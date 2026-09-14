@@ -149,6 +149,25 @@ export type AgentAuthStatus_Serialize = {
 	has_key: boolean,
 };
 
+export type AgentCardFrame = {
+	session_key: string,
+	provider: FleetProvider,
+	lifecycle: LifecycleState,
+	management: ManagementState,
+	transport_health: TransportHealth,
+	state: AgentState,
+	provenance: Provenance,
+	tier: Tier,
+	evidence_observed_at: number,
+	has_open_request: boolean,
+	pane_unbound: boolean,
+	pane_unbound_detail: string | null,
+	host_id: string,
+	turn_complete: boolean,
+	wait_kind: WaitKind | null,
+	attachment: Attachment,
+};
+
 /**  An agent definition parsed from an `.md` file under `~/.claude/agents/`. */
 export type AgentDef = AgentDef_Serialize;
 
@@ -158,6 +177,47 @@ export type AgentDef_Serialize = {
 	description: string,
 	tools: string[],
 	source_path: string,
+};
+
+/**
+ *  The operator-facing state of one agent.
+ * 
+ *  Deliberately small. Every surface renders exactly these, so a state that
+ *  cannot be explained to an operator in one word does not belong here.
+ */
+export type AgentState = 
+/**  The agent is running a turn. */
+"working" | 
+/**
+ *  The agent is blocked on a human: a question, an approval, an error it
+ *  cannot pass, or an explicit wait marker.
+ */
+"waiting" | 
+/**  The agent finished its turn and is free. NOT "the work is done". */
+"idle" | 
+/**  The process is gone, on process evidence. */
+"exited" | 
+/**
+ *  We hold the session but nothing has told us its state. Never inferred
+ *  into `Idle`, because silence and idleness are different facts.
+ */
+"unverifiable";
+
+/**
+ *  Section 20 (agent status) on the wire (#1015, #983).
+ * 
+ *  `AgentStatusSection` and its `StatusView` deliberately do not derive
+ *  `Serialize`, so this is the whole frame. It carries what a remote surface
+ *  needs to draw a card (the state, its evidence, the wait kind, the
+ *  attachment) and leaves OFF three roster fields: `current_request` (the
+ *  full tool input of a pending approval), `cwd` and `display_name` (the
+ *  operator's paths and labels, #983 M19). The failure reason and the unbound
+ *  detail are free text, so they are scrubbed as the frame is built.
+ */
+export type AgentStatusView = {
+	absent: string | null,
+	head_revision: number,
+	view: StatusViewFrame | null,
 };
 
 /**  What the last send did, when one has been fired. */
@@ -394,6 +454,20 @@ export type AttachableRef = ({ WorkspaceSession: {
 } }) & { OtherTmux?: never; WorkspaceSession?: never; WorkspaceShell?: never } | ({ OtherTmux: {
 	other_idx: number,
 } }) & { SshSession?: never; WorkspaceSession?: never; WorkspaceShell?: never };
+
+/**  How an operator can reach a session's terminal. */
+export type Attachment = 
+/**  An exact tmux pane can be attached. */
+"tmux" | 
+/**
+ *  The session is live but no pane is bound (#916): nothing can attach or
+ *  type into it until a later event binds one.
+ */
+"unbound" | 
+/**  A managed session reachable through daemon actions, not a pane. */
+"remote" | 
+/**  No way to reach it. */
+"none";
 
 /**
  *  One attention state a session row can be in.
@@ -1800,7 +1874,7 @@ export type DepReport = {
 	id: string,
 	name: string,
 	why: string,
-	tier: Tier,
+	tier: DepTier,
 	consumers: Consumer[],
 	/**  Copy-paste install command. */
 	install_hint: string,
@@ -1822,6 +1896,21 @@ export type DepState =
 { kind: "missing" } | 
 /**  Cannot be detected programmatically (e.g. marketplace plugin presence). */
 { kind: "unknown" };
+
+/**
+ *  Importance tier of a dependency within its topic. Drives whether onboarding
+ *  blocks (Required), warns (Recommended), surfaces (Optional) or merely
+ *  mentions (Suggested) a missing dependency.
+ */
+export type DepTier = 
+/**  Blocks core functionality if missing — onboarding cannot complete. */
+"required" | 
+/**  Strongly advised; onboarding warns but can proceed. */
+"recommended" | 
+/**  Extends features; surfaced with an install hint, never warns. */
+"optional" | 
+/**  Nice-to-have ecosystem extras (marketplace skills, etc.). */
+"suggested";
 
 /**  One choice in a tri-option (or n-option) confirmation dialog. */
 export type DialogOption = {
@@ -2205,6 +2294,19 @@ export type FleetStatusConfig = {
 	 *  Env: `AINB_FLEET_LEGACY_CLASSIFY_PRIMARY`.
 	 */
 	legacy_classify_primary?: boolean,
+	/**
+	 *  Return the TUI Fleet panel to the pre-section read: `fleet/snapshot`
+	 *  and `fleet/status` fetched separately and joined, instead of the one
+	 *  joined `fleet/roster_status` read (T0-section, #1015).
+	 * 
+	 *  The ONE-RELEASE rollback for T0-section: honoured in the first tagged
+	 *  release that carries section 20 and removed, with the pre-section read,
+	 *  in the release after it. Both paths fold through the same reducer, so
+	 *  this changes which daemon reads the panel pays for, never its words.
+	 * 
+	 *  Env: `AINB_FLEET_LEGACY_PANEL`.
+	 */
+	legacy_panel?: boolean,
 };
 
 export type FleetView = FleetView_Serialize;
@@ -2359,6 +2461,8 @@ export type HangarView_Serialize = {
 	hangar_daemon_config_loaded: boolean,
 	daemons_state: DaemonsState_Serialize,
 };
+
+export type HealthFrame = { kind: "live" } | { kind: "stale"; read_revision: number; head_revision: number } | { kind: "unreachable"; stale_since_ms: number; reason: string };
 
 /**  Focus area on the home screen */
 export type HomeScreenFocus = "Sidebar" | "ContentPanel";
@@ -3377,6 +3481,15 @@ export type PresetsConfig = {
 	file?: string,
 };
 
+/**  Who produced the state, in the vocabulary every surface prints. */
+export type Provenance = 
+/**  A provider lifecycle hook. */
+"hook" | 
+/**  An ACP session feed. */
+"acp" | 
+/**  A tmux pane or process inference. */
+"tmux";
+
 /**  Overlay showing results of a bulk recovery operation */
 export type RecoveryOverlay = RecoveryOverlay_Serialize;
 
@@ -3651,6 +3764,7 @@ export type SectionBodies_Serialize = {
 	recovery: RecoveryView_Serialize,
 	onboarding: OnboardingView_Serialize,
 	shell: ShellView_Serialize,
+	agent_status: AgentStatusView,
 };
 
 /**
@@ -4272,6 +4386,15 @@ export type SshView_Serialize = {
 	ssh_session_rename_buffer: string,
 };
 
+export type StatusViewFrame = {
+	host_id: string,
+	read_revision: number,
+	received_at_ms: number,
+	head_revision: number,
+	health: HealthFrame,
+	cards: AgentCardFrame[],
+};
+
 /**  The user's recorded decision on the Claude Code statusline wiring. */
 export type StatuslineDecision = 
 /**
@@ -4337,19 +4460,24 @@ export type TextSelection = {
 };
 
 /**
- *  Importance tier of a dependency within its topic. Drives whether onboarding
- *  blocks (Required), warns (Recommended), surfaces (Optional) or merely
- *  mentions (Suggested) a missing dependency.
+ *  The evidence tier a row's state came from (D14).
+ * 
+ *  Ordered best-first, so `<` means "better evidence". Only [`Tier::Hook`] and
+ *  [`Tier::AcpFeed`] may assert that a human is needed.
  */
 export type Tier = 
-/**  Blocks core functionality if missing — onboarding cannot complete. */
-"required" | 
-/**  Strongly advised; onboarding warns but can proceed. */
-"recommended" | 
-/**  Extends features; surfaced with an install hint, never warns. */
-"optional" | 
-/**  Nice-to-have ecosystem extras (marketplace skills, etc.). */
-"suggested";
+/**  0: a provider lifecycle hook pushed this. */
+"hook" | 
+/**  1: an ACP session feed reported it. */
+"acp_feed" | 
+/**  2: an in-band OSC frame carried it. */
+"osc_frame" | 
+/**  3: the process table implied it. */
+"process" | 
+/**  4: the session transcript implied it. */
+"transcript" | 
+/**  5: a tmux pane scrape implied it. */
+"pane_text";
 
 /**
  *  The user's recorded decision on the ainb rich tmux conf installation.
@@ -4707,6 +4835,17 @@ export type VolumeMount = {
 	container_path: string,
 	read_only?: boolean,
 };
+
+/**  The kind of human input a waiting agent needs. */
+export type WaitKind = 
+/**  A structured question. */
+"ask" | 
+/**  A tool or permission approval. */
+"approval" | 
+/**  An explicit wait marker. */
+"waiting" | 
+/**  An error the agent cannot pass on its own. */
+"error";
 
 /**
  *  Defaults for `ainb web`, which had none: [`ainb_web::WebConfig`] was built
