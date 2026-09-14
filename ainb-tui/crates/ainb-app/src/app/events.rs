@@ -5337,6 +5337,19 @@ impl EventHandler {
                                     *selected_idx,
                                 );
                             }
+                            // An env or build-args entry holds a credential by
+                            // where it lives, so it edits in the popup that
+                            // never serialises its value.
+                            crate::app::state::ConfigValue::Text(text)
+                                if crate::config::settings_model::credential_bearing_key(&key) =>
+                            {
+                                state.config.config_popup_state.open_secret(
+                                    &title,
+                                    &description,
+                                    &key,
+                                    text,
+                                );
+                            }
                             crate::app::state::ConfigValue::Text(text) => {
                                 state.config.config_popup_state.open_text(
                                     &title,
