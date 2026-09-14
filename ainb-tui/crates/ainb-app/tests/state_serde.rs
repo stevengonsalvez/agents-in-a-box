@@ -514,7 +514,8 @@ fn no_deny_listed_key_carries_text_unless_allow_listed() {
 // ---------------------------------------------------------------------------
 
 /// Opaque or unbounded types (#983 section 2). Matched against the declared
-/// field type, so `Option<PathBuf>` and `HashMap<Uuid, Vec<String>>` count.
+/// field type, so `Option<PathBuf>` and `HashMap<Uuid, Vec<String>>` count;
+/// the string collections are also matched by emitted JSON shape below.
 const DENY_TYPES: &[(&str, &str)] = &[
     ("toml::Value", "toml::value::Value"),
     ("serde_json::Value", "serde_json::value::Value"),
@@ -529,6 +530,56 @@ const DENY_TYPES: &[(&str, &str)] = &[
 
 /// Fields of a denied type that stay on the wire, each with its reason.
 const TYPE_ALLOW: &[(&str, &str)] = &[
+    (
+        "AskState.phases",
+        "(request id, phase) pairs: the id is a daemon attention id or `kind:since_ms`; the draft is a length and the reason scrubbed",
+    ),
+    ("AtcModeView.help", "ATC help lines, scrubbed"),
+    (
+        "ConfigureState.prompt",
+        "Boss prompt lines, scrubbed as one text",
+    ),
+    (
+        "ContainerTemplateConfig.environment",
+        "env var names with every value `<redacted>` in frame",
+    ),
+    (
+        "GitViewState.diff_content",
+        "diff lines, scrubbed as one text",
+    ),
+    (
+        "GitViewState.expanded_folders",
+        "repo-relative folder paths expanded in the tree",
+    ),
+    (
+        "ImageSource.build_args",
+        "build-arg names with every value `<redacted>` in frame",
+    ),
+    (
+        "McpServerDefinition.args",
+        "MCP server arguments, scrubbed in frame",
+    ),
+    (
+        "McpServerDefinition.env",
+        "env var names with every value `<redacted>` in frame",
+    ),
+    (
+        "PluginUiState.view",
+        "a plugin's published view with every string scrubbed",
+    ),
+    (
+        "PluginsHostView.plugin_render_errors",
+        "plugin render failures keyed by screen id, scrubbed",
+    ),
+    (
+        "RepositoryPreset.environment",
+        "env var names with every value `<redacted>` in frame",
+    ),
+    (
+        "SessionLabelsView.session_label_store",
+        "tmux session name to display label, the labels the session list draws",
+    ),
+    ("SyncConfirmState.plan", "skills sync plan lines, scrubbed"),
     (
         "ImageSource.path",
         "Dockerfile path of a container template",
@@ -679,6 +730,22 @@ fn no_opaque_or_unbounded_type_reaches_the_wire_unless_allow_listed() {
             hits.entry(field.owner_field.clone())
                 .or_insert_with(|| (field.path.clone(), label));
         }
+    }
+    // The same classes by the JSON shape a field actually emits, whatever its
+    // Rust spelling: `Vec<(String, String)>`, `HashMap<Uuid, String>`, a
+    // `BTreeMap`, a newtype around any of them, or a custom serializer's output.
+    for leaf in &trace.strings {
+        let label = if leaf.path.ends_with("[][]") {
+            "array of arrays of strings"
+        } else if leaf.path.ends_with("[]") {
+            "array of strings"
+        } else if leaf.path.ends_with("{}") {
+            "map with string values"
+        } else {
+            continue;
+        };
+        hits.entry(leaf.owner_field.clone())
+            .or_insert_with(|| (leaf.path.clone(), label));
     }
     let unlisted: Vec<String> = hits
         .iter()
