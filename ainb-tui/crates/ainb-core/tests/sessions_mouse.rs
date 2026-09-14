@@ -93,7 +93,7 @@ fn click(state: &mut AppState, ui: &mut UiState, x: u16, y: u16) -> Vec<Effect> 
 
 /// A drag, release or hover, then whatever intent it finished.
 fn finish_gesture(kind: Gesture, state: &mut AppState, ui: &mut UiState, x: u16, y: u16) {
-    if let Some(intent) = gesture(kind, Pos { x, y }, state, ui) {
+    if let Some(intent) = gesture(kind, Pos { x, y }, &*state, ui) {
         let _ = dispatch(state, &Keymap::defaults(), ui, intent);
     }
 }
