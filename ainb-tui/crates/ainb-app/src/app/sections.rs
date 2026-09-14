@@ -796,6 +796,10 @@ pub struct AgentStatusSection {
     pub view: Option<ainb_hangar_proto::status_view::StatusView>,
     /// Why there is no view, when there is none and the host knows why.
     pub absent: Option<String>,
+    /// The newest Fleet revision the host has been told about. Retained across
+    /// a reset, so the first read after a reconnect that lands below it renders
+    /// stale instead of live (#1019 review).
+    pub head_revision: i64,
 }
 
 impl AgentStatusSection {
@@ -810,10 +814,10 @@ impl AgentStatusSection {
         let changed = if let Some(view) = &mut self.view {
             view.apply(read, received_at_ms)
         } else {
-            self.view = Some(ainb_hangar_proto::status_view::StatusView::from_read(
-                read,
-                received_at_ms,
-            ));
+            let mut view =
+                ainb_hangar_proto::status_view::StatusView::from_read(read, received_at_ms);
+            view.observe_head(self.head_revision);
+            self.view = Some(view);
             true
         };
         changed || had_absent
@@ -843,7 +847,17 @@ impl AgentStatusSection {
 
     /// A newer Fleet revision was observed: rows go stale until a read lands.
     pub fn observe_head(&mut self, head_revision: i64) -> bool {
+        self.head_revision = self.head_revision.max(head_revision);
         self.view.as_mut().is_some_and(|view| view.observe_head(head_revision))
+    }
+
+    /// The host reconnected: drop the view so the next read builds a fresh
+    /// one, keeping the head so that read cannot claim to be live below it.
+    pub fn reset(&mut self) -> bool {
+        let changed = self.view.is_some() || self.absent.is_some();
+        self.view = None;
+        self.absent = None;
+        changed
     }
 }
 
@@ -958,6 +972,28 @@ mod agent_status_section_tests {
 
         assert!(section.update(|s| s.mark_absent("daemon has no fleet/roster_status")));
         assert!(section.view.is_none());
+    }
+
+    /// #1019 review: across a reconnect the section resets, keeps the head it
+    /// was told, and a read that lands below that head renders stale, not live.
+    #[test]
+    fn a_lower_revision_after_a_reconnect_renders_stale_not_live() {
+        let mut section = Versioned::new(AgentStatusSection::default());
+        section.update(|s| s.apply_read(read(40, session(AttentionState::Ask, 10)), 100));
+        section.update(|s| s.observe_head(42));
+        assert!(section.update(AgentStatusSection::reset));
+        assert!(section.view.is_none());
+        assert_eq!(section.head_revision, 42, "the head survives the reset");
+
+        // A rebuilt store answers from a reset revision counter.
+        section.update(|s| s.apply_read(read(3, session(AttentionState::Ask, 11)), 200));
+        assert!(matches!(
+            section.view.as_ref().unwrap().health,
+            ViewHealth::Stale {
+                read_revision: 3,
+                head_revision: 42
+            }
+        ));
     }
 
     /// #983: section 20 must not be serialisable until the redaction layer
