@@ -5,8 +5,10 @@
 # shellcheck disable=SC2034  # read by write_result in lib.sh
 EXPECT="ainb doctor --wire-shape reports no drift from the committed fixture, and a token-shaped string in a session label never appears in hangar connections list, the wire-shape frame output, or the web snapshot frame"
 
-# Shaped like a GitHub classic token; the redactor's table matches it.
-PROOF_TOKEN="ghp_ProofCanary0123456789abcdefghijklmnopq"
+# Shaped like a GitHub classic token so the redactor's table matches it. Built
+# from two halves so no token-shaped literal sits in the source, and replaced
+# by <canary> in every published capture once the checks have read them.
+PROOF_TOKEN="ghp""_ProofCanary0123456789abcdefghijklmnopq"
 
 scenario() {
   save_output wire-shape "$AINB_BIN" doctor --wire-shape
@@ -46,4 +48,12 @@ scenario() {
   if [[ ${#FAILED_CHECKS[@]} -gt 0 ]] && grep -qF "$PROOF_TOKEN" "$NODE_DIR/web-snapshot.json"; then
     known_issue 1056
   fi
+
+  # Checks are done; keep the canary out of what gets published.
+  local file
+  while IFS= read -r file; do
+    sed -i "s/$PROOF_TOKEN/<canary>/g" "$file"
+  done < <(grep -rlF "$PROOF_TOKEN" "$NODE_DIR" 2>/dev/null)
+  OBSERVED=("${OBSERVED[@]//$PROOF_TOKEN/<canary>}")
+  observe "the canary is written as <canary> in the published captures"
 }
