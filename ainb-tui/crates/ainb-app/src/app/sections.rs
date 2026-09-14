@@ -519,21 +519,21 @@ impl Default for LogsSection {
 
 #[derive(Debug)]
 pub struct TmuxSection {
-    // Live interactive embedded tmux-attach client for the preview pane.
-    // Enforced invariants (focus can drift, so none of these are assumed):
-    //  - Input forwards to the PTY only while `is_interactive_pane()` holds
-    //    (embed Some AND focused_pane == Preview).
+    // The tmux session the host's live client for the preview pane is on, as
+    // the host reported it: read-only while the sessions pane has focus,
+    // interactive once the preview does. The client itself is the host's.
+    // Setting this to `None` is how the reducer releases it: the host closes
+    // any client whose session this no longer names. Invariants (focus can
+    // drift, so none of these are assumed):
+    //  - Input forwards only while `is_interactive_pane()` holds (a session
+    //    here AND focused_pane == Preview).
     //  - Ctrl+Q releases only while interactive focus owns the terminal.
-    //  - `poll_embed_exit` (run before every draw) releases on client death
-    //    or when the session-list screen is no longer current, so keys are
-    //    never forwarded to an invisible PTY.
-    // Dropping it kills the ephemeral tmux client (never the session).
-    pub embed: Option<crate::tmux::EmbedClient>,
-    // The tmux session name the live embed is attached to. Some iff `embed`
-    // is Some. Re-entering on a DIFFERENT row releases the old client and
-    // attaches to the new target instead of silently refocusing the stale
-    // one (see `AppState::in_place_target`).
-    pub embed_session: Option<String>,
+    //  - `tick_terminal_pane` releases when the session-list screen is no
+    //    longer current, so keys are never forwarded to an invisible pane.
+    // Re-entering on a DIFFERENT row releases the old client and attaches to
+    // the new target instead of silently refocusing the stale one (see
+    // `AppState::in_place_target`).
+    pub embed_session: Option<crate::app::effect::TmuxSessionName>,
     // Tmux integration
     pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,
     pub preview_update_task: Option<tokio::task::JoinHandle<()>>,
@@ -558,7 +558,6 @@ pub struct TmuxSection {
 impl Default for TmuxSection {
     fn default() -> Self {
         Self {
-            embed: None,
             embed_session: None,
             tmux_sessions: HashMap::new(),
             preview_update_task: None,
