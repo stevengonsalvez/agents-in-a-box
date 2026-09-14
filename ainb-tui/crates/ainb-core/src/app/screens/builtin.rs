@@ -687,12 +687,13 @@ impl Screen for SkillManagerScreen {
         ids::SKILL_MANAGER
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
-        let saved = state.config.app_config.ui_preferences.skill_manager_sources_width;
+        use crate::components::skill_manager_screen::DEFAULT_SOURCES_WIDTH;
+        let saved = state.config.app_config.ui_preferences.skill_manager_sources_fraction;
         crate::components::skill_manager_screen::render_with_sources(
             frame,
             area,
             &state.skills.skill_manager_state,
-            ui.skill_sources.preferred_width(saved),
+            ui.skill_sources.preferred_width(saved, area.width, DEFAULT_SOURCES_WIDTH),
             ui.skill_sources.resize_active,
         );
     }
@@ -785,6 +786,7 @@ impl Screen for HomeScreen {
             &state.shell.home_screen_v2_state,
             &state.sessions.workspaces,
             state.workspace_load.is_loading_workspaces,
+            state.config.app_config.ui_preferences.home_sidebar_fraction,
             ui,
         );
     }
@@ -921,6 +923,7 @@ impl Screen for SetupMenuScreen {
             &state.shell.home_screen_v2_state,
             &state.sessions.workspaces,
             state.workspace_load.is_loading_workspaces,
+            state.config.app_config.ui_preferences.home_sidebar_fraction,
             ui,
         );
         self.setup_menu.render(frame, area, &state.onboarding.setup_menu_state);
