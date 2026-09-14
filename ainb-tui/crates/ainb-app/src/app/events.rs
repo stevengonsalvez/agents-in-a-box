@@ -5352,7 +5352,7 @@ impl EventHandler {
                                 // land in config.toml. Ctrl+K is the path that
                                 // takes a literal, and it writes it to the
                                 // keychain instead.
-                                state.config.config_popup_state.open_text(
+                                state.config.config_popup_state.open_secret(
                                     &title,
                                     "reference: $ENV_VAR or keychain:<service> — Ctrl+K stores a literal in the keychain",
                                     &key,
@@ -5395,7 +5395,7 @@ impl EventHandler {
                         let service = crate::config::screen_model::keychain_service(&setting.key);
                         state.config.config_screen_state.keychain_target =
                             Some(setting.key.clone());
-                        state.config.config_popup_state.open_text(
+                        state.config.config_popup_state.open_secret(
                             &format!("{} → keychain", setting.label),
                             &format!(
                                 "stored under '{service}'; config.toml keeps only the reference"
