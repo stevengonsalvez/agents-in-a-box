@@ -472,7 +472,13 @@ mod tests {
     }
 
     fn drain(store: &mut MirrorStore, peer: &str, frames: Vec<Frame>) -> Commit {
-        store.apply_drain(&HostId::new(peer), [FrameBatch { frames }])
+        store.apply_drain(
+            &HostId::new(peer),
+            [FrameBatch {
+                frames,
+                ..FrameBatch::default()
+            }],
+        )
     }
 
     fn held(store: &MirrorStore, host: &str, id: SectionId) -> Option<u64> {
