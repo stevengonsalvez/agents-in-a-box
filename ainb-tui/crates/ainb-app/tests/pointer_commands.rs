@@ -49,8 +49,11 @@ fn a_pointer_command_run_without_its_payload_changes_nothing() {
     for id in ids::ALL.iter().chain(reports::ids::ALL) {
         let row = keymap.command(&CommandId::new(*id)).expect("row resolves");
         if row.action.with_args(&serde_json::Value::Null).is_some() {
-            // The one row that takes no payload.
-            assert_eq!(*id, ids::SKILL_MANAGER_ALL_SOURCES, "{id} runs bare");
+            // The rows that take no payload.
+            assert!(
+                [ids::SKILL_MANAGER_ALL_SOURCES, reports::ids::DETACHED].contains(id),
+                "{id} runs bare"
+            );
             continue;
         }
         let mut state = AppState::new();
