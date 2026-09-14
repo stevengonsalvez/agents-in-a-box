@@ -1928,17 +1928,26 @@ async fn drain_stderr(plugin: PluginId, stderr: tokio::process::ChildStderr) {
     }
 }
 
+/// Topic prefixes the blanket `event_bus = true` grant does not cover: only a
+/// list entry that names the topic does. `fleet.` topics carry what the TUI
+/// host knows about every agent (`fleet.agent_status`: working directories,
+/// pending tool input), so a plugin must ask for one by name to read it.
+const EXPLICIT_GRANT_TOPIC_PREFIXES: &[&str] = &["fleet."];
+
 /// Whether an `event_bus` grant covers `topic`.
 ///
-/// `true` covers every topic. The list form is a topic allow-list: an entry
-/// ending in `*` covers every topic that starts with the text before it, and
-/// any other entry covers exactly that topic. So a plugin granted
-/// `["ui.state*"]` can publish its own view and can neither read nor subscribe
-/// to `fleet.agent_status`, which carries every agent's working directory and
-/// pending tool input (#1038 review).
+/// `true` covers every topic except those under
+/// [`EXPLICIT_GRANT_TOPIC_PREFIXES`]. The list form is a topic allow-list: an
+/// entry ending in `*` covers every topic that starts with the text before it,
+/// and any other entry covers exactly that topic. So a plugin granted
+/// `["ui.state*"]`, or the blanket `true`, can publish its own view and can
+/// neither read nor subscribe to `fleet.agent_status` (#1038 review).
 fn event_bus_covers(grant: &ainb_plugin_protocol::manifest::CapabilityGrant, topic: &str) -> bool {
     match grant {
-        ainb_plugin_protocol::manifest::CapabilityGrant::Bool(granted) => *granted,
+        ainb_plugin_protocol::manifest::CapabilityGrant::Bool(granted) => {
+            *granted
+                && !EXPLICIT_GRANT_TOPIC_PREFIXES.iter().any(|prefix| topic.starts_with(prefix))
+        }
         ainb_plugin_protocol::manifest::CapabilityGrant::List(entries) => {
             entries.iter().any(|entry| {
                 entry
@@ -2289,10 +2298,12 @@ mod tests {
         assert!(event_bus_covers(&hangar, "ui.state/hangar-tui"));
         assert!(!event_bus_covers(&hangar, "sessions.refresh_request"));
 
-        assert!(event_bus_covers(
-            &CapabilityGrant::Bool(true),
-            "fleet.agent_status"
-        ));
+        assert!(event_bus_covers(&CapabilityGrant::Bool(true), "ui.state"));
+        assert!(
+            !event_bus_covers(&CapabilityGrant::Bool(true), "fleet.agent_status"),
+            "the blanket grant does not cover a fleet topic: learnings, session-reader and \
+             witr hold it and never named the envelope"
+        );
         assert!(!event_bus_covers(&CapabilityGrant::Bool(false), "ui.state"));
         assert!(!event_bus_covers(
             &CapabilityGrant::List(Vec::new()),
