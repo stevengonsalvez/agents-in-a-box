@@ -16,7 +16,9 @@
 // [`serialize_section`], so they judge exactly what a host receives.
 
 pub mod fields;
+pub mod frame;
 pub mod shape;
+pub mod store;
 pub mod trace;
 
 use crate::app::AppState;
@@ -44,6 +46,36 @@ use std::sync::Mutex;
 pub fn section_json(state: &AppState, id: SectionId) -> serde_json::Value {
     serialize_section(state, id, serde_json::value::Serializer)
         .expect("a section view always serialises to JSON")
+}
+
+/// The daemon read behind a section's content, for [`frame::Mirror`].
+///
+/// None of the 19 sections records the revision and clock of the daemon read
+/// that fed it yet: the Fleet poller and section 20 (T0-section) gain one when
+/// they land on the frame, and add their arm here.
+#[must_use]
+pub fn daemon_read(_state: &AppState, id: SectionId) -> Option<frame::DaemonRead> {
+    match id {
+        SectionId::Sessions
+        | SectionId::SessionLabels
+        | SectionId::Tmux
+        | SectionId::Ssh
+        | SectionId::GitView
+        | SectionId::WorkspaceLoad
+        | SectionId::NewSession
+        | SectionId::Logs
+        | SectionId::ClaudeChat
+        | SectionId::Fleet
+        | SectionId::Hangar
+        | SectionId::McpPool
+        | SectionId::Inbox
+        | SectionId::PluginsHost
+        | SectionId::Config
+        | SectionId::Skills
+        | SectionId::Recovery
+        | SectionId::Onboarding
+        | SectionId::Shell => None,
+    }
 }
 
 /// Stable wire name of a section, used as the frame key and the fixture root.
