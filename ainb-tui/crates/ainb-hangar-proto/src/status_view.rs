@@ -249,7 +249,7 @@ mod tests {
         let asking = session("claude:a", AttentionState::Ask);
         let mut view = StatusView::from_read(read(3, std::slice::from_ref(&asking)), 100);
 
-        let mut heartbeat = asking.clone();
+        let mut heartbeat = asking;
         heartbeat.last_observed_at = 99;
         heartbeat.version = 2;
         heartbeat.updated_revision = 4;
