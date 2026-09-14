@@ -1410,7 +1410,11 @@ impl EventHandler {
                     return None;
                 };
                 let Some(action) = binding.action.with_args(&args) else {
-                    tracing::warn!("command `{id}` rejected arguments {args}");
+                    // Field names only: a payload can carry a pairing code, a
+                    // path or typed text, none of which belongs in a log.
+                    let fields: Vec<&String> =
+                        args.as_object().map(|object| object.keys().collect()).unwrap_or_default();
+                    tracing::warn!("command `{id}` rejected arguments with fields {fields:?}");
                     return None;
                 };
                 Self::apply_key_action(action, state, host)
