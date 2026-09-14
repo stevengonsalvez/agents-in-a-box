@@ -95,6 +95,10 @@ pub fn discover(root: &Path) -> Result<Vec<RegisteredPlugin>, RuntimeError> {
             );
             continue;
         }
+        if let Err(reason) = manifest.subscribes.validate() {
+            tracing::warn!(dir = %dir.display(), %reason, "invalid plugin manifest — skipping");
+            continue;
+        }
         let binary_path = dir.join(&manifest.plugin.name);
         out.push(RegisteredPlugin::new(manifest, binary_path, manifest_path));
     }
@@ -225,5 +229,38 @@ abi_version = 2
         let plugins = discover(tmp.path()).unwrap();
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].id, PluginId::from("burndown"));
+    }
+
+    /// #1053 review item 5: a manifest marking a `latest_state` topic it does
+    /// not subscribe to is skipped at discovery, not registered with a marker
+    /// that marks nothing.
+    #[test]
+    fn discover_skips_a_latest_state_topic_outside_snapshots() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (name, subscribes) in [
+            (
+                "good",
+                "snapshots = [\"fleet.agent_status\"]\nlatest_state = [\"fleet.agent_status\"]",
+            ),
+            (
+                "stray",
+                "snapshots = []\nlatest_state = [\"fleet.agent_status\"]",
+            ),
+        ] {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(
+                dir.join("manifest.toml"),
+                format!(
+                    "[plugin]\nname = \"{name}\"\nversion = \"1.0.0\"\nabi_version = 2\n[subscribes]\n{subscribes}\n"
+                ),
+            )
+            .unwrap();
+        }
+        let plugins = discover(tmp.path()).unwrap();
+        assert_eq!(
+            plugins.iter().map(|plugin| plugin.id.clone()).collect::<Vec<_>>(),
+            [PluginId::from("good")]
+        );
     }
 }
