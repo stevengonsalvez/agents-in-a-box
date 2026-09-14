@@ -105,7 +105,11 @@ fn a_newer_ui_state_is_kept_per_plugin_and_bumps_only_the_plugins_host_section()
     let mut state = AppState::new();
 
     let before = state.versions();
-    state.record_plugin_ui_state(publish(r#"{"screen":"kanban"}"#, 3, "hangar-tui"));
+    state.record_plugin_ui_state(
+        "hangar-tui",
+        true,
+        publish(r#"{"screen":"kanban"}"#, 3, "hangar-tui"),
+    );
     assert_eq!(
         bumped(&before, &state.versions()),
         vec![SectionId::PluginsHost]
@@ -116,11 +120,19 @@ fn a_newer_ui_state_is_kept_per_plugin_and_bumps_only_the_plugins_host_section()
 
     // The same publish read on the next tick changes nothing.
     let before = state.versions();
-    state.record_plugin_ui_state(publish(r#"{"screen":"kanban"}"#, 3, "hangar-tui"));
-    state.record_plugin_ui_state(None);
+    state.record_plugin_ui_state(
+        "hangar-tui",
+        true,
+        publish(r#"{"screen":"kanban"}"#, 3, "hangar-tui"),
+    );
+    state.record_plugin_ui_state("hangar-tui", true, None);
     assert!(bumped(&before, &state.versions()).is_empty());
 
-    state.record_plugin_ui_state(publish(r#"{"screen":"issues"}"#, 4, "hangar-tui"));
+    state.record_plugin_ui_state(
+        "hangar-tui",
+        true,
+        publish(r#"{"screen":"issues"}"#, 4, "hangar-tui"),
+    );
     assert_eq!(
         state.plugins_host.plugin_ui_states["hangar-tui"].view["screen"],
         "issues"
@@ -128,14 +140,120 @@ fn a_newer_ui_state_is_kept_per_plugin_and_bumps_only_the_plugins_host_section()
 }
 
 #[test]
-fn a_host_publish_or_a_non_json_view_is_not_kept() {
+fn two_plugins_keep_their_own_views() {
+    isolated_home();
+    let mut state = AppState::new();
+
+    state.record_plugin_ui_state(
+        "hangar-tui",
+        true,
+        publish(r#"{"v":"hangar"}"#, 1, "hangar-tui"),
+    );
+    state.record_plugin_ui_state(
+        "learnings",
+        true,
+        publish(r#"{"v":"learnings"}"#, 1, "learnings"),
+    );
+
+    assert_eq!(
+        state.plugins_host.plugin_ui_states["hangar-tui"].view["v"],
+        "hangar"
+    );
+    assert_eq!(
+        state.plugins_host.plugin_ui_states["learnings"].view["v"],
+        "learnings"
+    );
+}
+
+#[test]
+fn a_view_from_another_publisher_or_not_json_is_not_kept() {
     isolated_home();
     let mut state = AppState::new();
     let before = state.versions();
 
-    state.record_plugin_ui_state(publish(r#"{"screen":"kanban"}"#, 1, "host"));
-    state.record_plugin_ui_state(publish("not json", 2, "hangar-tui"));
+    state.record_plugin_ui_state(
+        "hangar-tui",
+        true,
+        publish(r#"{"screen":"kanban"}"#, 1, "host"),
+    );
+    state.record_plugin_ui_state("hangar-tui", true, publish("not json", 2, "hangar-tui"));
 
     assert!(state.plugins_host.plugin_ui_states.is_empty());
     assert!(bumped(&before, &state.versions()).is_empty());
+}
+
+#[test]
+fn a_stopped_plugin_loses_its_view() {
+    isolated_home();
+    let mut state = AppState::new();
+    state.record_plugin_ui_state("hangar-tui", true, publish(r#"{"v":1}"#, 1, "hangar-tui"));
+
+    state.record_plugin_ui_state("hangar-tui", false, publish(r#"{"v":1}"#, 1, "hangar-tui"));
+
+    assert!(!state.plugins_host.plugin_ui_states.contains_key("hangar-tui"));
+    // And a plugin that never had one bumps nothing when it is not running.
+    let before = state.versions();
+    state.record_plugin_ui_state("learnings", false, None);
+    assert!(bumped(&before, &state.versions()).is_empty());
+}
+
+#[test]
+fn a_view_over_the_size_cap_is_refused_and_drops_the_old_one() {
+    isolated_home();
+    let mut state = AppState::new();
+    state.record_plugin_ui_state("hangar-tui", true, publish(r#"{"v":1}"#, 1, "hangar-tui"));
+    let huge = format!(
+        r#"{{"blob":"{}"}}"#,
+        "x".repeat(ainb_app::app::state::MAX_PLUGIN_UI_STATE_BYTES)
+    );
+
+    state.record_plugin_ui_state("hangar-tui", true, publish(&huge, 2, "hangar-tui"));
+
+    assert!(!state.plugins_host.plugin_ui_states.contains_key("hangar-tui"));
+}
+
+/// A plugin screen stays rendering while some host wants it: the terminal
+/// showing it, or another host's watch. Without either, it stops being kicked.
+#[test]
+fn a_watched_plugin_screen_stays_wanted_while_the_terminal_shows_another() {
+    use ainb_app::app::screens::ids as screen_ids;
+
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    assert!(!state.plugin_screen_wanted(screen_ids::HANGAR));
+    assert!(!state.plugin_screen_wanted(screen_ids::LEARNINGS));
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        plugin_action::watch_screen(screen_ids::HANGAR, true),
+    );
+    assert!(
+        state.plugin_screen_wanted(screen_ids::HANGAR),
+        "watched from another host"
+    );
+    assert!(
+        !state.plugin_screen_wanted(screen_ids::LEARNINGS),
+        "nobody wants learnings"
+    );
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        plugin_action::watch_screen(screen_ids::HANGAR, false),
+    );
+    assert!(!state.plugin_screen_wanted(screen_ids::HANGAR));
+
+    // A screen no plugin owns is not watchable.
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        plugin_action::watch_screen(screen_ids::CONFIG, true),
+    );
+    assert!(state.plugins_host.watched_plugin_screens.is_empty());
 }
