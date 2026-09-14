@@ -246,22 +246,34 @@ run_combo() {
     log "config survived concurrent writes: branch_prefix=$prefix"
   fi
 
-  kill_sessions
+  # Quit every surface the orderly way first (ctrl+c is the TUI's quit key), so
+  # the check below covers the TUI closing its own presence, not only the
+  # kernel closing a killed process's socket.
+  local name
+  for name in "${SESSIONS[@]:-}"; do
+    if [[ -n "$name" ]]; then tmux send-keys -t "=$name" C-c 2>/dev/null || true; fi
+  done
 
-  # A quit surface leaves the registry: the TUI closes its socket on the way out.
+  # A quit surface leaves the registry. Only a listing that actually answered
+  # counts: an empty result from a failed call would pass vacuously.
   if (( ${#TUI_PIDS[@]} > 0 )); then
-    local gone_deadline=$((SECONDS + 10))
+    local gone=0 gone_deadline=$((SECONDS + 10))
     while (( SECONDS < gone_deadline )); do
-      seen=$(surfaces_seen "$home" "$hangar_home")
-      [[ "$seen" != *tui:* ]] && break
+      if HOME="$home" AINB_HANGAR_HOME="$hangar_home" "$AINB_BIN" hangar connections list --format json 2>/dev/null \
+        | jq -e '.connections | type == "array"' >/dev/null 2>&1; then
+        seen=$(surfaces_seen "$home" "$hangar_home")
+        if [[ "$seen" != *tui:* ]]; then gone=1; break; fi
+      fi
       sleep 1
     done
-    if [[ "$seen" == *tui:* ]]; then
-      fail "$label: tui rows outlived their TUIs (saw: $seen)"
-    else
+    if (( gone )); then
       log "tui rows gone after quit"
+    else
+      fail "$label: tui rows outlived their TUIs (saw: ${seen:-<no listing>})"
     fi
   fi
+
+  kill_sessions
 
   "$AINB_BIN" hangar daemon stop >/dev/null 2>&1 || true
 
