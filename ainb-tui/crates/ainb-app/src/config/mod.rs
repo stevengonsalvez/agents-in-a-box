@@ -501,7 +501,13 @@ pub struct PluginsConfig {
     ///
     /// `BTreeMap` keeps the serialized order stable so config.toml diffs stay
     /// deterministic across saves.
-    #[serde(default, flatten)]
+    ///
+    /// Plugin-defined tables can hold a URL or a key, so a frame leaves them out.
+    #[serde(
+        default,
+        flatten,
+        skip_serializing_if = "crate::wire::fields::omit_in_frame"
+    )]
     pub values: BTreeMap<String, toml::Value>,
 }
 
