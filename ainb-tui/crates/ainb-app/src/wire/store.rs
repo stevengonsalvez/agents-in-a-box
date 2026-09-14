@@ -6,8 +6,12 @@
 //                       (one transaction per drain)          (after commit)
 //
 // Any renderer (the headless test renderer, the desktop host, the web client
-// through `AppState.ts`) keeps this shape. The fan-out bench measures the same
-// three invariants in a real reactive store.
+// through `AppState.ts`) keeps this shape. The fan-out bench
+// (`bench/mirror-fanout`) measures the drain half in a real reactive store: the
+// last frame per section, one transaction per drain, unsubscribed sections
+// dropped, and scalar root memos. It runs one host in one epoch, so boot
+// epochs, channel peers, eviction and effect unwinding are covered by this
+// module's tests, not by the bench.
 
 use crate::app::versioned::SectionId;
 use crate::wire::frame::{DaemonRead, Frame, FrameBatch, HostId, Subscription};
