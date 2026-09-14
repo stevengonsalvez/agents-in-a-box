@@ -22,10 +22,11 @@ pub enum Intent {
     Text(String),
 }
 
-/// Arguments to a [`Intent::Command`]. `Args::Null` runs the row as the keymap
-/// wrote it; a row that carries a payload (a session position, a step, a
-/// character) takes a replacement payload here instead. See
-/// [`crate::app::keymap::KeyAction::with_args`].
+/// Arguments to a [`Intent::Command`].
+///
+/// `Args::Null` runs the row as the keymap wrote it; a row that carries a
+/// payload (a session position, a step, a character) takes a replacement
+/// payload here instead. See [`crate::app::keymap::KeyAction::with_args`].
 pub type Args = serde_json::Value;
 
 /// A cell position in the renderer's frame, column then row from top left.
