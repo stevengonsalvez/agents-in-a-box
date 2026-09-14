@@ -476,7 +476,7 @@ async fn run_tui_loop(
         // the step that queued them finished writing state, and before the
         // frame that shows their result.
         for effect in app.state.take_effects() {
-            ainb::effect_host::execute(effect, app, terminal, &mut ui).await?;
+            ainb::effect_host::execute(effect, app, &keymap, terminal, &mut ui).await?;
             needs_redraw = true;
         }
 
@@ -791,8 +791,10 @@ async fn run_tui_loop(
                             Ok(effects) => {
                                 info!(">>> Immediate tick completed successfully");
                                 for effect in effects {
-                                    ainb::effect_host::execute(effect, app, terminal, &mut ui)
-                                        .await?;
+                                    ainb::effect_host::execute(
+                                        effect, app, &keymap, terminal, &mut ui,
+                                    )
+                                    .await?;
                                 }
                                 last_app_tick = Instant::now();
                                 // Force UI refresh. The tick runs here
@@ -1113,7 +1115,7 @@ async fn run_tui_loop(
 
         // Apply the event a background result deferred to this iteration.
         for effect in app.state.apply_pending_event() {
-            ainb::effect_host::execute(effect, app, terminal, &mut ui).await?;
+            ainb::effect_host::execute(effect, app, &keymap, terminal, &mut ui).await?;
         }
 
         // Update last_tick on every iteration so the event-poll timeout
@@ -1298,7 +1300,7 @@ async fn run_tui_loop(
             match app.tick().await {
                 Ok(effects) => {
                     for effect in effects {
-                        ainb::effect_host::execute(effect, app, terminal, &mut ui).await?;
+                        ainb::effect_host::execute(effect, app, &keymap, terminal, &mut ui).await?;
                     }
                     last_app_tick = Instant::now();
                     // Consume the refresh flag; the repaint is handled by the
@@ -1383,7 +1385,7 @@ async fn run_intent(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
     for effect in ainb::dispatch(&mut app.state, keymap, ui, intent) {
-        ainb::effect_host::execute(effect, app, terminal, ui).await?;
+        ainb::effect_host::execute(effect, app, keymap, terminal, ui).await?;
     }
     Ok(())
 }
