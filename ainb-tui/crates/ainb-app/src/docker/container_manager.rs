@@ -840,37 +840,6 @@ impl ContainerManager {
         Ok(create_response.id)
     }
 
-    /// Execute a command in a running container with TTY support
-    pub async fn exec_interactive(
-        &self,
-        container_id: &str,
-        command: Vec<String>,
-    ) -> Result<tokio::process::Child, ContainerError> {
-        use std::process::Stdio;
-        use tokio::process::Command;
-
-        info!(
-            "Executing interactive command in container {}: {:?}",
-            container_id, command
-        );
-
-        // Use docker CLI for better TTY support than Bollard
-        let mut cmd = Command::new("docker");
-        cmd.arg("exec").arg("-it").arg(container_id);
-
-        for arg in command {
-            cmd.arg(arg);
-        }
-
-        cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
-
-        let child = cmd.spawn().map_err(|e| {
-            ContainerError::OperationFailed(format!("Failed to spawn docker exec: {}", e))
-        })?;
-
-        Ok(child)
-    }
-
     /// Execute a command in a running container (non-interactive)
     pub async fn exec_command(
         &self,
