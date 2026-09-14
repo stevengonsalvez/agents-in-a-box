@@ -24,7 +24,7 @@ fn every_exclusion_names_a_tripwire_once_with_an_issue_and_a_reason() {
         let mut fields = line.split_whitespace();
         let name = fields.next().expect("non-empty line has a name");
         let issue = fields.next().unwrap_or_default();
-        let reason: Vec<&str> = fields.collect();
+        let has_reason = fields.next().is_some();
         let at = format!("line {}: `{line}`", number + 1);
         assert!(name.starts_with("tripwire_"), "{at}: not a tripwire binary");
         assert!(
@@ -37,7 +37,7 @@ fn every_exclusion_names_a_tripwire_once_with_an_issue_and_a_reason() {
                 && issue[1..].chars().all(|c| c.is_ascii_digit()),
             "{at}: the second field must be an issue like #1023"
         );
-        assert!(!reason.is_empty(), "{at}: an exclusion needs a reason");
+        assert!(has_reason, "{at}: an exclusion needs a reason");
         assert!(seen.insert(name.to_string()), "{at}: excluded twice");
     }
 }
