@@ -41,8 +41,22 @@ fn source_input_has_path(normalized: &str) -> bool {
     ainb_skill_core::Uri::parse(normalized).ok().and_then(|u| u.path).is_some()
 }
 
-/// Render the spec §10.1 skills screen into `area`.
+/// Render the spec §10.1 skills screen into `area`, with the Sources panel at
+/// its default width.
 pub fn render(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
+    render_with_sources(frame, area, data, DEFAULT_SOURCES_WIDTH, false);
+}
+
+/// Render the skills screen with the Sources panel `sources_width` columns
+/// wide (clamped to `area`) and its edge bright while `resizing`. The width
+/// and the drag belong to the renderer, not to `data`.
+pub fn render_with_sources(
+    frame: &mut Frame,
+    area: Rect,
+    data: &SkillsScreenData,
+    sources_width: u16,
+    resizing: bool,
+) {
     // Vertical split: top row = sources|units, middle = detail, bottom = help.
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -57,13 +71,13 @@ pub fn render(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
     // Sources panel, rest for Units. Width is normalized against the
     // actual draw width so a stale/oversized persisted value can never
     // starve the Units table.
-    let sources_w = clamp_sources_width(data.sources_width, outer[0].width);
+    let sources_w = clamp_sources_width(sources_width, outer[0].width);
     let top = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(sources_w), Constraint::Min(40)])
         .split(outer[0]);
 
-    render_sources_panel(frame, top[0], data);
+    render_sources_panel(frame, top[0], data, resizing);
     render_units_table(frame, top[1], data);
     render_detail_pane(frame, outer[1], data);
     render_help_bar(frame, outer[2]);
@@ -796,12 +810,12 @@ fn render_add_source_prompt(frame: &mut Frame, area: Rect, input: &InputState) {
     frame.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
-fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
+fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData, resizing: bool) {
     let focused = data.focused_pane == FocusedSkillPane::Sources;
     // Focused panel = bright/gold border; unfocused = muted cornflower.
     // The edge brightens further while a resize drag is in flight so the
     // divider is obvious mid-drag.
-    let border_color = if focused || data.resize_active {
+    let border_color = if focused || resizing {
         GOLD
     } else {
         CORNFLOWER_BLUE
@@ -1805,13 +1819,11 @@ mod tests {
     }
 
     #[test]
-    fn default_has_sane_resize_and_focus_state() {
-        // TRAP guard: a derived Default would zero `sources_width`.
+    fn default_has_sane_focus_state() {
+        // TRAP guard: a derived Default would pick the first pane variant.
         let data = SkillsScreenData::default();
-        assert_eq!(data.sources_width, DEFAULT_SOURCES_WIDTH);
         assert_eq!(data.focused_pane, FocusedSkillPane::Units);
         assert!(data.source_filter.is_none());
-        assert!(!data.resize_active);
     }
 
     #[test]
@@ -1926,22 +1938,28 @@ mod tests {
     }
 
     #[test]
-    fn resize_helpers_clamp_within_bounds() {
+    fn resize_steps_clamp_within_bounds() {
         let term_w = 120u16;
-        let mut data = SkillsScreenData::default();
-        assert_eq!(data.sources_width, 32);
+        let mut width = DEFAULT_SOURCES_WIDTH;
 
         // Shrinking past the floor clamps at MIN_SOURCES_WIDTH.
         for _ in 0..50 {
-            data.shrink_sources(2, term_w);
+            width = step_sources_width(width, false, term_w);
         }
-        assert_eq!(data.sources_width, MIN_SOURCES_WIDTH);
+        assert_eq!(width, MIN_SOURCES_WIDTH);
 
         // Growing past the ceiling clamps at term_w - reserve.
         for _ in 0..200 {
-            data.grow_sources(2, term_w);
+            width = step_sources_width(width, true, term_w);
         }
-        assert_eq!(data.sources_width, term_w - SOURCES_UNITS_RESERVE);
+        assert_eq!(width, term_w - SOURCES_UNITS_RESERVE);
+
+        // A step starts from the width as drawn, so an oversized saved width
+        // shrinks visibly on the first press instead of after many.
+        assert_eq!(
+            step_sources_width(500, false, term_w),
+            term_w - SOURCES_UNITS_RESERVE - 2
+        );
     }
 
     #[test]
