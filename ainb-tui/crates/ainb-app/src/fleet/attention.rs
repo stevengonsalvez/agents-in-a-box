@@ -18,6 +18,7 @@ use std::fmt;
 /// from the variant order deliberately — sorting a chip list sorts it into the
 /// order it renders in.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AttentionKind {
     /// A structured question is waiting on a human. Blocks the agent.
     Ask,
@@ -92,6 +93,7 @@ impl fmt::Display for AttentionKind {
 /// while it is up (spec: "daemon row wins while the daemon is up"), and the
 /// source is carried so the merge can say WHY a row looks the way it does.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AttentionSource {
     /// Read from the local notifyd notifications store or the session's own
     /// status. Always available, daemon up or down.
@@ -107,6 +109,7 @@ pub enum AttentionSource {
 /// something that needs them and has no way to learn why the surface will not
 /// take their answer.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum Unanswerable {
     /// The row came from the daemon, and the daemon has since gone away, so the
     /// `attention/answer` call that would deliver the answer is unavailable.
@@ -148,6 +151,7 @@ impl Unanswerable {
 
 /// How an answer to this row would be delivered.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum Answerable {
     /// Through the daemon's `attention/answer`, targeting this attention id.
     /// Unambiguous by construction: the id names exactly one open row, so the
@@ -226,17 +230,21 @@ pub const DENY_LABEL: &str = "deny";
 
 /// One structured option an ASK offers.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AttentionOption {
     /// The label the operator picks and the text delivered as the answer.
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub label: String,
     /// The option's own explanation, or empty.
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub description: String,
 }
 
 /// One live attention state on one session row.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SessionAttention {
     /// What the session needs.
     pub kind: AttentionKind,
@@ -251,6 +259,7 @@ pub struct SessionAttention {
     /// The one-line question or reason the `ask` tab leads with, when the
     /// producer supplied one.
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub detail: Option<String>,
     /// Structured answer options. EMPTY unless the producer supplied a
     /// structured request — a free-text composer, not a zero-option list.
@@ -435,6 +444,7 @@ pub fn format_age(now_ms: i64, since_ms: i64) -> String {
 /// consumer that saw only the rows could not tell "the daemon says nothing is
 /// waiting" from "the daemon did not answer", and those need opposite chips.
 #[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct DaemonAttention {
     /// Open rows keyed by their provider-owned session id.
     ///
@@ -456,6 +466,7 @@ pub struct DaemonAttention {
     pub reachable: bool,
     /// Why the last poll failed, for the one banner line the header shows.
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub error: Option<String>,
     /// `true` when that failure means NOTHING IS SERVING the socket, so
     /// starting a daemon is the remedy a surface may offer.
