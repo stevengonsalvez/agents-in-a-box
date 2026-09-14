@@ -6,7 +6,8 @@
 //   frames (seeded LCG) ──16 ms drains──▶ MirrorStore.applyDrain ──batch()──▶ effects, memos
 //
 // Frames have the wire shape of `ainb_app::wire::frame::Frame`: a section name,
-// a version, a host id and the whole section body. A drain keeps the last frame
+// a version, a boot epoch, a host id and the whole section body. One host, one
+// epoch: the bench measures the drain shape, not epoch or peer handling. A drain keeps the last frame
 // per section (as `MirrorStore::apply_drain` does) and writes them in one
 // `batch`, diffing each body against the last one applied so only changed row
 // fields are written and only their readers notify.
@@ -37,6 +38,13 @@ export const CEILINGS = {
   longestUnitMs: 2.4,
   applyUnits: Math.ceil(BURST_MS / DRAIN_MS),
 };
+
+/**
+ * The computations `mount` creates: 3 root memos, 3 root effects and 4
+ * effects per session. A change to the effects or memos in `mount` changes
+ * it; update this to the new count, and say why in the commit.
+ */
+export const CENSUS = 3 + 3 + 4 * SESSIONS;
 
 const SECTIONS = [
   "sessions", "session_labels", "tmux", "ssh", "git_view", "workspace_load",
@@ -117,6 +125,7 @@ function* burst(seed) {
       frame: {
         section,
         version: versions[section],
+        epoch: 1,
         host_id: "local",
         body: JSON.parse(JSON.stringify(bodies[section])),
       },
@@ -124,7 +133,7 @@ function* burst(seed) {
   }
 }
 
-/** The store, its 406 computations and the counters around them. */
+/** The store, its `CENSUS` computations and the counters around them. */
 function mount(subscribed) {
   const counters = { runs: 0, created: 0 };
   const [store, setStore] = createStore(initialBodies());
@@ -169,12 +178,19 @@ function mount(subscribed) {
   // proxies, and a 100-row section body arrives whole on every frame.
   const plain = initialBodies();
 
-  /** Write only the row fields that differ, by path, so only their readers notify. */
+  /**
+   * Write only the row fields that differ, by path, so only their readers
+   * notify. A key the new body no longer has is cleared, on a row or on the
+   * body itself: a whole-body frame drops a field by leaving it out.
+   */
   const writeDiff = (section, body) => {
     const before = plain[section];
     if (!Array.isArray(body.rows) || !Array.isArray(before.rows) || body.rows.length !== before.rows.length) {
       setStore(section, reconcile(body, { key: "id", merge: true }));
       return;
+    }
+    for (const key in before) {
+      if (!(key in body)) setStore(section, key, undefined);
     }
     for (let i = 0; i < body.rows.length; i++) {
       const next = body.rows[i];
@@ -182,6 +198,9 @@ function mount(subscribed) {
       if (next === prev) continue;
       for (const field in next) {
         if (next[field] !== prev[field]) setStore(section, "rows", i, field, next[field]);
+      }
+      for (const field in prev) {
+        if (!(field in next)) setStore(section, "rows", i, field, undefined);
       }
     }
   };
@@ -208,7 +227,21 @@ function mount(subscribed) {
     return { wrote: true, dropped };
   };
 
-  return { counters, applyUnit, dispose };
+  return { counters, applyUnit, dispose, store };
+}
+
+/** A frame that leaves a row field out clears it from the store. */
+function removedKeysAreCleared() {
+  const mounted = mount(new Set(SECTIONS));
+  const body = initialBodies().agent_status;
+  const { heartbeatAt: _dropped, ...row } = body.rows[0];
+  body.rows[0] = row;
+  mounted.applyUnit([{ section: "agent_status", version: 1, epoch: 1, host_id: "local", body }]);
+  const cleared = !("heartbeatAt" in mounted.store.agent_status.rows[0])
+    || mounted.store.agent_status.rows[0].heartbeatAt === undefined;
+  const kept = mounted.store.agent_status.rows[1].heartbeatAt === 0;
+  mounted.dispose();
+  return cleared && kept;
 }
 
 /** Best of `REPEATS` for the timing metrics of one mode and seed. */
@@ -330,7 +363,11 @@ function main() {
   // shared runner's one slow sample is noise, not a regression. Counts are
   // deterministic and gate on the maximum.
   const gates = [
-    ["census is 406 computations", drain.computationsAtMount === 406],
+    [
+      `census is ${CENSUS} computations (a changed mount changes it: update CENSUS in bench.mjs)`,
+      drain.computationsAtMount === CENSUS,
+    ],
+    ["a frame that leaves a row field out clears it", removedKeysAreCleared()],
     [`per-drain computation runs <= ${CEILINGS.computationRuns}`, drain.computationRunsMax <= CEILINGS.computationRuns],
     [`per-drain apply ms per 1k frames <= ${CEILINGS.applyMsPer1kFrames}`, drain.applyMsPer1kFramesMedian <= CEILINGS.applyMsPer1kFrames],
     [`per-drain longest apply unit <= ${CEILINGS.longestUnitMs} ms`, drain.longestUnitMsMedian <= CEILINGS.longestUnitMs],
