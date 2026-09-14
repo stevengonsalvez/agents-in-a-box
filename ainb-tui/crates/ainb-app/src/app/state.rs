@@ -3006,7 +3006,9 @@ pub enum AsyncAction {
     /// process is replaced. Claude gets `--continue` to preserve the
     /// conversation; Codex restarts fresh (no continue flag exists).
     DowngradeHeadroom(Uuid),
-    CleanupOrphaned,       // Clean up orphaned containers without worktrees
+    CleanupOrphaned, // Clean up orphaned containers without worktrees
+    /// Reload the "Other tmux" rows, after the user comes back from one.
+    ReloadOtherTmuxSessions,
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     ConfirmOtherTmuxRename, // Confirm and execute rename for "Other tmux" session
@@ -9845,6 +9847,10 @@ impl AppState {
                     invalidate_docker_probe_cache(&DOCKER_PROBE);
                     // Reload workspace data and force UI refresh
                     self.load_real_workspaces().await;
+                    self.shell.ui_needs_refresh = true;
+                }
+                AsyncAction::ReloadOtherTmuxSessions => {
+                    self.load_other_tmux_sessions().await;
                     self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::FetchContainerLogs(session_id) => {
