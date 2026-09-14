@@ -34,12 +34,17 @@ fn every_pointer_command_is_an_unbound_row_in_the_one_registry() {
         .map(String::as_str)
         .filter(|id| keymap.command(&CommandId::new(*id)).is_some_and(|row| row.chord.is_none()))
         .collect();
-    let mut host_commands: Vec<&str> = ids::ALL.iter().chain(reports::ids::ALL).copied().collect();
+    let mut host_commands: Vec<&str> = ids::ALL
+        .iter()
+        .chain(reports::ids::ALL)
+        .chain(ainb_app::app::plugin_action::ids::ALL)
+        .copied()
+        .collect();
     unbound.sort_unstable();
     host_commands.sort_unstable();
     assert_eq!(
         unbound, host_commands,
-        "only pointer and report commands are unbound"
+        "only pointer, report and plugin action commands are unbound"
     );
 }
 
