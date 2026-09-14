@@ -54,23 +54,32 @@ impl Seed for PlainSeed {
     }
 }
 
-/// Trace every section frame of `state` into one [`trace::Trace`].
+/// Trace every section frame of every state into one [`trace::Trace`].
+///
+/// # Panics
+///
+/// When a frame fails to serialise: that frame would fail on the wire too, and
+/// a check over a partial trace would pass on what it never saw.
 #[must_use]
-pub fn trace_state(state: &AppState) -> trace::Trace {
+pub fn trace_states(states: &[AppState]) -> trace::Trace {
     let mut all = trace::Trace::default();
-    for id in SectionId::ALL {
-        let one = trace::trace(section_name(id), &SectionFrame { state, id });
-        all.fields.extend(one.fields);
-        all.strings.extend(one.strings);
-        all.leaf_paths.extend(one.leaf_paths);
+    for state in states {
+        for id in SectionId::ALL {
+            let one = trace::trace(section_name(id), &SectionFrame { state, id }).unwrap_or_else(
+                |error| panic!("{} frame failed to serialise: {error}", section_name(id)),
+            );
+            all.fields.extend(one.fields);
+            all.strings.extend(one.strings);
+            all.leaf_paths.extend(one.leaf_paths);
+        }
     }
     all
 }
 
-/// The leaf key paths the frames of `state` produce.
+/// The leaf key paths the frames of `states` produce.
 #[must_use]
-pub fn key_paths(state: &AppState) -> BTreeSet<String> {
-    trace_state(state).leaf_paths
+pub fn key_paths(states: &[AppState]) -> BTreeSet<String> {
+    trace_states(states).leaf_paths
 }
 
 /// The committed fixture as a set.
@@ -140,7 +149,7 @@ impl std::fmt::Display for ShapeDiff {
 #[must_use]
 pub fn diff_against_committed() -> ShapeDiff {
     diff(
-        &key_paths(&sample_state(&mut PlainSeed)),
+        &key_paths(&sample_states(&mut PlainSeed)),
         &committed_key_paths(),
     )
 }
@@ -194,7 +203,61 @@ pub const TYPED_LABELS: &[&str] = &[
     "ssh.rename_buffer",
     "tmux.rename_buffer",
     "session_labels.rename_buffer",
+    // The plain-text popup variant from `sample_states`.
+    "config.text_popup",
 ];
+
+/// Every sample the checks trace: [`sample_state`], whose config popup is the
+/// Ctrl+K `SecretInput`, and the same state with a plain setting open in a
+/// `TextInput`. The popup holds one variant at a time, so both are needed for
+/// either to be seen.
+///
+/// # Panics
+///
+/// When the registry has no plain text row, or the reducer stops opening one
+/// in a `TextInput`: the variant would silently drop out of every check.
+#[must_use]
+pub fn sample_states(seed: &mut dyn Seed) -> Vec<AppState> {
+    use crate::app::state::ConfigValue;
+    use crate::components::config_popup::ConfigPopupType;
+
+    let secret_popup = sample_state(seed);
+    let mut text_popup = sample_state(seed);
+    let screen = &mut text_popup.config.get_mut().config_screen_state;
+    let row = screen
+        .settings
+        .iter()
+        .find_map(|(category, rows)| {
+            rows.iter()
+                .position(|row| row.key == "web.listen")
+                .map(|index| (*category, index))
+        })
+        .expect("the registry declares web.listen as a text row");
+    let value = seed.text("config.text_popup", TextKind::Typed);
+    if let Some(ConfigValue::Text(text)) = screen
+        .settings
+        .get_mut(&row.0)
+        .and_then(|rows| rows.get_mut(row.1))
+        .map(|setting| &mut setting.value)
+    {
+        *text = value;
+    }
+    screen.visible_rows = vec![row];
+    screen.selected_setting = 0;
+    screen.keychain_target = None;
+    crate::app::EventHandler::process_event(
+        crate::app::AppEvent::ConfigEditSetting,
+        &mut text_popup,
+    );
+    assert!(
+        matches!(
+            text_popup.config.config_popup_state.popup_type,
+            ConfigPopupType::TextInput { .. }
+        ),
+        "Enter on a plain text row opens a TextInput"
+    );
+    vec![secret_popup, text_popup]
+}
 
 /// Build the sample state. Every optional screen is open and every field the
 /// leak checks name holds text from `seed`.
