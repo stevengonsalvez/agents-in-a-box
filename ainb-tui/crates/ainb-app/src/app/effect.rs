@@ -87,9 +87,10 @@ pub enum Effect {
 /// A tmux session name an effect can target.
 ///
 /// Not empty, free of the `:` and `.` tmux reads as window and pane separators
-/// and of control characters, and not starting with `$`, `%`, `@` or `=`,
-/// which tmux reads as a session, pane or window id or an exact-match marker,
-/// so such a name could reach another session.
+/// and of control characters, with no whitespace at either end, and not
+/// starting with `$`, `%`, `@` or `=`, which tmux reads as a session, pane or
+/// window id or an exact-match marker, so such a name could reach another
+/// session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxSessionName(String);
 
@@ -99,6 +100,7 @@ impl TmuxSessionName {
     pub fn new(name: impl Into<String>) -> Option<Self> {
         let name = name.into();
         let addressable = !name.is_empty()
+            && name.trim() == name
             && !name.contains([':', '.'])
             && !name.starts_with(['$', '%', '@', '='])
             && !name.chars().any(char::is_control);
@@ -230,6 +232,9 @@ mod tests {
             "%1",
             "@2",
             "=work",
+            " work",
+            "work ",
+            "work\t",
         ] {
             assert_eq!(TmuxSessionName::new(bad), None, "{bad:?}");
         }
