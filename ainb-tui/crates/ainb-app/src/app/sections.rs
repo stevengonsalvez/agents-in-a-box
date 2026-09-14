@@ -688,7 +688,7 @@ pub struct ShellSection {
     // Confirmation dialog state
     pub confirmation_dialog: Option<ConfirmationDialog>,
     // Pending event to be processed in next loop iteration
-    pub pending_event: Option<crate::app::events::AppEvent>,
+    pub(crate) pending_event: Option<crate::app::events::AppEvent>,
     // Async action processing
     pub pending_async_action: Option<AsyncAction>,
     // Flag to track if user cancelled during async operation
