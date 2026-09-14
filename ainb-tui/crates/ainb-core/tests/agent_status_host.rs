@@ -260,6 +260,7 @@ fn a_section_change_reaches_a_subscribed_plugin_through_the_runtime() {
         },
         subscribes: Subscribes {
             snapshots: vec![AGENT_STATUS_TOPIC.to_string()],
+            latest_state: vec![AGENT_STATUS_TOPIC.to_string()],
         },
         lifecycle: Lifecycle {
             spawn: SpawnMode::Lazy,
