@@ -30,6 +30,9 @@ pub mod versioned;
 pub use effect::{Effect, TerminalTarget, ToolTerminal};
 #[cfg(any(test, feature = "test-support"))]
 pub use events::{AppEvent, EventHandler};
+// The wire sample state opens the Ctrl+K popup through the real reducer.
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use events::{AppEvent, EventHandler};
 pub use events::{
     NoRenderer, RendererHost, is_in_text_input_context, skill_manager_overlay_open,
     slash_command_intent,
