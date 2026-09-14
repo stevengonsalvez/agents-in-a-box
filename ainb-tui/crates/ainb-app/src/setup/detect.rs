@@ -10,6 +10,7 @@ use crate::setup::catalog::{Consumer, Detect, Tier, Topic, catalog};
 /// Detected state of a single dependency.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "detail")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum DepState {
     /// Present and satisfies any version/variant requirement.
     Ok(Option<String>),
@@ -32,6 +33,7 @@ impl DepState {
 
 /// A dependency spec joined with its detected state.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct DepReport {
     pub id: &'static str,
     pub name: &'static str,
@@ -55,6 +57,7 @@ impl DepReport {
 
 /// A topic joined with its per-dependency reports.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct TopicReport {
     pub id: &'static str,
     pub label: &'static str,
@@ -64,6 +67,7 @@ pub struct TopicReport {
 
 /// Overall detection result across the whole catalog.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SetupStatus {
     pub topics: Vec<TopicReport>,
 }
