@@ -182,6 +182,86 @@ const DENY_WORDS: &[&str] = &[
 /// Fields whose key matches a deny word and still carry text, each with why
 /// the text is safe on the wire. Keyed by the traced `Owner.field`.
 const NAME_ALLOW: &[(&str, &str)] = &[
+    ("ActionOutcome.detail", "daemon action output, scrubbed"),
+    ("BrowseRow.install_uri", "catalog install URI, scrubbed"),
+    ("ChangedFile.path", "repo-relative path of a changed file"),
+    ("CloneProgress.url", "clone URL in progress, scrubbed"),
+    ("CommitInfo.message", "commit subject in the log, scrubbed"),
+    (
+        "ConfirmationDialog.message",
+        "confirmation prompt text, scrubbed",
+    ),
+    ("FileTreeItem.full_path", "repo-relative path of a tree row"),
+    (
+        "GitViewState.file_tree_items",
+        "changed-file tree rows (`file` in the field name)",
+    ),
+    (
+        "ImageSource.path",
+        "Dockerfile path of a container template",
+    ),
+    ("LibraryRow.path", "on-disk path of a library skill"),
+    (
+        "LogsView.log_history_state",
+        "the log viewer (`log` in the field name); entries and search text are withheld",
+    ),
+    (
+        "McpInstallation.install_command",
+        "MCP install command, scrubbed in frame",
+    ),
+    (
+        "McpInstallation.url",
+        "MCP git source URL, scrubbed in frame",
+    ),
+    (
+        "RecoveryResultLine.detail",
+        "per-item recovery result, scrubbed",
+    ),
+    (
+        "SessionLogSummary.log_path",
+        "log file the history viewer lists",
+    ),
+    (
+        "ShellSession.preview_content",
+        "workspace shell scrollback, scrubbed in frame",
+    ),
+    (
+        "ShellSession.working_dir",
+        "directory the workspace shell runs in",
+    ),
+    (
+        "ShellSession.workspace_path",
+        "repository root the workspace shell belongs to",
+    ),
+    (
+        "SkillsScreenData.detail",
+        "the selected unit's detail pane (`detail` in the field name); its URI is scrubbed",
+    ),
+    (
+        "SourceRemoveConfirm.source_uri",
+        "skills source URI in the remove prompt, scrubbed",
+    ),
+    ("UnitDetail.uri", "skill unit URI, scrubbed"),
+    (
+        "UnitRow.declared_uri",
+        "skill unit URI as declared, scrubbed",
+    ),
+    (
+        "ValidatedPath.expanded_path",
+        "an onboarding repo directory after `~` expansion",
+    ),
+    (
+        "ValidatedPath.path",
+        "an onboarding repo directory as typed",
+    ),
+    (
+        "VolumeMount.container_path",
+        "mount point inside a container",
+    ),
+    (
+        "VolumeMount.host_path",
+        "host directory a container template mounts",
+    ),
     (
         "AuthSetupState.error_message",
         "auth error prose, scrubbed through redact::scrub",
@@ -442,6 +522,36 @@ const DENY_TYPES: &[(&str, &str)] = &[
 /// Fields of a denied type that stay on the wire, each with its reason.
 const TYPE_ALLOW: &[(&str, &str)] = &[
     (
+        "ImageSource.path",
+        "Dockerfile path of a container template",
+    ),
+    (
+        "SessionLogSummary.log_path",
+        "log file the history viewer lists; its entries are not in the frame",
+    ),
+    (
+        "ShellSession.working_dir",
+        "directory the workspace shell runs in",
+    ),
+    (
+        "ShellSession.workspace_path",
+        "repository root the workspace shell belongs to",
+    ),
+    ("UnitDetail.deployed", "paths a skill unit is deployed to"),
+    ("UnitDetail.requires", "names of units a skill requires"),
+    (
+        "UnitRow.targets",
+        "tool names a skill unit targets, e.g. `claude`",
+    ),
+    (
+        "ValidatedPath.expanded_path",
+        "an onboarding repo directory after `~` expansion",
+    ),
+    (
+        "ValidatedPath.path",
+        "an onboarding repo directory as typed",
+    ),
+    (
         "ConfigValue::Choice.0",
         "a Choice row's fixed option labels from the registry",
     ),
@@ -504,10 +614,6 @@ const TYPE_ALLOW: &[(&str, &str)] = &[
     (
         "OrphanedWorktree.path",
         "worktree directory the recovery screen offers to clean up",
-    ),
-    (
-        "PluginUiState.view",
-        "the plugin's published `ui.state` view: a documented plugin contract the host never reads into",
     ),
     (
         "RepoSource::LocalPath.0",
@@ -579,6 +685,285 @@ fn no_opaque_or_unbounded_type_reaches_the_wire_unless_allow_listed() {
          and not allow-listed:\n  {}\nstale allow-list entries: {stale:?}",
         unlisted.len(),
         unlisted.join("\n  ")
+    );
+}
+
+/// Fields that reach the frame only through `serialize_with`. serde traces them
+/// as its private wrapper, which hides the declared type from the check above,
+/// so each one is named here: a pass-through wrapper cannot slip a field past
+/// the type deny-list without showing up in review.
+const SERIALIZER_REDACTED: &[&str] = &[
+    "ActionOutcome.detail",
+    "ActionOutcome.summary",
+    "AgentAuthStatus.has_key",
+    "AnswerPhase::Failed.draft_len",
+    "AnswerPhase::Failed.reason",
+    "AskState.free_text_len",
+    "AtcModeView.help",
+    "AttentionOption.description",
+    "AttentionOption.label",
+    "AuthPane::KeyEntry.buf_len",
+    "AuthProviderPopupState.api_key_len",
+    "AuthSetupState.api_key_len",
+    "AuthSetupState.error_message",
+    "BranchPickerState.error",
+    "BranchPickerState.filter_len",
+    "Broadcast.text_len",
+    "BrowseRow.install_uri",
+    "BrowseViewState.query_len",
+    "BrowseViewState.status",
+    "ClaudeChatState.current_streaming_response",
+    "ClaudeChatState.input_len",
+    "ClaudeChatState.message_count",
+    "CloneProgress.error",
+    "CloneProgress.url",
+    "CommitInfo.message",
+    "ConfigPopupType::SecretInput.value_len",
+    "ConfigScreenState.edit_len",
+    "ConfigScreenState.search_len",
+    "ConfigureState.prompt",
+    "ConfirmationDialog.message",
+    "ConfirmationDialog.warning",
+    "ContainerTemplateConfig.environment",
+    "DaemonAttention.error",
+    "DaemonStatus.last_error",
+    "DaemonStatus.reason",
+    "DaemonsState.hooks_status",
+    "DaemonsState.shared",
+    "DepInstall::Error.0",
+    "DiffRow.raw",
+    "FleetView.daemon_attention",
+    "FleetView.fleet_snapshot",
+    "GitViewState.commit_message_len",
+    "GitViewState.diff_content",
+    "GitViewView.quick_commit_message_len",
+    "Hunk.rows",
+    "ImageSource.build_args",
+    "InputState.buffer_len",
+    "LogEntry.message",
+    "LogHistoryViewerState.error_message",
+    "LogHistoryViewerState.search_query_len",
+    "MarkdownLine.content",
+    "McpInstallation.install_command",
+    "McpInstallation.url",
+    "McpOverlayState.last_action",
+    "McpServerDefinition.args",
+    "McpServerDefinition.env",
+    "Notification.message",
+    "OnboardingState.error_message",
+    "OnboardingState.otel_api_token_len",
+    "OnboardingState.otel_instance_id_len",
+    "OnboardingState.otel_otlp_endpoint",
+    "OnboardingState.status_message",
+    "OrphanedSession.task",
+    "OrphanedWorktree.source_repo",
+    "PickRepoState.filter_len",
+    "PickRepoState.git_auth_error",
+    "PluginUiState.view",
+    "PluginsHostView.plugin_render_errors",
+    "RecoveryResultLine.detail",
+    "RepoCheck::Failed.0",
+    "RepoSource::HttpsUrl.0",
+    "RepositoryPreset.custom_rules",
+    "RepositoryPreset.environment",
+    "SecretValue.reference",
+    "Session.boss_prompt",
+    "Session.preview_content",
+    "Session.recent_logs",
+    "SessionAttention.detail",
+    "SessionRecoveryState.action_result",
+    "SessionRecoveryState.last_error",
+    "SessionRecoveryState.search_query_len",
+    "ShellSession.preview_content",
+    "SkillsScreenData.preview_loading",
+    "SkillsScreenData.search_len",
+    "SkillsScreenData.source_filter_len",
+    "SkillsViewState.search_query_len",
+    "SourceRemoveConfirm.source_uri",
+    "SourceRow.uri",
+    "StatuslineStatus::Other.0",
+    "SyncConfirmState.plan",
+    "UnitDetail.uri",
+    "UnitRow.declared_uri",
+    "UnitRow.source",
+    "ValidatedPath.error",
+    "WorkspaceLoadView.workspace_load_error",
+];
+
+#[test]
+fn every_field_behind_a_custom_serializer_is_named() {
+    isolated_home();
+    let trace = shape::trace_state(&shape::sample_state(&mut shape::PlainSeed));
+    let wrapped: BTreeSet<String> = trace
+        .fields
+        .iter()
+        .filter(|f| f.rust_type.contains("__SerializeWith"))
+        .map(|f| f.owner_field.clone())
+        .collect();
+    let listed: BTreeSet<String> = SERIALIZER_REDACTED.iter().map(|s| (*s).to_string()).collect();
+    let unlisted: Vec<_> = wrapped.difference(&listed).collect();
+    let stale: Vec<_> = listed.difference(&wrapped).collect();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "fields behind serialize_with not in SERIALIZER_REDACTED: {unlisted:#?}\nstale: {stale:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Completeness of the sample
+// ---------------------------------------------------------------------------
+
+/// Crate prefixes whose types carry no nested fields worth tracing.
+const LEAF_TYPE_PREFIXES: &[&str] = &[
+    "alloc::",
+    "core::",
+    "std::",
+    "uuid::",
+    "chrono::",
+    "serde_json::",
+    "toml::",
+];
+
+/// Containers and options left empty in the sample on purpose, with the reason.
+const UNFILLED_WAIVED: &[(&str, &str)] = &[
+    (
+        "DaemonsState.action_requests",
+        "DaemonKind and Action enums plus a generation number; no text",
+    ),
+    ("DaemonsState.error_open", "a DaemonKind unit enum; no text"),
+    (
+        "DaemonsState.inflight",
+        "an Action enum and a generation number (the Instant is skipped); no text",
+    ),
+    (
+        "DaemonsState.menu",
+        "a DaemonKind, a cursor and the row's ATC instance name; private constructor, opened only by a key press",
+    ),
+    (
+        "FileTreeItem.status",
+        "a GitFileStatus unit enum: filled, and a leaf by shape",
+    ),
+    (
+        "OnboardingState.dependency_status",
+        "detected-dependency report: static catalog labels and install hints, built by probing the machine",
+    ),
+    (
+        "OrphanedWorktree.agent_type",
+        "a SessionAgentType unit enum; no text",
+    ),
+    (
+        "PickRepoState.git_auth_status",
+        "a GitAuthStatus unit enum: filled, and a leaf by shape",
+    ),
+    ("Session.codex_model", "a CodexModel unit enum; no text"),
+    (
+        "SessionFleetMetadata.lifecycle",
+        "a LifecycleState unit enum; no text",
+    ),
+    (
+        "SessionLabelsView.session_context_menu",
+        "row indices and a cursor; no text",
+    ),
+    (
+        "SessionLabelsView.session_label_rename_target",
+        "row indices; no text",
+    ),
+    (
+        "SetupMenuState.pending_action",
+        "a SetupMenuItem unit enum; no text",
+    ),
+    (
+        "SkillsScreenData.preview",
+        "the fetched preview itself is skipped; what remains is checkboxes and a cursor",
+    ),
+    (
+        "SkillsViewState.data",
+        "skill and agent metadata from a disk scan of ~/.claude: names, descriptions, tool names, source paths",
+    ),
+    (
+        "Snapshot.evidence_census",
+        "probe counts and an EvidenceHealth enum; no text",
+    ),
+    (
+        "Snapshot.hook_health",
+        "notifyd hook install report from the machine: versions, script and binary paths, issue lines",
+    ),
+    (
+        "UsageConfig.plan",
+        "a plan id and provider enum, monthly USD, reset day and the date it was set",
+    ),
+];
+
+/// A traced field emitted as `null` or an empty container whose element type
+/// has fields of its own: everything below it is invisible to the four checks.
+fn structured_but_empty(
+    field: &ainb_app::wire::trace::FieldNode,
+    leaves: &BTreeSet<String>,
+) -> bool {
+    if !leaves.contains(&field.path) {
+        return false;
+    }
+    // Empty in one instance and filled in another (a second template, a second
+    // session) still shows its subtree.
+    let filled_elsewhere = leaves.iter().any(|leaf| {
+        leaf.len() > field.path.len()
+            && leaf.starts_with(&field.path)
+            && matches!(leaf.as_bytes()[field.path.len()], b'.' | b'[' | b'{')
+    });
+    if filled_elsewhere {
+        return false;
+    }
+    let ty = &field.rust_type;
+    let container = [
+        "Option<",
+        "Vec<",
+        "HashMap<",
+        "BTreeMap<",
+        "HashSet<",
+        "BTreeSet<",
+    ]
+    .iter()
+    .any(|c| ty.contains(c));
+    if !container {
+        return false;
+    }
+    let mut token = String::new();
+    let mut structured = false;
+    for ch in ty.chars().chain(std::iter::once(' ')) {
+        if ch.is_alphanumeric() || ch == '_' || ch == ':' {
+            token.push(ch);
+            continue;
+        }
+        if token.contains("::") && !LEAF_TYPE_PREFIXES.iter().any(|p| token.starts_with(p)) {
+            structured = true;
+        }
+        token.clear();
+    }
+    structured
+}
+
+#[test]
+fn the_sample_fills_every_structured_subtree() {
+    isolated_home();
+    let trace = shape::trace_state(&shape::sample_state(&mut shape::PlainSeed));
+    let waived: BTreeMap<_, _> = UNFILLED_WAIVED.iter().copied().collect();
+    let empty: BTreeSet<String> = trace
+        .fields
+        .iter()
+        .filter(|f| structured_but_empty(f, &trace.leaf_paths))
+        .map(|f| format!("{}  ({})", f.owner_field, f.rust_type))
+        .collect();
+    let unlisted: Vec<_> = empty
+        .iter()
+        .filter(|e| !waived.contains_key(e.split("  (").next().unwrap_or_default()))
+        .collect();
+    let owners: BTreeSet<_> =
+        empty.iter().map(|e| e.split("  (").next().unwrap_or_default()).collect();
+    let stale: Vec<_> = waived.keys().filter(|k| !owners.contains(*k)).collect();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "sample leaves structured subtrees empty, so no check sees below them. Fill them in \
+         wire::shape::sample_state or waive with a reason:\n{unlisted:#?}\nstale waivers: {stale:?}"
     );
 }
 
@@ -843,4 +1228,10 @@ fn saves_outside_a_frame_keep_what_the_frame_withholds() {
     assert!(!frame.contains("sample config.fleet.bridge.telegram.token"));
     assert!(!frame.contains("sample config.mcp.env"));
     assert!(!frame.contains("sample config.mcp.json"));
+    assert!(!frame.contains("sample config.container.env"));
+    let sessions = section_json(&state, SectionId::Sessions).to_string();
+    assert!(
+        !sessions.contains("id_ed25519"),
+        "identity file left out of the frame"
+    );
 }
