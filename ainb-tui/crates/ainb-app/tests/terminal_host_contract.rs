@@ -197,3 +197,33 @@ fn a_full_screen_attach_runs_with_the_released_preview_client_closed() {
     );
     assert!(!state.is_interactive_pane());
 }
+
+#[test]
+fn a_closed_input_channel_releases_the_pane_closes_the_client_and_says_so() {
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = session_list_with(&["ainb-contract-e"]);
+    let mut host = HeadlessHost::default();
+    host.command(&mut state, &keymap, "session_list.attach_interactive");
+    assert!(state.is_interactive_pane());
+
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        reports::terminal_input_closed("ainb-contract-e"),
+    );
+    host.run(&mut state, &keymap, effects);
+
+    assert!(!state.is_interactive_pane(), "the pane is released");
+    assert_eq!(host.held, None, "the host closed the client");
+    assert!(
+        state
+            .shell
+            .notifications
+            .iter()
+            .any(|note| note.message.contains("input channel closed")),
+        "{:?}",
+        state.shell.notifications
+    );
+}
