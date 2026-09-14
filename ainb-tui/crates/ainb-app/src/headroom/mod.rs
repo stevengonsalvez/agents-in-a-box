@@ -867,7 +867,7 @@ mod tests {
     /// Point `AINB_HOME` (and the proxy port) at a scratch home for one test,
     /// restoring both on drop. Callers hold `HEADROOM_ENV_LOCK`.
     struct ScratchHome {
-        dir: tempfile::TempDir,
+        _dir: tempfile::TempDir,
         old_home: Option<std::ffi::OsString>,
         old_port: Option<std::ffi::OsString>,
     }
@@ -886,7 +886,7 @@ mod tests {
             std::env::set_var("AINB_HOME", dir.path());
             std::env::set_var("AINB_HEADROOM_PORT", port.to_string());
             std::fs::create_dir_all(users_dir()).expect("users dir");
-            Self { dir, old_home, old_port }
+            Self { _dir: dir, old_home, old_port }
         }
     }
 
