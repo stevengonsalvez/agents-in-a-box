@@ -196,10 +196,14 @@ async fn tokio_main() -> Result<()> {
             let presence = spawn_tui_presence();
             // Section 20 (T0-section, #1015): one joined daemon read per Fleet
             // revision, folded into the app state by its reducer. Held for the
-            // TUI's lifetime; dropping it stops the task.
-            let mut agent_status = ainb::agent_status_host::AgentStatusHost::spawn(Box::new(
-                fleet::bridge::daemon::tui_client,
-            ));
+            // TUI's lifetime; dropping it stops the task. It is the process's
+            // only agent-status reader: the Fleet panel renders what it
+            // publishes (#1031), and `[fleet.status] legacy_panel` is honoured
+            // here rather than in the plugin.
+            let mut agent_status = ainb::agent_status_host::AgentStatusHost::spawn(
+                Box::new(fleet::bridge::daemon::tui_client),
+                config::tunables::legacy_panel(),
+            );
 
             // A plugin-disabled TUI is a diagnostic fallback with no Hangar
             // consumer. Do not leave a background daemon behind for it.
@@ -494,6 +498,9 @@ async fn run_tui_loop(
     // none of it survives this process or crosses to another surface.
     let mut ui = crate::app::ui_state::UiState::default();
     ui.restore(&app.state.config.app_config);
+    // The live tmux client behind the session list's preview pane. The reducer
+    // names the session; this owns the PTY.
+    let mut clients = ainb::terminal_clients::TerminalClients::default();
 
     let (keymap, keymap_warning) = Keymap::load_user();
     if let Some(warning) = keymap_warning {
@@ -511,6 +518,7 @@ async fn run_tui_loop(
         &keymap,
         &mut ui,
         terminal,
+        &mut clients,
     )
     .await?;
     // Event-poll cadence: how often we wake up to check for a keystroke
@@ -573,19 +581,21 @@ async fn run_tui_loop(
         // writing state, and before the frame that shows their result.
         let leftover = app.state.take_effects();
         if !leftover.is_empty() {
-            run_effects(leftover, app, &keymap, &mut ui, terminal).await?;
+            run_effects(leftover, app, &keymap, &mut ui, terminal, &mut clients).await?;
             needs_redraw = true;
         }
         // Reports from background work (a daemon verb) that finished since the
         // last iteration.
         for report in ainb::effect_host::take_deferred_reports() {
-            run_intent(report, app, &keymap, &mut ui, terminal).await?;
+            run_intent(report, app, &keymap, &mut ui, terminal, &mut clients).await?;
             needs_redraw = true;
         }
         // Section 20 updates from the agent-status host task. The TUI paints
-        // Fleet through the plugin, so a section change is not a repaint here;
-        // its version is what a mirrored surface subscribes to.
+        // Fleet through the plugin, so a section change is not a repaint here:
+        // it is published to the plugins, which fold it into the panel (#1031),
+        // and its version is what a mirrored surface subscribes to.
         agent_status.drain_into(&mut app.state);
+        agent_status.publish(&app.state, app.state.plugins_host.plugin_runtime.as_ref());
 
         // Drive plugin-owned screens before every paint. Pushes any
         // host-side state into each plugin and drains its painted
@@ -598,38 +608,41 @@ async fn run_tui_loop(
             needs_redraw = true;
         }
 
-        // If the interactive embed ended (detach / session gone / EOF), auto-
-        // release so the pane reverts to the read-only preview, not a dead
-        // screen. Releasing changes the layout, so it is a repaint trigger.
-        if app.state.poll_embed_exit() {
+        // A client that ended on its own (detach, session gone, EOF) is
+        // reported, so the pane reverts to the read-only preview rather than a
+        // dead screen. Releasing changes the layout, so it is a repaint
+        // trigger, and so is the pane leaving a screen that no longer shows it.
+        if let Some(report) = clients.take_exited() {
+            run_intent(report, app, &keymap, &mut ui, terminal, &mut clients).await?;
+            needs_redraw = true;
+        }
+        if app.state.tick_terminal_pane() {
             needs_redraw = true;
         }
 
         // Read-only preview is a real tmux client feeding the same vt100
         // parser used after input focus is granted. Keep it aligned with the
-        // current selection and viewport before painting.
+        // current selection before painting: the reducer says when to open
+        // one, and the effect opens it at the pane's size.
         if app.state.shell.current_screen == crate::app::screens::ids::SESSION_LIST
             && !app.state.is_interactive_pane()
         {
-            let sz = terminal.size().unwrap_or(ratatui::layout::Size {
-                width: 80,
-                height: 24,
-            });
-            let sidebar = ui.sessions_pane.effective_width(sz.width);
-            let (rows, cols) = crate::components::layout::interactive_embed_size(
-                sz.width,
-                sz.height,
-                sidebar,
-                app.state.config.app_config.ui_preferences.show_session_menu_bar,
-            );
-            needs_redraw |= app.state.sync_terminal_observer(rows, cols);
+            if let Some(effect) = app.state.request_terminal_observer() {
+                run_effects(vec![effect], app, &keymap, &mut ui, terminal, &mut clients).await?;
+                needs_redraw = true;
+            }
+        }
+        // The client follows the session state names: one the reducer
+        // released or declined closes here, before the frame that would show it.
+        if clients.reconcile(&app.state) {
+            needs_redraw = true;
         }
 
         // Live embed output is the third repaint source alongside input and
         // plugin frames: the PTY reader thread marks the embed dirty as bytes
         // stream in, with no host input involved. Without this the dirty-gate
         // would hold the live pane at the 250ms app-tick floor.
-        if app.state.embed_take_dirty() {
+        if clients.take_dirty() {
             needs_redraw = true;
         }
 
@@ -651,6 +664,7 @@ async fn run_tui_loop(
             // Under the same dirty gate the draw is, so these keep the cadence
             // they had when they lived in `render`.
             layout.tick_before_draw(&mut app.state);
+            layout.tmux_preview_mut().show_terminal(clients.screen());
             let draw_start = Instant::now();
             match terminal.draw(|frame| {
                 layout.render(frame, &app.state, &mut ui);
@@ -666,6 +680,7 @@ async fn run_tui_loop(
                     // The embed resize and three pane rects could only be
                     // measured by the frame that just went out.
                     crate::components::layout::publish_after_draw(&mut app.state, &mut ui);
+                    crate::components::layout::resize_terminal_client(&mut ui, &mut clients);
                     needs_redraw = false;
                 }
                 // Transient frame-write failure (e.g. EINTR over a flaky SSH
@@ -730,14 +745,12 @@ async fn run_tui_loop(
                     // reach the embed, the palette and plugins below, but never
                     // the host keymap.
                     let chord = crate::app::terminal_keys::chord_from_key_event(&key_event);
-                    let interactive_detach = chord.as_ref().is_some_and(|chord| {
-                        keymap
-                            .binding_for(&KeyContext::EmbedInteractive, EMBED_DETACH_ROW)
-                            .is_some_and(|row| row.chord.as_ref() == Some(chord))
-                    });
+                    let interactive_detach =
+                        chord.as_ref().is_some_and(|chord| keymap.releases_in_place_pane(chord));
                     if interactive_detach {
                         if app.state.is_interactive_pane() {
-                            detach_interactive_pane(app, &keymap, &mut ui, terminal).await?;
+                            detach_interactive_pane(app, &keymap, &mut ui, terminal, &mut clients)
+                                .await?;
                         }
                         if app.state.shell.current_screen == crate::app::screens::ids::SESSION_LIST
                         {
@@ -753,24 +766,18 @@ async fn run_tui_loop(
                     // palette.
                     if app.state.is_interactive_pane() {
                         if interactive_detach {
-                            detach_interactive_pane(app, &keymap, &mut ui, terminal).await?;
+                            detach_interactive_pane(app, &keymap, &mut ui, terminal, &mut clients)
+                                .await?;
                             continue;
                         }
                         // write_input only errors when the PTY writer thread is
                         // gone — release immediately instead of leaving a
                         // focused pane that silently eats input.
-                        let write_failed = app
-                            .state
-                            .tmux
-                            .embed
-                            .as_ref()
-                            .zip(crate::tmux::encode_key_event(&key_event))
-                            .is_some_and(|(client, bytes)| client.write_input(&bytes).is_err());
-                        if write_failed {
-                            app.state.release_interactive_pane();
-                            app.state.add_error_notification(
-                                "Live session input channel closed — released".to_string(),
-                            );
+                        if let Some(report) = crate::tmux::encode_key_event(&key_event)
+                            .and_then(|bytes| clients.write_input(&bytes))
+                        {
+                            run_intent(report, app, &keymap, &mut ui, terminal, &mut clients)
+                                .await?;
                         }
                         continue;
                     }
@@ -814,7 +821,15 @@ async fn run_tui_loop(
                                 // no host mapping fall through to the log-only
                                 // stub (plugin-owned dispatch lands later).
                                 if let Some(intent) = crate::app::slash_command_intent(&cmd) {
-                                    run_intent(intent, app, &keymap, &mut ui, terminal).await?;
+                                    run_intent(
+                                        intent,
+                                        app,
+                                        &keymap,
+                                        &mut ui,
+                                        terminal,
+                                        &mut clients,
+                                    )
+                                    .await?;
                                 } else {
                                     tracing::info!(
                                         "slash command requested (no host mapping): /{}",
@@ -880,12 +895,20 @@ async fn run_tui_loop(
                     // stop). Tick straight away so it starts, and the frame
                     // shows it, without waiting out the app tick.
                     let confirming = app.state.shell.confirmation_dialog.is_some();
-                    run_intent(ainb::Intent::Key(chord), app, &keymap, &mut ui, terminal).await?;
+                    run_intent(
+                        ainb::Intent::Key(chord),
+                        app,
+                        &keymap,
+                        &mut ui,
+                        terminal,
+                        &mut clients,
+                    )
+                    .await?;
                     // Layout work the table resolved never reaches the reducer.
                     let columns = terminal.size().map_or(80, |size| size.width);
                     for action in ui.take_queued() {
                         if let Some(save) = ui.apply_host(action, layout, &app.state, columns) {
-                            run_intent(save, app, &keymap, &mut ui, terminal).await?;
+                            run_intent(save, app, &keymap, &mut ui, terminal, &mut clients).await?;
                         }
                     }
                     if confirming
@@ -897,7 +920,8 @@ async fn run_tui_loop(
                         match app.tick().await {
                             Ok(effects) => {
                                 info!(">>> Immediate tick completed successfully");
-                                run_effects(effects, app, &keymap, &mut ui, terminal).await?;
+                                run_effects(effects, app, &keymap, &mut ui, terminal, &mut clients)
+                                    .await?;
                                 last_app_tick = Instant::now();
                                 // Force UI refresh. The tick runs here
                                 // for the same reason it runs before the
@@ -934,19 +958,13 @@ async fn run_tui_loop(
                     // without it ignore the sequences). Everything else is
                     // swallowed.
                     if app.state.is_interactive_pane() {
-                        let write_failed = ui
+                        if let Some(report) = ui
                             .embed_pane_area
-                            .zip(app.state.tmux.embed.as_ref())
-                            .and_then(|(inner, client)| {
-                                crate::tmux::encode_mouse_event(&mouse_event, inner)
-                                    .map(|bytes| client.write_input(&bytes).is_err())
-                            })
-                            .unwrap_or(false);
-                        if write_failed {
-                            app.state.release_interactive_pane();
-                            app.state.add_error_notification(
-                                "Live session input channel closed — released".to_string(),
-                            );
+                            .and_then(|inner| crate::tmux::encode_mouse_event(&mouse_event, inner))
+                            .and_then(|bytes| clients.write_input(&bytes))
+                        {
+                            run_intent(report, app, &keymap, &mut ui, terminal, &mut clients)
+                                .await?;
                         }
                         continue;
                     }
@@ -984,7 +1002,8 @@ async fn run_tui_loop(
                                     ainb::Pos { x: col, y: row },
                                     ainb::Btn::Left,
                                 );
-                                run_intent(press, app, &keymap, &mut ui, terminal).await?;
+                                run_intent(press, app, &keymap, &mut ui, terminal, &mut clients)
+                                    .await?;
                             }
                         }
                         MouseEventKind::Down(MouseButton::Right) => {
@@ -995,7 +1014,8 @@ async fn run_tui_loop(
                                 },
                                 ainb::Btn::Right,
                             );
-                            run_intent(press, app, &keymap, &mut ui, terminal).await?;
+                            run_intent(press, app, &keymap, &mut ui, terminal, &mut clients)
+                                .await?;
                         }
                         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                             // Handle mouse scroll based on current view
@@ -1037,6 +1057,7 @@ async fn run_tui_loop(
                                     &keymap,
                                     &mut ui,
                                     terminal,
+                                    &mut clients,
                                 )
                                 .await?;
                             } else if app.state.shell.current_screen == screen_ids::LOG_HISTORY {
@@ -1108,6 +1129,7 @@ async fn run_tui_loop(
                                     &keymap,
                                     &mut ui,
                                     terminal,
+                                    &mut clients,
                                 )
                                 .await?;
                             }
@@ -1128,6 +1150,7 @@ async fn run_tui_loop(
                                     &keymap,
                                     &mut ui,
                                     terminal,
+                                    &mut clients,
                                 )
                                 .await?;
                             }
@@ -1141,6 +1164,7 @@ async fn run_tui_loop(
                                 &keymap,
                                 &mut ui,
                                 terminal,
+                                &mut clients,
                             )
                             .await?;
                         }
@@ -1159,22 +1183,24 @@ async fn run_tui_loop(
                     if app.state.is_interactive_pane() {
                         // Forward as a bracketed paste so the inner program
                         // doesn't submit multi-line content line-by-line.
-                        let write_failed = app.state.tmux.embed.as_ref().is_some_and(|client| {
-                            let mut bytes = Vec::with_capacity(text.len() + 12);
-                            bytes.extend_from_slice(b"\x1b[200~");
-                            bytes.extend_from_slice(text.as_bytes());
-                            bytes.extend_from_slice(b"\x1b[201~");
-                            client.write_input(&bytes).is_err()
-                        });
-                        if write_failed {
-                            app.state.release_interactive_pane();
-                            app.state.add_error_notification(
-                                "Live session input channel closed — released".to_string(),
-                            );
+                        let mut bytes = Vec::with_capacity(text.len() + 12);
+                        bytes.extend_from_slice(b"\x1b[200~");
+                        bytes.extend_from_slice(text.as_bytes());
+                        bytes.extend_from_slice(b"\x1b[201~");
+                        if let Some(report) = clients.write_input(&bytes) {
+                            run_intent(report, app, &keymap, &mut ui, terminal, &mut clients)
+                                .await?;
                         }
                     } else {
-                        run_intent(ainb::Intent::Text(text), app, &keymap, &mut ui, terminal)
-                            .await?;
+                        run_intent(
+                            ainb::Intent::Text(text),
+                            app,
+                            &keymap,
+                            &mut ui,
+                            terminal,
+                            &mut clients,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1182,7 +1208,7 @@ async fn run_tui_loop(
 
         // Apply the event a background result deferred to this iteration.
         let pending = app.state.apply_pending_event();
-        run_effects(pending, app, &keymap, &mut ui, terminal).await?;
+        run_effects(pending, app, &keymap, &mut ui, terminal, &mut clients).await?;
 
         // Update last_tick on every iteration so the event-poll timeout
         // stays accurate. The heavy work below is gated on a SEPARATE
@@ -1365,7 +1391,7 @@ async fn run_tui_loop(
 
             match app.tick().await {
                 Ok(effects) => {
-                    run_effects(effects, app, &keymap, &mut ui, terminal).await?;
+                    run_effects(effects, app, &keymap, &mut ui, terminal, &mut clients).await?;
                     last_app_tick = Instant::now();
                     // Consume the refresh flag; the repaint is handled by the
                     // app-tick redraw below (perf: bead `wai`).
@@ -1418,9 +1444,6 @@ fn preview_scroll_route(
     }
 }
 
-/// The keymap row that releases the in-place interactive pane.
-const EMBED_DETACH_ROW: &str = "detach";
-
 /// Ask the reducer to leave the interactive pane and run what it returns.
 ///
 /// While the embed owns the keyboard the host routes Ctrl+Q itself, but the
@@ -1430,13 +1453,15 @@ async fn detach_interactive_pane(
     keymap: &Keymap,
     ui: &mut crate::app::ui_state::UiState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    clients: &mut ainb::terminal_clients::TerminalClients,
 ) -> Result<()> {
     let command = ainb::CommandId::new(format!(
-        "{}.{EMBED_DETACH_ROW}",
-        KeyContext::EmbedInteractive.name()
+        "{}.{}",
+        KeyContext::EmbedInteractive.name(),
+        ainb::app::keymap::EMBED_DETACH_ROW
     ));
     let intent = ainb::Intent::Command(command, serde_json::Value::Null);
-    run_intent(intent, app, keymap, ui, terminal).await
+    run_intent(intent, app, keymap, ui, terminal, clients).await
 }
 
 /// Dispatch one intent and run the effects it returns, in order, once the
@@ -1447,9 +1472,10 @@ async fn run_intent(
     keymap: &Keymap,
     ui: &mut crate::app::ui_state::UiState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    clients: &mut ainb::terminal_clients::TerminalClients,
 ) -> Result<()> {
     let effects = ainb::dispatch(&mut app.state, keymap, ui, intent);
-    run_effects(effects, app, keymap, ui, terminal).await
+    run_effects(effects, app, keymap, ui, terminal, clients).await
 }
 
 /// Run `effects` in order. Each one's reports are dispatched as soon as it
@@ -1461,11 +1487,18 @@ async fn run_effects(
     keymap: &Keymap,
     ui: &mut crate::app::ui_state::UiState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    clients: &mut ainb::terminal_clients::TerminalClients,
 ) -> Result<()> {
     let mut queue = std::collections::VecDeque::from(effects);
     while let Some(effect) = queue.pop_front() {
+        // The step that queued this effect may have released the preview
+        // pane (a full-screen attach does). Close that client now, not on the
+        // next loop, so it cannot outlive an effect that blocks this loop.
+        clients.reconcile(&app.state);
         let plugins = app.state.plugins_host.plugin_runtime.clone();
-        for report in ainb::effect_host::execute(effect, terminal, ui, plugins.as_ref()).await? {
+        for report in
+            ainb::effect_host::execute(effect, terminal, ui, clients, plugins.as_ref()).await?
+        {
             queue.extend(ainb::dispatch(&mut app.state, keymap, ui, report));
         }
     }
@@ -1481,9 +1514,10 @@ async fn apply_gesture(
     keymap: &Keymap,
     ui: &mut crate::app::ui_state::UiState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    clients: &mut ainb::terminal_clients::TerminalClients,
 ) -> Result<()> {
     match crate::app::mouse::gesture(gesture, pos, &app.state, ui) {
-        Some(intent) => run_intent(intent, app, keymap, ui, terminal).await,
+        Some(intent) => run_intent(intent, app, keymap, ui, terminal, clients).await,
         None => Ok(()),
     }
 }

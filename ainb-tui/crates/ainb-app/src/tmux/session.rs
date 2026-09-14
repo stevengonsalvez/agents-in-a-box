@@ -9,7 +9,6 @@
 #![allow(dead_code)]
 
 use crate::tmux::capture::{CaptureOptions, capture_pane};
-use crate::tmux::pty_wrapper::PtyWrapper;
 use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::process::Command;
@@ -31,8 +30,6 @@ pub struct TmuxSession {
     sanitized_name: String,
     /// Program to run in the session (e.g., "claude", "aider")
     program: String,
-    /// Current PTY connection (if attached)
-    pty: Option<PtyWrapper>,
     /// Current attach state
     attach_state: AttachState,
     /// Environment variables to seed into the session at creation time (passed
@@ -48,7 +45,6 @@ impl std::fmt::Debug for TmuxSession {
         f.debug_struct("TmuxSession")
             .field("sanitized_name", &self.sanitized_name)
             .field("program", &self.program)
-            .field("pty", &self.pty.is_some())
             .field("attach_state", &self.attach_state)
             .finish()
     }
@@ -69,7 +65,6 @@ impl TmuxSession {
         Self {
             sanitized_name,
             program,
-            pty: None,
             attach_state: AttachState::Detached,
             env: Vec::new(),
             remain_on_exit: false,
@@ -289,7 +284,6 @@ impl TmuxSession {
     /// * `Result<()>` - Success or an error
     pub async fn detach(&mut self) -> Result<()> {
         // Close PTY
-        self.pty = None;
         self.attach_state = AttachState::Detached;
 
         tracing::info!("Detached from tmux session: {}", self.sanitized_name);
@@ -363,7 +357,6 @@ impl Drop for TmuxSession {
     fn drop(&mut self) {
         // Note: We can't use async in Drop, so we just set the state
         // The actual cleanup should be done explicitly via cleanup()
-        self.pty = None;
         self.attach_state = AttachState::Detached;
     }
 }

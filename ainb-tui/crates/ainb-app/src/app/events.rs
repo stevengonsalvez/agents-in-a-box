@@ -195,15 +195,37 @@ pub enum AppEvent {
     AbtopSetupFinished {
         ok: bool,
     },
-    /// The host opened a tmux client on `tmux_session` for the in-place pane.
+    /// The host opened, and keeps, a writable client on `tmux_session` for
+    /// the in-place pane.
     InPlaceOpened {
         tmux_session: String,
-        embed: crate::app::reports::LocalEmbed,
     },
-    /// The in-place client on `tmux_session` would not open.
+    /// The host opened, and keeps, a read-only client on `tmux_session` for
+    /// the preview pane.
+    ObserverOpened {
+        tmux_session: String,
+    },
+    /// The read-only client on `tmux_session` would not open; `unsupported`
+    /// when the host cannot mirror a terminal at all.
+    ObserverFailed {
+        tmux_session: String,
+        error: String,
+        unsupported: bool,
+    },
+    /// The host's client on `tmux_session` ended on its own.
+    TerminalExited {
+        tmux_session: String,
+    },
+    /// Input for the host's client on `tmux_session` could not be written.
+    TerminalInputClosed {
+        tmux_session: String,
+    },
+    /// The in-place client on `tmux_session` would not open; `unsupported`
+    /// when the host can never open one.
     InPlaceFailed {
         tmux_session: String,
         error: String,
+        unsupported: bool,
     },
     /// The host's plugin runtime had no running `plugin` for `action_id`.
     PluginActionUndelivered {
@@ -966,8 +988,7 @@ impl EventHandler {
 
     fn emit_full_screen_attach(state: &mut AppState, target: TerminalTarget) {
         // Read first: releasing writes the tmux section even with nothing held.
-        if state.tmux.embed.is_some()
-            || state.tmux.embed_session.is_some()
+        if state.tmux.embed_session.is_some()
             || state.shell.focused_pane == crate::app::state::FocusedPane::Preview
         {
             state.release_interactive_pane();
@@ -1384,7 +1405,7 @@ impl EventHandler {
         // Read from the background watcher's snapshot — never call
         // live_window::current() inline; the Tier 2 fallback walks JSONL
         // transcripts and would stall input handling on every keystroke.
-        let live_source = state.fleet.live_window_watcher.snapshot().source;
+        let live_source = state.host.live_window_watcher.snapshot().source;
         let status = state.statusline_status();
         Self::should_wire_statusline_inner(live_source, status.as_ref())
     }
@@ -1682,7 +1703,7 @@ impl EventHandler {
             PalCycleMode => Self::route_pal_dial(|dial| dial.cycle_mode(), state),
             PalRetry
                 if matches!(
-                    state.fleet.pal_dial.status(),
+                    state.host.pal_dial.status(),
                     crate::fleet::pal_dial::DialStatus::Failed { .. }
                 ) =>
             {
@@ -1918,7 +1939,7 @@ impl EventHandler {
         if state.shell.session_tab != crate::components::session_tabs::SessionTab::Pal {
             return None;
         }
-        turn(&mut state.fleet.pal_dial);
+        turn(&mut state.host.pal_dial);
         state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
@@ -1982,8 +2003,8 @@ impl EventHandler {
         }
 
         let host = match state.shell.session_tab {
-            SessionTab::Pal => state.fleet.pal_chat.as_mut(),
-            SessionTab::Thread => state.fleet.session_chat.as_mut().map(|(_, host)| host),
+            SessionTab::Pal => state.host.pal_chat.as_mut(),
+            SessionTab::Thread => state.host.session_chat.as_mut().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         }?;
         let outcome = reduce_chat_key(host.state_mut(), action);
@@ -2487,19 +2508,19 @@ impl EventHandler {
             }
             AppEvent::NextSession => {
                 state.next_session();
-                state.workspace_load.last_preview_update = None;
+                state.host.last_preview_update = None;
             }
             AppEvent::PreviousSession => {
                 state.previous_session();
-                state.workspace_load.last_preview_update = None;
+                state.host.last_preview_update = None;
             }
             AppEvent::NextWorkspace => {
                 state.next_workspace();
-                state.workspace_load.last_preview_update = None;
+                state.host.last_preview_update = None;
             }
             AppEvent::PreviousWorkspace => {
                 state.previous_workspace();
-                state.workspace_load.last_preview_update = None;
+                state.host.last_preview_update = None;
             }
             AppEvent::GoToTop => {
                 state.select_first_visible_session_in_current_workspace();
@@ -3195,7 +3216,7 @@ impl EventHandler {
             // go and find the row that starts it.
             AppEvent::SessionStartHangarDaemon => {
                 let generation = state.hangar.daemons_state.next_generation();
-                if state.fleet.daemon_start_cta.start(generation) {
+                if state.host.daemon_start_cta.start(generation) {
                     state.emit(Effect::RunDaemonAction {
                         daemon: crate::fleet::daemons::probe::DaemonKind::HangarDaemon,
                         action: crate::cli::daemon::Action::Start,
@@ -3864,29 +3885,48 @@ impl EventHandler {
                 }
                 state.shell.ui_needs_refresh = true;
             }
-            AppEvent::InPlaceOpened {
+            AppEvent::InPlaceOpened { tmux_session } => {
+                // A client for a row or a screen the user has since left is
+                // not adopted: the session stays unnamed here, so the host
+                // closes it instead of attaching it out of sight.
+                let wanted = state.shell.current_screen == crate::app::screens::ids::SESSION_LIST
+                    && state.selected_tmux_name().as_deref() == Some(tmux_session.as_str());
+                if let Some(tmux_session) =
+                    crate::app::effect::TmuxSessionName::new(tmux_session).filter(|_| wanted)
+                {
+                    state.adopt_interactive_pane(tmux_session);
+                }
+            }
+            AppEvent::ObserverOpened { tmux_session } => {
+                state.adopt_terminal_observer(&tmux_session);
+            }
+            AppEvent::ObserverFailed {
                 tmux_session,
-                embed,
+                error,
+                unsupported,
             } => {
-                // Another process's client cannot be adopted here; a client
-                // for a row or a screen the user has since left is closed, not
-                // attached out of sight.
-                if let Some(client) = embed.adopt() {
-                    if state.shell.current_screen == crate::app::screens::ids::SESSION_LIST
-                        && state.selected_tmux_name().as_deref() == Some(tmux_session.as_str())
-                    {
-                        state.adopt_interactive_pane(tmux_session, client);
-                    } else {
-                        let mut client = client;
-                        client.shutdown();
-                    }
+                state.observer_failed(tmux_session, &error, unsupported);
+            }
+            AppEvent::TerminalExited { tmux_session } => {
+                state.terminal_exited(&tmux_session);
+            }
+            AppEvent::TerminalInputClosed { tmux_session } => {
+                if state.embed_session_is(&tmux_session) {
+                    state.release_interactive_pane();
+                    state.add_error_notification(
+                        "Live session input channel closed, released".to_string(),
+                    );
                 }
             }
             AppEvent::InPlaceFailed {
                 tmux_session,
                 error,
+                unsupported,
             } => {
                 tracing::warn!("failed to attach interactive embed to {tmux_session}: {error}");
+                if unsupported {
+                    state.host.in_place_unsupported = true;
+                }
                 state.add_error_notification(format!(
                     "Live attach to '{tmux_session}' failed: {error}"
                 ));
@@ -3948,7 +3988,7 @@ impl EventHandler {
                 if report.daemon == crate::fleet::daemons::probe::DaemonKind::HangarDaemon.id()
                     && action == crate::cli::daemon::Action::Start
                 {
-                    state.fleet.daemon_start_cta.finish(report.generation, &outcome);
+                    state.host.daemon_start_cta.finish(report.generation, &outcome);
                 }
                 state.hangar.daemons_state.finish_action(
                     &report.daemon,
@@ -6118,7 +6158,7 @@ impl EventHandler {
                 // already carry our block. This event is reachable from the
                 // global `W` shortcut as well as the legacy Burndown route,
                 // so the guard lives here rather than at the keymap.
-                if state.fleet.live_window_watcher.snapshot().source == LiveSource::Tier1Cache {
+                if state.host.live_window_watcher.snapshot().source == LiveSource::Tier1Cache {
                     return;
                 }
                 // Read uncached: the install is a once-per-session action, so
@@ -9044,7 +9084,7 @@ mod session_composer_key_tests {
         let mut state = AppState::default();
         state.shell.current_screen = ids::SESSION_LIST.to_string();
         state.shell.session_tab = SessionTab::Pal;
-        state.fleet.pal_chat = Some(ChatHost::pal());
+        state.host.pal_chat = Some(ChatHost::pal());
         assert!(
             state.session_composer_captures_text(),
             "the fixture must actually be capturing, or every assertion below is vacuous"

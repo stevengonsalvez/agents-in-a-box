@@ -9,9 +9,7 @@
 // - Lightweight, fast, and responsive interactions
 
 pub mod capture;
-pub mod embed_client;
 pub mod process_detection;
-pub mod pty_wrapper;
 pub mod session;
 
 use anyhow::Result;
@@ -311,11 +309,9 @@ async fn bind_clipboard_for_copy_modes(_session_name: &str, copy_cmd: &str) -> R
 pub use capture::CaptureOptions;
 #[allow(unused_imports)]
 // lib-facing re-export; the bin target includes this module tree directly
-pub use embed_client::EmbedClient;
 pub use process_detection::ClaudeProcessDetector;
 #[allow(unused_imports)]
 // lib-facing re-export; the bin target includes this module tree directly
-pub use pty_wrapper::PtyWrapper;
 #[allow(unused_imports)]
 // lib-facing re-export; the bin target includes this module tree directly
 pub use session::{AttachState, TmuxSession};

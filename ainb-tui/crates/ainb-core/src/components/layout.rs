@@ -244,9 +244,22 @@ fn session_menu_bar_height(show_menu_bar: bool) -> u16 {
     if show_menu_bar { 6 } else { 1 }
 }
 
+/// Size the host's live tmux client to the pane interior the frame that just
+/// went out measured, once per change.
+pub fn resize_terminal_client(
+    ui: &mut UiState,
+    clients: &mut crate::terminal_clients::TerminalClients,
+) {
+    if let Some(size) = ui.embed_desired_size.take() {
+        if ui.last_embed_size != Some(size) && clients.resize(size.0, size.1) {
+            ui.last_embed_size = Some(size);
+        }
+    }
+}
+
 /// Apply the effects of a frame that only the frame could measure.
 ///
-/// The embed's size, the HomeScreen sidebar rect, the welcome panel's viewport
+/// The `HomeScreen` sidebar rect, the welcome panel's viewport
 /// and the log-history entry pane all come out of the layout arithmetic, so
 /// they cannot be known before the draw. Applying them is a mutation and the
 /// draw takes `&AppState`, so the draw records what it measured in [`UiState`]
@@ -258,16 +271,6 @@ pub fn publish_after_draw(state: &mut AppState, ui: &mut UiState) {
     // an unconditional `&mut` would bump the tmux, shell and logs sections once
     // a frame, and a section that changes every frame tells a subscriber
     // nothing at all.
-    if let Some(size) = ui.embed_desired_size.take() {
-        if ui.last_embed_size != Some(size) {
-            let (rows, cols) = size;
-            if let Some(embed) = state.tmux.get_mut().embed.as_mut() {
-                let _ = embed.resize(rows, cols);
-                ui.last_embed_size = Some(size);
-            }
-        }
-    }
-
     state.shell.set_if_changed(
         |shell| &mut shell.home_screen_v2_state.welcome.content_height,
         ui.welcome_viewport.0,
@@ -422,7 +425,7 @@ impl LayoutComponent {
                 let log = state.get_selected_session().map_or(
                     crate::fleet::session_log::Log::Rows(Vec::new()),
                     |session| {
-                        state.log_streams.session_log.read(&crate::fleet::session_log::LogKey::new(
+                        state.host.session_log.read(&crate::fleet::session_log::LogKey::new(
                             &session.workspace_path,
                             AppState::agent_hook_name(session.agent_type),
                         ))
@@ -435,13 +438,13 @@ impl LayoutComponent {
             // state machine either way, so the two cannot drift in what they
             // render or which failures they report.
             SessionTab::Pal => {
-                let header = session_tabs::pal_header(&state.fleet.pal_dial);
+                let header = session_tabs::pal_header(&state.host.pal_dial);
                 // Inserted between the header and the conversation rather than
                 // replacing either. Both still have something true to say with
                 // the daemon down — the dials an operator recovers an adapter
                 // with, and the call the chat could not make — and the offer is
                 // the one thing neither of them could say.
-                let offer = state.pal_daemon_cta_open().then_some(&state.fleet.daemon_start_cta);
+                let offer = state.pal_daemon_cta_open().then_some(&state.host.daemon_start_cta);
                 // `chat_host`, not `chat_host_for`: the conversation was ticked
                 // in `tick_before_draw`, and `chat_host_for` ENDS by calling
                 // this, so what is painted is what was ticked rather than a
@@ -544,15 +547,15 @@ impl LayoutComponent {
                 // this pane never opens the notifications store. `spawn` is
                 // idempotent.
                 crate::fleet::session_log::spawn(
-                    &state.log_streams.session_log,
-                    &state.log_streams.session_log_running,
+                    &state.host.session_log,
+                    &state.host.session_log_running,
                 );
             }
             SessionTab::Pal => {
                 // The dial ticks with the pane, so the registry read and any
                 // in-flight configure land without the operator pressing
                 // anything, exactly like the chat host's own tick.
-                if state.fleet.update(|fleet| fleet.pal_dial.tick()) {
+                if state.host.pal_dial.tick() {
                     state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
                 let _ = state.chat_host_for(active);

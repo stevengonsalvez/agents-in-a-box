@@ -1383,7 +1383,7 @@ mod tests {
         // Daemon UP: this is not the offer's case, it is the one where the
         // conversation opened and its scope never resolved.
         with_daemon(&mut state, true, false);
-        state.fleet.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
+        state.host.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
 
         assert!(
             state.session_tab_send_block(SessionTab::Pal).is_some(),
@@ -1481,7 +1481,7 @@ mod tests {
         with_daemon(&mut state, false, true);
         assert!(state.pal_daemon_cta_armed());
 
-        state.fleet.daemon_start_cta.start(1);
+        state.host.daemon_start_cta.start(1);
         assert!(!state.pal_daemon_cta_armed());
         assert!(!footer_text(&state, SessionTab::Pal, true).contains(START_DAEMON_VERB));
     }
@@ -1535,7 +1535,7 @@ mod tests {
 
         // The chat case: a Pal whose scope the daemon never minted.
         state.shell.session_tab = SessionTab::Pal;
-        state.fleet.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
+        state.host.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
         with_daemon(&mut state, true, false);
         assert!(
             SessionTab::Pal.enter_refusal(&state).is_some(),

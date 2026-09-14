@@ -39,8 +39,13 @@ unix_socket_dial = ["~/.agents-in-a-box/hangar.sock", "${AINB_HANGAR_HOME}/hanga
 # (host/workspace_set_active, host/workspace_set_default). Bool-true grants
 # the write for any workspace; the read caps (list / get_active) are ungated.
 "workspace:write" = true
-# Snapshot/event bus + plugin-local data dir.
-event_bus = true
+# Snapshot/event bus, narrowed to the topics this plugin uses (#1038 review):
+# the agent-status envelope the TUI host publishes (every agent's cwd and
+# pending tool input, so no plugin gets it by a blanket grant), its own
+# `ui.state` view, and the panel close request. An entry ending in `*` is a
+# prefix; any other entry is one exact topic.
+event_bus = ["fleet.agent_status", "ui.state*", "ui.close_request"]
+# Plugin-local data dir.
 write_plugin_data = true
 
 [provides]
@@ -50,7 +55,18 @@ cli_namespaces = ["hangar"]
 snapshots = []
 
 [subscribes]
-snapshots = []
+# The agent-status envelope the TUI host publishes; the Fleet panel renders
+# from it and reads no Fleet status of its own (#1031).
+#
+# Lifecycle consequence (#1038 review): the runtime never idle-reaps a plugin
+# that declares a snapshot subscription (`maybe_idle_reap` in
+# ainb-plugin-runtime's plugin_task.rs), so once this plugin spawns (lazily, on
+# first use) it lives for the rest of the TUI session, holding its daemon
+# socket and its `secrets:read` grant, instead of being reaped after the
+# runtime's idle window. That is what keeps the panel current: an envelope
+# published while the plugin is reaped would be dropped, and only the latest
+# one is kept for its next `snapshot_get`.
+snapshots = ["fleet.agent_status"]
 
 [lifecycle]
 spawn = "lazy"

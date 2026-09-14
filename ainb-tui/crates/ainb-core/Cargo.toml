@@ -37,6 +37,7 @@ arboard = { workspace = true }
 futures-util = { workspace = true }
 
 # Tmux/PTY support
+portable-pty = { workspace = true }
 vt100 = { workspace = true }
 tui-term = { workspace = true }
 

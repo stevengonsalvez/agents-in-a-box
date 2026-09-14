@@ -167,10 +167,9 @@ fn a_session_attach_whose_target_is_gone_stops_the_session_and_reloads_the_rows(
         state.shell.pending_async_action,
         Some(AsyncAction::RefreshWorkspaces)
     ));
-    assert_eq!(
-        moved,
-        vec![SectionId::Sessions, SectionId::Tmux, SectionId::Shell]
-    );
+    // The dropped tmux session handle is host-only state, so no tmux section
+    // moves.
+    assert_eq!(moved, vec![SectionId::Sessions, SectionId::Shell]);
 }
 
 #[test]
@@ -343,7 +342,7 @@ fn an_in_place_client_that_would_not_open_says_why() {
 
     let moved = report(
         &mut state,
-        reports::in_place_failed("tmux_api_feat", "no server running"),
+        reports::in_place_failed("tmux_api_feat", "no server running", false),
     );
 
     let errors = notices(&state, &NotificationType::Error);
@@ -355,20 +354,17 @@ fn an_in_place_client_that_would_not_open_says_why() {
     assert_eq!(moved, vec![SectionId::Shell]);
 }
 
-/// A handle from another process (or one already adopted) has no client
-/// behind it, so the report opens nothing.
+/// A report for a client the preview no longer wants names nothing, so the
+/// host closes the client rather than the pane showing it.
 #[test]
-fn an_in_place_report_with_nothing_to_adopt_opens_nothing() {
+fn an_in_place_report_for_a_row_that_is_not_selected_opens_nothing() {
     let mut state = AppState::new();
-    let handle: reports::LocalEmbed =
-        serde_json::from_value(serde_json::json!("not-a-parked-client")).expect("handle");
+    state.shell.current_screen = ainb_app::app::screens::ids::SESSION_LIST.to_string();
 
-    let moved = report(
-        &mut state,
-        reports::in_place_opened("tmux_api_feat", &handle),
-    );
+    let moved = report(&mut state, reports::in_place_opened("tmux_api_feat"));
 
     assert!(!state.is_interactive_pane());
+    assert!(state.embed_session_name().is_none());
     assert!(moved.is_empty(), "{moved:?}");
 }
 

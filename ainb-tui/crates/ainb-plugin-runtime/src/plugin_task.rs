@@ -1093,19 +1093,16 @@ impl PluginTask {
         }
     }
 
-    /// The `event_bus` grant every snapshot-bus call needs; `-32001` without it.
-    fn require_event_bus(&self) -> Result<(), RpcError> {
-        if self.plugin.manifest.capabilities.event_bus.is_granted() {
-            Ok(())
-        } else {
-            Err(RpcError::capability_denied("event_bus"))
-        }
+    /// The `event_bus` grant every snapshot-bus call needs, for this topic;
+    /// `-32001` without it. See [`event_bus_covers`] for the list form.
+    fn require_event_bus(&self, topic: &str) -> Result<(), RpcError> {
+        require_event_bus_grant(&self.plugin.manifest.capabilities.event_bus, topic)
     }
 
     fn host_snapshot_get(&self, params: Value) -> Result<Value, RpcError> {
-        self.require_event_bus()?;
         let p: SnapshotGetParams =
             serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        self.require_event_bus(&p.topic)?;
         let topic = Topic::from(p.topic);
         let (payload, version) = match self.snapshots.get(&topic) {
             Some((p, v, _publisher)) => (Some(p), v),
@@ -1116,9 +1113,9 @@ impl PluginTask {
     }
 
     fn host_snapshot_subscribe(&self, params: Value) -> Result<Value, RpcError> {
-        self.require_event_bus()?;
         let p: SnapshotSubscribeParams =
             serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        self.require_event_bus(&p.topic)?;
         self.snapshots.subscribe(Topic::from(p.topic), self.plugin.id.clone());
         Ok(serde_json::to_value(SnapshotSubscribeResult::default())
             .expect("SnapshotSubscribeResult serializable"))
@@ -1438,15 +1435,16 @@ impl PluginTask {
         match method {
             methods::HOST_SNAPSHOT_PUBLISH => {
                 // A notification has no error reply, so a publish without the
-                // grant is dropped rather than answered with `-32001`.
-                if self.require_event_bus().is_err() {
-                    warn!(plugin = %self.plugin.id, "snapshot publish denied: no event_bus grant");
-                    return;
-                }
+                // grant for its topic is dropped rather than answered with
+                // `-32001`.
                 let Ok(p) = serde_json::from_value::<SnapshotPublishParams>(params) else {
                     warn!(plugin = %self.plugin.id, "bad snapshot publish");
                     return;
                 };
+                if self.require_event_bus(&p.topic).is_err() {
+                    warn!(plugin = %self.plugin.id, topic = %p.topic, "snapshot publish denied: no event_bus grant for the topic");
+                    return;
+                }
                 // `ui.state` is one view per plugin: a bare publish is stored
                 // under the publisher's own `ui.state/<id>`, and a publish to
                 // another plugin's slot is refused, so two plugins can never
@@ -1930,6 +1928,48 @@ async fn drain_stderr(plugin: PluginId, stderr: tokio::process::ChildStderr) {
     }
 }
 
+/// Topic prefixes the blanket `event_bus = true` grant does not cover: only a
+/// list entry that names the topic does. `fleet.` topics carry what the TUI
+/// host knows about every agent (`fleet.agent_status`: working directories,
+/// pending tool input), so a plugin must ask for one by name to read it.
+const EXPLICIT_GRANT_TOPIC_PREFIXES: &[&str] = &["fleet."];
+
+/// Whether an `event_bus` grant covers `topic`.
+///
+/// `true` covers every topic except those under
+/// [`EXPLICIT_GRANT_TOPIC_PREFIXES`]. The list form is a topic allow-list: an
+/// entry ending in `*` covers every topic that starts with the text before it,
+/// and any other entry covers exactly that topic. So a plugin granted
+/// `["ui.state*"]`, or the blanket `true`, can publish its own view and can
+/// neither read nor subscribe to `fleet.agent_status` (#1038 review).
+fn event_bus_covers(grant: &ainb_plugin_protocol::manifest::CapabilityGrant, topic: &str) -> bool {
+    match grant {
+        ainb_plugin_protocol::manifest::CapabilityGrant::Bool(granted) => {
+            *granted
+                && !EXPLICIT_GRANT_TOPIC_PREFIXES.iter().any(|prefix| topic.starts_with(prefix))
+        }
+        ainb_plugin_protocol::manifest::CapabilityGrant::List(entries) => {
+            entries.iter().any(|entry| {
+                entry
+                    .strip_suffix('*')
+                    .map_or(entry == topic, |prefix| topic.starts_with(prefix))
+            })
+        }
+    }
+}
+
+/// [`event_bus_covers`] as the `-32001` a snapshot-bus request answers.
+fn require_event_bus_grant(
+    grant: &ainb_plugin_protocol::manifest::CapabilityGrant,
+    topic: &str,
+) -> Result<(), RpcError> {
+    if event_bus_covers(grant, topic) {
+        Ok(())
+    } else {
+        Err(RpcError::capability_denied("event_bus"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Channel-bias smoke test for the priority key path.
@@ -1943,7 +1983,7 @@ mod tests {
 
     use super::{
         HandleKeyParams, MAX_CONSECUTIVE_REDRAWS, RedrawGovernor, collect_granted_capabilities,
-        resolve_against_existing_ancestor,
+        event_bus_covers, require_event_bus_grant, resolve_against_existing_ancestor,
     };
     use ainb_plugin_protocol::manifest::{
         Capabilities, CapabilityGrant, Lifecycle, Manifest, PluginMeta, Provides, Subscribes,
@@ -2235,5 +2275,39 @@ mod tests {
             !gov.tripped,
             "a settle between animations must avoid the trip"
         );
+    }
+
+    /// #1038 review item 1: a plugin granted `event_bus = ["other.*"]` is
+    /// denied `-32001` for `fleet.agent_status`, on `host/snapshot/get` and
+    /// `host/snapshot/subscribe` alike (both call this one check), while a
+    /// listed topic, a `*` prefix and the unconditional grant still pass.
+    #[test]
+    fn an_event_bus_list_grant_denies_an_unlisted_topic() {
+        let other = CapabilityGrant::List(vec!["other.*".into()]);
+        let err = require_event_bus_grant(&other, "fleet.agent_status").expect_err("denied");
+        assert_eq!(err.code, ainb_plugin_protocol::errors::CAPABILITY_DENIED);
+        assert!(event_bus_covers(&other, "other.topic"));
+
+        let hangar = CapabilityGrant::List(vec!["fleet.agent_status".into(), "ui.state*".into()]);
+        assert!(event_bus_covers(&hangar, "fleet.agent_status"));
+        assert!(
+            !event_bus_covers(&hangar, "fleet.agent_status.extra"),
+            "an entry without `*` is exact"
+        );
+        assert!(event_bus_covers(&hangar, "ui.state"));
+        assert!(event_bus_covers(&hangar, "ui.state/hangar-tui"));
+        assert!(!event_bus_covers(&hangar, "sessions.refresh_request"));
+
+        assert!(event_bus_covers(&CapabilityGrant::Bool(true), "ui.state"));
+        assert!(
+            !event_bus_covers(&CapabilityGrant::Bool(true), "fleet.agent_status"),
+            "the blanket grant does not cover a fleet topic: learnings, session-reader and \
+             witr hold it and never named the envelope"
+        );
+        assert!(!event_bus_covers(&CapabilityGrant::Bool(false), "ui.state"));
+        assert!(!event_bus_covers(
+            &CapabilityGrant::List(Vec::new()),
+            "ui.state"
+        ));
     }
 }
