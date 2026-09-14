@@ -114,7 +114,7 @@ impl TerminalClients {
     }
 
     /// Whether new output arrived since the last call. Clears the flag.
-    pub fn take_dirty(&self) -> bool {
+    pub fn take_dirty(&mut self) -> bool {
         self.held.as_ref().is_some_and(|held| held.client.take_dirty())
     }
 
