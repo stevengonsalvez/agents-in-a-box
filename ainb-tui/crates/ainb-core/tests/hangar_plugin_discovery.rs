@@ -64,8 +64,15 @@ fn discovery_finds_hangar_and_validates_all_four_caps() {
         "secrets:read cap must validate"
     );
 
-    // The two bool-form caps survive too.
-    assert!(matches!(caps.event_bus, CapabilityGrant::Bool(true)));
+    // The snapshot bus is a topic allow-list since the #1038 review, so a
+    // blanket grant cannot hand the agent-status envelope to this plugin's
+    // neighbours.
+    assert_eq!(
+        caps.event_bus.allow_list().unwrap(),
+        ["fleet.agent_status", "ui.state*", "ui.close_request"],
+        "event_bus cap must validate"
+    );
+    // The bool-form cap survives too.
     assert!(matches!(
         caps.write_plugin_data,
         CapabilityGrant::Bool(true)

@@ -717,7 +717,8 @@ impl DaemonClient {
 
     /// Dial the socket and complete the mandatory `auth/hello` first frame.
     async fn dial(&self) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
-        self.dial_with(self.hello_params()).await
+        let (reader, writer, _hello) = self.dial_with(self.hello_params()).await?;
+        Ok((reader, writer))
     }
 
     /// [`Self::dial`] for a presence lease's own connection: always listed,
@@ -726,13 +727,31 @@ impl DaemonClient {
     async fn dial_presence(
         &self,
     ) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
-        self.dial_with(self.hello_params_with(false)).await
+        let (reader, writer, _hello) = self.dial_with(self.hello_params_with(false)).await?;
+        Ok((reader, writer))
     }
 
+    /// Complete `auth/hello` on a fresh connection and return what the daemon
+    /// answered: its protocol range and capability catalogue (D17).
+    ///
+    /// A daemon that predates the negotiation answers `{}`, which decodes as
+    /// an empty catalogue, so a caller branching on
+    /// [`auth::HelloResult::advertises`] takes its older path for it.
+    ///
+    /// # Errors
+    /// Returns [`DaemonError`] when the daemon is unreachable, refuses the
+    /// hello, or the reply cannot be decoded.
+    pub async fn hello(&self) -> Result<auth::HelloResult, DaemonError> {
+        let (_reader, _writer, hello) = self.dial_with(self.hello_params()).await?;
+        Ok(hello)
+    }
+
+    /// Connect and complete `auth/hello`, returning the connection and what the
+    /// daemon answered, so the one handshake is decoded in one place.
     async fn dial_with(
         &self,
         hello_params: Value,
-    ) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
+    ) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf, auth::HelloResult), DaemonError> {
         let stream =
             UnixStream::connect(&self.socket).await.map_err(|source| DaemonError::Connect {
                 path: self.socket.display().to_string(),
@@ -741,14 +760,21 @@ impl DaemonClient {
         let (read_half, mut writer) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         write_frame(&mut writer, methods::AUTH_HELLO, hello_params, 1).await?;
-        let hello = read_response(&mut reader).await?;
-        if let Some(error) = hello.error {
+        let reply = read_response(&mut reader).await?;
+        if let Some(error) = reply.error {
             return Err(DaemonError::Rpc {
                 code: error.code,
                 message: error.message,
             });
         }
-        Ok((reader, writer))
+        let hello = serde_json::from_value(
+            reply
+                .result
+                .filter(|result| !result.is_null())
+                .unwrap_or_else(|| Value::Object(serde_json::Map::default())),
+        )
+        .map_err(|error| DaemonError::Decode(format!("decoding auth/hello: {error}")))?;
+        Ok((reader, writer, hello))
     }
 
     /// Encode the optional surface extension without widening every client call
@@ -1057,6 +1083,36 @@ mod tests {
         frame.extend_from_slice(&body);
         writer.write_all(&frame).await.expect("write test frame");
         writer.flush().await.expect("flush test frame");
+    }
+
+    /// #1038 review item 10: `dial_with` decodes the hello reply once, so
+    /// `hello()` reports the daemon's catalogue, and a pre-negotiation daemon's
+    /// bare `{}` reads as an empty one.
+    #[tokio::test]
+    async fn hello_returns_the_catalogue_the_dial_decoded() {
+        let temp = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temp.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake hangar socket");
+        tokio::spawn(async move {
+            for result in [
+                json!({"capabilities": ["fleet.roster_status.read"]}),
+                json!({}),
+            ] {
+                let (stream, _) = listener.accept().await.expect("accept client");
+                let (read_half, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let hello = read_frame(&mut reader).await.expect("read auth request");
+                assert_eq!(hello["method"], methods::AUTH_HELLO);
+                write_test_frame(
+                    &mut writer,
+                    &json!({"jsonrpc": "2.0", "id": 1, "result": result}),
+                )
+                .await;
+            }
+        });
+        let client = DaemonClient::with_parts(socket, "test-token".into());
+        assert!(client.hello().await.expect("hello").advertises("fleet.roster_status.read"));
+        assert!(client.hello().await.expect("hello").capabilities.is_empty());
     }
 
     #[tokio::test]

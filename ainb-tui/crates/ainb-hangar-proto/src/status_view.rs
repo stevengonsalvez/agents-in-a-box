@@ -1,10 +1,11 @@
 //! The agent-status view every surface renders from (D14, T0-section, #1015).
 //!
-//! One pure reducer over `fleet/roster_status` replies, shared by the TUI Fleet
-//! panel (in the hangar plugin) and by section 20 of the app state (and so by
-//! the desktop and the phone through W0-mirror). Two surfaces folding the same
-//! replies through two reducers is exactly the drift D14 removes, so neither
-//! keeps one of its own.
+//! One pure reducer over `fleet/roster_status` replies, run by section 20 of the
+//! app state (and so by the desktop and the phone through W0-mirror). The TUI
+//! Fleet panel, in the hangar plugin, receives the folded view whole on the
+//! host's agent-status topic (`status_topic`, #1031) instead of folding reads
+//! of its own. Two surfaces folding the same replies through two reducers is
+//! exactly the drift D14 removes, so neither keeps one of its own.
 //!
 //! ```text
 //!  fleet/roster_status ──▶ StatusView::apply ──▶ cards + health ──▶ render

@@ -542,7 +542,9 @@ pub struct FleetStatusConfig {
     pub legacy_classify_primary: bool,
     /// Return the TUI Fleet panel to the pre-section read: `fleet/snapshot`
     /// and `fleet/status` fetched separately and joined, instead of the one
-    /// joined `fleet/roster_status` read (T0-section, #1015).
+    /// joined `fleet/roster_status` read (T0-section, #1015). The TUI's
+    /// agent-status host task honours it, the process's only status reader
+    /// since #1031; the panel renders what that task publishes either way.
     ///
     /// The ONE-RELEASE rollback for T0-section: honoured in the first tagged
     /// release that carries section 20 and removed, with the pre-section read,

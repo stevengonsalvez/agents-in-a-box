@@ -196,10 +196,14 @@ async fn tokio_main() -> Result<()> {
             let presence = spawn_tui_presence();
             // Section 20 (T0-section, #1015): one joined daemon read per Fleet
             // revision, folded into the app state by its reducer. Held for the
-            // TUI's lifetime; dropping it stops the task.
-            let mut agent_status = ainb::agent_status_host::AgentStatusHost::spawn(Box::new(
-                fleet::bridge::daemon::tui_client,
-            ));
+            // TUI's lifetime; dropping it stops the task. It is the process's
+            // only agent-status reader: the Fleet panel renders what it
+            // publishes (#1031), and `[fleet.status] legacy_panel` is honoured
+            // here rather than in the plugin.
+            let mut agent_status = ainb::agent_status_host::AgentStatusHost::spawn(
+                Box::new(fleet::bridge::daemon::tui_client),
+                config::tunables::legacy_panel(),
+            );
 
             // A plugin-disabled TUI is a diagnostic fallback with no Hangar
             // consumer. Do not leave a background daemon behind for it.
@@ -583,9 +587,11 @@ async fn run_tui_loop(
             needs_redraw = true;
         }
         // Section 20 updates from the agent-status host task. The TUI paints
-        // Fleet through the plugin, so a section change is not a repaint here;
-        // its version is what a mirrored surface subscribes to.
+        // Fleet through the plugin, so a section change is not a repaint here:
+        // it is published to the plugins, which fold it into the panel (#1031),
+        // and its version is what a mirrored surface subscribes to.
         agent_status.drain_into(&mut app.state);
+        agent_status.publish(&app.state, app.state.plugins_host.plugin_runtime.as_ref());
 
         // Drive plugin-owned screens before every paint. Pushes any
         // host-side state into each plugin and drains its painted

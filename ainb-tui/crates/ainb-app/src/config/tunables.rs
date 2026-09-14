@@ -188,8 +188,8 @@ pub fn legacy_classify_primary() -> bool {
     )
 }
 
-/// The `[fleet.status] legacy_panel` env spelling, read by the hangar plugin,
-/// which cannot depend on this crate.
+/// The `[fleet.status] legacy_panel` env spelling. Read by the TUI's
+/// agent-status host task through [`legacy_panel`] (#1031).
 pub const LEGACY_PANEL_ENV: &str = "AINB_FLEET_LEGACY_PANEL";
 
 /// Whether the Fleet panel is rolled back to the pre-section two reads
@@ -309,8 +309,8 @@ pub fn export_env_bridge(config: &AppConfig) {
         LEGACY_CLASSIFY_PRIMARY_ENV,
         config.fleet.status.legacy_classify_primary.to_string(),
     );
-    // Bridged for the same reason: the Fleet panel runs in the hangar plugin,
-    // a subprocess that inherits this environment and cannot read this crate.
+    // Bridged like the flag above so a child `ainb` inherits the same rollback.
+    // Since #1031 the Fleet panel no longer reads it: the TUI's host task does.
     publish(
         LEGACY_PANEL_ENV,
         config.fleet.status.legacy_panel.to_string(),

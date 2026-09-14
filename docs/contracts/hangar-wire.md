@@ -61,6 +61,42 @@ A surface renders a Fleet card from this reply alone. `fleet/snapshot` and
 both and joins them pays two projections per Fleet event where this read pays
 one. The join is `ainb_hangar_proto::agent_status::join`, the only one.
 
+**Agent-status topic** (#1031, plugin runtime, not the daemon socket). In the
+TUI one host task reads agent status: it picks `fleet/roster_status` when the
+daemon advertises `fleet.roster_status.read`, otherwise (an N-1 daemon, or
+`[fleet.status] legacy_panel`) `fleet/snapshot` plus `fleet/status` joined by
+the same `join`, and pays at most one read per Fleet revision. `legacy_panel` is
+the one-release rollback: honoured in v1.29.0 and removed, with the pre-section
+read for a current daemon, in v1.30.0. After folding the
+reply into section 20 it publishes an `AgentStatusEnvelope`
+(`ainb_hangar_proto::status_topic`) on the host snapshot topic
+`fleet.agent_status`: `sequence`, the read `revision`, `host_id`, the local read
+clock, `head_revision`, a tagged `health` (`live`, `stale`, `unreachable`,
+`absent`) and the joined rows. The envelope is the whole view, never a delta,
+because the snapshot bus keeps only the latest payload. The hangar plugin
+subscribes, reads the latest once at init, drops any envelope at or below the
+last sequence it applied, and renders the Fleet panel from it with no Fleet
+subscription or read of its own, so a Fleet event costs the TUI process one
+projection. An encoded envelope over 6 MiB is published as `absent` with the
+reason instead of cut short. Declaring the subscription in the manifest
+(`[subscribes] snapshots`) means the runtime never idle-reaps the hangar plugin:
+once it spawns it lives for the TUI session, daemon socket and `secrets:read`
+grant included, which is what keeps it subscribed.
+
+Who can read the envelope. It carries every agent's `cwd`, `display_name`, raw
+`current_request` (the pending tool input) and fingerprints, the fields the #983
+section 20 frame leaves out, so it is not a mirror surface and D1 renders
+`AgentStatusView`, not this. On the plugin bus, `host/snapshot/get`,
+`host/snapshot/subscribe` and `host/snapshot/publish` are gated by the plugin's
+`event_bus` grant for the topic. The list form covers exactly the topics it
+names (an entry ending in `*` is a prefix). The blanket `event_bus = true`
+covers every topic except `fleet.` ones, which only a list entry naming them
+covers. So the reader set is: the TUI host, which publishes it, and the in-tree
+hangar plugin, granted `["fleet.agent_status", "ui.state*", "ui.close_request"]`.
+Learnings, session-reader and witr hold `event_bus = true` and are denied
+`-32001`; a third-party plugin reads it only by naming the topic in its
+manifest grant.
+
 ### Sockets
 
 The daemon binds `hangar.sock` and symlinks `hangar-v<N>.sock` for every
