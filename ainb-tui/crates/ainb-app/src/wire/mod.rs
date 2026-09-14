@@ -280,8 +280,10 @@ view!(FleetView<'a> for FleetSection {
     attention_error_since: std::collections::HashMap<uuid::Uuid, i64>,
 });
 
+// `pending_daemon_config_edits` stays out: raw `(key, value)` edits queued by
+// a keystroke and drained on the same app tick by `process_async_action`, so a
+// host has nothing to draw from them.
 view!(HangarView<'a> for HangarSection {
-    pending_daemon_config_edits: Vec<(String, String)>,
     hangar_daemon_config_loaded: bool,
     daemons_state: crate::components::daemons::DaemonsState,
 });
