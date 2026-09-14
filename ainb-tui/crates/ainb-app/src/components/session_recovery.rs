@@ -75,6 +75,7 @@ pub struct OrphanedWorktree {
     /// Git branch
     pub branch: Option<String>,
     /// Last commit message/hash
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
     pub last_commit: Option<String>,
     /// Original repository (detected from git remote)
     #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
