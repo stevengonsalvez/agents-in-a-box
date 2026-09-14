@@ -363,6 +363,9 @@ pub struct HangarPlugin {
     /// Switching workspace clears this map, making late replies harmless.
     snapshot_generation: i64,
     snapshot_response_ids: BTreeMap<i64, i64>,
+    /// The latest agent-status envelope read at init, until it is folded
+    /// (#1031).
+    agent_status_seed: Option<tokio::sync::oneshot::Receiver<Vec<u8>>>,
     /// The first-run danger-full-access modal (P5.6). `Showing` over the landing
     /// screen on a fresh machine until the user accepts (`y`), then `Dismissed`.
     /// Initialised from the recorded `warnings_ack` on `plugin/init`.
@@ -667,6 +670,7 @@ impl Default for HangarPlugin {
             snapshot_fetch_cursor: 0,
             snapshot_generation: 1,
             snapshot_response_ids: BTreeMap::new(),
+            agent_status_seed: None,
             first_run: FirstRunModal::default(),
             first_run_ack_pending: false,
             pending_detail_slug: None,
@@ -2440,6 +2444,21 @@ impl HangarPlugin {
                 let ws = self.app_state().ws_id.as_str().to_string();
                 self.screens.set_health(h, &ws);
             }
+        }
+    }
+
+    /// Fold the envelope the init-time `snapshot_get` found, once it lands.
+    fn drain_agent_status_seed(&mut self) {
+        let Some(seed) = self.agent_status_seed.as_mut() else {
+            return;
+        };
+        match seed.try_recv() {
+            Ok(payload) => {
+                self.agent_status_seed = None;
+                self.apply_agent_status(&payload);
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => self.agent_status_seed = None,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
         }
     }
 
@@ -5636,25 +5655,34 @@ impl Plugin for HangarPlugin {
         // #1031: the Fleet panel renders what the host's agent-status owner
         // publishes. Subscribe first, then read the latest envelope: the bus
         // replays nothing, and an envelope published between the two arrives
-        // as an event whose sequence the pane drops if it is not newer.
-        match host.snapshot_subscribe(AGENT_STATUS_TOPIC).await {
-            Ok(_) => {
-                if let Ok(latest) = host.snapshot_get(AGENT_STATUS_TOPIC).await {
-                    if let Some(payload) = latest.payload {
-                        self.apply_agent_status(&payload);
-                    }
+        // as an event whose sequence the pane drops if it is not newer. Off
+        // the init path, so a host that never answers cannot hold the daemon
+        // dial behind it; the seed is folded on the next event or render.
+        let (seed_tx, seed_rx) = tokio::sync::oneshot::channel();
+        self.agent_status_seed = Some(seed_rx);
+        let seeder = host.clone();
+        tokio::spawn(async move {
+            if let Err(error) = seeder.snapshot_subscribe(AGENT_STATUS_TOPIC).await {
+                let _ = seeder
+                    .log_info(format!(
+                        "hangar: agent status subscription refused, the Fleet panel stays absent: {error}"
+                    ))
+                    .await;
+                return;
+            }
+            if let Ok(latest) = seeder.snapshot_get(AGENT_STATUS_TOPIC).await {
+                if let Some(payload) = latest.payload {
+                    let _ = seed_tx.send(payload.to_vec());
                 }
             }
-            Err(error) => self.pending_logs.push(format!(
-                "hangar: agent status subscription refused, the Fleet panel stays absent: {error}"
-            )),
-        }
+        });
         self.connect(host).await;
         Ok(())
     }
 
     async fn handle_event(&mut self, host: &HostClient, params: HandleEventParams) -> Result<()> {
         if params.topic == AGENT_STATUS_TOPIC {
+            self.drain_agent_status_seed();
             self.apply_agent_status(&params.payload);
             return Ok(());
         }
@@ -5811,6 +5839,7 @@ impl Plugin for HangarPlugin {
         // FRAME, not per snapshot, so a running card's `2m` ticks between pulls.
         // Nothing set it before, so both read an epoch-zero clock.
         self.screens.issue_list.set_now_ms(now_ms_clock());
+        self.drain_agent_status_seed();
         self.drain_pending_refreshes(host);
         if let Some(intent) = self.screens.take_pending_fleet_intent() {
             self.apply_fleet_intent(host, intent).await;
