@@ -807,15 +807,14 @@ impl AgentStatusSection {
         received_at_ms: i64,
     ) -> bool {
         let had_absent = self.absent.take().is_some();
-        let changed = match &mut self.view {
-            Some(view) => view.apply(read, received_at_ms),
-            None => {
-                self.view = Some(ainb_hangar_proto::status_view::StatusView::from_read(
-                    read,
-                    received_at_ms,
-                ));
-                true
-            }
+        let changed = if let Some(view) = &mut self.view {
+            view.apply(read, received_at_ms)
+        } else {
+            self.view = Some(ainb_hangar_proto::status_view::StatusView::from_read(
+                read,
+                received_at_ms,
+            ));
+            true
         };
         changed || had_absent
     }
@@ -824,13 +823,12 @@ impl AgentStatusSection {
     /// unreachable; without one the section is absent for `reason`.
     pub fn mark_read_failed(&mut self, reason: impl Into<String>, now_ms: i64) -> bool {
         let reason = reason.into();
-        match &mut self.view {
-            Some(view) => view.mark_unreachable(reason, now_ms),
-            None => {
-                let changed = self.absent.as_deref() != Some(reason.as_str());
-                self.absent = Some(reason);
-                changed
-            }
+        if let Some(view) = &mut self.view {
+            view.mark_unreachable(reason, now_ms)
+        } else {
+            let changed = self.absent.as_deref() != Some(reason.as_str());
+            self.absent = Some(reason);
+            changed
         }
     }
 
@@ -965,6 +963,7 @@ mod agent_status_section_tests {
     /// #983: section 20 must not be serialisable until the redaction layer
     /// exists. Autoref probe: the inherent const wins only if `Serialize` holds.
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn agent_status_section_is_not_serialize() {
         trait NotSerialize {
             const IS_SERIALIZE: bool = false;
