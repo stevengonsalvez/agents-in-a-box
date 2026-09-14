@@ -1327,6 +1327,18 @@ pub fn defaults() -> Vec<Binding> {
             AppEvent::MigrateLayoutWidths { columns: 0 },
             "Convert saved column widths into fractions of the host's screen",
         ),
+        // Plugin actions (`crate::app::plugin_action::ids`), named by a
+        // renderer from the plugin's `ui.state` view.
+        unbound(
+            Context::Screen("plugin", super::keymap::SubContext::Named("owned")),
+            "action",
+            AppEvent::PluginAction {
+                plugin: String::new(),
+                action_id: String::new(),
+                payload: serde_json::Value::Null,
+            },
+            "Run a plugin's own action by id",
+        ),
         unbound(
             Context::Global,
             "attach_finished",
