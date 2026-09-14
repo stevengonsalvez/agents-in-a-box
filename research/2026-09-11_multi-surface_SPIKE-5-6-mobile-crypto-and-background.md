@@ -37,7 +37,7 @@ The numbers this section rests on:
 | signal | iOS `[simulator]` | Android 15 `[emulator A15]` | Android 14 `[emulator A14]` |
 |---|---|---|---|
 | crate completes Noise IK, `auth/hello`, `fleet/subscribe` under AEAD in a release app | **yes**, 11 of 11 cold starts | yes, 5 of 5 | yes, 5 of 5 |
-| Noise IK on the device clock | 0.9 to 11.9 ms | 7 to 44 ms | 1.6 to 3.1 ms (cold starts and first launch) |
+| Noise IK on the device clock | 0.9 to 11.9 ms | 7 to 44 ms over the 5 cold starts; 176.3 ms on the first launch after install (section 3.2) | 1.6 to 3.1 ms (cold starts and first launch) |
 | launch to `auth/hello` at the peer, 5 runs | 1.05 to 1.68 s (set A); 1.17 to 9.72 s (set B, host under heavier memory pressure) | 3.9 to 5.9 s | 1.26 to 1.29 s |
 | release size added by the crate | **+2.45 MiB** `.app`, +0.82 MiB zipped `.ipa` | +1.73 MiB APK with `--exclude-libs` | same APK: 1,720,192 byte `.so` |
 | heartbeats after Home or lock (live session) | **none after +1.5 s** in 11 of 11 runs (9 sent none, 2 sent one within 1.5 s); first missed beat 3.6 to 16.5 s after the transition | 0 in 10 of 10 | 40 of 40 in 10 of 10: alive for the whole 600 s |
@@ -128,8 +128,8 @@ the iPhone over USB, with the same harness and scripts, would add:
 > **Exit gate**: Maestro or Detox flow against a fixture daemon: banner tap,
 > answer tap; attention row `answered` with `answered_by = device:<id>` and
 > receipt `delivered`. **Foreground only**: the phone treats its socket as lost
-> the moment the app leaves the foreground (spike 6: suspended at once on iOS,
-> destroyed at 6 s on Android 15), reconnects with `after_revision` on every
+> the moment the app leaves the foreground (spike 6: heartbeat stopped within
+> 1.5 s on iOS, socket destroyed at 6 s on Android 15), reconnects with `after_revision` on every
 > return to the foreground, and asserts `Complete` replay. The heartbeat skips
 > missed ticks rather than bursting them. No banner timing is gated while the
 > app is backgrounded. Suspended-app banners belong to the push row, which moves
@@ -668,6 +668,8 @@ cargo build --release --features peer
     --transport lan --log $RUN/peerd-android-emu.log
 ./target/release/wirectl probe --secrets $RUN/host-secrets.json --url ws://127.0.0.1:47642/peer \
     --runs 5 --heartbeat-seconds 3
+# port 47642 differs from the peerd line above (47655); the emulator lane did not
+# record the peerd it probed there, so this line is kept as it was run
 
 # Android SDK root, Gradle home and npm cache in session scratch
 sdkmanager --sdk_root=$SDK "ndk;27.1.12297006" "cmake;3.22.1" "platforms;android-37.0" "build-tools;37.0.0"
