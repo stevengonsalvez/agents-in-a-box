@@ -39,8 +39,7 @@ impl Plugin for ActionForward {
             *count
         };
         let view = serde_json::json!({ "actions": count, "last": p.action_id });
-        host.snapshot_publish(topics::UI_STATE, view.to_string().into_bytes())
-            .await
+        host.snapshot_publish(topics::UI_STATE, view.to_string().into_bytes()).await
     }
 
     async fn render(&mut self, _host: &HostClient, _p: RenderParams) -> Result<WireBuffer> {
@@ -57,12 +56,7 @@ impl Plugin for ActionForward {
     ) -> Result<CliOutput> {
         match argv.first().map(String::as_str) {
             Some("last") => {
-                let out = self
-                    .last
-                    .lock()
-                    .await
-                    .clone()
-                    .unwrap_or_else(|| "none".to_string());
+                let out = self.last.lock().await.clone().unwrap_or_else(|| "none".to_string());
                 Ok(CliOutput::ok(format!("{out}\n")))
             }
             Some("count") => {
