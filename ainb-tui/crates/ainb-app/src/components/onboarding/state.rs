@@ -286,6 +286,7 @@ pub struct ValidatedPath {
     pub path: PathBuf,
     pub is_valid: bool,
     pub expanded_path: PathBuf,
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub error: Option<String>,
 }
 
@@ -381,8 +382,10 @@ pub struct OnboardingState {
     /// Whether to show cursor
     pub show_cursor: bool,
     /// Error message to display
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub error_message: Option<String>,
     /// Transient success/status message (e.g. after the `I` tmux-config install)
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub status_message: Option<String>,
     /// After pressing `G`: waiting for the user to pick an agent for the
     /// generated install script (c/x/p), or Esc to cancel.
@@ -616,7 +619,7 @@ pub enum DepInstall {
     /// Finished successfully (the next re-detect should flip the checkbox).
     Done,
     /// Failed — carries a short error message to show inline.
-    Error(String),
+    Error(#[serde(serialize_with = "crate::wire::fields::scrub_str")] String),
 }
 
 impl OnboardingState {
