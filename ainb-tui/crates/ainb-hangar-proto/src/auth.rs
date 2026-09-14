@@ -46,6 +46,8 @@ pub const UNAUTHORIZED: i32 = -32000;
 /// device? }`. It reaches it once, in W0-wire, and R1 adds nothing to hello,
 /// the phase that introduces off-box devices fills in [`Self::device`], which
 /// is why the member is here from the start rather than bolted on later.
+/// [`Self::transient`] is the one later member, and it is S-B's registry flag,
+/// not a negotiation member (#963).
 ///
 /// Every member except `token` is absent-by-default, so the original
 /// `{ token }` frame a pre-W0-wire client sends still decodes: it is read as
@@ -80,6 +82,19 @@ pub struct HelloParams {
     /// Always `None` on the local unix leg, whose principal is the peer uid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceInfo>,
+    /// This connection is one call from a process whose presence another of
+    /// its connections already holds (#963).
+    ///
+    /// Not a D17 negotiation member: it belongs to the S-B registry. A TUI
+    /// holds one long-lived presence connection and still dials short request
+    /// connections for polls and actions. Those are served, and stamp
+    /// provenance, exactly like any other connection, but the registry leaves
+    /// them out of `hangar/connections_list` and `connections_changed`, so one
+    /// running surface is one row. Absent means listed, which is what every
+    /// client that predates the flag is; a daemon that predates it ignores the
+    /// member and lists the connection, the pre-#963 behaviour.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transient: bool,
 }
 
 /// The paired device presenting a per-device token (D13 / R1).
@@ -150,6 +165,7 @@ pub fn hello_request(id: i64, token: &str) -> RpcRequest {
             protocol: ProtocolRange::supported(),
             capabilities: crate::protocol::catalogue_strings(),
             device: None,
+            transient: false,
         }),
     }
 }
@@ -212,6 +228,29 @@ mod tests {
         assert_eq!(params.protocol, ProtocolRange::legacy());
         assert!(params.capabilities.is_empty());
         assert_eq!(params.device, None);
+        assert!(
+            !params.transient,
+            "a pre-#963 client is a listed connection"
+        );
+    }
+
+    /// `transient` is on the wire only when set, so every listed client keeps
+    /// the exact hello frame it sent before #963.
+    #[test]
+    fn transient_is_serialized_only_when_set() {
+        let listed = hello_request(1, "mdt_X");
+        assert!(
+            listed.params.get("transient").is_none(),
+            "{:?}",
+            listed.params
+        );
+
+        let mut params: HelloParams = serde_json::from_value(listed.params).unwrap();
+        params.transient = true;
+        let encoded = serde_json::to_value(&params).unwrap();
+        assert_eq!(encoded["transient"], true);
+        let decoded: HelloParams = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.transient);
     }
 
     /// The N-1 daemon leg: a bare `{}` reply is what every pre-W0-wire daemon
