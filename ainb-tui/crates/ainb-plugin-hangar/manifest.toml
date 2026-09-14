@@ -57,6 +57,15 @@ snapshots = []
 [subscribes]
 # The agent-status envelope the TUI host publishes; the Fleet panel renders
 # from it and reads no Fleet status of its own (#1031).
+#
+# Lifecycle consequence (#1038 review): the runtime never idle-reaps a plugin
+# that declares a snapshot subscription (`maybe_idle_reap` in
+# ainb-plugin-runtime's plugin_task.rs), so once this plugin spawns (lazily, on
+# first use) it lives for the rest of the TUI session, holding its daemon
+# socket and its `secrets:read` grant, instead of being reaped after the
+# runtime's idle window. That is what keeps the panel current: an envelope
+# published while the plugin is reaped would be dropped, and only the latest
+# one is kept for its next `snapshot_get`.
 snapshots = ["fleet.agent_status"]
 
 [lifecycle]
