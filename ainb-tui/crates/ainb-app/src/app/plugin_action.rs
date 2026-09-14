@@ -30,13 +30,15 @@ pub fn run(plugin: &str, action_id: &str, payload: Value) -> Intent {
     )
 }
 
-/// Keep `screen`'s plugin rendering while the terminal shows something
-/// else (`watching`), or stop.
+/// Keep `screen`'s plugin rendering at `width` by `height`, the viewport the
+/// watching host draws it at, while the terminal shows something else
+/// (`watching`), or stop. Several hosts watching one screen get the largest
+/// size any of them asked for.
 #[must_use]
-pub fn watch_screen(screen: &str, watching: bool) -> Intent {
+pub fn watch_screen(screen: &str, watching: bool, width: u16, height: u16) -> Intent {
     Intent::Command(
         CommandId::new(ids::WATCH_SCREEN),
-        json!({ "screen": screen, "watching": watching }),
+        json!({ "screen": screen, "watching": watching, "width": width, "height": height }),
     )
 }
 
@@ -45,6 +47,8 @@ pub fn watch_screen(screen: &str, watching: bool) -> Intent {
 struct WatchArgs {
     screen: String,
     watching: bool,
+    width: u16,
+    height: u16,
 }
 
 #[derive(Deserialize)]
@@ -75,6 +79,8 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
                 AppEvent::WatchPluginScreen {
                     screen: args.screen,
                     watching: args.watching,
+                    width: args.width,
+                    height: args.height,
                 }
             }),
         ),
