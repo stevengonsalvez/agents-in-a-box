@@ -114,7 +114,11 @@ world_up() {
   CAPTURES=(); OBSERVED=(); FAILED_CHECKS=(); KNOWN_ISSUE=""
   PROOF_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-  PROOF_WORLD="$(mktemp -d "${TMPDIR:-/tmp}/ainb-proof-$NODE.XXXXXX")"
+  # Without a world every path below would land under / (HOME=/home), so a
+  # failed mktemp ends the node before anything is exported. run.sh sets
+  # PROOF_TMP_ROOT to a directory of its own so concurrent runs stay apart.
+  PROOF_WORLD="$(mktemp -d "${PROOF_TMP_ROOT:-${TMPDIR:-/tmp}}/ainb-proof-$NODE.XXXXXX")" || exit 1
+  : "${PROOF_WORLD:?mktemp gave no world directory}"
   export HOME="$PROOF_WORLD/home"
   # The daemon tails $AINB_HANGAR_HOME/events.jsonl while the hook appends to
   # ~/.agents-in-a-box/events.jsonl, so the two must be one directory or no
