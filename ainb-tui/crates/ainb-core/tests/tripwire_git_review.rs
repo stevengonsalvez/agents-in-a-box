@@ -65,7 +65,8 @@ fn seed_repo(repo: &Path) {
 
 fn render_to_text(state: &GitViewState) -> (String, Vec<Color>) {
     let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    term.draw(|f| render::render(f, f.size(), &state.review, &state.review_ui))
+    let mut layout = render::ReviewSidebarLayout::default();
+    term.draw(|f| render::render(f, f.area(), &state.review, &state.review_ui, &mut layout))
         .unwrap();
     let buf = term.backend().buffer();
     let mut text = String::new();
