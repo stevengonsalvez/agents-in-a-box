@@ -5,7 +5,7 @@
 #
 # The regenerator REFUSES to write while the surface has changed but
 # ainb-plugin-protocol's version has not. Bump the version first.
-protocol_version = "0.1.2"
+protocol_version = "0.1.3"
 
 [lib]
 reexport errors :: { ProtocolError , RpcError }
@@ -104,6 +104,8 @@ struct Provides [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize
   field snapshots: Vec < String > [# [serde (default)]]
 struct Subscribes [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
   field snapshots: Vec < String > [# [serde (default)]]
+  field latest_state: Vec < String > [# [serde (default , skip_serializing_if = "Vec::is_empty")]]
+Subscribes::fn blocks_idle_reap (& self) -> bool
 enum SpawnMode [# [derive (Debug , Clone , Copy , Default , PartialEq , Eq , Serialize , Deserialize)] # [serde (rename_all = "lowercase")]]
   variant Eager
   variant Lazy
