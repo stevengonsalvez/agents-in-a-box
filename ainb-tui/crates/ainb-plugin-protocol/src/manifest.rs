@@ -249,6 +249,24 @@ pub struct Subscribes {
     /// Snapshot topics whose updates the plugin wants.
     #[serde(default)]
     pub snapshots: Vec<String>,
+    /// The subset of [`Self::snapshots`] that carry the latest state, not a
+    /// stream: a plugin reaped while one is published loses nothing, because on
+    /// respawn it resubscribes and reads the latest value with
+    /// `host/snapshot/get`. Only the other topics keep the plugin from idle
+    /// reap (#1040). Empty by default, which keeps every subscription's
+    /// exemption, the behaviour before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub latest_state: Vec<String>,
+}
+
+impl Subscribes {
+    /// Whether a subscription keeps the plugin alive past its idle window: some
+    /// subscribed topic is not marked [`Self::latest_state`], so a delivery
+    /// missed while reaped could not be recovered.
+    #[must_use]
+    pub fn blocks_idle_reap(&self) -> bool {
+        self.snapshots.iter().any(|topic| !self.latest_state.contains(topic))
+    }
 }
 
 /// Plugin spawn policy.
@@ -324,6 +342,7 @@ mod tests {
             },
             subscribes: Subscribes {
                 snapshots: vec!["sessions.usage_data".into()],
+                latest_state: vec![],
             },
             lifecycle: Lifecycle {
                 spawn: SpawnMode::Lazy,
@@ -345,6 +364,39 @@ mod tests {
         let s = toml::to_string(&m).unwrap();
         let back: Manifest = toml::from_str(&s).unwrap();
         assert_eq!(m, back);
+    }
+
+    /// #1040: only a subscription outside `latest_state` blocks idle reap, and
+    /// a manifest without the field keeps the old exemption.
+    #[test]
+    fn only_a_stream_subscription_blocks_idle_reap() {
+        let parse = |src: &str| -> Subscribes {
+            let m: Manifest = toml::from_str(&format!(
+                "[plugin]\nname = \"x\"\nversion = \"1.0.0\"\nabi_version = 2\n{src}"
+            ))
+            .unwrap();
+            m.subscribes
+        };
+        assert!(!parse("").blocks_idle_reap(), "no subscription");
+        assert!(
+            parse("[subscribes]\nsnapshots = [\"sessions.usage_data\"]\n").blocks_idle_reap(),
+            "a stream subscription keeps the old exemption"
+        );
+        let latest = parse(
+            "[subscribes]\nsnapshots = [\"fleet.agent_status\"]\nlatest_state = [\"fleet.agent_status\"]\n",
+        );
+        assert_eq!(latest.latest_state, ["fleet.agent_status"]);
+        assert!(
+            !latest.blocks_idle_reap(),
+            "a latest-state topic is recoverable"
+        );
+        assert!(
+            parse(
+                "[subscribes]\nsnapshots = [\"fleet.agent_status\", \"sessions.usage_data\"]\nlatest_state = [\"fleet.agent_status\"]\n"
+            )
+            .blocks_idle_reap(),
+            "one stream topic is enough to keep it"
+        );
     }
 
     #[test]
