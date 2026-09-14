@@ -22,7 +22,7 @@ fn command_intent_bumps_only_the_section_it_changes() {
     let before = state.versions();
     assert!(!state.shell.help_visible);
 
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
@@ -46,7 +46,7 @@ fn text_intent_bumps_only_the_section_holding_the_field() {
         .open_text("Branch prefix", "", "branch_prefix", "");
     let before = state.versions();
 
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
@@ -65,7 +65,7 @@ fn key_intent_resolves_through_the_keymap() {
     let keymap = Keymap::defaults();
     let mut state = AppState::new();
 
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
@@ -81,7 +81,7 @@ fn pointer_intent_without_a_renderer_changes_nothing() {
     let mut state = AppState::new();
     let before = state.versions();
 
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
@@ -97,7 +97,7 @@ fn unknown_command_changes_nothing() {
     let mut state = AppState::new();
     let before = state.versions();
 
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
@@ -179,7 +179,7 @@ fn an_unbound_row_is_a_command_no_key_reaches_until_an_override_binds_it() {
 
     let mut state = AppState::new();
     let before = state.versions();
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
@@ -212,7 +212,7 @@ fn command_args_replace_the_payload_of_a_row_that_carries_one() {
 
     // The row attaches position 1; the argument asks for position 7, which an
     // empty list does not have, and the notice names the argument.
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
