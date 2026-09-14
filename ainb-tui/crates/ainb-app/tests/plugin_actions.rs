@@ -229,7 +229,7 @@ fn a_watched_plugin_screen_stays_wanted_while_the_terminal_shows_another() {
         &mut state,
         &keymap,
         &mut NoRenderer,
-        plugin_action::watch_screen(screen_ids::HANGAR, true),
+        plugin_action::watch_screen(screen_ids::HANGAR, true, 120, 40),
     );
     assert!(
         state.plugin_screen_wanted(screen_ids::HANGAR),
@@ -244,7 +244,7 @@ fn a_watched_plugin_screen_stays_wanted_while_the_terminal_shows_another() {
         &mut state,
         &keymap,
         &mut NoRenderer,
-        plugin_action::watch_screen(screen_ids::HANGAR, false),
+        plugin_action::watch_screen(screen_ids::HANGAR, false, 0, 0),
     );
     assert!(!state.plugin_screen_wanted(screen_ids::HANGAR));
 
@@ -253,7 +253,7 @@ fn a_watched_plugin_screen_stays_wanted_while_the_terminal_shows_another() {
         &mut state,
         &keymap,
         &mut NoRenderer,
-        plugin_action::watch_screen(screen_ids::CONFIG, true),
+        plugin_action::watch_screen(screen_ids::CONFIG, true, 120, 40),
     );
     assert!(state.plugins_host.watched_plugin_screens.is_empty());
 }
@@ -347,7 +347,7 @@ fn a_screen_watch_lapses_unless_renewed_and_goes_with_its_plugin() {
             state,
             &keymap,
             &mut NoRenderer,
-            plugin_action::watch_screen(screen_ids::HANGAR, true),
+            plugin_action::watch_screen(screen_ids::HANGAR, true, 120, 40),
         );
     };
     let lease = AppState::PLUGIN_SCREEN_WATCH_LEASE;
@@ -370,4 +370,44 @@ fn a_screen_watch_lapses_unless_renewed_and_goes_with_its_plugin() {
         !state.plugin_screen_wanted(screen_ids::HANGAR),
         "its plugin is gone"
     );
+}
+
+/// Hosts watching one screen at different sizes get one render at the largest
+/// width and the largest height any live request asked for; a request with no
+/// viewport is refused, and a lapsed request no longer counts.
+#[test]
+fn a_watched_screen_renders_at_the_largest_size_a_live_watch_asked_for() {
+    use ainb_app::app::screens::ids as screen_ids;
+    use std::time::{Duration, Instant};
+
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    let mut watch = |state: &mut AppState, width, height| {
+        let _ = dispatch(
+            state,
+            &keymap,
+            &mut NoRenderer,
+            plugin_action::watch_screen(screen_ids::HANGAR, true, width, height),
+        );
+    };
+
+    watch(&mut state, 0, 24);
+    assert!(
+        !state.plugin_screen_wanted(screen_ids::HANGAR),
+        "no viewport"
+    );
+    assert_eq!(state.watched_viewport(screen_ids::HANGAR), None);
+
+    watch(&mut state, 200, 30);
+    let wide_at = Instant::now();
+    std::thread::sleep(Duration::from_millis(20));
+    watch(&mut state, 90, 60);
+    assert_eq!(state.watched_viewport(screen_ids::HANGAR), Some((200, 60)));
+
+    // The wide request lapses first; the tall one alone sets the size.
+    let lease = AppState::PLUGIN_SCREEN_WATCH_LEASE;
+    state.release_plugin_screen_watches(wide_at + lease + Duration::from_millis(10), |_| false);
+    assert_eq!(state.watched_viewport(screen_ids::HANGAR), Some((90, 60)));
 }
