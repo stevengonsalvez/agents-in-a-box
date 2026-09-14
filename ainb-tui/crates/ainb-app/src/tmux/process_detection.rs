@@ -195,20 +195,15 @@ pub fn host_tmux_session_name() -> Option<&'static str> {
         return Some(name.as_str());
     }
     std::env::var_os("TMUX")?;
-    let mut last_miss = LAST_MISS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if last_miss.is_some_and(|at| at.elapsed() < HOST_SESSION_RETRY) {
+    let last_miss = || LAST_MISS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last_miss().is_some_and(|at| at.elapsed() < HOST_SESSION_RETRY) {
         return None;
     }
-    match detect_host_tmux_session() {
-        Some(name) => {
-            *last_miss = None;
-            Some(HOST_SESSION.get_or_init(|| name).as_str())
-        }
-        None => {
-            *last_miss = Some(std::time::Instant::now());
-            None
-        }
-    }
+    let Some(name) = detect_host_tmux_session() else {
+        *last_miss() = Some(std::time::Instant::now());
+        return None;
+    };
+    Some(HOST_SESSION.get_or_init(|| name).as_str())
 }
 
 /// Probe tmux for the session whose pane this process runs in.
@@ -259,9 +254,11 @@ fn process_ancestry() -> Vec<u32> {
     ancestry
 }
 
-/// The session of the pane whose pid is the NEAREST entry of `ancestry`, from
-/// `tmux list-panes -a -F '#{pane_pid} #{session_name}'` output. Nearest first,
-/// so a TUI in a nested tmux names its own pane rather than an outer one.
+/// The session of the pane whose pid is the nearest entry of `ancestry`.
+///
+/// `panes` is `tmux list-panes -a -F '#{pane_pid} #{session_name}'` output.
+/// Nearest first, so a TUI in a nested tmux names its own pane rather than an
+/// outer one.
 pub fn session_for_ancestry(panes: &str, ancestry: &[u32]) -> Option<String> {
     ancestry.iter().find_map(|pid| {
         panes.lines().find_map(|line| {
