@@ -251,3 +251,121 @@ fn detach_while_interactive_returns_detach_and_leaves_the_pane_to_the_host() {
         "the reducer left the release to the host"
     );
 }
+
+#[test]
+fn ctrl_v_on_the_repo_picker_returns_paste_clipboard_and_the_text_lands_in_the_filter() {
+    use ainb_app::app::state::{NewSessionState, NewSessionStep};
+    use ainb_app::components::new_session::pick_repo::PickRepoState;
+
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = ids::NEW_SESSION.to_string();
+    state.new_session.new_session_state = Some(NewSessionState {
+        step: NewSessionStep::PickRepo,
+        pick_repo_state: Some(PickRepoState::from_disk_no_locals()),
+        ..NewSessionState::default()
+    });
+    let filter = |state: &AppState| {
+        state
+            .new_session
+            .new_session_state
+            .as_ref()
+            .and_then(|ns| ns.pick_repo_state.as_ref())
+            .map(|pick| pick.filter.clone())
+    };
+    let ctrl_v = Intent::Key(ainb_app::Chord::parse("ctrl+v").expect("valid chord"));
+    let before = state.versions();
+
+    let effects = dispatch(&mut state, &keymap, &mut NoRenderer, ctrl_v);
+
+    assert_eq!(effects, vec![Effect::PasteClipboard]);
+    assert_eq!(
+        filter(&state).as_deref(),
+        Some(""),
+        "the reducer read no clipboard"
+    );
+    let asked = state.versions();
+    // The picker's key handler runs against its section even when all it
+    // does is ask for the paste.
+    assert_eq!(bumped(&before, &asked), vec![SectionId::NewSession]);
+
+    // What the host does with the clipboard's text: a Text intent.
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        Intent::Text("owner/repo".to_string()),
+    );
+    assert!(effects.is_empty());
+    assert_eq!(filter(&state).as_deref(), Some("owner/repo"));
+    assert_eq!(
+        bumped(&asked, &state.versions()),
+        vec![SectionId::NewSession]
+    );
+}
+
+#[test]
+fn ctrl_v_in_a_config_text_popup_returns_paste_clipboard_and_changes_nothing() {
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = ids::CONFIG.to_string();
+    state
+        .config
+        .config_popup_state
+        .open_text("Branch prefix", "", "branch_prefix", "");
+    let before = state.versions();
+
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        Intent::Key(ainb_app::Chord::parse("ctrl+v").expect("valid chord")),
+    );
+
+    assert_eq!(effects, vec![Effect::PasteClipboard]);
+    assert_eq!(bumped(&before, &state.versions()), Vec::<SectionId>::new());
+}
+
+/// `ClaudeLogin` is emitted from the tick once Docker is ready, so the part a
+/// test can pin without Docker is how the reducer takes the host's report.
+#[test]
+fn the_oauth_login_report_succeeds_only_with_credentials_written() {
+    use ainb_app::app::state::{AuthMethod, AuthSetupState};
+
+    let home = isolated_home();
+    let auth_dir = home.join("oauth-report");
+    std::fs::create_dir_all(&auth_dir).expect("auth dir");
+    let setup = || AuthSetupState {
+        selected_method: AuthMethod::OAuth,
+        api_key_input: String::new(),
+        is_processing: true,
+        error_message: None,
+        show_cursor: false,
+    };
+
+    // A clean exit that wrote nothing is still a failure.
+    let mut state = AppState::new();
+    state.onboarding.auth_setup_state = Some(setup());
+    assert!(!state.finish_oauth_login(&auth_dir, true));
+    let auth = state.onboarding.auth_setup_state.as_ref().expect("still on the auth menu");
+    assert!(!auth.is_processing);
+    assert!(
+        auth.error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("Authentication failed"))
+    );
+
+    // Credentials and a clean exit land on the session list.
+    std::fs::write(auth_dir.join(".credentials.json"), "{}").expect("credentials");
+    let mut state = AppState::new();
+    state.onboarding.auth_setup_state = Some(setup());
+    assert!(
+        !state.finish_oauth_login(&auth_dir, false),
+        "a failed exit fails"
+    );
+    assert!(state.finish_oauth_login(&auth_dir, true));
+    assert!(state.onboarding.auth_setup_state.is_none());
+    assert_eq!(state.shell.current_screen, ids::SESSION_LIST);
+}
