@@ -2751,7 +2751,7 @@ impl EventHandler {
                 preferences.sessions_sidebar_fraction = Some(fraction.clamp(0.0, 1.0));
                 preferences.sessions_sidebar_collapsed = Some(collapsed);
                 state.persist_app_config([
-                    "ui_preferences.sessions_sidebar_width",
+                    "ui_preferences.sessions_sidebar_fraction",
                     "ui_preferences.sessions_sidebar_collapsed",
                 ]);
             }
@@ -4029,6 +4029,8 @@ impl EventHandler {
                     state.persist_app_config([
                         "ui_preferences.home_sidebar_fraction",
                         "ui_preferences.home_sidebar_width",
+                        "ui_preferences.sessions_sidebar_fraction",
+                        "ui_preferences.sessions_sidebar_width",
                         "ui_preferences.skill_manager_sources_fraction",
                         "ui_preferences.skill_manager_sources_width",
                     ]);
