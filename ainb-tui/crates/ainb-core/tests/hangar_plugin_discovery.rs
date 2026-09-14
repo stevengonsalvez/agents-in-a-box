@@ -69,7 +69,12 @@ fn discovery_finds_hangar_and_validates_all_four_caps() {
     // neighbours.
     assert_eq!(
         caps.event_bus.allow_list().unwrap(),
-        ["fleet.agent_status", "ui.state*", "ui.close_request"],
+        [
+            "fleet.agent_status",
+            "fleet.agent_status.clock",
+            "ui.state*",
+            "ui.close_request"
+        ],
         "event_bus cap must validate"
     );
     // The bool-form cap survives too.
