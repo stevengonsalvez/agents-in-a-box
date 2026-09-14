@@ -20,6 +20,10 @@ use std::path::PathBuf;
 /// The committed leaf key paths of every section frame of [`sample_state`].
 pub const COMMITTED_KEY_PATHS: &str = include_str!("../../tests/fixtures/section_key_paths.txt");
 
+/// The fixture's path in the repository, for messages an installed binary prints.
+pub const COMMITTED_KEY_PATHS_REPO_PATH: &str =
+    "ainb-tui/crates/ainb-app/tests/fixtures/section_key_paths.txt";
+
 /// Where [`COMMITTED_KEY_PATHS`] lives in the source tree, for regeneration.
 pub const COMMITTED_KEY_PATHS_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -693,5 +697,312 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
             Some(seed.text("workspace_load.error", Captured));
     }
 
+    fill_secondary_screens(&mut state, seed);
     state
+}
+
+/// Everything below the leak fields: the lists, dialogs and overlays a screen
+/// opens. Left empty they hide their text from all four checks, which
+/// `the_sample_fills_every_structured_subtree` refuses.
+#[allow(clippy::too_many_lines)]
+fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
+    use crate::components::skill_manager_screen as skills;
+    use TextKind::Captured;
+
+    {
+        let shell_path = PathBuf::from("/work/sample-repo");
+        let mut shell = crate::models::session::ShellSession::new(
+            shell_path.clone(),
+            shell_path,
+            Some("main".to_string()),
+        );
+        shell.preview_content = Some(seed.text("session.shell.preview_content", Captured));
+        state.sessions.get_mut().workspaces[0].shell_session = Some(shell);
+    }
+    {
+        let tmux = state.tmux.get_mut();
+        tmux.other_tmux_sessions = vec![crate::models::OtherTmuxSession {
+            name: "scratch".to_string(),
+            attached: false,
+            windows: 1,
+            created: Some("2026-09-14".to_string()),
+        }];
+    }
+    {
+        let fleet = state.fleet.get_mut();
+        fleet.fleet_metadata.insert(
+            uuid::Uuid::nil(),
+            crate::app::state::SessionFleetMetadata {
+                model: Some("claude-sonnet-4-5".to_string()),
+                reasoning_effort: Some("high".to_string()),
+                direct_child_count: 1,
+                provider_session_id: Some("s-1".to_string()),
+                ..crate::app::state::SessionFleetMetadata::default()
+            },
+        );
+        fleet.ask_state.set_phase(
+            "request-1",
+            crate::fleet::answer::AnswerPhase::Failed {
+                reason: seed.text("fleet.ask.failure_reason", Captured),
+                draft: Some("typed answer".to_string()),
+            },
+        );
+        let mut attention =
+            fleet.daemon_attention.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let crate::fleet::attention::DaemonAttention {
+            by_session_id, all, ..
+        } = &mut *attention;
+        for chip in by_session_id.values_mut().flatten().chain(all.values_mut()) {
+            {
+                chip.options = vec![crate::fleet::attention::AttentionOption {
+                    label: "yes".to_string(),
+                    description: seed.text("fleet.attention.option", Captured),
+                }];
+            }
+        }
+    }
+    {
+        let git = state.git_view.get_mut();
+        if let Some(view) = git.git_view_state.as_mut() {
+            view.changed_files = vec![crate::components::git_view::ChangedFile {
+                path: ".env.local".to_string(),
+                status: crate::components::git_view::GitFileStatus::Modified,
+                insertions: 1,
+                deletions: 0,
+            }];
+            view.file_tree_items = vec![crate::components::git_view::FileTreeItem {
+                display_name: ".env.local".to_string(),
+                full_path: ".env.local".to_string(),
+                depth: 0,
+                is_folder: false,
+                status: Some(crate::components::git_view::GitFileStatus::Modified),
+                is_last_in_group: true,
+                is_expanded: false,
+                file_count: 0,
+            }];
+            view.commits = vec![crate::git::operations::CommitInfo {
+                hash_short: "abc1234".to_string(),
+                author: "sample".to_string(),
+                date: "2026-09-14".to_string(),
+                message: seed.text("git_view.commit.message", Captured),
+            }];
+        }
+    }
+    {
+        let new_session = state.new_session.get_mut();
+        if let Some(flow) = new_session.new_session_state.as_mut() {
+            if let Some(pick) = flow.pick_repo_state.as_mut() {
+                pick.clone_progress =
+                    Some(crate::components::new_session::pick_repo::CloneProgress {
+                        url: seed.text("new_session.clone_progress.url", Captured),
+                        bytes_done: 1,
+                        bytes_total: 2,
+                        error: Some(seed.text("new_session.clone_progress.error", Captured)),
+                    });
+                pick.git_auth_status =
+                    Some(crate::components::new_session::pick_repo::GitAuthStatus::Authenticated);
+            }
+            if let Some(configure) = flow.configure_state.as_mut() {
+                use crate::components::new_session::configure as cfg;
+                configure.base_selection = Some(cfg::BaseSelection {
+                    display: "origin/main".to_string(),
+                    short_name: "main".to_string(),
+                    is_remote: true,
+                    mode: cfg::BaseMode::BaseOff,
+                });
+                let mut picker = cfg::BranchPickerState::new(
+                    vec![cfg::PickerBranchEntry {
+                        entry: crate::git::branch_list::BranchEntry {
+                            display: "origin/main".to_string(),
+                            short_name: "main".to_string(),
+                            is_remote: true,
+                            is_default: true,
+                        },
+                        in_use: false,
+                    }],
+                    false,
+                );
+                picker.error = Some(seed.text("new_session.branch_picker.error", Captured));
+                configure.branch_picker = Some(picker);
+                configure.custom_overrides =
+                    Some(cfg::CustomOverrides::seed_from(&configure.current_preset));
+                configure.repo_check =
+                    cfg::RepoCheck::Failed(seed.text("new_session.repo_check", Captured));
+            }
+        }
+    }
+    {
+        let logs = state.log_streams.get_mut();
+        logs.log_history_state.sessions =
+            vec![crate::components::log_history_viewer::SessionLogSummary {
+                filename: "session.jsonl".to_string(),
+                display_name: "session".to_string(),
+                log_path: PathBuf::from("/home/sample/.agents-in-a-box/logs/session.jsonl"),
+                log_count: 1,
+                error_count: 0,
+                warn_count: 0,
+                is_jsonl: true,
+            }];
+        logs.log_history_state.log_entries_area = Some(crate::geometry::Area {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        });
+    }
+    {
+        let onboarding = state.onboarding.get_mut();
+        if let Some(wizard) = onboarding.onboarding_state.as_mut() {
+            wizard.install_states.insert(
+                "tmux".to_string(),
+                crate::components::onboarding::state::DepInstall::Error(
+                    seed.text("onboarding.install_error", Captured),
+                ),
+            );
+            wizard.validated_directories =
+                vec![crate::components::onboarding::state::ValidatedPath {
+                    path: PathBuf::from("~/work"),
+                    is_valid: false,
+                    expanded_path: PathBuf::from("/home/sample/work"),
+                    error: Some(seed.text("onboarding.validated_path.error", Captured)),
+                }];
+        }
+    }
+    {
+        let recovery = &mut state.recovery.get_mut().session_recovery_state;
+        recovery.recovery_overlay = Some(crate::components::session_recovery::RecoveryOverlay {
+            title: "Cleanup".to_string(),
+            results: vec![crate::components::session_recovery::RecoveryResultLine {
+                name: "x".to_string(),
+                success: false,
+                detail: seed.text("recovery.result.detail", Captured),
+            }],
+            scroll_offset: 0,
+        });
+    }
+    {
+        let shell = state.shell.get_mut();
+        shell.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+            title: "Delete session".to_string(),
+            message: seed.text("shell.confirmation.message", Captured),
+            confirm_action: crate::app::state::ConfirmAction::DeleteSession(uuid::Uuid::nil()),
+            selected_option: false,
+            warning: Some(seed.text("shell.confirmation.warning", Captured)),
+            options: Some(vec![crate::app::state::DialogOption {
+                label: "Delete".to_string(),
+                action: crate::app::state::ConfirmAction::DeleteSession(uuid::Uuid::nil()),
+            }]),
+            selected_index: 0,
+        });
+    }
+    {
+        let hangar = state.hangar.get_mut();
+        hangar.daemons_state.outcomes.insert(
+            "bridge",
+            crate::components::daemons::ActionOutcome {
+                action: crate::cli::daemon::Action::Start,
+                ok: false,
+                summary: seed.text("hangar.outcome.summary", Captured),
+                detail: seed.text("hangar.outcome.detail", Captured),
+            },
+        );
+        if let Some(shared) = hangar.daemons_state.shared.as_ref() {
+            shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).atc =
+                Some(crate::components::daemons::AtcModeView {
+                    name: "atc".to_string(),
+                    provider: "claude".to_string(),
+                    help: vec![seed.text("hangar.atc.help", Captured)],
+                });
+        }
+    }
+    {
+        let config = state.config.get_mut();
+        let dockerfile: crate::config::ContainerTemplate = serde_json::from_value(serde_json::json!({
+            "name": "custom",
+            "description": "built from a Dockerfile",
+            "config": {
+                "image_source": {
+                    "type": "Dockerfile",
+                    "path": "/work/sample-repo/Dockerfile",
+                    "build_args": { "NPM_TOKEN": seed.text("config.container.build_args", Captured) },
+                },
+                "volumes": [{ "host_path": "/home/sample/.cache", "container_path": "/cache" }],
+            },
+        }))
+        .expect("sample dockerfile template parses");
+        config.app_config.container_templates.insert("custom".to_string(), dockerfile);
+        let git_mcp: crate::config::McpServerConfig = serde_json::from_value(serde_json::json!({
+            "name": "from-git",
+            "description": "installed from git",
+            "installation": {
+                "type": "Git",
+                "url": seed.text("config.mcp.git_url", Captured),
+                "branch": "main",
+                "install_command": seed.text("config.mcp.install_command", Captured),
+            },
+            "definition": { "type": "Command", "command": "mcp", "args": [] },
+        }))
+        .expect("sample git mcp server parses");
+        config.app_config.mcp_servers.insert("from-git".to_string(), git_mcp);
+        config.app_config.plugins.values.insert(
+            "sample".to_string(),
+            toml::Value::String(seed.text("config.plugins.values", Captured)),
+        );
+    }
+    {
+        let skills = &mut state.skills.get_mut().skill_manager_state;
+        let uri = seed.text("skills.unit.uri", Captured);
+        skills.units = vec![skills::UnitRow {
+            idx: 0,
+            name: "sample".to_string(),
+            kind: "skill".to_string(),
+            source: uri.clone(),
+            git_ref: "main".to_string(),
+            targets: vec!["claude".to_string()],
+            declared_uri: uri.clone(),
+        }];
+        skills.detail = Some(skills::UnitDetail {
+            uri: uri.clone(),
+            deployed: vec!["~/.claude/skills/sample".to_string()],
+            last_used: None,
+            invocations: Some(1),
+            requires: Vec::new(),
+            upstream_status: "current".to_string(),
+        });
+        skills.source_remove_confirm = Some(skills::SourceRemoveConfirm {
+            source_name: "private".to_string(),
+            source_uri: uri,
+            unit_count: 1,
+            cursor: 0,
+        });
+        skills.sync_confirm = Some(skills::SyncConfirmState {
+            target: "claude".to_string(),
+            label: "sync".to_string(),
+            plan: vec![seed.text("skills.sync.plan", Captured)],
+            scroll: 0,
+        });
+        skills.library = Some(skills::LibraryViewState {
+            rows: vec![skills::LibraryRow {
+                name: "sample".to_string(),
+                kind: "skill".to_string(),
+                path: "~/.claude/skills/sample".to_string(),
+                created: "2026-09-14".to_string(),
+                deploy: "claude".to_string(),
+            }],
+            selected: 0,
+            show_detail: false,
+        });
+        skills.browse = Some(skills::BrowseViewState {
+            results: vec![skills::BrowseRow {
+                name: "sample".to_string(),
+                repo: "o/r".to_string(),
+                stars: 1,
+                install_uri: seed.text("skills.browse.install_uri", Captured),
+                description: "sample".to_string(),
+                kind: ainb_skill_core::catalog::CatalogEntryKind::default(),
+            }],
+            status: Some(seed.text("skills.browse.status", Captured)),
+            ..skills::BrowseViewState::default()
+        });
+    }
 }
