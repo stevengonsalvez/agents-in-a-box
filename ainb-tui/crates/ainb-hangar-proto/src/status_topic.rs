@@ -291,4 +291,150 @@ mod tests {
             bytes.len()
         );
     }
+
+    /// Every leaf key path of the envelope, in the committed form: array items
+    /// as `[]`, and `current_request` kept as one opaque leaf because its
+    /// inside is the agent's tool input, not a shape this crate owns.
+    const ENVELOPE_KEY_PATHS: &str = "
+head_revision
+health.head_revision
+health.kind
+health.read_revision
+health.reason
+health.stale_since_ms
+host_id
+read_at_ms
+revision
+rows[].read_revision
+rows[].session.active_work_count
+rows[].session.attention
+rows[].session.attention_updated_at
+rows[].session.capabilities.approval_session
+rows[].session.capabilities.approvals
+rows[].session.capabilities.archive
+rows[].session.capabilities.continue_turn
+rows[].session.capabilities.interrupt
+rows[].session.capabilities.kill
+rows[].session.capabilities.restart
+rows[].session.capabilities.retry
+rows[].session.capabilities.send_prompt
+rows[].session.capabilities.start
+rows[].session.capabilities.stop
+rows[].session.capabilities.structured_answer
+rows[].session.capabilities.structured_dismiss
+rows[].session.capabilities.tmux_attach
+rows[].session.capabilities.tmux_text
+rows[].session.capabilities.verified_picker
+rows[].session.confidence
+rows[].session.current_request
+rows[].session.current_request_fingerprint
+rows[].session.cwd
+rows[].session.discovered_at
+rows[].session.display_name
+rows[].session.last_observed_at
+rows[].session.lifecycle
+rows[].session.lifecycle_updated_at
+rows[].session.management
+rows[].session.model
+rows[].session.model_updated_at
+rows[].session.pane_binding
+rows[].session.process_start_fingerprint
+rows[].session.provenance
+rows[].session.provider
+rows[].session.provider_session_id
+rows[].session.reasoning_effort
+rows[].session.session_key
+rows[].session.tmux_target
+rows[].session.transport_health
+rows[].session.updated_revision
+rows[].session.version
+rows[].status.attachment
+rows[].status.cwd
+rows[].status.display_name
+rows[].status.evidence_observed_at
+rows[].status.has_open_request
+rows[].status.host_id
+rows[].status.pane_unbound
+rows[].status.pane_unbound_detail
+rows[].status.provenance
+rows[].status.provider
+rows[].status.session_key
+rows[].status.state
+rows[].status.tier
+rows[].status.turn_complete
+rows[].status.wait_kind
+sequence
+";
+
+    fn leaf_paths(
+        value: &serde_json::Value,
+        path: &str,
+        into: &mut std::collections::BTreeSet<String>,
+    ) {
+        match value {
+            serde_json::Value::Object(map) if !path.ends_with(".current_request") => {
+                for (key, child) in map {
+                    let next = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    leaf_paths(child, &next, into);
+                }
+            }
+            serde_json::Value::Array(items) if !path.ends_with(".current_request") => {
+                for item in items {
+                    leaf_paths(item, &format!("{path}[]"), into);
+                }
+            }
+            _ => {
+                into.insert(path.to_string());
+            }
+        }
+    }
+
+    /// #1038 review item 3: the envelope bypasses the #983 section frame, so its
+    /// shape is locked here. Every optional field is filled and every health
+    /// variant traced; a path not in [`ENVELOPE_KEY_PATHS`] (a new
+    /// `FleetSession` or `AgentStatusRow` field, say) fails until it is triaged
+    /// for the plugin bus and added.
+    #[test]
+    fn the_envelope_key_paths_match_the_committed_list() {
+        let mut full = read(7, 1);
+        let row = &mut full.rows[0];
+        row.session.reasoning_effort = Some("high".to_string());
+        row.session.process_start_fingerprint = Some("pane=%1;pid=1;started=1".to_string());
+        row.status.pane_unbound_detail = Some("pane gone".to_string());
+        row.status.wait_kind = Some(crate::agent_status::WaitKind::Ask);
+        let mut view = StatusView::from_read(full, 1);
+        let mut paths = std::collections::BTreeSet::new();
+        let mut trace = |envelope: &AgentStatusEnvelope| {
+            leaf_paths(&serde_json::to_value(envelope).unwrap(), "", &mut paths);
+        };
+        trace(&AgentStatusEnvelope::from_view(1, &view));
+        view.observe_head(9);
+        trace(&AgentStatusEnvelope::from_view(2, &view));
+        view.mark_unreachable("daemon not reachable", 5);
+        trace(&AgentStatusEnvelope::from_view(3, &view));
+        trace(&AgentStatusEnvelope::absent(
+            4,
+            "daemon serves no agent status read",
+            9,
+        ));
+
+        let committed: std::collections::BTreeSet<String> = ENVELOPE_KEY_PATHS
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
+        let added: Vec<_> = paths.difference(&committed).collect();
+        let removed: Vec<_> = committed.difference(&paths).collect();
+        assert!(
+            added.is_empty() && removed.is_empty(),
+            "envelope shape drifted.\nadded (triage for the plugin bus, then list):\n{}\nremoved:\n{}",
+            added.iter().map(|p| format!("{p}\n")).collect::<String>(),
+            removed.iter().map(|p| format!("{p}\n")).collect::<String>(),
+        );
+    }
 }
