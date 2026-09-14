@@ -47,6 +47,8 @@ pub mod ids {
     pub const LOGIN_FINISHED: &str = "global.login_finished";
     /// `{"report": DaemonActionReport}`
     pub const DAEMON_ACTION_FINISHED: &str = "global.daemon_action_finished";
+    /// `{"store": String, "error": String}`
+    pub const PERSIST_FAILED: &str = "global.persist_failed";
 
     /// Every report command id.
     pub const ALL: &[&str] = &[
@@ -66,6 +68,7 @@ pub mod ids {
         CLIPBOARD_FAILED,
         LOGIN_FINISHED,
         DAEMON_ACTION_FINISHED,
+        PERSIST_FAILED,
     ];
 }
 
@@ -365,6 +368,15 @@ pub fn daemon_action_finished(report: &DaemonActionReport) -> Intent {
     command(ids::DAEMON_ACTION_FINISHED, json!({ "report": report }))
 }
 
+/// Report that the host could not write `store`.
+#[must_use]
+pub fn persist_failed(store: &str, error: &str) -> Intent {
+    command(
+        ids::PERSIST_FAILED,
+        json!({ "store": store, "error": error }),
+    )
+}
+
 /// Whether an OAuth login that exited `exited_ok` left credentials in
 /// `auth_dir`: the one test of success, shared by the reducer and a host that
 /// wants to tell the user before it restores its screen.
@@ -470,6 +482,13 @@ struct DaemonArgs {
     report: DaemonActionReport,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistFailedArgs {
+    store: String,
+    error: String,
+}
+
 fn parse<T: for<'de> Deserialize<'de>>(args: &Args) -> Option<T> {
     serde_json::from_value(args.clone()).ok()
 }
@@ -556,6 +575,12 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
         AppEvent::DaemonActionFinished { .. } => {
             parse::<DaemonArgs>(args).map(|args| AppEvent::DaemonActionFinished {
                 report: args.report,
+            })
+        }
+        AppEvent::PersistFailed { .. } => {
+            parse::<PersistFailedArgs>(args).map(|args| AppEvent::PersistFailed {
+                store: args.store,
+                error: args.error,
             })
         }
         _ => return None,
