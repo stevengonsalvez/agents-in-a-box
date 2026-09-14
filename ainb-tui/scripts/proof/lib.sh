@@ -153,6 +153,17 @@ world_down() {
   if [[ -s "$PROOF_WORLD/web.log" ]]; then
     redact_host <"$PROOF_WORLD/web.log" >"$NODE_DIR/web-log.txt"
   fi
+  local daemon_log
+  daemon_log="$(find "$AINB_HANGAR_HOME/hangar/logs" -type f -name 'daemon.*' 2>/dev/null | sort | tail -1)"
+  if [[ -n "$daemon_log" ]]; then
+    tail -n 200 "$daemon_log" | redact_host >"$NODE_DIR/daemon-log-tail.txt"
+  fi
+  local stderr_file
+  for stderr_file in "$PROOF_WORLD"/*.stderr; do
+    if [[ -s "$stderr_file" ]]; then
+      redact_host <"$stderr_file" >"$NODE_DIR/${stderr_file##*/}.txt"
+    fi
+  done
   # Quit TUIs the way an operator does before anything is signalled.
   for name in $(ptmux list-sessions -F '#{session_name}' 2>/dev/null); do
     ptmux send-keys -t "=$name:" C-c 2>/dev/null || true
@@ -337,7 +348,16 @@ start_tui() {
   # The home screen drops the first key pressed right after its first render
   # (#1029); give it a beat so every scenario's first key lands.
   sleep 1.5
+  # The TUI autostarts its private daemon; a scenario that reads the daemon
+  # before it is up would blame the wrong thing, so wait for it here.
+  if ! wait_for 30 daemon_running; then
+    say "the TUI in $session did not bring its daemon up within 30 s"
+    observe "the daemon the TUI autostarts was not running 30 s after the home screen: $("$AINB_BIN" hangar daemon status 2>&1 | head -1)"
+  fi
 }
+
+# daemon_running: the world's private daemon answers on its socket.
+daemon_running() { "$AINB_BIN" hangar daemon status 2>/dev/null | grep -q 'daemon: running'; }
 
 # tui_pid <session>: pid of the ainb process in a harness pane.
 tui_pid() { ptmux display-message -p -t "=$1:" '#{pane_pid}' 2>/dev/null; }
