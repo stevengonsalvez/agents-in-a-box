@@ -57,7 +57,10 @@ final class Actuator: XCTestCase {
     /// the host to answer the Face ID sheet with a simulated match or non-match.
     func testTapBiometricProbe() {
         app.activate()
-        app.buttons["biometric gate"].tap()
+        // A React Native Pressable exposes its label as static text, not a button.
+        let probe = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "biometric gate")).firstMatch
+        XCTAssertTrue(probe.waitForExistence(timeout: 10))
+        probe.tap()
         stamp("biometric_probe_tapped")
         sleep(20)
     }
