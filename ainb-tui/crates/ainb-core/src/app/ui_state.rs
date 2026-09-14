@@ -125,23 +125,31 @@ impl SessionsPaneState {
         self.expanded_width(terminal_width)
     }
 
-    pub fn clamp_width(width: u16, terminal_width: u16) -> u16 {
-        crate::app::state::clamp_sessions_sidebar_width(width, terminal_width)
-    }
-
     pub fn expanded_width(&self, terminal_width: u16) -> u16 {
-        Self::clamp_width(self.preferred_width(terminal_width), terminal_width)
+        crate::app::state::clamp_sessions_sidebar_width(
+            self.preferred_width(terminal_width),
+            terminal_width,
+        )
     }
 
-    /// The intent that saves this layout as a fraction of a `row`-wide
-    /// screen.
+    /// The intent that saves this layout: the width the user asked for as a
+    /// fraction of a `row`-wide screen, unclamped, so a narrow surface cannot
+    /// shrink the preference every surface draws from. The clamp is applied
+    /// only when drawing. `None` for a row with no width yet.
     #[must_use]
-    pub fn save_layout(&self, row: u16) -> crate::app::Intent {
-        crate::app::pointer::save_sessions_pane_layout(
-            self.expanded_width(row),
-            row,
+    pub fn save_layout(&self, row: u16) -> Option<crate::app::Intent> {
+        if row == 0 {
+            return None;
+        }
+        let fraction = match (self.width, self.saved_fraction) {
+            (Some(width), _) => f64::from(width) / f64::from(row),
+            (None, Some(fraction)) => fraction,
+            (None, None) => f64::from(DEFAULT_SESSIONS_SIDEBAR_WIDTH) / f64::from(row),
+        };
+        Some(crate::app::pointer::save_sessions_pane_layout(
+            fraction,
             self.collapsed,
-        )
+        ))
     }
 
     pub fn edge_highlighted(&self) -> bool {
@@ -268,7 +276,7 @@ impl SessionsPaneState {
             return;
         };
         let requested = x.saturating_sub(rect.x).saturating_add(1);
-        self.width = Some(Self::clamp_width(requested, terminal_width));
+        self.width = Some(requested.min(terminal_width));
     }
 
     pub fn finish_resize(&mut self) -> bool {
@@ -435,7 +443,7 @@ impl UiState {
                 self.sessions_pane.toggle_collapsed();
                 self.needs_redraw = true;
                 let row = self.sessions_pane.last_content_width().unwrap_or(columns);
-                Some(self.sessions_pane.save_layout(row))
+                self.sessions_pane.save_layout(row)
             }
             HostAction::GrowSkillSources | HostAction::ShrinkSkillSources => {
                 use crate::components::skill_manager_screen::{
