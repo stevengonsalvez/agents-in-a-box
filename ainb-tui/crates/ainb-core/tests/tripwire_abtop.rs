@@ -29,7 +29,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// tmux session ainb spawns for the embedded abtop monitor. Must match
-/// `ABTOP_SESSION` in `crates/ainb-core/src/main.rs`'s `AttachAbtop` arm.
+/// the session `crates/ainb-core/src/effect_host.rs` attaches for
+/// `Effect::AttachTerminal(TerminalTarget::Tool(ToolTerminal::Abtop))`.
 const ABTOP_SESSION: &str = "ainb-abtop";
 static ABTOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -248,7 +249,7 @@ fn pressing_t_offers_setup_then_embeds_abtop() {
 /// shortcut is now mirrored there, like stats/witr/skills) returns to the
 /// session list when the user quits abtop — not home.
 ///
-/// Like witr, abtop is a tmux suspend/attach (`AttachAbtop` never touches
+/// Like witr, abtop is a tmux suspend/attach (the host's abtop attach never touches
 /// `current_screen`), so resume-on-origin is automatic — this proves it
 /// end-to-end and that the new session-list `t` binding actually launches
 /// abtop. Seeds `abtop-setup-dismissed` so the first-run consent dialog
