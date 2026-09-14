@@ -346,9 +346,9 @@ struct Drain {
 fn into_section(frame: Frame) -> MirroredSection {
     MirroredSection {
         version: frame.version,
-        host_id: frame.host_id,
+        host_id: frame.host_id.clone(),
         daemon_read: frame.daemon_read,
-        body: frame.body,
+        body: frame.into_body(),
     }
 }
 
