@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ainb_app::config::AppConfig;
-use ainb_app::wire::frame::{FrameBatch, Subscription};
+use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
 use ainb_app::{Intent, Keymap};
 use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::{DesktopHost, FrameSink};
@@ -139,8 +139,9 @@ fn terminal_close(window: tauri::State<'_, Window>, key: String) {
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
 
 /// Attach the webview's frame channel, send it every section it names, and
-/// answer with the host id its frames are held under. The webview owns the one
-/// subscription list; unknown section names are dropped.
+/// answer with the host id its frames are held under: the id the daemon gave
+/// in `auth/hello`, or `local` until it names one (#1066). The webview owns the
+/// one subscription list; unknown section names are dropped.
 #[tauri::command]
 fn subscribe(
     window: tauri::State<'_, Window>,
@@ -149,7 +150,7 @@ fn subscribe(
 ) -> HostId {
     *window.frames.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frames);
     window.shell.subscribe(sections);
-    HostId::local()
+    HostId::daemon()
 }
 
 /// Apply an intent from the webview: a key, a command, pasted text. A
