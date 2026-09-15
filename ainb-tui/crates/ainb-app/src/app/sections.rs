@@ -392,8 +392,6 @@ pub struct ConfigSection {
     pub config_screen_state: ConfigScreenState,
     /// Config popup state for choice/text input popups in config screen
     pub config_popup_state: crate::components::config_popup::ConfigPopupState,
-    // Changelog viewer state
-    pub changelog_state: crate::components::ChangelogState,
     /// Whether the Claude statusline is wired, from the shared probe, copied
     /// in on the tick when it changes. Renderers draw the statusline CTA from
     /// this rather than asking the probe, so a host that only receives
@@ -410,10 +408,16 @@ impl Default for ConfigSection {
             config_screen_state: ConfigScreenState::from_app_config(&app_config),
             app_config,
             config_popup_state: crate::components::config_popup::ConfigPopupState::default(),
-            changelog_state: crate::components::ChangelogState::new(),
             statusline_status: None,
         }
     }
+}
+
+/// Section 21: the changelog viewer's scroll position (#1052). The lines are
+/// static content ([`crate::components::ChangelogState::lines`]).
+#[derive(Debug, Default)]
+pub struct ChangelogSection {
+    pub changelog_state: crate::components::ChangelogState,
 }
 
 #[derive(Debug)]
