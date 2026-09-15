@@ -539,6 +539,11 @@ pub struct TmuxSection {
     // the new target instead of silently refocusing the stale one (see
     // `AppState::in_place_target`).
     pub embed_session: Option<crate::app::effect::TmuxSessionName>,
+    /// The tmux session the host itself runs in, as the host reported it, or
+    /// `None` for a host outside tmux. The own-session rule reads this: that
+    /// row's preview would mirror the host into itself, and attaching it would
+    /// nest it. The reducer never looks it up.
+    pub host_session: Option<crate::app::effect::TmuxSessionName>,
     // Other tmux sessions (not managed by agents-in-a-box)
     pub other_tmux_sessions: Vec<crate::models::OtherTmuxSession>,
     pub other_tmux_expanded: bool,
@@ -554,6 +559,7 @@ impl Default for TmuxSection {
     fn default() -> Self {
         Self {
             embed_session: None,
+            host_session: None,
             other_tmux_sessions: Vec::new(),
             other_tmux_expanded: true, // Default to expanded
             selected_other_tmux_index: None,
