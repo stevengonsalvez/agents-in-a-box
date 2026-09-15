@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use ainb_hangar_store::repo::daemon_identity::{DaemonIdentityRepo, EVENT_ADOPTION_BATCH};
+use ainb_hangar_store::repo::fleet::{WRITE_LOCK_ATTEMPTS, is_lock_contention};
 use sqlx::SqlitePool;
 
 /// Pause between two adoption batches.
@@ -17,19 +18,28 @@ const BATCH_PAUSE: Duration = Duration::from_millis(50);
 
 /// Spawn the task that moves every `local` `fleet_event` row to `host_id`.
 ///
-/// Never fatal: a failed batch is logged and the task stops, leaving the rest
-/// `local` for the next boot, which starts over from the same query.
+/// Never fatal. A batch that loses the write lock is retried after
+/// [`BATCH_PAUSE`], up to [`WRITE_LOCK_ATTEMPTS`] times in a row, because boot is
+/// when the single writer is busiest. Any other fault stops the task and leaves
+/// the rest `local` for the next boot, which starts over from the same query.
 pub fn spawn_event_adoption(pool: SqlitePool, host_id: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut adopted: u64 = 0;
+        let mut contended: u32 = 0;
         loop {
             match DaemonIdentityRepo::adopt_local_events(&pool, &host_id, EVENT_ADOPTION_BATCH)
                 .await
             {
                 Ok(0) => break,
-                Ok(moved) => adopted += moved,
+                Ok(moved) => {
+                    adopted += moved;
+                    contended = 0;
+                }
+                Err(error) if is_lock_contention(&error) && contended + 1 < WRITE_LOCK_ATTEMPTS => {
+                    contended += 1;
+                }
                 Err(error) => {
-                    tracing::warn!(%error, adopted, "fleet_event host adoption stopped");
+                    tracing::error!(%error, adopted, "fleet_event host adoption stopped");
                     return;
                 }
             }
