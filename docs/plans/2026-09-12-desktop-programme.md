@@ -36,7 +36,7 @@ flowchart TD
   end
 
   subgraph S2[slice 2: extraction]
-    P1[P1 ainb-app crate]:::done --> P2[P2 sessions]:::plan --> P3[P3 hangar plugin]:::plan --> P4[P4 review]:::plan --> P5[P5 inbox, config]:::plan --> P6[P6 client, web, sessions.json]:::plan
+    P1[P1 ainb-app crate]:::done --> P2[P2 sessions]:::done --> P3[P3 hangar plugin]:::done --> P4[P4 review]:::done --> P5[P5 inbox, config]:::done --> P6[P6 client, web, sessions.json]:::plan
   end
   SD --> P1
 
