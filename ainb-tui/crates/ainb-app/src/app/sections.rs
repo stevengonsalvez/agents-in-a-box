@@ -196,18 +196,18 @@ pub struct PluginPresence {
 }
 
 /// The requests keeping one plugin screen rendering for hosts that are not
-/// showing it here.
+/// showing it here, one per watching host.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScreenWatch {
-    /// Each request still inside its lease: when it arrived, and the width
-    /// and height the requesting host draws the screen at.
-    pub requests: Vec<(std::time::Instant, u16, u16)>,
+    /// Each watching host's request still inside its lease: when it last
+    /// arrived, and the width and height that host draws the screen at. Keyed
+    /// by host, so a stop or a new size from one host replaces only its own.
+    pub requests:
+        std::collections::BTreeMap<crate::wire::frame::HostId, (std::time::Instant, u16, u16)>,
 }
 
 impl ScreenWatch {
-    /// Distinct viewports kept per screen; past this the oldest is dropped.
-    /// A host renewing one size holds one entry, so only this many different
-    /// sizes watched at once can reach it.
+    /// Hosts kept per screen; past this the least recently renewed is dropped.
     const MAX_REQUESTS: usize = 16;
 
     /// The largest viewport a watch may ask a plugin to render. A larger
@@ -215,11 +215,12 @@ impl ScreenWatch {
     /// arbitrarily large frame.
     pub const MAX_VIEWPORT: (u16, u16) = (1024, 512);
 
-    /// Record a request for `width` by `height` at `now`, clamped to
-    /// [`Self::MAX_VIEWPORT`]. A request for a size already live renews that
-    /// entry's lease instead of adding one. Requests older than `lease` go.
+    /// Record `host`'s request for `width` by `height` at `now`, clamped to
+    /// [`Self::MAX_VIEWPORT`]. It replaces that host's earlier request, size and
+    /// lease both. Requests older than `lease` go.
     pub fn renew(
         &mut self,
+        host: crate::wire::frame::HostId,
         now: std::time::Instant,
         width: u16,
         height: u16,
@@ -230,21 +231,29 @@ impl ScreenWatch {
             height.min(Self::MAX_VIEWPORT.1),
         );
         self.lapse(now, lease);
-        if let Some(entry) = self.requests.iter_mut().find(|(_, w, h)| (*w, *h) == (width, height))
-        {
-            entry.0 = now;
-            return;
+        if !self.requests.contains_key(&host) && self.requests.len() >= Self::MAX_REQUESTS {
+            let stalest = self
+                .requests
+                .iter()
+                .min_by_key(|(_, (at, _, _))| *at)
+                .map(|(stalest, _)| stalest.clone());
+            if let Some(stalest) = stalest {
+                self.requests.remove(&stalest);
+            }
         }
-        if self.requests.len() >= Self::MAX_REQUESTS {
-            self.requests.remove(0);
-        }
-        self.requests.push((now, width, height));
+        self.requests.insert(host, (now, width, height));
+    }
+
+    /// End `host`'s request. Returns whether it had one.
+    pub fn stop(&mut self, host: &crate::wire::frame::HostId) -> bool {
+        self.requests.remove(host).is_some()
     }
 
     /// Drop requests older than `lease` at `now`. Returns whether any went.
     pub fn lapse(&mut self, now: std::time::Instant, lease: std::time::Duration) -> bool {
         let before = self.requests.len();
-        self.requests.retain(|(at, _, _)| now.saturating_duration_since(*at) <= lease);
+        self.requests
+            .retain(|_, (at, _, _)| now.saturating_duration_since(*at) <= lease);
         self.requests.len() != before
     }
 
@@ -252,7 +261,7 @@ impl ScreenWatch {
     /// live request asked for, so no watching host gets a clipped view.
     #[must_use]
     pub fn viewport(&self) -> Option<(u16, u16)> {
-        self.requests.iter().fold(None, |size, (_, width, height)| {
+        self.requests.values().fold(None, |size, (_, width, height)| {
             let (w, h) = size.unwrap_or((0, 0));
             Some(((*width).max(w), (*height).max(h)))
         })

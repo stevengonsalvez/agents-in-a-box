@@ -78,6 +78,8 @@ pub enum AppEvent {
     /// the terminal shows something else, or no longer does.
     WatchPluginScreen {
         screen: String,
+        /// The host watching, so its stop ends only its own request.
+        host: crate::wire::frame::HostId,
         watching: bool,
         /// The viewport the watching host draws the screen at.
         width: u16,
@@ -239,6 +241,10 @@ pub enum AppEvent {
     PluginInputUndelivered {
         plugin: String,
         screen: String,
+    },
+    /// `host` went away: release what it held.
+    HostDisconnected {
+        host: crate::wire::frame::HostId,
     },
     /// The user left the live terminal.
     Detached,
@@ -3984,6 +3990,9 @@ impl EventHandler {
                     "Could not run `{action_id}`: the {plugin} plugin is not running"
                 ));
             }
+            AppEvent::HostDisconnected { host } => {
+                state.release_host_screen_watches(&host, None);
+            }
             AppEvent::PluginInputUndelivered { plugin, screen } => {
                 // Still on the screen the key was for: leave it, as the key
                 // would have had the plugin been able to take it.
@@ -7115,6 +7124,7 @@ impl EventHandler {
             }
             AppEvent::WatchPluginScreen {
                 screen,
+                host,
                 watching,
                 width,
                 height,
@@ -7130,28 +7140,35 @@ impl EventHandler {
                 {
                     tracing::warn!(%screen, width, height, "watch viewport clamped to the maximum");
                 }
+                let no_viewport = width == 0 || height == 0;
                 if !plugin_screen {
                     tracing::warn!(%screen, "watch request for a screen no plugin owns");
-                } else if watching && (width == 0 || height == 0) {
+                } else if watching && no_viewport && watched {
+                    // A host with nothing to draw at is not watching: its
+                    // request ends like a stop, and another host's stays.
+                    tracing::warn!(%screen, width, height, "watch renewal with no viewport; stopped");
+                    state.release_host_screen_watches(&host, Some(&screen));
+                } else if watching && no_viewport {
                     tracing::warn!(%screen, width, height, "watch request with no viewport");
                 } else if watching && watched {
-                    // A renewal moves the lease and maybe the render size,
-                    // neither of which a frame carries.
-                    state.plugins_host.update(|host| {
-                        if let Some(watch) = host.watched_plugin_screens.get_mut(&screen) {
-                            watch.renew(now, width, height, lease);
-                        }
-                        false
+                    // A renewal moves the lease, which no frame carries, and
+                    // may move the render size, which moves the section like a
+                    // stop does.
+                    state.plugins_host.update(|plugins| {
+                        plugins.watched_plugin_screens.get_mut(&screen).is_some_and(|watch| {
+                            let before = watch.viewport();
+                            watch.renew(host, now, width, height, lease);
+                            watch.viewport() != before
+                        })
                     });
                 } else if watching {
                     let mut watch = ScreenWatch::default();
-                    watch.renew(now, width, height, lease);
+                    watch.renew(host, now, width, height, lease);
                     state.plugins_host.watched_plugin_screens.insert(screen, watch);
-                } else {
-                    // A stop names no watcher, so removing the watch would end
-                    // every other host's too. The stopping host just stops
-                    // renewing, and its request lapses with the lease.
-                    tracing::debug!(%screen, "watch stop; the request lapses with its lease");
+                } else if watched {
+                    // A stop ends this host's request only; the screen stays
+                    // watched while another host's request is live.
+                    state.release_host_screen_watches(&host, Some(&screen));
                 }
             }
             AppEvent::NavigateTo(screen_id) => {
