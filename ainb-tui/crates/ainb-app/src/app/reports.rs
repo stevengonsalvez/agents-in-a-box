@@ -37,6 +37,8 @@ pub mod ids {
     pub const TERMINAL_INPUT_CLOSED: &str = "global.terminal_input_closed";
     /// `{"plugin": String, "action_id": String}`
     pub const PLUGIN_ACTION_UNDELIVERED: &str = "global.plugin_action_undelivered";
+    /// `{"plugin": String, "screen": String}`
+    pub const PLUGIN_INPUT_UNDELIVERED: &str = "global.plugin_input_undelivered";
     /// No arguments.
     pub const DETACHED: &str = "global.detached";
     /// `{"outcome": EditorOutcome}`
@@ -64,6 +66,7 @@ pub mod ids {
         TERMINAL_EXITED,
         TERMINAL_INPUT_CLOSED,
         PLUGIN_ACTION_UNDELIVERED,
+        PLUGIN_INPUT_UNDELIVERED,
         DETACHED,
         EDITOR_FINISHED,
         CLIPBOARD_FAILED,
@@ -336,6 +339,16 @@ pub fn plugin_action_undelivered(plugin: &str, action_id: &str) -> Intent {
     )
 }
 
+/// Report that a key leaving `screen` could not be serviced by `plugin`, so
+/// the reducer leaves the screen instead.
+#[must_use]
+pub fn plugin_input_undelivered(plugin: &str, screen: &str) -> Intent {
+    command(
+        ids::PLUGIN_INPUT_UNDELIVERED,
+        json!({ "plugin": plugin, "screen": screen }),
+    )
+}
+
 /// Report that the user left the live terminal.
 #[must_use]
 pub fn detached() -> Intent {
@@ -461,6 +474,13 @@ struct UndeliveredArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct InputUndeliveredArgs {
+    plugin: String,
+    screen: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EditorArgs {
     outcome: EditorOutcome,
 }
@@ -557,6 +577,12 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
             parse::<UndeliveredArgs>(args).map(|args| AppEvent::PluginActionUndelivered {
                 plugin: args.plugin,
                 action_id: args.action_id,
+            })
+        }
+        AppEvent::PluginInputUndelivered { .. } => {
+            parse::<InputUndeliveredArgs>(args).map(|args| AppEvent::PluginInputUndelivered {
+                plugin: args.plugin,
+                screen: args.screen,
             })
         }
         AppEvent::Detached => args.is_null().then_some(AppEvent::Detached),
