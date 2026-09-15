@@ -15,11 +15,13 @@ const CANARY: &str = "ghp_ProofCanary0123456789abcdefghijklmnopq";
 
 fn stub_ainb(dir: &std::path::Path) -> std::path::PathBuf {
     let row = r#""session_id":"95312768-43d4-4a9e-af9a-337e0c57a95d","tmux_session_name":"tmux_repo-95312768","workspace_name":"repo","worktree_path":"/w/repo","created_at":"2026-09-15T00:31:48Z","is_running":true,"claude_active":false"#;
+    let cost = r#"{"totals":{"cost_usd":0.5,"session_count":1,"model_count":1,"bucket":{"input_tokens":10}},"sessions":[{"session_id":"s1","provider":"claude","project":"-home-op-secret-repo","cwd":"/home/op/secret-repo","cost_usd":0.5,"bucket":{}}],"models":[{"model":"claude-sonnet","cost_usd":0.5,"bucket":{}}],"daily":[],"groups":[{"group":"repo","cost_usd":0.5,"session_count":1,"bucket":{}}],"budget_breaches":[]}"#;
     let script = format!(
         "#!/bin/sh\n\
          case \" $* \" in\n\
          *\" list --frame \"*) echo '[{{{row}}}]' ;;\n\
          *\" list \"*) echo '[{{{row},\"display_name\":\"deploy {CANARY}\"}}]' ;;\n\
+         *\" fleet cost \"*) echo '{cost}' ;;\n\
          *) echo null ;;\n\
          esac\n"
     );
@@ -52,4 +54,8 @@ async fn the_web_snapshot_reads_sessions_from_list_frame_not_the_operator_list()
         "the session source is not list --frame: {body}"
     );
     assert!(!body.contains(CANARY), "{body}");
+    // The cost panel keeps the totals and drops the per-session paths (#1113).
+    assert_eq!(snapshot.cost["totals"]["session_count"], 1, "{body}");
+    assert!(!body.contains("/home/op"), "{body}");
+    assert!(!body.contains("secret-repo"), "{body}");
 }
