@@ -31,7 +31,10 @@ scenario() {
   # Up to 180 s, as in s-c-answered: the web's poller can lag behind the
   # daemon for minutes (#1055), and a shorter wait failed run 11 on that alone.
   local id
-  web_card_id 'Proof S-D' race-card
+  if ! web_card_id 'Proof S-D' race-card 180; then
+    check "the web lists the card within 180 s" false
+    return
+  fi
   id="$WEB_CARD_ID"
   web_answer "$id" 1 >"$PROOF_WORLD/race-1.json" &
   web_answer "$id" 2 >"$PROOF_WORLD/race-2.json" &
