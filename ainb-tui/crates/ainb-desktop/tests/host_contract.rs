@@ -124,6 +124,24 @@ fn reframe_sends_every_subscribed_section_again() {
     assert_eq!(framed, vec!["frame sessions", "frame shell"]);
 }
 
+/// A renderer that attaches names its sections and gets exactly those, once.
+#[test]
+fn subscribe_frames_exactly_the_named_sections_in_one_batch() {
+    let log = Log::default();
+    let mut host = host(&[], &log);
+    let _ = host.tick();
+    assert!(
+        log.borrow().is_empty(),
+        "nothing is framed before a renderer subscribes"
+    );
+
+    host.subscribe(Subscription::only(&[SectionId::Sessions, SectionId::Fleet]));
+
+    let mut framed = log.borrow().clone();
+    framed.sort();
+    assert_eq!(framed, vec!["frame fleet", "frame sessions"]);
+}
+
 /// A key-only row writes outside ainb, so a chord that lands on one is named
 /// for the shell to refuse; any other chord is not.
 #[test]
