@@ -28,7 +28,10 @@ scenario() {
   check "the TUI control center shows the web-bound card" wait_screen tui '1 need you' 20
   capture tui control-before-web-answer
   local id reply
-  web_card_id 'answered from the web' web-card
+  if ! web_card_id 'answered from the web' web-card 180; then
+    check "the web lists the card within 180 s" false
+    return
+  fi
   id="$WEB_CARD_ID"
   curl -sS "$WEB_URL/api/snapshot" | redact_host >"$NODE_DIR/web-snapshot-before-answer.json"
   CAPTURES+=("web-snapshot-before-answer.json")
@@ -43,7 +46,10 @@ scenario() {
   sleep 4
   ask_session "Proof S-C: answered in the TUI?" proof-sc-tui || { check "second ASK session" false; return; }
   check "the TUI shows the second card" wait_screen tui '1 need you' 20
-  web_card_id 'answered in the TUI' tui-card
+  if ! web_card_id 'answered in the TUI' tui-card 180; then
+    check "the web lists the card within 180 s" false
+    return
+  fi
   id="$WEB_CARD_ID"
   capture tui control-before-tui-answer
   keys tui Enter
