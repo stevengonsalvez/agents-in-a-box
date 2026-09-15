@@ -2804,13 +2804,84 @@ mod tests {
                 .with_detail("Decide the sqlite path"),
         );
 
-        state.refresh_attention_markers(2_000);
+        state.refresh_attention(2_000);
 
         let chips = &state.sessions.workspaces[0].sessions[0].live_attention;
         assert_eq!(chips.len(), 1, "the daemon row must land: {chips:?}");
         assert_eq!(chips[0].kind, AttentionKind::Ask);
         assert_eq!(chips[0].source, AttentionSource::Daemon);
         assert_eq!(chips[0].detail.as_deref(), Some("Decide the sqlite path"));
+    }
+
+    /// A refresh that finds nothing new bumps no section, so a mirror frames
+    /// nothing: the desktop calls this from its tick.
+    #[test]
+    fn a_refresh_with_unchanged_rows_bumps_neither_sessions_nor_fleet() {
+        use crate::app::versioned::SectionId;
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let cwd = "/work/steady";
+        let mut state = state_with_session_at(cwd, Some("tmux_steady"));
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-steady".into())
+                .with_detail("Pick a port"),
+        );
+        let versions = |state: &AppState| {
+            let all = state.versions();
+            (
+                all[SectionId::Sessions.index()],
+                all[SectionId::Fleet.index()],
+            )
+        };
+
+        state.refresh_attention(2_000);
+        let settled = versions(&state);
+        state.refresh_attention(3_000);
+        state.refresh_attention(4_000);
+
+        assert_eq!(
+            versions(&state),
+            settled,
+            "nothing changed, so nothing bumped"
+        );
+        assert_eq!(
+            state.sessions.workspaces[0].sessions[0].live_attention.len(),
+            1
+        );
+    }
+
+    /// An attached session's clear point moves every refresh without bumping
+    /// Fleet, and lands in the baseline once, when the session detaches.
+    #[test]
+    fn an_attached_session_folds_its_clear_point_only_on_detach() {
+        use crate::app::versioned::SectionId;
+        let cwd = "/work/attached";
+        let mut state = state_with_session_at(cwd, Some("tmux_attached"));
+        let id = state.sessions.workspaces[0].sessions[0].id;
+        state.sessions.workspaces[0].sessions[0].is_attached = true;
+        let fleet = |state: &AppState| state.versions()[SectionId::Fleet.index()];
+
+        state.refresh_attention(2_000);
+        let settled = fleet(&state);
+        state.refresh_attention(3_000);
+        assert_eq!(
+            fleet(&state),
+            settled,
+            "an attached refresh keeps Fleet still"
+        );
+        assert_eq!(state.fleet.attention_baseline.get(&id), None);
+
+        state.sessions.workspaces[0].sessions[0].is_attached = false;
+        state.refresh_attention(4_000);
+        assert_eq!(
+            state.fleet.attention_baseline.get(&id),
+            Some(&3_000),
+            "the clear point is the last refresh that saw it attached"
+        );
+        let folded = fleet(&state);
+        state.refresh_attention(5_000);
+        assert_eq!(fleet(&state), folded);
     }
 
     #[test]
@@ -2826,7 +2897,7 @@ mod tests {
         );
 
         assert!(state.mark_session_stopped_for_missing_tmux(id, "tmux_missing"));
-        state.refresh_attention_markers(2_000);
+        state.refresh_attention(2_000);
 
         assert!(
             state.sessions.workspaces[0].sessions[0].live_attention.is_empty(),
@@ -2847,11 +2918,11 @@ mod tests {
                 .with_detail("agent command failed"),
         );
 
-        state.refresh_attention_markers(2_000);
+        state.refresh_attention(2_000);
         assert_eq!(state.sessions.workspaces[0].sessions[0].errors.len(), 1);
 
         assert!(state.mark_session_stopped_for_missing_tmux(id, "tmux_missing_error"));
-        state.refresh_attention_markers(3_000);
+        state.refresh_attention(3_000);
 
         let session = &state.sessions.workspaces[0].sessions[0];
         assert!(session.live_attention.is_empty());
@@ -2896,7 +2967,7 @@ mod tests {
             all,
         );
 
-        state.refresh_attention_markers(2_000);
+        state.refresh_attention(2_000);
 
         assert_eq!(
             state.find_session(parent_id).unwrap().live_attention.len(),
@@ -2931,7 +3002,7 @@ mod tests {
             all,
         );
 
-        state.refresh_attention_markers(2_000);
+        state.refresh_attention(2_000);
 
         assert!(
             state.find_session(id).unwrap().live_attention.is_empty(),
@@ -2960,7 +3031,7 @@ mod tests {
             all,
         );
 
-        state.refresh_attention_markers(2_000);
+        state.refresh_attention(2_000);
 
         assert_eq!(state.find_session(id).unwrap().live_attention.len(), 1);
     }
@@ -2976,7 +3047,7 @@ mod tests {
             SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-9".into()),
         );
 
-        state.refresh_attention_markers(2_000);
+        state.refresh_attention(2_000);
 
         assert_eq!(
             state.sessions.workspaces[0].sessions[0].live_attention[0].answerable,
@@ -3012,7 +3083,7 @@ mod tests {
             not_running: true,
         };
 
-        state.refresh_attention_markers(2_000);
+        state.refresh_attention(2_000);
 
         let chip = &state.sessions.workspaces[0].sessions[0].live_attention[0];
         assert!(
@@ -3040,7 +3111,7 @@ mod tests {
         state.sessions.workspaces[0].sessions[0].status =
             SessionStatus::Error("adapter exited 1: no such model".to_string());
 
-        state.refresh_attention_markers(2_000);
+        state.refresh_attention(2_000);
 
         let chip = state.sessions.workspaces[0].sessions[0]
             .live_attention
@@ -3081,7 +3152,7 @@ mod tests {
 
         // First observation stamps the clock.
         let raised_at = 1_000_000_000_000;
-        state.refresh_attention_markers(raised_at);
+        state.refresh_attention(raised_at);
         assert!(
             state.sessions.workspaces[0].sessions[0]
                 .live_attention
@@ -3091,7 +3162,7 @@ mod tests {
         );
 
         // Three hours later, still failed, still the same failure.
-        state.refresh_attention_markers(raised_at + 3 * 60 * 60 * 1000);
+        state.refresh_attention(raised_at + 3 * 60 * 60 * 1000);
 
         let session = &state.sessions.workspaces[0].sessions[0];
         assert!(
@@ -3133,7 +3204,7 @@ mod tests {
                 .with_detail("the agent escalated: cannot reach the API"),
         );
 
-        state.refresh_attention_markers(raised_at + 5 * 60 * 60 * 1000);
+        state.refresh_attention(raised_at + 5 * 60 * 60 * 1000);
 
         let session = &state.sessions.workspaces[0].sessions[0];
         assert!(
@@ -3164,7 +3235,7 @@ mod tests {
             SessionAttention::daemon(AttentionKind::Approve, 1_000, "att-x".into()),
         );
 
-        state.refresh_attention_markers(2_000);
+        state.refresh_attention(2_000);
 
         assert!(state.sessions.workspaces[0].sessions[0].live_attention.is_empty());
         assert_eq!(
@@ -3185,7 +3256,7 @@ mod tests {
             SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into()),
         );
 
-        state.refresh_attention_markers(2_000);
+        state.refresh_attention(2_000);
 
         assert!(
             state.sessions.workspaces[0].sessions[0].live_attention.is_empty(),
@@ -3215,7 +3286,7 @@ mod tests {
             SessionAttention::daemon(AttentionKind::Approve, 1_000, "att-1".into()),
         );
 
-        state.refresh_attention_markers(2_000);
+        state.refresh_attention(2_000);
 
         assert_eq!(
             state.sessions.workspaces[0].sessions[0].live_attention.len(),
