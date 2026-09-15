@@ -47,6 +47,7 @@
 //! daemon's pool owns `transcript_tx`, so this crate stays a library that a
 //! standalone process could host unchanged.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ainb_hangar_core::idgen::IdGen;
@@ -146,6 +147,11 @@ pub struct HighWater {
     pub ingest_order: i64,
 }
 
+/// The monotonic clock the commit cadence is measured on. [`Instant::now`] in
+/// production; a test swaps in a hand-driven one through
+/// [`StoreWriter::with_clock`] so the interval elapses exactly when it says.
+pub type WriterClock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
 /// Buffers one session's chunks and commits them on the cadence.
 pub struct StoreWriter {
     store: Store,
@@ -156,6 +162,7 @@ pub struct StoreWriter {
     id_gen: Box<dyn IdGen>,
     buffered: Vec<NewFleetProviderEvent>,
     buffered_bytes: usize,
+    clock: WriterClock,
     last_flush: Instant,
     commits: u64,
     rows_written: u64,
@@ -185,12 +192,22 @@ impl StoreWriter {
             id_gen,
             buffered: Vec::new(),
             buffered_bytes: 0,
+            clock: Arc::new(Instant::now),
             last_flush: Instant::now(),
             commits: 0,
             rows_written: 0,
             bytes_written: 0,
             rows_dropped: 0,
         }
+    }
+
+    /// Measure the commit cadence on `clock` instead of [`Instant::now`]. The
+    /// interval restarts from the new clock's now.
+    #[must_use]
+    pub fn with_clock(mut self, clock: WriterClock) -> Self {
+        self.last_flush = clock();
+        self.clock = clock;
+        self
     }
 
     /// Record the adapter's CURRENT session id, stamped onto later rows.
@@ -234,7 +251,7 @@ impl StoreWriter {
     /// leg: a buffered chunk becomes visible without waiting for a second
     /// chunk.
     pub async fn tick(&mut self) -> Result<Option<HighWater>, FleetProviderEventError> {
-        if self.buffered.is_empty() || self.last_flush.elapsed() < self.config.flush_interval {
+        if self.buffered.is_empty() || self.since_last_flush() < self.config.flush_interval {
             return Ok(None);
         }
         self.flush().await
@@ -254,7 +271,7 @@ impl StoreWriter {
     /// Either way the error is returned, so a caller that treats a flush
     /// failure as a session-level fault still sees it.
     pub async fn flush(&mut self) -> Result<Option<HighWater>, FleetProviderEventError> {
-        self.last_flush = Instant::now();
+        self.last_flush = (self.clock)();
         if self.buffered.is_empty() {
             return Ok(None);
         }
@@ -326,7 +343,11 @@ impl StoreWriter {
 
     fn flush_due(&self) -> bool {
         self.buffered_bytes >= self.config.flush_bytes
-            || self.last_flush.elapsed() >= self.config.flush_interval
+            || self.since_last_flush() >= self.config.flush_interval
+    }
+
+    fn since_last_flush(&self) -> Duration {
+        (self.clock)().saturating_duration_since(self.last_flush)
     }
 
     /// Drop the oldest buffered rows until the buffer is back under
