@@ -1,12 +1,12 @@
 //! The desktop's embedded host: one `AppState`, driven through `dispatch`, with
 //! every change framed for the webview.
 
-use ainb_app::app::RendererHost;
 use ainb_app::app::intent::{Btn, Pos};
-use ainb_app::app::keymap::HostAction;
+use ainb_app::app::keymap::{HostAction, active_contexts};
+use ainb_app::app::{KEY_ONLY_COMMANDS, RendererHost};
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
-use ainb_app::{AppState, Effect, Intent, Keymap};
+use ainb_app::{AppState, Chord, CommandId, Effect, Intent, Keymap};
 
 /// Where framed state goes: the Tauri channel in the app, a recorder in tests.
 pub trait FrameSink {
@@ -149,6 +149,21 @@ impl<S: FrameSink> DesktopHost<S> {
             dropped = pending.len(),
             "effect reports kept queueing effects; the chain was cut"
         );
+    }
+
+    /// The key-only row `chord` runs in the current state, if it runs one.
+    ///
+    /// Those rows write outside ainb (`global.wire_statusline` edits Claude
+    /// Code's settings), so the reducer runs them only from a key. A chord the
+    /// webview sends is script-reachable, so the shell refuses it there.
+    #[must_use]
+    pub fn key_only_command(&self, chord: &Chord) -> Option<CommandId> {
+        let (ctx, _) = self.keymap.resolve_with_context(&active_contexts(&self.state), chord)?;
+        self.keymap
+            .commands()
+            .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))
+            .map(|(id, _)| id)
+            .filter(|id| KEY_ONLY_COMMANDS.contains(&id.as_str()))
     }
 
     /// Layout work for the webview queued since the last call.
