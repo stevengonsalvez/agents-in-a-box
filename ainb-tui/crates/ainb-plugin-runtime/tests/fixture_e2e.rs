@@ -944,9 +944,11 @@ fn a_wedged_plugin_keeps_a_bounded_key_inbox_and_counts_drops() {
     }
 
     let stats = handle.input_inbox_stats(&id).expect("registered");
-    assert_eq!(
-        stats.keys_queued,
-        ainb_plugin_runtime::inbox::INPUT_INBOX_CAPACITY,
+    // Full, and no fuller. One short of full is the same verdict: the task
+    // may have taken one key off the queue and be blocked writing it.
+    let capacity = ainb_plugin_runtime::inbox::INPUT_INBOX_CAPACITY;
+    assert!(
+        (capacity - 1..=capacity).contains(&stats.keys_queued),
         "a plugin that is not reading leaves the inbox full, and no fuller: {stats:?}"
     );
     assert!(
