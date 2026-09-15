@@ -2973,7 +2973,7 @@ pub enum WorkspaceLoadResult {
 
 /// Load workspaces asynchronously (standalone function for use in spawned tasks)
 /// This is called from background task to avoid blocking the main thread
-pub async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
+async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
     info!("load_workspaces_async: Starting");
 
     // Boss-mode (Docker) and Interactive-mode (tmux) sessions are fetched
@@ -3766,7 +3766,7 @@ impl AppState {
     }
 
     /// Check if OAuth token needs refresh (expires within 30 minutes)
-    pub fn oauth_token_needs_refresh(credentials_path: &std::path::Path) -> bool {
+    fn oauth_token_needs_refresh(credentials_path: &std::path::Path) -> bool {
         use std::fs;
 
         if let Ok(contents) = fs::read_to_string(credentials_path) {
@@ -4265,10 +4265,90 @@ impl AppState {
     }
 
     /// Timeout for Docker operations in seconds
-    pub const DOCKER_TIMEOUT_SECS: u64 = 10;
+    const DOCKER_TIMEOUT_SECS: u64 = 10;
 
     /// Start loading workspaces in the background (non-blocking)
     /// Returns a channel receiver that will receive the result
+    /// Load the workspaces in the background and apply them on a later tick
+    /// through [`Self::check_workspace_loading_complete`].
+    ///
+    /// Owns the load policy every host shares: the whole load is bounded by the
+    /// Docker timeout, and a failure or a timeout lands as its
+    /// `WorkspaceLoadResult` rather than blocking the host. Must be called
+    /// inside a tokio runtime.
+    pub fn start_workspace_load(&mut self) {
+        let result_sender = self.start_background_workspace_loading();
+        tokio::spawn(async move {
+            let budget = std::time::Duration::from_secs(Self::DOCKER_TIMEOUT_SECS);
+            let result = match tokio::time::timeout(budget, load_workspaces_async()).await {
+                Ok(Ok(workspaces)) => {
+                    info!(
+                        "Background workspace loading succeeded: {} workspaces",
+                        workspaces.len()
+                    );
+                    WorkspaceLoadResult::Success(workspaces)
+                }
+                Ok(Err(e)) => {
+                    warn!("Background workspace loading failed: {}", e);
+                    WorkspaceLoadResult::Error(e.to_string())
+                }
+                Err(_) => {
+                    warn!(
+                        "Background workspace loading timed out after {}s",
+                        Self::DOCKER_TIMEOUT_SECS
+                    );
+                    WorkspaceLoadResult::Timeout
+                }
+            };
+            // The receiver is gone only when the host that asked has.
+            let _ = result_sender.send(result);
+        });
+    }
+
+    /// Refresh the Boss mode OAuth tokens when they are close to expiry and
+    /// Docker can run the refresh. With `notify`, the outcome is posted as a
+    /// notice; a startup refresh stays quiet.
+    ///
+    /// The Docker check is the cached display-class answer: a stale "no" defers
+    /// the refresh to the next call, which every host paces itself.
+    pub async fn refresh_oauth_tokens_if_due(&mut self, notify: bool) {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let credentials_path = home.join(".agents-in-a-box").join("auth").join(".credentials.json");
+        if !credentials_path.exists() || !Self::oauth_token_needs_refresh(&credentials_path) {
+            return;
+        }
+        if !self.is_docker_available().await {
+            info!("Docker not available - skipping OAuth token refresh");
+            return;
+        }
+        match self.refresh_oauth_tokens().await {
+            Ok(()) => {
+                info!("OAuth tokens refreshed");
+                if notify {
+                    self.add_notification(Notification {
+                        message: "✅ OAuth tokens refreshed automatically".to_string(),
+                        notification_type: NotificationType::Success,
+                        created_at: Instant::now(),
+                        duration: Duration::from_secs(5),
+                    });
+                }
+            }
+            Err(e) => {
+                warn!("Failed to refresh OAuth tokens: {}", e);
+                if notify {
+                    self.add_notification(Notification {
+                        message: format!("⚠️ Token refresh failed: {}", e),
+                        notification_type: NotificationType::Warning,
+                        created_at: Instant::now(),
+                        duration: Duration::from_secs(10),
+                    });
+                }
+            }
+        }
+    }
+
     pub fn start_background_workspace_loading(
         &mut self,
     ) -> mpsc::UnboundedSender<WorkspaceLoadResult> {
@@ -10446,7 +10526,7 @@ impl AppState {
     /// DISPLAY CLASS ONLY, with the same split as `is_docker_available_sync`:
     /// anything that would leak a container on a stale "no" must go through
     /// `boss_cleanup_docker_gate` instead.
-    pub async fn is_docker_available(&self) -> bool {
+    async fn is_docker_available(&self) -> bool {
         docker_answer_or_probe_async(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_async)
             .await
     }
