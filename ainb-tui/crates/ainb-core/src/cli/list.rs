@@ -294,8 +294,8 @@ mod tests {
             ]
         );
         assert_eq!(
-            rows[2].worktree_path,
-            "/w/repo-5b1f2a8e-0000-4000-8000-000000000003"
+            rows[2].worktree_name,
+            "repo-5b1f2a8e-0000-4000-8000-000000000003"
         );
     }
 
@@ -306,7 +306,7 @@ mod tests {
                 session_id: "bad".to_string(),
                 tmux_session_name: None,
                 workspace_name: "repo".to_string(),
-                worktree_path: "/w".to_string(),
+                worktree_name: "w".to_string(),
                 created_at: "not a stamp".to_string(),
                 is_running: true,
                 claude_active: false,
@@ -315,7 +315,7 @@ mod tests {
                 session_id: "good".to_string(),
                 tmux_session_name: None,
                 workspace_name: "repo".to_string(),
-                worktree_path: "/w".to_string(),
+                worktree_name: "w".to_string(),
                 created_at: "2026-09-15T00:00:00Z".to_string(),
                 is_running: true,
                 claude_active: false,
