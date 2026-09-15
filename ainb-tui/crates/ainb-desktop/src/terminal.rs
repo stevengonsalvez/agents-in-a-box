@@ -46,6 +46,10 @@ pub const WINDOW_BYTES: usize = 4 * 1024 * 1024;
 /// fast pane crosses the IPC boundary in few, large messages.
 const CHUNK_BYTES: usize = 64 * 1024;
 
+/// How long a full window waits for an acknowledgement before it is assumed
+/// lost and the window reopens.
+const ACK_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The largest grid a tab may ask its PTY for.
 const MAX_ROWS: u16 = 500;
 const MAX_COLS: u16 = 1000;
@@ -182,7 +186,20 @@ impl Flow {
             if state.sink.is_some() && state.unacked < WINDOW_BYTES {
                 break;
             }
-            state = self.wake.wait(state).unwrap_or_else(PoisonError::into_inner);
+            let (next, waited) = self
+                .wake
+                .wait_timeout(state, ACK_TIMEOUT)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = next;
+            if waited.timed_out() && state.sink.is_some() && state.unacked >= WINDOW_BYTES {
+                // An acknowledgement was lost (a webview that dropped one):
+                // resend rather than hold the tab forever.
+                tracing::warn!(
+                    unacked = state.unacked,
+                    "no terminal acknowledgement for 10 s; reopening the window"
+                );
+                state.unacked = 0;
+            }
         }
         let len = bytes.len();
         let sent = state.sink.as_mut().is_some_and(|sink| sink(bytes));
