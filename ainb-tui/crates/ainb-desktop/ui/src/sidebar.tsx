@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
 import type { FleetView_Serialize, SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
-import { ringFor, rowStatus } from "./sessions.ts";
+import { label, ringFor, rowStatus } from "./sessions.ts";
 
 interface Props {
   sessions: SessionsView_Serialize | undefined;
@@ -29,7 +29,7 @@ export function Sidebar(props: Props) {
         <For each={props.sessions?.workspaces}>
           {(workspace, w) => (
             <section class="workspace" data-workspace={workspace.name}>
-              <div class="workspace-name">{workspace.name}</div>
+              <div class="workspace-name">{label(workspace.name)}</div>
               <ul>
                 <For each={workspace.sessions}>
                   {(session, s) => {
@@ -47,8 +47,8 @@ export function Sidebar(props: Props) {
                       >
                         <span class="cursor">{selected() ? "▶" : ""}</span>
                         <span class={`ring ${rowStatus(session.status)}`} title={ring() ?? rowStatus(session.status)} />
-                        <span class="name">{session.name}</span>
-                        <span class="branch">{session.branch_name}</span>
+                        <span class="name">{label(session.name)}</span>
+                        <span class="branch">{label(session.branch_name)}</span>
                       </li>
                     );
                   }}
