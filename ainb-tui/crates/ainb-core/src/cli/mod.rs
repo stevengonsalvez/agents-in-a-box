@@ -206,7 +206,8 @@ pub struct ListArgs {
 
     /// Print the web dashboard's session rows as JSON, projected from the
     /// redacted Sessions frame: labels withheld, text scrubbed. `ainb web`
-    /// reads this; an operator's own list keeps the plain form.
+    /// reads this; an operator's own list keeps the plain form. Always JSON:
+    /// it overrides `--format`.
     #[arg(long, hide = true)]
     pub frame: bool,
 }
