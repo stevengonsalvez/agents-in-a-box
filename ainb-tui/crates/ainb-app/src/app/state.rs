@@ -574,7 +574,7 @@ impl AppState {
         }
     }
 
-    /// True when the selected row is the tmux session this TUI runs in.
+    /// True when the selected row is the tmux session this host runs in.
     ///
     /// Its preview would mirror the TUI into itself, so the preview pane shows
     /// a placeholder instead and no observer is started.
@@ -584,15 +584,15 @@ impl AppState {
 
     /// Whether `name` is the tmux session the host reported running in.
     fn is_host_tmux_session(&self, name: &str) -> bool {
-        self.tmux.host_session.as_ref().is_some_and(|host| host.as_str() == name)
+        self.host.host_tmux_session.as_deref() == Some(name)
     }
 
     /// Record the tmux session the host runs in, or `None` outside tmux.
     ///
     /// A host calls this as often as it likes: an unchanged name is not a write.
-    pub fn set_host_tmux_session(&mut self, session: Option<crate::app::effect::TmuxSessionName>) {
-        if self.tmux.host_session != session {
-            self.tmux.host_session = session;
+    pub fn set_host_tmux_session(&mut self, session: Option<String>) {
+        if self.host.host_tmux_session != session {
+            self.host.host_tmux_session = session;
         }
     }
 
