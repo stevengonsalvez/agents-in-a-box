@@ -186,10 +186,24 @@ fn web_rows(sessions: &[SessionInfo]) -> Vec<ainb_app::wire::web::WebSessionRow>
     let mut state = ainb_app::AppState::new();
     state.sessions.get_mut().workspaces = workspaces;
     // The frame groups sessions by workspace; the web list draws newest first,
-    // as `ainb list` does. RFC 3339 UTC stamps sort in time order as text.
+    // as `ainb list` does. Sorted on the parsed instant: RFC 3339 text is not in
+    // time order when two stamps carry fractions of different widths.
     let mut rows = ainb_app::wire::web::session_rows(&state);
-    rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    sort_newest_first(&mut rows);
     rows
+}
+
+/// Newest `created_at` first. A stamp that does not parse sorts last, as the
+/// oldest possible instant.
+fn sort_newest_first(rows: &mut [ainb_app::wire::web::WebSessionRow]) {
+    rows.sort_by_cached_key(|row| {
+        std::cmp::Reverse(
+            DateTime::parse_from_rfc3339(&row.created_at)
+                .map_or(DateTime::<Utc>::MIN_UTC, |instant| {
+                    instant.with_timezone(&Utc)
+                }),
+        )
+    });
 }
 
 /// Output sessions as JSON
@@ -283,6 +297,61 @@ mod tests {
             rows[2].worktree_path,
             "/w/repo-5b1f2a8e-0000-4000-8000-000000000003"
         );
+    }
+
+    #[test]
+    fn an_unparseable_created_at_sorts_last() {
+        let mut rows = vec![
+            ainb_app::wire::web::WebSessionRow {
+                session_id: "bad".to_string(),
+                tmux_session_name: None,
+                workspace_name: "repo".to_string(),
+                worktree_path: "/w".to_string(),
+                created_at: "not a stamp".to_string(),
+                is_running: true,
+                claude_active: false,
+            },
+            ainb_app::wire::web::WebSessionRow {
+                session_id: "good".to_string(),
+                tmux_session_name: None,
+                workspace_name: "repo".to_string(),
+                worktree_path: "/w".to_string(),
+                created_at: "2026-09-15T00:00:00Z".to_string(),
+                is_running: true,
+                claude_active: false,
+            },
+        ];
+        sort_newest_first(&mut rows);
+        let ids: Vec<_> = rows.iter().map(|row| row.session_id.as_str()).collect();
+        assert_eq!(ids, ["good", "bad"]);
+    }
+
+    #[test]
+    fn frame_rows_sort_on_the_instant_not_the_stamp_text() {
+        let row = |id: &str, created_at: &str| SessionInfo {
+            session_id: id.to_string(),
+            tmux_session_name: format!("tmux_repo-{id}"),
+            workspace_name: "repo".to_string(),
+            display_name: None,
+            worktree_path: "/w/repo".to_string(),
+            created_at: DateTime::parse_from_rfc3339(created_at).unwrap().with_timezone(&Utc),
+            is_running: true,
+            claude_active: false,
+        };
+        // Same millisecond: ".100000001Z" is one nanosecond later than
+        // ".100Z", but sorts before it as text ('0' < 'Z').
+        let rows = web_rows(&[
+            row(
+                "5b1f2a8e-0000-4000-8000-000000000001",
+                "2026-09-15T00:00:00.100Z",
+            ),
+            row(
+                "5b1f2a8e-0000-4000-8000-000000000002",
+                "2026-09-15T00:00:00.100000001Z",
+            ),
+        ]);
+        let ids: Vec<_> = rows.iter().map(|row| &row.session_id[33..]).collect();
+        assert_eq!(ids, ["002", "001"]);
     }
 
     #[test]

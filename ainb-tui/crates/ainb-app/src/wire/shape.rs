@@ -83,19 +83,68 @@ pub fn trace_states(states: &[AppState]) -> trace::Trace {
 
 /// The web dashboard's session rows (`/api/snapshot`'s `sessions[]`), projected
 /// from the Sessions frame by [`crate::wire::web::session_rows`]. Traced like a
-/// frame, so the key-path fixture, the name and type deny-lists, the canary and
-/// the tripwire all see the row keys and values: a field the frame withholds
-/// cannot come back on the web through a new row key (#1056).
+/// frame, so the key-path fixture and the name and type deny-lists see the row
+/// keys and values: a field the frame withholds cannot come back on the web
+/// through a new row key (#1056). The canary and the tripwire build from the
+/// frames alone and do not see these rows.
+///
+/// `needs[]` is traced the same way from a sample daemon card that carries
+/// every key the daemon writes, so a card key the allow-list starts passing
+/// shows up as a new path (#1081).
 fn web_snapshot_trace(state: &AppState) -> trace::Trace {
     #[derive(serde::Serialize)]
     struct WebSnapshotSessions {
         sessions: Vec<crate::wire::web::WebSessionRow>,
+        needs: Vec<crate::wire::web::WebNeedCard>,
     }
     let rows = WebSnapshotSessions {
         sessions: crate::wire::web::session_rows(state),
+        needs: sample_web_needs(&mut PlainSeed),
     };
     trace::trace("web_snapshot", &rows)
         .unwrap_or_else(|error| panic!("web snapshot rows failed to serialise: {error}"))
+}
+
+/// The web needs cards projected from sample daemon cards: every key
+/// `ainb-web`'s inbox mapping writes, a fully populated ASK payload with its
+/// text drawn from `seed`, and one unparsed payload.
+///
+/// Public so the canary and the tripwire in `tests/state_serde.rs` run their
+/// seeds through the needs projection as they do through the frames (#1081).
+pub fn sample_web_needs(seed: &mut dyn Seed) -> Vec<crate::wire::web::WebNeedCard> {
+    use TextKind::Captured;
+    let cards = serde_json::json!([
+        {
+            "attentionId": "01J0SAMPLEATTENTION",
+            "kind": "ASK",
+            "wireKind": "ask_user_question",
+            "sessionId": "sample-session",
+            "cwd": format!("/work/{}", seed.text("needs.cwd", Captured)),
+            "workspaceId": "sample-workspace",
+            "degraded": false,
+            "createdAt": 1_700_000_000_000_i64,
+            "channels": ["web"],
+            "sessionKey": "claude:sample-session",
+            "state": "waiting",
+            "provenance": "hook",
+            "tier": 0,
+            "evidenceObservedAt": 1_700_000_000_000_i64,
+            "hostId": "local",
+            "paneUnbound": false,
+            "payload": {
+                "question": seed.text("needs.question", Captured),
+                "options": [seed.text("needs.option", Captured)],
+                "text": seed.text("needs.text", Captured),
+                "marker": seed.text("needs.marker", Captured),
+                "snippet": seed.text("needs.snippet", Captured),
+                "pattern": seed.text("needs.pattern", Captured),
+                "message": seed.text("needs.message", Captured),
+                "tool_input": {"questions": [seed.text("needs.tool_input", Captured)]},
+            },
+        },
+        {"kind": "ERR", "payload": seed.text("needs.unparsed_payload", Captured)},
+    ]);
+    crate::wire::web::need_cards(&cards)
 }
 
 /// The frame around a section body, as it is serialised: `frame.section`,

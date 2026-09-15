@@ -36,9 +36,10 @@ impl FakeSource {
                 "claude_active": true
             }
         ]);
-        let needs = json!([
-            { "kind": "ASK", "context": { "question": "pick option 2" }, "session": { "cwd": "/tmp/demo" } }
-        ]);
+        // A daemon card, as the data source projects it for the browser.
+        let needs = ainb_app::wire::web::need_cards(&json!([
+            { "kind": "ASK", "sessionId": "abc", "cwd": "/tmp/demo", "payload": { "question": "pick option 2" } }
+        ]));
         CoreSnapshot { sessions, needs }
     }
 }

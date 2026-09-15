@@ -392,9 +392,9 @@ async fn cost(State(state): State<AppState>) -> Response {
 
 /// Shared helper: read the cached snapshot and return one projected field as
 /// JSON. Borrows the cached value rather than re-shelling per request.
-async fn project(
+async fn project<T: serde::Serialize>(
     state: &AppState,
-    pick: impl FnOnce(&FleetSnapshot) -> &serde_json::Value,
+    pick: impl FnOnce(&FleetSnapshot) -> &T,
 ) -> Response {
     match state.resolve_snapshot().await {
         Ok(snap) => Json(pick(&snap)).into_response(),
@@ -447,7 +447,7 @@ mod tests {
     use crate::data::{
         CoreFuture, CoreSnapshot, CostFuture, DataError, FleetSnapshot, SnapshotFuture,
     };
-    use serde_json::{Value, json};
+    use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A data source whose `core` and `cost` fetch counters advance
@@ -487,7 +487,7 @@ mod tests {
                 let n = self.core_fetches.fetch_add(1, Ordering::SeqCst);
                 Ok::<_, DataError>(CoreSnapshot {
                     sessions: json!([{ "tick": n }]),
-                    needs: json!([]),
+                    needs: Vec::new(),
                 })
             })
         }

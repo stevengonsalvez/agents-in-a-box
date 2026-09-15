@@ -501,6 +501,18 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "session working directory, drawn in the session list",
     ),
     (
+        "WebNeedCard.hostId",
+        "the host a web needs card came from, e.g. `local`",
+    ),
+    (
+        "WebNeedCard.sessionKey",
+        "the card's `provider:session-id` identity, not a credential",
+    ),
+    (
+        "WebNeedPayload.message",
+        "attention message text on a web needs card, scrubbed through redact::scrub",
+    ),
+    (
         "WebSessionRow.worktree_path",
         "the web session list's worktree path, Session.workspace_path from the Sessions frame",
     ),
@@ -732,6 +744,14 @@ const TYPE_ALLOW: &[(&str, &str)] = &[
     (
         "UnitRow.targets",
         "tool names a skill unit targets, e.g. `claude`",
+    ),
+    (
+        "WebNeedCard.channels",
+        "push channel tokens (`web`, `os`) resolved at raise time",
+    ),
+    (
+        "WebNeedPayload.options",
+        "ASK option labels on a web needs card, each scrubbed through redact::scrub",
     ),
     (
         "ValidatedPath.expanded_path",
@@ -1477,6 +1497,10 @@ fn no_credential_shaped_value_reaches_the_wire() {
             find_in_frame(section_name(id), &frame, &mut found);
         }
     }
+    // The web needs projection is a wire too (#1081): every credential shape
+    // seeded into a daemon card must be scrubbed out of the web card.
+    let needs = serde_json::to_value(shape::sample_web_needs(&mut seed)).expect("needs");
+    find_in_frame("web_snapshot.needs", &needs, &mut found);
     assert!(
         found.is_empty(),
         "tripwire: {} credential-shaped value(s) in the frames:\n  {}",

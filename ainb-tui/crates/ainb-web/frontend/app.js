@@ -98,7 +98,7 @@
 
   // Needs come from the daemon attention inbox (`attention/list`, spec P8/D18),
   // mapped in crates/ainb-web/src/daemon.rs to cards of shape:
-  //   { attentionId, kind: "ASK|ERR|WAIT", wireKind, sessionId, cwd,
+  //   { attentionId, kind: "ASK|ERR|WAIT", wireKind, sessionId, workspaceName,
   //     workspaceId, degraded, createdAt, payload }
   // `payload` is the parsed request context (ASK → { question, options }) or the
   // raw string when it did not parse. An ASK card with an `attentionId` is
@@ -107,8 +107,11 @@
     return (row.kind || "").toUpperCase() || "ASK";
   }
 
+  // The card carries no cwd (#1081): `workspaceName` is its last path
+  // component, which for an ainb worktree is the worktree directory, not the
+  // session list's workspace name.
   function needTitle(row) {
-    return row.cwd || row.workspaceId || row.sessionId || "session";
+    return row.workspaceName || row.workspaceId || row.sessionId || "session";
   }
 
   function needDetail(row) {
