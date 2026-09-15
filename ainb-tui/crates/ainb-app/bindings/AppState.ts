@@ -833,22 +833,6 @@ export type ChangedFile = {
 	deletions: number,
 };
 
-/**
- *  State for the changelog viewer: where it is scrolled to. The lines
- *  themselves are static content behind [`ChangelogState::lines`], so a frame
- *  of this state carries two numbers, not the whole changelog (#1052).
- */
-export type ChangelogState = {
-	/**  Current scroll offset */
-	scroll_offset: number,
-	/**  Total number of lines */
-	total_lines: number,
-};
-
-export type ChangelogView = {
-	changelog_state: ChangelogState,
-};
-
 /**  Authentication provider for Claude API */
 export type ClaudeAuthProvider = 
 /**  System authentication (Claude Pro/Max subscription) */
@@ -3725,7 +3709,6 @@ export type SectionBodies_Serialize = {
 	onboarding: OnboardingView_Serialize,
 	shell: ShellView_Serialize,
 	agent_status: AgentStatusView,
-	changelog: ChangelogView,
 };
 
 /**
