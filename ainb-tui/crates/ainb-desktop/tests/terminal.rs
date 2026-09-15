@@ -280,3 +280,48 @@ fn closing_a_tab_reports_the_user_left_it() {
     );
     assert_eq!(args["outcome"], serde_json::json!("detached"));
 }
+
+/// The executor opens a tab for a session attach and keeps the documented
+/// failure for a target a tab cannot hold.
+#[test]
+fn the_executor_opens_tabs_for_session_attaches_only() {
+    use ainb_app::app::{Effect, TerminalTarget, TmuxSessionName};
+    use ainb_desktop::executor::DesktopExecutor;
+    use ainb_desktop::host::Executor;
+
+    let _session = Session::start("d1c-exec", "sleep 600");
+    let recorder = Arc::new(Recorder::default());
+    let executor = DesktopExecutor::new(None);
+    let terminals = Terminals::new(
+        private_tmux(),
+        Events(Arc::clone(&recorder)),
+        executor.report_sender(),
+    );
+    let mut executor = executor.with_terminals(terminals.clone());
+    let name = TmuxSessionName::new("d1c-exec").expect("a valid tmux name");
+
+    let reports = executor.execute(Effect::AttachTerminal(TerminalTarget::Session {
+        id: uuid::Uuid::nil(),
+        tmux_session: name.clone(),
+    }));
+    assert!(
+        reports.is_empty(),
+        "an opened tab reports nothing yet: {reports:?}"
+    );
+    assert_eq!(state_of(&terminals, "d1c-exec"), Some(TabState::Attached));
+
+    let reports = executor.execute(Effect::AttachTerminal(TerminalTarget::InPlace {
+        tmux_session: name,
+        show_menu_bar: false,
+    }));
+    let (id, _) = report_named(&reports[0]);
+    assert_eq!(id, ainb_app::app::reports::ids::IN_PLACE_FAILED);
+
+    terminals.close("d1c-exec");
+    let (id, _) = report_named(&executor.take_deferred()[0]);
+    assert_eq!(
+        id,
+        ainb_app::app::reports::ids::ATTACH_FINISHED,
+        "a closed tab reports on the tick"
+    );
+}
