@@ -110,11 +110,32 @@ fn ainb_bin() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// Send the shell's tracing to `<hangar home>/desktop.log`, so its warnings
+/// exist somewhere once the window hides the terminal it was started from.
+fn init_logging(hangar_home: &std::path::Path) {
+    let path = hangar_home.join("desktop.log");
+    let file = std::fs::create_dir_all(hangar_home)
+        .and_then(|()| std::fs::OpenOptions::new().create(true).append(true).open(&path));
+    match file {
+        Ok(file) => {
+            let installed = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(Mutex::new(file))
+                .try_init();
+            if let Err(error) = installed {
+                eprintln!("desktop logging not installed: {error}");
+            }
+        }
+        Err(error) => eprintln!("desktop log {} not opened: {error}", path.display()),
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let hangar_home = ainb_hangar_core::hangar_home()
                 .ok_or("the hangar home cannot be resolved: set AINB_HANGAR_HOME")?;
+            init_logging(&hangar_home);
             // The desktop loads the user config itself and hands it to the
             // host, which reads nothing from disk for it.
             let config = AppConfig::load().unwrap_or_else(|error| {
