@@ -35,18 +35,20 @@ pub type CoreFuture<'a> =
 /// A `'static` boxed future, the return shape of [`DataSource::cost`].
 pub type CostFuture<'a> = Pin<Box<dyn Future<Output = Value> + Send + 'a>>;
 
-/// A snapshot of everything the dashboard renders, as opaque JSON values
-/// proxied straight from the underlying `ainb` commands. Keeping these as
-/// [`Value`] (rather than re-deriving the CLI's structs) means new fields the
-/// CLI adds flow through to the frontend with no code change here.
+/// A snapshot of everything the dashboard renders, as JSON values. `sessions`
+/// and `needs` are projections through `ainb_app::wire::web` allow-lists, so a
+/// field the CLI or the daemon adds does NOT reach the browser until the
+/// projection names it and the key-path fixture locks it (#1056, #1081).
+/// `cost` is proxied as the CLI prints it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FleetSnapshot {
     /// `ainb --format json list --frame`: the live session list, as rows
     /// projected from the redacted Sessions frame (#1056).
     pub sessions: Value,
-    /// The daemon `attention/list` inbox mapped to ASK/ERR/WAIT cards (D18).
-    /// Each card carries `attentionId` so an ASK can be answered via
-    /// `POST /api/answer`.
+    /// The daemon `attention/list` inbox mapped to ASK/ERR/WAIT cards (D18),
+    /// projected by `ainb_app::wire::web::need_cards`: no `cwd`, no raw
+    /// request, payload text scrubbed (#1081). Each card carries `attentionId`
+    /// so an ASK can be answered via `POST /api/answer`.
     pub needs: Value,
     /// `ainb --format json fleet cost` — cost rollups. `null` when the verb is
     /// absent from this build (cost-surface not yet merged) so the dashboard
@@ -312,7 +314,12 @@ async fn daemon_needs() -> Value {
                         empty()
                     })
                 };
-                crate::daemon::attention_to_needs_with_status(&rows, &status.rows)
+                // The browser gets the allow-listed card, never the daemon's:
+                // `cwd` and the raw request stay behind, as section 20's frame
+                // keeps them (#1081).
+                let cards = crate::daemon::attention_to_needs_with_status(&rows, &status.rows);
+                serde_json::to_value(ainb_app::wire::web::need_cards(&cards))
+                    .unwrap_or_else(|_| Value::Array(Vec::new()))
             }
             Err(e) => {
                 tracing::debug!(error = %e, "attention/list unavailable; needs degrades to empty");
