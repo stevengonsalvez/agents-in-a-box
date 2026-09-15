@@ -36,14 +36,15 @@ fn a_started_workspace_load_is_applied_on_a_later_tick() {
     );
 
     host.start_workspace_load();
-    let _ = host.tick();
-    assert_eq!(
-        loading.lock().expect("frame log").last(),
-        Some(&true),
-        "the first tick frames the load as running"
+    // Checked before any tick: the runtime is multi-threaded, so the load can
+    // finish before the first tick frames anything.
+    assert!(
+        host.state().workspace_load.is_loading_workspaces,
+        "the host reports the load running as soon as it starts"
     );
 
-    // The load is bounded by the state's 10 s Docker budget.
+    // Only a tick applies the result, so the last frame reads `false` only
+    // once one has. The load is bounded by the state's 10 s Docker budget.
     let deadline = Instant::now() + Duration::from_secs(30);
     while loading.lock().expect("frame log").last() != Some(&false) {
         assert!(
