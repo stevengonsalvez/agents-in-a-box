@@ -143,9 +143,10 @@ pub async fn list_sessions(args: &ListArgs) -> Result<Vec<SessionInfo>> {
 ///
 /// The sessions are put into an app state's Sessions section, labels
 /// included, and the rows are projected from that section's redacted frame
-/// (`ainb_app::wire::web`). A label is withheld by the frame, and any other
-/// string passes the frame's scrub, so the browser gets what a mirror renderer
-/// gets and never the operator's own list as typed (#1056).
+/// (`ainb_app::wire::web`). The label is withheld by the frame, so the browser
+/// gets what a mirror renderer gets, never the operator's own list as typed
+/// (#1056). The tmux session name and worktree path pass through as stored:
+/// the frame does not scrub them.
 fn web_rows(sessions: &[SessionInfo]) -> Vec<ainb_app::wire::web::WebSessionRow> {
     use ainb_app::models::{Session, SessionStatus as ModelStatus, Workspace};
     let mut workspaces: Vec<Workspace> = Vec::new();
