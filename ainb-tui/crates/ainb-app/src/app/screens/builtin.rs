@@ -6,8 +6,8 @@
 use super::ids;
 use crate::app::AppState;
 use crate::app::keymap::{Chord, Key, KeyAction, KeyContext, Keymap, Mods, SubContext};
-use ainb_plugin_runtime::{
-    KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT, KeyCode, KeyEvent, MouseEvent,
+use ainb_plugin_protocol::params::{
+    KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT, KeyCode, KeyEvent, MouseEvent, Viewport,
 };
 
 /// Static screen → plugin routing table: the render tick, plugin action
@@ -106,7 +106,8 @@ pub enum PluginRoute {
 }
 
 /// The keymap chord a plugin key event stands for, so a plugin screen's keys
-/// resolve against the same rows as every other key.
+/// resolve against the same rows as every other key. The wire has no Insert
+/// key, so no plugin key event becomes [`Key::Insert`].
 fn chord_for(key: &KeyEvent) -> Chord {
     let code = match key.code {
         KeyCode::Char { ch } => Key::Char(ch),
@@ -184,7 +185,10 @@ pub fn route_key_to_focused_plugin(
     // is wedged the key would not be acted on, so the central dispatch takes
     // it (PanelBack) rather than trapping the user with only Ctrl+C.
     let back = is_back_key(keymap, key);
-    if back && (!presence.registered || presence.wedged) {
+    // Esc is a floor on a dead screen: a rowset rebound away from it must not
+    // trap the operator on a plugin that will never pop.
+    let dead = !presence.registered || presence.wedged;
+    if dead && (back || matches!(key.code, KeyCode::Esc)) {
         return PluginRoute::Host;
     }
     // Every other key stays claimed on an absent plugin's screen, so the
@@ -214,7 +218,7 @@ pub fn route_key_to_focused_plugin(
 pub fn route_mouse_to_focused_plugin(
     state: &AppState,
     origin: (u16, u16),
-    area: (u16, u16),
+    area: Viewport,
     event: &MouseEvent,
 ) -> PluginRoute {
     let Some(plugin_name) = plugin_id_for_screen(&state.shell.current_screen) else {
@@ -235,7 +239,9 @@ pub fn route_mouse_to_focused_plugin(
     if matches!(event.kind, ainb_plugin_runtime::MouseKind::Moved) {
         return PluginRoute::Consumed;
     }
-    let Some((col, row)) = click_to_viewport(event.col, event.row, origin, area) else {
+    let Some((col, row)) =
+        click_to_viewport(event.col, event.row, origin, (area.width, area.height))
+    else {
         return PluginRoute::Consumed;
     };
     let mut mouse = *event;
@@ -426,6 +432,45 @@ mod tests {
         );
     }
 
+    /// With the back row rebound away from Esc, Esc still leaves a wedged or
+    /// absent screen through the host, while on a live plugin it is a plain key.
+    #[test]
+    fn esc_still_leaves_a_dead_plugin_screen_when_the_back_row_is_rebound() {
+        let overrides =
+            crate::app::keymap_toml::KeymapOverrides::parse("[\"plugin.owned\"]\nback = \"x\"\n")
+                .expect("valid override");
+        let keymap = Keymap::defaults().with_overrides(&overrides).expect("rebinds");
+        let esc = key(KeyCode::Esc, 0);
+
+        for (registered, wedged) in [(true, true), (false, false)] {
+            let mut state = on_plugin_screen(ids::ANALYTICS, registered, wedged);
+            assert_eq!(
+                route_key_to_focused_plugin(&state, &keymap, &esc),
+                PluginRoute::Host,
+                "registered {registered}, wedged {wedged}"
+            );
+            let event = crate::app::events::EventHandler::handle_key_event_with_keymap(
+                Chord::from(Key::Esc),
+                &mut state,
+                &keymap,
+                &mut crate::app::NoRenderer,
+            );
+            assert!(
+                matches!(
+                    event,
+                    Some(crate::app::AppEvent::PanelBack | crate::app::AppEvent::GoToHomeScreen)
+                ),
+                "the host's own rows take Esc off the screen: {event:?}"
+            );
+        }
+
+        let live = on_plugin_screen(ids::ANALYTICS, true, false);
+        assert!(matches!(
+            route_key_to_focused_plugin(&live, &keymap, &esc),
+            PluginRoute::Forward(crate::app::Effect::ForwardToPlugin { back: false, .. })
+        ));
+    }
+
     /// A live plugin gets the key as an effect for the host, with `back` set
     /// on the keys that leave the screen.
     #[test]
@@ -495,7 +540,7 @@ mod tests {
         };
         let state = on_plugin_screen(ids::HANGAR, true, false);
         assert_eq!(
-            route_mouse_to_focused_plugin(&state, (3, 1), (20, 10), &down(10, 4)),
+            route_mouse_to_focused_plugin(&state, (3, 1), Viewport::new(20, 10), &down(10, 4)),
             PluginRoute::Forward(crate::app::Effect::ForwardToPlugin {
                 plugin: "hangar-tui".to_string(),
                 screen: ids::HANGAR.to_string(),
@@ -504,7 +549,7 @@ mod tests {
             })
         );
         assert_eq!(
-            route_mouse_to_focused_plugin(&state, (3, 1), (20, 10), &down(1, 1)),
+            route_mouse_to_focused_plugin(&state, (3, 1), Viewport::new(20, 10), &down(1, 1)),
             PluginRoute::Consumed
         );
         let moved = MouseEvent {
@@ -512,18 +557,18 @@ mod tests {
             ..down(10, 4)
         };
         assert_eq!(
-            route_mouse_to_focused_plugin(&state, (3, 1), (20, 10), &moved),
+            route_mouse_to_focused_plugin(&state, (3, 1), Viewport::new(20, 10), &moved),
             PluginRoute::Consumed
         );
         let absent = on_plugin_screen(ids::HANGAR, false, false);
         assert_eq!(
-            route_mouse_to_focused_plugin(&absent, (3, 1), (20, 10), &down(10, 4)),
+            route_mouse_to_focused_plugin(&absent, (3, 1), Viewport::new(20, 10), &down(10, 4)),
             PluginRoute::Consumed
         );
         let mut home = AppState::default();
         home.shell.current_screen = ids::HOME.to_string();
         assert_eq!(
-            route_mouse_to_focused_plugin(&home, (3, 1), (20, 10), &down(10, 4)),
+            route_mouse_to_focused_plugin(&home, (3, 1), Viewport::new(20, 10), &down(10, 4)),
             PluginRoute::Host
         );
     }
