@@ -341,7 +341,10 @@ impl RuntimeHandle {
         // keypress doesn't queue behind chunked `HandleEvent` publishes
         // (a 50-chunk `sessions.usage_data` refresh was previously
         // starving Esc on the burndown screen).
-        handle.key_inbox.send(params).is_ok()
+        let before = handle.key_inbox.dropped();
+        let sent = handle.key_inbox.send(params).is_ok();
+        warn_on_input_drop(plugin_id, "key", before, handle.key_inbox.dropped());
+        sent
     }
 
     /// Forward a single normalized mouse event to the plugin owning the
@@ -373,7 +376,26 @@ impl RuntimeHandle {
         };
         // Mark dirty BEFORE enqueue (same race-avoidance as `send_key`).
         handle.render_dirty.store(true, Ordering::Release);
-        handle.mouse_inbox.send(params).is_ok()
+        let before = handle.mouse_inbox.dropped();
+        let sent = handle.mouse_inbox.send(params).is_ok();
+        warn_on_input_drop(plugin_id, "mouse", before, handle.mouse_inbox.dropped());
+        sent
+    }
+
+    /// How full this plugin's key and mouse inboxes are, and how many events
+    /// each has pushed out (#1087). `None` for an unknown plugin.
+    ///
+    /// Both inboxes hold [`crate::inbox::INPUT_INBOX_CAPACITY`] events and drop
+    /// the oldest when full, so a plugin that stops reading its stdin costs a
+    /// bounded amount of memory however long the user keeps typing at it.
+    #[must_use]
+    pub fn input_inbox_stats(&self, plugin_id: &PluginId) -> Option<InputInboxStats> {
+        self.lookup(plugin_id).map(|handle| InputInboxStats {
+            keys_queued: handle.key_inbox.len(),
+            keys_dropped: handle.key_inbox.dropped(),
+            mouse_queued: handle.mouse_inbox.len(),
+            mouse_dropped: handle.mouse_inbox.dropped(),
+        })
     }
 
     /// Ask `plugin_id` to run its action `action_id` with `payload`.
@@ -677,5 +699,32 @@ impl RuntimeHandle {
             })
             .map_err(|_| RuntimeError::ShuttingDown)?;
         Ok(rx)
+    }
+}
+
+/// A plugin's input inbox depths and drop counts, from
+/// [`RuntimeHandle::input_inbox_stats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputInboxStats {
+    /// Key events queued and not yet written to the plugin.
+    pub keys_queued: usize,
+    /// Key events pushed out of a full inbox.
+    pub keys_dropped: u64,
+    /// Mouse events queued and not yet written to the plugin.
+    pub mouse_queued: usize,
+    /// Mouse events pushed out of a full inbox.
+    pub mouse_dropped: u64,
+}
+
+/// Log an input drop on the first one and then at every power of two, so a
+/// wedged plugin being typed at leaves a trail without a line per keystroke.
+fn warn_on_input_drop(plugin_id: &PluginId, input: &str, before: u64, after: u64) {
+    if after > before && after.is_power_of_two() {
+        tracing::warn!(
+            plugin = %plugin_id,
+            input,
+            dropped = after,
+            "plugin input inbox full; dropping the oldest events"
+        );
     }
 }
