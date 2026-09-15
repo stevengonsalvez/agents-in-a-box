@@ -26,9 +26,8 @@
 
 use std::time::Duration;
 
-use ainb_hangar_store::repo::mutation_ledger::{
-    LOCAL_HOST_ID, MutationLedgerRepo, RetentionPolicy,
-};
+use ainb_hangar_store::repo::daemon_identity::{DaemonIdentityRepo, UNMINTED_HOST_ID};
+use ainb_hangar_store::repo::mutation_ledger::{MutationLedgerRepo, RetentionPolicy};
 use sqlx::SqlitePool;
 
 /// Gap between steady-state passes.
@@ -56,22 +55,31 @@ pub fn spawn_mutation_retention_sweeper(pool: SqlitePool) -> tokio::task::JoinHa
         let clock = SystemClock;
         tokio::time::sleep(FIRST_PASS_DELAY).await;
         loop {
-            match MutationLedgerRepo::retain(
-                &pool,
-                LOCAL_HOST_ID,
-                clock.now_ms(),
-                RetentionPolicy::default(),
-            )
-            .await
-            {
-                Ok(report) if report.expired == 0 && report.deleted == 0 => {}
-                Ok(report) => tracing::info!(
-                    expired = report.expired,
-                    deleted = report.deleted,
-                    "mutation_ledger retention pass"
-                ),
-                Err(error) => {
-                    tracing::warn!(error = %error, "mutation_ledger retention failed");
+            // Rows a pre-#1066 daemon wrote under `local` age out on the same
+            // policy as rows under the minted id (#1066).
+            let hosts = DaemonIdentityRepo::known_host_ids(&pool).await.unwrap_or_else(|error| {
+                tracing::warn!(error = %error, "daemon identity unreadable; sweeping local only");
+                vec![UNMINTED_HOST_ID.to_string()]
+            });
+            for host_id in hosts {
+                match MutationLedgerRepo::retain(
+                    &pool,
+                    &host_id,
+                    clock.now_ms(),
+                    RetentionPolicy::default(),
+                )
+                .await
+                {
+                    Ok(report) if report.expired == 0 && report.deleted == 0 => {}
+                    Ok(report) => tracing::info!(
+                        host_id,
+                        expired = report.expired,
+                        deleted = report.deleted,
+                        "mutation_ledger retention pass"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "mutation_ledger retention failed");
+                    }
                 }
             }
             tokio::time::sleep(SWEEP_PERIOD).await;
