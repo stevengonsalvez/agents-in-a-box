@@ -1625,11 +1625,26 @@ mod tests {
     }
 
     /// The focused Preset row keeps its `• modified` badge visible at any
-    /// width: the hint goes first, then the pills fold to the cycle display
-    /// (#1050).
+    /// width: the hint goes first, then the pills fold to the cycle display,
+    /// and there the preset name gives way before the badge does (#1050).
     #[test]
     fn render_preset_row_keeps_the_modified_badge_when_the_row_is_tight() {
         use ratatui::{Terminal, backend::TestBackend};
+
+        fn draw(state: &ConfigureState, width: u16) -> String {
+            let mut terminal = Terminal::new(TestBackend::new(width, 2)).unwrap();
+            terminal.draw(|f| render_preset_row(f, state, f.size(), true)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .take(width as usize)
+                .map(|c| c.symbol())
+                .collect()
+        }
+        const BADGE: &str = "\u{2022} modified";
+
         let mut state = mk_state();
         state.preset_selection = PresetSelection::Named(1);
         assert!(
@@ -1637,34 +1652,44 @@ mod tests {
             "precondition: b differs from the loaded a"
         );
 
-        let draw = |width: u16| {
-            let mut terminal = Terminal::new(TestBackend::new(width, 2)).unwrap();
-            terminal.draw(|f| render_preset_row(f, &state, f.size(), true)).unwrap();
-            terminal
-                .backend()
-                .buffer()
-                .content()
-                .iter()
-                .map(|c| c.symbol())
-                .collect::<String>()
-        };
+        // Pills with the hint need 65 cells, pills alone 49.
+        let full = draw(&state, 65);
+        assert!(
+            full.contains(BADGE) && full.contains("to change"),
+            "{full:?}"
+        );
+        for width in [64, 49] {
+            let pills = draw(&state, width);
+            assert!(
+                pills.contains(BADGE) && pills.contains("Custom"),
+                "{width}: {pills:?}"
+            );
+            assert!(!pills.contains("to change"), "{width}: {pills:?}");
+        }
+        let cycle = draw(&state, 48);
+        assert!(
+            cycle.contains(BADGE) && !cycle.contains("Custom"),
+            "{cycle:?}"
+        );
 
-        let wide = draw(120);
-        assert!(
-            wide.contains("modified") && wide.contains("to change"),
-            "{wide:?}"
+        // The longest shipped preset name at 40 columns: the name is cut, the
+        // badge is whole.
+        let long = "antigravity-interactive-yolo";
+        state.available_presets[1] = long.to_string();
+        state.presets_cache.insert(
+            long.to_string(),
+            RepositoryPreset {
+                name: long.to_string(),
+                ..Default::default()
+            },
         );
-        let tight = draw(60);
         assert!(
-            tight.contains("modified"),
-            "the badge outranks the hint: {tight:?}"
+            state.is_modified(),
+            "precondition: the long preset is modified"
         );
-        assert!(!tight.contains("to change"), "{tight:?}");
-        let narrow = draw(40);
-        assert!(
-            narrow.contains("modified"),
-            "the cycle display keeps the badge: {narrow:?}"
-        );
+        let narrow = draw(&state, 40);
+        assert!(narrow.trim_end().ends_with(BADGE), "{narrow:?}");
+        assert!(narrow.contains("antigravity-\u{2026}"), "{narrow:?}");
     }
 
     #[test]
