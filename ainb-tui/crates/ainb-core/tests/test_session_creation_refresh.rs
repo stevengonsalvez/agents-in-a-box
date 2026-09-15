@@ -17,7 +17,7 @@
 // or tmux/Docker, mirroring the original tests which also stubbed creation out
 // and only verified the refresh/reset behaviour.
 
-use ainb::app::App;
+use ainb::App;
 use ainb::app::events::EventHandler;
 use ainb::app::screens::ids as screen_ids;
 use ainb::app::state::NewSessionStep;
