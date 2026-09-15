@@ -128,9 +128,7 @@ fn sample_need_cards() -> serde_json::Value {
             "paneUnbound": false,
             "payload": {
                 "question": "sample question",
-                "header": "sample header",
                 "options": ["sample option"],
-                "multiSelect": false,
                 "text": "sample text",
                 "marker": "sample marker",
                 "snippet": "sample snippet",
