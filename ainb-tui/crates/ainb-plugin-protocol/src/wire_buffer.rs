@@ -60,7 +60,7 @@ impl Color {
 /// One painted cell. The `modifier` field is a bitfield of style
 /// flags (bold, italic, ...) — host-side mapping lives in the
 /// runtime crate, not here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Cell {
     /// Visible glyph(s) in this cell. May be a multi-codepoint
     /// grapheme cluster; host re-measures width on paint.
@@ -97,7 +97,7 @@ impl Cell {
 /// for. Cells outside `0..width × 0..height` are technically legal
 /// but the host clamps them silently; emit them only at your own
 /// risk.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WireBuffer {
     /// Viewport width in cells.
     pub width: u16,
