@@ -12222,7 +12222,6 @@ impl AppState {
                 true
             });
         }
-        self.host.attention_attached_at.retain(|id, _| live.contains(id));
         // Every (session, kind) a LOCAL chip still claims this pass. Anything
         // else loses its clock below, so a question that closed and a later one
         // of the same kind do not share an instant.
