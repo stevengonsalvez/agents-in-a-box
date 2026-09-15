@@ -12252,6 +12252,8 @@ impl AppState {
             } else if let Some(seen) = self.host.attention_attached_at.remove(&id) {
                 // The session was detached since the last refresh: its clear
                 // point is the last instant it was seen attached.
+                // This fold is the baseline's only writer, so a plain compare
+                // is safe; a second writer would have to keep the `max`.
                 if self.fleet.attention_baseline.get(&id) != Some(&seen) {
                     self.fleet.update(|fleet| {
                         fleet.attention_baseline.insert(id, seen);
