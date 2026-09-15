@@ -976,7 +976,7 @@ impl FleetRepo {
             None => {
                 let mut row = new_session(event);
                 // The daemon's minted id, read in this transaction (#1066).
-                row.host_id = crate::repo::daemon_identity::host_id_on(&mut **tx).await?;
+                row.host_id = crate::repo::daemon_identity::host_id_on(tx).await?;
                 (row, true)
             }
         };
