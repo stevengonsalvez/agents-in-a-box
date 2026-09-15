@@ -96,6 +96,9 @@ pub fn execute<'t>(
             Work::Done(if back && !serviced {
                 vec![reports::plugin_input_undelivered(&plugin, &screen)]
             } else {
+                if !serviced {
+                    tracing::debug!(%plugin, %screen, "plugin input dropped: not serviced");
+                }
                 Vec::new()
             })
         }
