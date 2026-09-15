@@ -14,7 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 const CANARY: &str = "ghp_ProofCanary0123456789abcdefghijklmnopq";
 
 fn stub_ainb(dir: &std::path::Path) -> std::path::PathBuf {
-    let row = r#""session_id":"95312768-43d4-4a9e-af9a-337e0c57a95d","tmux_session_name":"tmux_repo-95312768","workspace_name":"repo","worktree_path":"/w/repo","created_at":"2026-09-15T00:31:48Z","is_running":true,"claude_active":false"#;
+    let row = r#""session_id":"95312768-43d4-4a9e-af9a-337e0c57a95d","tmux_session_name":"tmux_repo-95312768","workspace_name":"repo","worktree_name":"repo","created_at":"2026-09-15T00:31:48Z","is_running":true,"claude_active":false"#;
     let script = format!(
         "#!/bin/sh\n\
          case \" $* \" in\n\
