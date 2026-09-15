@@ -271,7 +271,6 @@ impl AppState {
             SectionId::Onboarding => self.onboarding.version(),
             SectionId::Shell => self.shell.version(),
             SectionId::AgentStatus => self.agent_status.version(),
-            SectionId::Changelog => self.changelog.version(),
         }
     }
 
@@ -2940,9 +2939,6 @@ pub struct AppState {
     /// Section 20: agent status from one joined daemon read (T0-section).
     pub agent_status: Versioned<AgentStatusSection>,
 
-    /// Section 21: the changelog viewer's scroll position (#1052).
-    pub changelog: Versioned<crate::app::sections::ChangelogSection>,
-
     /// Effects queued by the step being applied, for the host to drain. Not a
     /// section: see [`crate::app::effect::EffectOutbox`].
     effects: crate::app::effect::EffectOutbox,
@@ -3363,7 +3359,6 @@ impl Default for AppState {
             recovery: Versioned::default(),
             mcp_pool: Versioned::default(),
             agent_status: Versioned::default(),
-            changelog: Versioned::default(),
             effects: crate::app::effect::EffectOutbox::default(),
             statusline: StatuslineProbe::default(),
             host: HostOnlyState::default(),
