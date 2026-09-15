@@ -7,7 +7,7 @@ import { createFrameStore, type SectionName } from "./store.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { Sidebar } from "./sidebar.tsx";
-import { accelerator, stepTab, type Accelerator, type Tab, type TabsView } from "./tabs.ts";
+import { accelerator, openRowIntent, rowOf, stepTab, type Accelerator, type RowId, type Tab, type TabsView } from "./tabs.ts";
 import { TerminalView } from "./terminal.tsx";
 import "./shell.css";
 
@@ -92,8 +92,10 @@ function Shell() {
     if (view.focus !== null) activate(view.focus);
     else if (!view.tabs.some((tab) => tab.key === active())) activate(view.tabs[0]?.key ?? null);
   };
+  /** Select a session-list row and attach it, so the reducer marks it attached. */
+  const openRow = (row: RowId) => void invoke("dispatch", { intent: openRowIntent(row) });
   const choose = (tab: Tab) => {
-    if (tab.state === "detached") void invoke("terminal_reattach", { key: tab.key });
+    if (tab.state === "detached") openRow(rowOf(tab.target));
     activate(tab.key);
   };
   const onAccelerator = (shell: Accelerator) => {
@@ -141,11 +143,7 @@ function Shell() {
   window.addEventListener("keydown", onKey);
   onCleanup(() => window.removeEventListener("keydown", onKey));
 
-  /** A sidebar row: select it and attach, through the session list's own row. */
-  const openSession = (id: string) =>
-    void invoke("dispatch", {
-      intent: { Command: ["session_list.select_row", { target: { session: id }, open: true }] },
-    });
+  const openSession = (id: string) => openRow({ session: id });
 
   onMount(async () => {
     setSidecar(await invoke<SidecarState>("sidecar_state"));
