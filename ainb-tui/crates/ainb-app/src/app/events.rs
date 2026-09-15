@@ -7140,18 +7140,26 @@ impl EventHandler {
                 {
                     tracing::warn!(%screen, width, height, "watch viewport clamped to the maximum");
                 }
+                let no_viewport = width == 0 || height == 0;
                 if !plugin_screen {
                     tracing::warn!(%screen, "watch request for a screen no plugin owns");
-                } else if watching && (width == 0 || height == 0) {
+                } else if watching && no_viewport && watched {
+                    // A host with nothing to draw at is not watching: its
+                    // request ends like a stop, and another host's stays.
+                    tracing::warn!(%screen, width, height, "watch renewal with no viewport; stopped");
+                    state.release_host_screen_watches(&host, Some(&screen));
+                } else if watching && no_viewport {
                     tracing::warn!(%screen, width, height, "watch request with no viewport");
                 } else if watching && watched {
-                    // A renewal moves the lease and maybe the render size,
-                    // neither of which a frame carries.
+                    // A renewal moves the lease, which no frame carries, and
+                    // may move the render size, which moves the section like a
+                    // stop does.
                     state.plugins_host.update(|plugins| {
-                        if let Some(watch) = plugins.watched_plugin_screens.get_mut(&screen) {
+                        plugins.watched_plugin_screens.get_mut(&screen).is_some_and(|watch| {
+                            let before = watch.viewport();
                             watch.renew(host, now, width, height, lease);
-                        }
-                        false
+                            watch.viewport() != before
+                        })
                     });
                 } else if watching {
                     let mut watch = ScreenWatch::default();
