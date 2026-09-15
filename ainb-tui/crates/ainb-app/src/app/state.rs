@@ -12886,6 +12886,25 @@ impl AppState {
         });
     }
 
+    /// End `host`'s watch requests: on `screen` only, or on every screen. A
+    /// screen whose last request that was goes unwatched.
+    pub fn release_host_screen_watches(
+        &mut self,
+        host: &crate::wire::frame::HostId,
+        screen: Option<&str>,
+    ) {
+        self.plugins_host.update(|plugins| {
+            let mut changed = false;
+            plugins.watched_plugin_screens.retain(|watched, watch| {
+                if screen.is_none_or(|screen| screen == watched) {
+                    changed |= watch.stop(host);
+                }
+                !watch.requests.is_empty()
+            });
+            changed
+        });
+    }
+
     /// The size a screen another host watches renders at, when one does.
     #[must_use]
     pub fn watched_viewport(&self, screen_id: &str) -> Option<(u16, u16)> {
