@@ -16,7 +16,7 @@ use ainb_app::{Intent, Keymap, SectionId};
 use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::{DesktopHost, FrameSink};
 use ainb_desktop::shell::Shell;
-use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarState};
+use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarView};
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
 
@@ -53,7 +53,11 @@ struct Window {
     shell: Shell<ChannelSink>,
     frames: ChannelSink,
     sidecar: Sidecar,
+    sidecar_config: SidecarConfig,
 }
+
+/// The most of the sidecar log "show log" returns.
+const LOG_TAIL_BYTES: u64 = 64 * 1024;
 
 /// Attach the webview's frame channel and send it every section it draws.
 #[tauri::command]
@@ -70,8 +74,14 @@ fn dispatch(window: tauri::State<'_, Window>, intent: Intent) {
 
 /// Where the daemon connection stands, for the banner on first paint.
 #[tauri::command]
-fn sidecar_state(window: tauri::State<'_, Window>) -> SidecarState {
-    window.sidecar.state().borrow().clone()
+fn sidecar_state(window: tauri::State<'_, Window>) -> SidecarView {
+    window.sidecar.state().borrow().view()
+}
+
+/// The end of the sidecar log, for the degraded banner's "show log".
+#[tauri::command]
+fn show_log(window: tauri::State<'_, Window>) -> Option<String> {
+    ainb_desktop::sidecar::log_tail(&window.sidecar_config, LOG_TAIL_BYTES)
 }
 
 /// Leave the degraded state and look for a daemon again.
@@ -172,21 +182,22 @@ fn main() {
                 frames.clone(),
             );
             let daemon_bin = daemon_bin()?;
-            let sidecar = tauri::async_runtime::block_on(async {
-                Sidecar::start(SidecarConfig::new(hangar_home, daemon_bin))
-            });
+            let sidecar_config = SidecarConfig::new(hangar_home, daemon_bin);
+            let sidecar =
+                tauri::async_runtime::block_on(async { Sidecar::start(sidecar_config.clone()) });
             let mut states = sidecar.state();
             app.manage(Window {
                 shell: Shell::new(host, DesktopExecutor::new(ainb_bin())),
                 frames,
                 sidecar,
+                sidecar_config,
             });
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    let state = states.borrow_and_update().clone();
-                    if let Err(error) = handle.emit("sidecar", state) {
+                    let view = states.borrow_and_update().view();
+                    if let Err(error) = handle.emit("sidecar", view) {
                         tracing::warn!(%error, "sidecar state not delivered to the webview");
                     }
                     if states.changed().await.is_err() {
@@ -209,6 +220,7 @@ fn main() {
             subscribe,
             dispatch,
             sidecar_state,
+            show_log,
             retry_sidecar
         ])
         .run(tauri::generate_context!())
