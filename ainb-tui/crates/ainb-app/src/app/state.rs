@@ -3325,12 +3325,22 @@ impl AppState {
 }
 
 impl Default for AppState {
+    /// The terminal host's state: the user config loaded from disk.
     fn default() -> Self {
-        // Load persistent configuration
         let app_config = AppConfig::load().unwrap_or_else(|e| {
             warn!("Failed to load config, using defaults: {}", e);
             AppConfig::default()
         });
+        Self::with_config(app_config)
+    }
+}
+
+impl AppState {
+    /// State built on `app_config` as given. Nothing is read from disk for
+    /// it, so a host that owns its own config root (the desktop) passes the
+    /// config it loaded rather than inheriting the terminal's.
+    #[must_use]
+    pub fn with_config(app_config: AppConfig) -> Self {
         let home_screen_v2_state = HomeScreenV2State::default();
         // Read before the literal moves `app_config` into its section.
         let session_filter = app_config.ui_preferences.session_filter;
