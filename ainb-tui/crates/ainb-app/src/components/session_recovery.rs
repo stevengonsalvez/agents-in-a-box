@@ -1218,11 +1218,13 @@ impl SessionRecoveryState {
         // Guard: `can_resume` already implies a transcript exists; double-check.
         session.transcript_path.as_ref().ok_or("No transcript path")?;
 
-        let new_session = format!(
+        // Capped like every other mint (#1122): `session.session` comes from an
+        // agent's JSON on disk, so its length is whatever that file says.
+        let new_session = crate::tmux::cap_session_name(format!(
             "{}-resumed-{}",
             session.session,
             chrono::Utc::now().timestamp()
-        );
+        ));
         let directory = &session.directory;
 
         let create_result = Command::new("tmux")
