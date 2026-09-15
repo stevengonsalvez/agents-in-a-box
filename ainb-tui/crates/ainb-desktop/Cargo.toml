@@ -32,10 +32,12 @@ ainb-hangar-core = { path = "../ainb-hangar-core", optional = true }
 ainb-hangar-proto = { path = "../ainb-hangar-proto" }
 arboard = "3.6"
 nix = { version = "0.29", features = ["fs", "process", "signal"] }
+portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.36", features = ["full"] }
 tracing = "0.1"
+uuid = { version = "1.5", features = ["serde"] }
 tracing-subscriber = { version = "0.3", optional = true, features = ["fmt"] }
 tauri = { version = "~2.11.5", optional = true }
 
