@@ -4,9 +4,11 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag};
 
-/// The bundled changelog, embedded at compile time. A remote renderer (the
-/// desktop host, the web client) draws the changelog from this same text,
-/// never from a frame: it is static content, not state (#1052).
+/// The bundled changelog, embedded at compile time.
+///
+/// A remote renderer (the desktop host, the web client) draws the changelog
+/// from this same text, never from a frame: it is static content, not state
+/// (#1052).
 pub const CHANGELOG_MARKDOWN: &str = include_str!("../../../../CHANGELOG.md");
 
 /// The changelog parsed into rendered lines, once per process.
