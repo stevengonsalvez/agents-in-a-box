@@ -41,6 +41,9 @@ pub struct SidecarConfig {
     pub hello_budget: Duration,
     /// Spawns that crash or never answer before the supervisor gives up.
     pub max_spawn_attempts: u32,
+    /// The wait before each reconnect after the daemon is lost; a loss past
+    /// the last step leaves the app degraded.
+    pub reconnect_backoff: Vec<Duration>,
 }
 
 impl SidecarConfig {
@@ -53,6 +56,7 @@ impl SidecarConfig {
             grace: Duration::from_secs(2),
             hello_budget: Duration::from_secs(60),
             max_spawn_attempts: 3,
+            reconnect_backoff: RECONNECT_BACKOFF.to_vec(),
         }
     }
 
@@ -150,18 +154,33 @@ fn surface() -> SurfaceInfo {
     }
 }
 
+/// The default reconnect backoff: 1 s, 4 s, 16 s, as the spec's reconnect row.
+const RECONNECT_BACKOFF: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(4),
+    Duration::from_secs(16),
+];
+
+/// A connection that stayed up this long before it was lost starts the
+/// backoff over, so a daemon that restarts once a day never exhausts it.
+const STABLE_CONNECTION: Duration = Duration::from_secs(60);
+
 async fn supervise(config: SidecarConfig, state: watch::Sender<SidecarState>, retry: Arc<Notify>) {
+    let degrade = |error: String| {
+        tracing::warn!(%error, "no hangar daemon for the desktop; degraded");
+        state.send_replace(SidecarState::Degraded {
+            error,
+            log: config.log_path(),
+        });
+    };
+    let mut losses = 0usize;
     loop {
-        let found = find_or_start(&config).await;
-        let spawned = match found {
+        let spawned = match find_or_start(&config).await {
             Ok(spawned) => spawned,
             Err(error) => {
-                tracing::warn!(%error, "no hangar daemon for the desktop; degraded");
-                state.send_replace(SidecarState::Degraded {
-                    error,
-                    log: config.log_path(),
-                });
+                degrade(error);
                 retry.notified().await;
+                losses = 0;
                 state.send_replace(SidecarState::Starting);
                 continue;
             }
@@ -171,31 +190,67 @@ async fn supervise(config: SidecarConfig, state: watch::Sender<SidecarState>, re
             PresenceLease::spawn_with(surface(), Box::new(move || config.client()))
         };
         let mut presence = lease.state();
+
         // Connected only once the lease holds, so "connected" means the
-        // daemon lists this surface.
-        let lost = loop {
-            match presence.borrow_and_update().clone() {
-                PresenceState::Connected => {
-                    state.send_replace(SidecarState::Connected {
-                        daemon_pid: daemon_pid(&config.hangar_home),
-                        spawned,
-                    });
+        // daemon lists this surface, and only within the budget.
+        let held = tokio::time::timeout(config.hello_budget, async {
+            loop {
+                if matches!(*presence.borrow_and_update(), PresenceState::Connected) {
+                    return true;
                 }
-                PresenceState::Waiting { error: Some(error) }
-                    if matches!(*state.borrow(), SidecarState::Connected { .. }) =>
-                {
-                    break error;
+                if presence.changed().await.is_err() {
+                    return false;
                 }
-                PresenceState::Waiting { .. } => {}
-                PresenceState::Closed => break "presence closed".to_string(),
             }
+        })
+        .await;
+        if !matches!(held, Ok(true)) {
+            lease.close().await;
+            degrade(format!(
+                "the daemon answered but did not list this surface within {:?}",
+                config.hello_budget
+            ));
+            retry.notified().await;
+            losses = 0;
+            state.send_replace(SidecarState::Starting);
+            continue;
+        }
+        state.send_replace(SidecarState::Connected {
+            daemon_pid: daemon_pid(&config.hangar_home),
+            spawned,
+        });
+        let connected_at = Instant::now();
+
+        let lost = loop {
             if presence.changed().await.is_err() {
                 break "presence ended".to_string();
             }
+            match presence.borrow_and_update().clone() {
+                PresenceState::Connected => {}
+                PresenceState::Waiting { error } => {
+                    break error.unwrap_or_else(|| "the connection dropped".to_string());
+                }
+                PresenceState::Closed => break "presence closed".to_string(),
+            }
         };
-        tracing::warn!(error = %lost, "desktop lost the hangar daemon; reconnecting");
-        state.send_replace(SidecarState::Reconnecting { error: lost });
         lease.close().await;
+        losses = if connected_at.elapsed() >= STABLE_CONNECTION {
+            1
+        } else {
+            losses + 1
+        };
+        let Some(backoff) = config.reconnect_backoff.get(losses - 1) else {
+            degrade(format!(
+                "the daemon was lost {losses} times in a row; last: {lost}"
+            ));
+            retry.notified().await;
+            losses = 0;
+            state.send_replace(SidecarState::Starting);
+            continue;
+        };
+        tracing::warn!(error = %lost, ?backoff, "desktop lost the hangar daemon; reconnecting");
+        state.send_replace(SidecarState::Reconnecting { error: lost });
+        tokio::time::sleep(*backoff).await;
     }
 }
 
@@ -230,12 +285,35 @@ async fn find_or_start(config: &SidecarConfig) -> Result<bool, String> {
                 );
             }
             None => match wait_for_hello(config, Some(&mut child)).await {
-                Ok(()) => return Ok(true),
-                Err(error) => last_error = format!("{error} (attempt {attempt})"),
+                Ok(()) => {
+                    reap_when_done(child);
+                    return Ok(true);
+                }
+                Err(error) => {
+                    // Never answered: stop it and reap it rather than leave a
+                    // half-started daemon or a zombie behind.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    last_error = format!("{error} (attempt {attempt})");
+                }
             },
         }
     }
     Err(last_error)
+}
+
+/// Reap the daemon this process started whenever it exits, so a daemon that
+/// dies while the app runs does not linger as a zombie. It never signals it.
+fn reap_when_done(mut child: Child) {
+    let spawned =
+        std::thread::Builder::new()
+            .name("ainb-desktop-sidecar-reaper".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "no reaper for the daemon child; it may linger as a zombie");
+    }
 }
 
 /// Start the bundled daemon for this home in its own session, logging to the
