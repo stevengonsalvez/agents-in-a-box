@@ -52,7 +52,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ainb_hangar_daemon::acp_pool::{AcpPool, ConvergeCause, PoolConfig, SubmitOutcome};
+use ainb_hangar_daemon::acp_pool::{
+    AcpPool, AdmissionHook, AdmissionPoint, ConvergeCause, PoolConfig, SubmitOutcome,
+};
 use ainb_hangar_daemon::events::EventBroker;
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::fleet::{FleetSessionPatch, NewFleetEvent, ObservationAuthority};
@@ -3215,10 +3217,58 @@ async fn a_hung_adapter_close_does_not_hold_the_evicted_slot() {
 /// same idle victim and overshoot the cap by one, permanently: the second
 /// victim is never evicted and the process hosts cap+1 tenants until something
 /// else removes one.
+///
+/// #958: the interleaving that still overshot is forced, not waited for. The
+/// first arrival (`c`) is held once admitted until the second (`d`) has read
+/// the process's occupancy; `d` is then held there until `c` has attached and
+/// stopped counting as attaching. An occupancy read that took the route table
+/// before `c`'s route and the attaching count after `c` left it counted `c`
+/// nowhere, evicted nothing and hosted three.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_concurrent_arrivals_never_overshoot_the_session_cap() {
+    let c_admitted = Arc::new(tokio::sync::Notify::new());
+    let d_counted = Arc::new(tokio::sync::Notify::new());
+    let c_attached = Arc::new(tokio::sync::Notify::new());
+    let hook = {
+        let signals = (
+            Arc::clone(&c_admitted),
+            Arc::clone(&d_counted),
+            Arc::clone(&c_attached),
+        );
+        AdmissionHook(Arc::new(move |point, session_key| {
+            let (c_admitted, d_counted, c_attached) = (
+                Arc::clone(&signals.0),
+                Arc::clone(&signals.1),
+                Arc::clone(&signals.2),
+            );
+            let session_key = session_key.to_string();
+            Box::pin(async move {
+                match (point, session_key.as_str()) {
+                    // `notify_one` stores a permit, so neither side can miss
+                    // a signal sent before it started waiting.
+                    (AdmissionPoint::Admitted, "acp:cap-c") => {
+                        c_admitted.notify_one();
+                        // Bounded, so a regression that deadlocks the pool here
+                        // names the point it stuck at rather than a delivery.
+                        tokio::time::timeout(Duration::from_secs(10), d_counted.notified())
+                            .await
+                            .expect("c, held at Admitted, never saw d reach Counted");
+                    }
+                    (AdmissionPoint::Attached, "acp:cap-c") => c_attached.notify_one(),
+                    (AdmissionPoint::Counted, "acp:cap-d") => {
+                        d_counted.notify_one();
+                        tokio::time::timeout(Duration::from_secs(10), c_attached.notified())
+                            .await
+                            .expect("d, held at Counted, never saw c reach Attached");
+                    }
+                    _ => {}
+                }
+            })
+        }))
+    };
     let (_dir, store, pool, _broker) = harness_with_broker(&[("FAKE_ACP_CHUNKS", "1")], |config| {
         config.max_sessions_per_provider = 2;
+        config.admission_hook = Some(hook);
     })
     .await;
     // Two hosted, idle sessions: the cap is full and both are evictable.
@@ -3238,6 +3288,13 @@ async fn two_concurrent_arrivals_never_overshoot_the_session_cap() {
         tokio::spawn(async move {
             pool.submit_prompt(&seeded.session_key, &message, "arrive").await;
         });
+        // `d` arrives only once `c` is past `make_room`: arriving earlier it
+        // would take the eviction lock first and wait for a `c` that needs it.
+        if key == "acp:cap-c" {
+            tokio::time::timeout(Duration::from_secs(20), c_admitted.notified())
+                .await
+                .expect("the first arrival was admitted");
+        }
     }
     for (session_key, message) in &arrivals {
         let (state, detail) = await_terminal(&store, message, session_key).await;
