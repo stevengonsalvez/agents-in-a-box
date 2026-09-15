@@ -224,12 +224,16 @@ impl Flow {
         true
     }
 
-    fn set_sink(&self, sink: Sink) {
+    /// Install the webview's sink. `true` when it replaces an earlier one: the
+    /// webview reloaded and holds none of the output sent so far.
+    fn set_sink(&self, sink: Sink) -> bool {
         let mut state = lock(&self.state);
+        let replaced = state.sink_epoch > 0;
         state.sink = Some(sink);
         state.sink_epoch += 1;
         state.unacked = 0;
         self.wake.notify_all();
+        replaced
     }
 
     fn ack(&self, bytes: usize) {
@@ -463,14 +467,34 @@ impl Terminals {
         }
     }
 
-    /// Route the tab's output to `sink`, replacing any earlier one (a webview
-    /// that reloaded). `false` for a tab that is not listed.
+    /// Route the tab's output to `sink`, replacing any earlier one. `false`
+    /// for a tab that is not listed.
+    ///
+    /// A replaced sink is a webview that reloaded: its fresh terminal holds
+    /// nothing, so the client is replaced too and tmux redraws the whole
+    /// screen, as a redial does.
     pub fn attach_output(&self, key: &str, sink: Sink) -> bool {
-        let tabs = lock(&self.inner.tabs);
-        position(&tabs, key).is_some_and(|index| {
-            tabs[index].flow.set_sink(sink);
-            true
-        })
+        let mut tabs = lock(&self.inner.tabs);
+        let Some(index) = position(&tabs, key) else {
+            return false;
+        };
+        let reloaded = tabs[index].flow.set_sink(sink);
+        if reloaded && tabs[index].client.is_some() {
+            let tab = &mut tabs[index];
+            // Bumped first, so the old client's exit is stale when it lands.
+            tab.generation += 1;
+            tab.flow.retarget(tab.generation);
+            tab.client = None;
+            let (size, flow, generation) = (tab.size, Arc::clone(&tab.flow), tab.generation);
+            match self.spawn(key, size, &flow, generation) {
+                Ok(client) => tabs[index].client = Some(client),
+                Err(error) => {
+                    tracing::warn!(tab = key, %error, "terminal reattach after reload failed");
+                    self.schedule_redial(&mut tabs, index);
+                }
+            }
+        }
+        true
     }
 
     /// The webview painted `bytes` of the tab's output.
