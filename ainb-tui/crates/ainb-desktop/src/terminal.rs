@@ -246,19 +246,27 @@ impl Flow {
         }
         // Sent with the lock released: an IPC send can be slow, and an ack or
         // a new sink must not wait behind it.
+        // The chunk is counted before the send, so an acknowledgement landing
+        // mid-send subtracts from a total that already includes it.
         let len = bytes.len();
         let (Some(mut sink), epoch) = (state.sink.take(), state.sink_epoch) else {
             return true;
         };
+        state.unacked += len;
         drop(state);
         let sent = sink(bytes);
         let mut state = lock(&self.state);
-        // An unsent chunk means the webview went away (a reload); the next
-        // sink starts clean.
-        if sent && state.sink_epoch == epoch && !state.closed {
+        if state.sink_epoch != epoch {
+            // A new sink arrived mid-send and started its own count at zero.
+            return true;
+        }
+        if sent && !state.closed {
             state.sink = Some(sink);
-            state.unacked += len;
             state.last_active = Instant::now();
+        } else {
+            // Unsent: the webview went away (a reload), so the chunk was never
+            // in flight; the next sink starts clean.
+            state.unacked = state.unacked.saturating_sub(len);
         }
         true
     }
