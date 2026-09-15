@@ -57,7 +57,8 @@ async fn the_web_snapshot_reads_sessions_from_list_frame_not_the_operator_list()
     );
     assert!(!body.contains(CANARY), "{body}");
     // The cost panel keeps the totals and drops the per-session paths (#1113).
-    assert_eq!(snapshot.cost["totals"]["session_count"], 1, "{body}");
+    let cost = snapshot.cost.as_ref().expect("a cost panel");
+    assert_eq!(cost.totals.session_count, 1, "{body}");
     assert!(!body.contains("/home/op"), "{body}");
     assert!(!body.contains("secret-repo"), "{body}");
 }
