@@ -21,7 +21,8 @@ pub type SnapshotFuture<'a> =
 /// Returned by [`DataSource::core`].
 #[derive(Debug, Clone)]
 pub struct CoreSnapshot {
-    /// `ainb --format json list` — the live session list.
+    /// `ainb --format json list --frame`: the live session list, as rows
+    /// projected from the redacted Sessions frame (#1056).
     pub sessions: Value,
     /// The daemon `attention/list` inbox mapped to ASK/ERR/WAIT cards (D18).
     pub needs: Value,
@@ -40,7 +41,8 @@ pub type CostFuture<'a> = Pin<Box<dyn Future<Output = Value> + Send + 'a>>;
 /// CLI adds flow through to the frontend with no code change here.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FleetSnapshot {
-    /// `ainb --format json list` — the live session list.
+    /// `ainb --format json list --frame`: the live session list, as rows
+    /// projected from the redacted Sessions frame (#1056).
     pub sessions: Value,
     /// The daemon `attention/list` inbox mapped to ASK/ERR/WAIT cards (D18).
     /// Each card carries `attentionId` so an ASK can be answered via
@@ -337,10 +339,13 @@ impl DataSource for AinbCliSource {
 
     fn core(&self) -> CoreFuture<'_> {
         Box::pin(async move {
-            // Sessions still come from `ainb list` (the daemon exposes no
-            // host-session snapshot RPC). Needs now read the daemon's attention
-            // inbox instead of the old `ainb fleet needs` capture-pane poll (D18).
-            let sessions = self.run_json(&["list"], false).await?;
+            // Sessions come from `ainb list --frame` (the daemon exposes no
+            // host-session snapshot RPC): the same sessions as `ainb list`, but
+            // as rows projected from the redacted Sessions section frame, so a
+            // label or any text the frame withholds or scrubs never reaches the
+            // browser (#1056). Needs read the daemon's attention inbox instead
+            // of the old `ainb fleet needs` capture-pane poll (D18).
+            let sessions = self.run_json(&["list", "--frame"], false).await?;
             let needs = daemon_needs().await;
             Ok(CoreSnapshot { sessions, needs })
         })
