@@ -29,7 +29,7 @@ impl ChangelogComponent {
         // Calculate visible lines
         let content_height = area.height.saturating_sub(2) as usize; // Account for borders
         let start_line = state.scroll_offset;
-        let end_line = (start_line + content_height).min(state.lines.len());
+        let end_line = (start_line + content_height).min(state.lines().len());
 
         // Colors
         let heading1_color = PROGRESS_CYAN;
@@ -38,7 +38,7 @@ impl ChangelogComponent {
         let code_bg = Color::Rgb(35, 35, 45);
         let code_fg = SELECTION_GREEN;
 
-        let visible_lines: Vec<Line> = state.lines[start_line..end_line]
+        let visible_lines: Vec<Line> = state.lines()[start_line..end_line]
             .iter()
             .map(|md_line| {
                 let style = match &md_line.style {
