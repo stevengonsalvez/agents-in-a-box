@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
-use ainb_app::{Intent, Keymap, SectionId};
+use ainb_app::{Intent, Keymap};
 use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::{DesktopHost, FrameSink};
 use ainb_desktop::intent::RendererIntent;
@@ -20,17 +20,6 @@ use ainb_desktop::shell::Shell;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarView};
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
-
-/// The sections the shell draws in this node: the sidebar, the header counts
-/// and the terminal tabs.
-const SECTIONS: &[SectionId] = &[
-    SectionId::Sessions,
-    SectionId::Shell,
-    SectionId::Tmux,
-    SectionId::Fleet,
-    SectionId::Config,
-    SectionId::AgentStatus,
-];
 
 /// The webview's frame channel, once it has subscribed.
 #[derive(Clone, Default)]
@@ -57,11 +46,18 @@ struct Window {
 /// The most of the sidecar log "show log" returns.
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
 
-/// Attach the webview's frame channel and send it every section it draws.
+/// Attach the webview's frame channel, send it every section it names, and
+/// answer with the host id its frames are held under. The webview owns the one
+/// subscription list; unknown section names are dropped.
 #[tauri::command]
-fn subscribe(window: tauri::State<'_, Window>, frames: Channel<FrameBatch>) {
+fn subscribe(
+    window: tauri::State<'_, Window>,
+    frames: Channel<FrameBatch>,
+    sections: Subscription,
+) -> HostId {
     *window.frames.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frames);
-    window.shell.reframe();
+    window.shell.subscribe(sections);
+    HostId::local()
 }
 
 /// Apply an intent from the webview: a key, a command, pasted text. A
@@ -182,7 +178,8 @@ fn main() {
                 config,
                 Keymap::defaults(),
                 HostId::local(),
-                Subscription::only(SECTIONS),
+                // Nothing is framed until the webview subscribes.
+                Subscription::none(),
                 frames.clone(),
             );
             let daemon_bin = daemon_bin()?;
