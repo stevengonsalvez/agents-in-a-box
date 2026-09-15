@@ -32,24 +32,25 @@ use crate::config::WebConfig;
 use crate::daemon::{Answerer, DaemonAnswerer};
 use crate::data::{DataSource, FleetSnapshot};
 
-/// Number of [`POLL_INTERVAL`] ticks between cost re-fetches. At least 1, so the
-/// poller always fetches cost at startup and at least every `COST_POLL_INTERVAL`.
-const COST_TICK_STRIDE: u64 = {
-    let stride = COST_POLL_INTERVAL.as_secs() / POLL_INTERVAL.as_secs();
-    if stride == 0 { 1 } else { stride }
-};
-
 /// How often the background poller refreshes the snapshot. The SSE stream only
 /// emits when the fingerprint changes, so this is a safety-net cadence, not a
 /// per-client cost.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// How often the poller re-fetches `ainb fleet cost`. Cost cold-boots the
-/// burndown plugin runtime per call and rolls up slowly, so it polls far less
-/// often than sessions/needs. Between cost fetches the poller reuses the last
-/// cost value held in the cached snapshot. Must be a multiple of
-/// [`POLL_INTERVAL`]; the poller derives the tick stride from the two.
+/// How often the cost task re-fetches `ainb fleet cost`. Cost cold-boots the
+/// burndown plugin runtime per call and rolls up slowly, so it runs on its own
+/// task and cadence and never holds up sessions or needs (#1055).
 const COST_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The first bound on one cost fetch. A fetch past it is abandoned (its process
+/// is killed), the last cost value is kept, and the next fetch gets twice the
+/// time, up to [`COST_FETCH_TIMEOUT_CAP`]; a fetch that lands resets it. A lone
+/// `fleet cost` returns in under a second, but #1055 measured 120 s under
+/// contention, so the cap sits above that.
+const COST_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The most time one cost fetch is ever given.
+const COST_FETCH_TIMEOUT_CAP: Duration = Duration::from_secs(240);
 
 /// SSE keep-alive comment cadence (keeps proxies from dropping idle streams).
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -145,15 +146,19 @@ impl AppState {
     }
 
     /// Resolve a snapshot for a request: prefer the cache; on a cold cache
-    /// (before the first poll completes) fall back to a single direct fetch so
-    /// the very first request after startup still succeeds.
+    /// (before the first poll completes) fall back to a single direct fetch of
+    /// sessions and needs so the very first request after startup still
+    /// succeeds. Cost is not fetched here: a second, concurrent `fleet cost`
+    /// beside the cost task's is what stalled the first snapshot for 120 s
+    /// (#1055). The cold snapshot carries no cost until the cost task lands.
     pub(crate) async fn resolve_snapshot(
         &self,
     ) -> Result<Arc<FleetSnapshot>, crate::data::DataError> {
         if let Some(snap) = self.cached() {
             return Ok(snap);
         }
-        let snap = Arc::new(self.data.snapshot().await?);
+        let core = self.data.core().await?;
+        let snap = Arc::new(FleetSnapshot::from_parts(core, serde_json::Value::Null));
         // Seed the cache so concurrent cold-start requests coalesce too.
         let _ = self.cache.send_if_modified(|slot| {
             if slot.is_none() {
@@ -166,23 +171,24 @@ impl AppState {
         Ok(self.cached().unwrap_or(snap))
     }
 
-    /// Background task: poll the data source and update the cached snapshot when
-    /// the fingerprint changes. Sessions + needs refresh every [`POLL_INTERVAL`]
-    /// (~2s); cost refreshes only every [`COST_POLL_INTERVAL`] because
-    /// `ainb fleet cost` cold-boots the burndown plugin runtime per call and
-    /// rolls up slowly. On ticks that skip the cost fetch, the poller reuses the
-    /// last cost value held in the cache, so the cached snapshot always carries
-    /// the most recent cost. The poller runs the only `ainb`/`tmux`
-    /// subprocesses; all requests and SSE streams read the cache.
+    /// Background tasks: poll the data source and update the cached snapshot
+    /// when the fingerprint changes.
+    ///
+    /// Sessions and needs refresh every [`POLL_INTERVAL`] (about 2 s) on one
+    /// task, and are published as soon as they are read. Cost refreshes every
+    /// [`COST_POLL_INTERVAL`] on a second task, bounded by
+    /// [`COST_FETCH_TIMEOUT`]: `ainb fleet cost` cold-boots the burndown plugin
+    /// runtime per call and can take minutes under contention, so it must never
+    /// gate the first snapshot or a new session or card (#1055). When cost lands
+    /// it is folded into the cached snapshot at once; the fast task reads the
+    /// latest cost each tick. The tasks run the only `ainb`/`tmux` subprocesses;
+    /// requests and SSE streams read the cache.
     fn spawn_poller(&self) {
+        let (cost_tx, cost_rx) = watch::channel(serde_json::Value::Null);
+        self.spawn_cost_task(cost_tx);
         let data = Arc::clone(&self.data);
         let tx = self.cache.clone();
         tokio::spawn(async move {
-            let mut last_fp: Option<u64> = None;
-            // The cost value carried forward between cost fetches. Seeded `Null`
-            // (cost-absent) until the first cost fetch lands.
-            let mut last_cost: serde_json::Value = serde_json::Value::Null;
-            let mut tick: u64 = 0;
             let mut ticker = tokio::time::interval(POLL_INTERVAL);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -193,32 +199,67 @@ impl AppState {
                 if tx.is_closed() {
                     break;
                 }
-
-                // Fetch the fast-cadence surfaces every tick.
                 let core = match data.core().await {
                     Ok(core) => core,
                     Err(e) => {
                         tracing::warn!(error = %e, "core snapshot poll failed");
-                        tick = tick.wrapping_add(1);
                         continue;
                     }
                 };
+                let snap = FleetSnapshot::from_parts(core, cost_rx.borrow().clone());
+                // Compare with what the cache holds, not a local copy: the cost
+                // task also writes the cache, and a stale local fingerprint
+                // would republish the same snapshot to every SSE stream.
+                let _ = tx.send_if_modified(|slot| {
+                    if slot.as_ref().map(|held| held.fingerprint) == Some(snap.fingerprint) {
+                        return false;
+                    }
+                    *slot = Some(Arc::new(snap));
+                    true
+                });
+            }
+        });
+    }
 
-                // Re-fetch cost only on the slow cadence (and on the very first
-                // tick). Reuse the carried-forward value in between. Cost is
-                // best-effort and never fails the poll.
-                if tick % COST_TICK_STRIDE == 0 {
-                    last_cost = data.cost().await;
+    /// The cost task: fetch cost now and every [`COST_POLL_INTERVAL`], one fetch
+    /// at a time, each bounded by [`COST_FETCH_TIMEOUT`]. A fresh value goes to
+    /// the fast task through `cost_tx` and straight into the cached snapshot.
+    fn spawn_cost_task(&self, cost_tx: watch::Sender<serde_json::Value>) {
+        let data = Arc::clone(&self.data);
+        let tx = self.cache.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(COST_POLL_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut bound = COST_FETCH_TIMEOUT;
+            loop {
+                ticker.tick().await;
+                if tx.is_closed() {
+                    break;
                 }
-
-                let snap = FleetSnapshot::from_parts(core, last_cost.clone());
-                if last_fp != Some(snap.fingerprint) {
-                    last_fp = Some(snap.fingerprint);
-                    // Replace the cached snapshot; SSE subscribers and every
-                    // handler observe the new value.
-                    let _ = tx.send(Some(Arc::new(snap)));
+                let Ok(cost) = tokio::time::timeout(bound, data.cost()).await else {
+                    tracing::warn!(
+                        timeout_s = bound.as_secs(),
+                        "fleet cost fetch timed out; keeping the last cost"
+                    );
+                    bound = (bound * 2).min(COST_FETCH_TIMEOUT_CAP);
+                    continue;
+                };
+                bound = COST_FETCH_TIMEOUT;
+                if *cost_tx.borrow() == cost {
+                    continue;
                 }
-                tick = tick.wrapping_add(1);
+                cost_tx.send_replace(cost.clone());
+                tx.send_if_modified(|slot| {
+                    let Some(snap) = slot.as_ref() else {
+                        return false;
+                    };
+                    let core = crate::data::CoreSnapshot {
+                        sessions: snap.sessions.clone(),
+                        needs: snap.needs.clone(),
+                    };
+                    *slot = Some(Arc::new(FleetSnapshot::from_parts(core, cost.clone())));
+                    true
+                });
             }
         });
     }
@@ -444,9 +485,7 @@ async fn events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::{
-        CoreFuture, CoreSnapshot, CostFuture, DataError, FleetSnapshot, SnapshotFuture,
-    };
+    use crate::data::{CoreFuture, CoreSnapshot, CostFuture, DataError};
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -457,6 +496,8 @@ mod tests {
     struct FakeSource {
         core_fetches: AtomicU64,
         cost_fetches: AtomicU64,
+        /// Cost never resolves: the stalled `fleet cost` of #1055.
+        cost_hangs: bool,
     }
 
     impl FakeSource {
@@ -464,6 +505,14 @@ mod tests {
             Self {
                 core_fetches: AtomicU64::new(0),
                 cost_fetches: AtomicU64::new(0),
+                cost_hangs: false,
+            }
+        }
+
+        fn with_hanging_cost() -> Self {
+            Self {
+                cost_hangs: true,
+                ..Self::new()
             }
         }
 
@@ -474,14 +523,6 @@ mod tests {
     }
 
     impl DataSource for FakeSource {
-        fn snapshot(&self) -> SnapshotFuture<'_> {
-            Box::pin(async move {
-                let core = self.core().await?;
-                let cost = self.cost().await;
-                Ok::<_, DataError>(FleetSnapshot::from_parts(core, cost))
-            })
-        }
-
         fn core(&self) -> CoreFuture<'_> {
             Box::pin(async move {
                 let n = self.core_fetches.fetch_add(1, Ordering::SeqCst);
@@ -495,6 +536,9 @@ mod tests {
         fn cost(&self) -> CostFuture<'_> {
             Box::pin(async move {
                 let n = self.cost_fetches.fetch_add(1, Ordering::SeqCst);
+                if self.cost_hangs {
+                    std::future::pending::<()>().await;
+                }
                 json!({ "fetch": n })
             })
         }
@@ -538,75 +582,141 @@ mod tests {
         );
     }
 
-    /// Cost must poll on the slow [`COST_POLL_INTERVAL`] cadence while
-    /// sessions/needs poll on the fast [`POLL_INTERVAL`] one. Over a window of
-    /// many fast ticks, `core` is fetched on every tick but `cost` only once per
-    /// `COST_TICK_STRIDE` ticks — and the cached snapshot always carries the
-    /// most recent cost value.
-    #[tokio::test(start_paused = true)]
-    async fn cost_polls_slower_than_sessions_and_needs() {
-        let config = WebConfig {
+    fn test_config() -> WebConfig {
+        WebConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
             token: None,
             insecure_bind: false,
             read_only: true,
-        };
-        let source = Arc::new(FakeSource::new());
-        let state = AppState::new(config, Arc::clone(&source) as Arc<dyn DataSource>);
+        }
+    }
 
-        // First tick fires immediately: one core fetch and one cost fetch.
-        tokio::time::advance(Duration::from_millis(1)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(
-            source.cost_fetch_count(),
-            1,
-            "cost must be fetched on the first tick"
-        );
-        let after_first = state.cached().expect("cache seeded on first tick");
-        assert_eq!(
-            after_first.cost,
-            json!({ "fetch": 0 }),
-            "cached snapshot must carry the first cost value"
-        );
-
-        // Advance through (COST_TICK_STRIDE - 1) more fast ticks. Each refreshes
-        // core but must NOT re-fetch cost yet — cost stays carried forward.
-        for _ in 1..COST_TICK_STRIDE {
-            tokio::time::advance(POLL_INTERVAL).await;
+    async fn settle() {
+        for _ in 0..4 {
             tokio::task::yield_now().await;
+        }
+    }
+
+    /// Cost polls on the slow [`COST_POLL_INTERVAL`] cadence on its own task,
+    /// sessions and needs on the fast [`POLL_INTERVAL`] one, and the cached
+    /// snapshot carries the latest cost as soon as it lands.
+    #[tokio::test(start_paused = true)]
+    async fn cost_polls_slower_than_sessions_and_needs() {
+        let source = Arc::new(FakeSource::new());
+        let state = AppState::new(test_config(), Arc::clone(&source) as Arc<dyn DataSource>);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(source.cost_fetch_count(), 1, "cost is fetched at startup");
+        assert_eq!(
+            state.cached().expect("cache seeded").cost,
+            json!({ "fetch": 0 }),
+            "the first cost lands in the cached snapshot"
+        );
+
+        let fast_ticks = COST_POLL_INTERVAL.as_secs() / POLL_INTERVAL.as_secs();
+        for _ in 1..fast_ticks {
+            tokio::time::advance(POLL_INTERVAL).await;
+            settle().await;
         }
         assert_eq!(
             source.cost_fetch_count(),
             1,
-            "cost must NOT be re-fetched within a single cost interval"
+            "cost is not re-fetched within one cost interval"
         );
-        let mid = state.cached().expect("cache present mid-interval");
         assert_eq!(
-            mid.cost,
-            json!({ "fetch": 0 }),
-            "between cost fetches the cached snapshot reuses the last cost value"
+            state.cached().expect("cache present").cost,
+            json!({ "fetch": 0 })
         );
 
-        // The next fast tick crosses the cost interval boundary → cost re-fetched.
         tokio::time::advance(POLL_INTERVAL).await;
-        tokio::task::yield_now().await;
+        settle().await;
         assert_eq!(
             source.cost_fetch_count(),
             2,
-            "cost must be re-fetched once a full COST_POLL_INTERVAL elapses"
+            "cost is re-fetched once a full cost interval elapses"
         );
-        let after_second = state.cached().expect("cache present after second cost fetch");
         assert_eq!(
-            after_second.cost,
-            json!({ "fetch": 1 }),
-            "cached snapshot must carry the refreshed cost value"
+            state.cached().expect("cache present").cost,
+            json!({ "fetch": 1 })
+        );
+        assert!(
+            source.core_fetches.load(Ordering::SeqCst) >= fast_ticks,
+            "core is fetched on every fast tick"
+        );
+    }
+
+    /// #1055: a cost fetch that never returns must not hold up sessions and
+    /// needs. The first snapshot publishes on the first tick, later ticks keep
+    /// refreshing, and the stalled fetch is abandoned at the timeout.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_cost_fetch_never_gates_sessions_and_needs() {
+        let source = Arc::new(FakeSource::with_hanging_cost());
+        let state = AppState::new(test_config(), Arc::clone(&source) as Arc<dyn DataSource>);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+        let first = state.cached().expect("sessions publish without waiting on cost");
+        assert_eq!(first.cost, serde_json::Value::Null, "no cost yet");
+
+        tokio::time::advance(POLL_INTERVAL).await;
+        settle().await;
+        let later = state.cached().expect("cache present");
+        assert_ne!(
+            first.sessions, later.sessions,
+            "the fast task keeps refreshing"
         );
 
-        // Core was fetched on every tick across the whole window; cost only twice.
+        tokio::time::advance(COST_FETCH_TIMEOUT + COST_POLL_INTERVAL).await;
+        settle().await;
         assert_eq!(
-            source.core_fetches.load(Ordering::SeqCst),
-            COST_TICK_STRIDE + 1,
-            "core must be fetched on every fast tick"
+            source.cost_fetch_count(),
+            2,
+            "the stalled fetch was abandoned and the next one started"
+        );
+    }
+
+    /// A cost fetch that times out gives the next one twice the time, up to the
+    /// cap, so a slow but finite `fleet cost` eventually lands.
+    #[tokio::test(start_paused = true)]
+    async fn each_cost_timeout_doubles_the_next_bound_up_to_the_cap() {
+        let source = Arc::new(FakeSource::with_hanging_cost());
+        let _state = AppState::new(test_config(), Arc::clone(&source) as Arc<dyn DataSource>);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(source.cost_fetch_count(), 1);
+
+        // First bound 30 s: the second fetch starts right after it.
+        tokio::time::advance(COST_FETCH_TIMEOUT).await;
+        settle().await;
+        assert_eq!(source.cost_fetch_count(), 2);
+
+        // Second bound 60 s: nothing new until it expires.
+        tokio::time::advance(COST_FETCH_TIMEOUT * 2 - Duration::from_secs(1)).await;
+        settle().await;
+        assert_eq!(source.cost_fetch_count(), 2, "the second fetch has 60 s");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        assert_eq!(source.cost_fetch_count(), 3);
+
+        // The bound never passes the cap.
+        assert!(
+            COST_FETCH_TIMEOUT_CAP > Duration::from_secs(120),
+            "above the measured 120 s"
+        );
+    }
+
+    /// #1055: a cold request does not start a second `fleet cost` beside the
+    /// cost task's.
+    #[tokio::test(start_paused = true)]
+    async fn a_cold_request_reads_sessions_and_needs_without_cost() {
+        let source = Arc::new(FakeSource::with_hanging_cost());
+        let state = AppState::new(test_config(), Arc::clone(&source) as Arc<dyn DataSource>);
+        let snap = state.resolve_snapshot().await.expect("cold snapshot");
+        assert!(snap.sessions.is_array());
+        assert!(
+            source.cost_fetch_count() <= 1,
+            "only the cost task fetches cost"
         );
     }
 }

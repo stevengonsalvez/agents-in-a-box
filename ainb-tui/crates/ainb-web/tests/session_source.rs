@@ -8,7 +8,7 @@
 // Its own test binary: it points `AINB_BIN`, `HOME` and `AINB_HANGAR_HOME` at a
 // scratch directory, which no other test in this process may race.
 
-use ainb_web::data::{AinbCliSource, DataSource};
+use ainb_web::data::{AinbCliSource, DataSource, FleetSnapshot};
 use std::os::unix::fs::PermissionsExt;
 
 const CANARY: &str = "ghp_ProofCanary0123456789abcdefghijklmnopq";
@@ -38,7 +38,9 @@ async fn the_web_snapshot_reads_sessions_from_list_frame_not_the_operator_list()
     std::env::set_var("HOME", scratch.path());
     std::env::set_var("AINB_HANGAR_HOME", scratch.path());
 
-    let snapshot = AinbCliSource::new().snapshot().await.expect("snapshot");
+    let source = AinbCliSource::new();
+    let core = source.core().await.expect("sessions and needs");
+    let snapshot = FleetSnapshot::from_parts(core, source.cost().await);
     let body = serde_json::to_string(&snapshot).expect("snapshot serialises");
 
     assert_eq!(
