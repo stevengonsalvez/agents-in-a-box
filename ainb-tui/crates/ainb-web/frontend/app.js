@@ -281,7 +281,9 @@
   //   cost.sessions[], cost.daily[], cost.budget_breaches[]  (not surfaced here)
   // where a TokenBucket is { input_tokens, cache_creation_tokens,
   // cache_read_tokens, output_tokens, reasoning_tokens, call_count, cost_usd }.
-  // `cost` is `null` when the `fleet cost` verb is absent from this build.
+  // `cost` is `null` when the `fleet cost` verb is absent from this build, when
+  // it fails or times out, or before the server's first cost fetch lands: cost
+  // runs on its own cadence and never holds up sessions or needs (#1055).
   function fmtUsd(n) {
     if (typeof n !== "number" || !isFinite(n)) return "–";
     return `$${n.toFixed(2)}`;
@@ -313,11 +315,11 @@
     const host = $("cost");
     host.replaceChildren();
 
-    // `null`/absent verb → the surface genuinely isn't available in this build.
+    // `null`: no cost yet (still fetching, failed, or absent from this build).
     if (cost == null) {
       $("stat-cost").textContent = "–";
       $("cost-meta").textContent = "unavailable";
-      host.appendChild(emptyState("◷", "Cost surface not available in this build."));
+      host.appendChild(emptyState("◷", "Cost is not available yet."));
       return;
     }
 
