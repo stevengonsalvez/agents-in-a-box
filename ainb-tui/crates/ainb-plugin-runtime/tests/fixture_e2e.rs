@@ -1034,14 +1034,21 @@ fn a_plugin_popping_a_level_per_esc_keeps_every_esc() {
 }
 
 /// Esc presses with no frame painted in between carry no evidence, so a burst
-/// faster than the render tick is never ejected.
+/// faster than the render tick is not ejected on the frame check. It still
+/// meets the press ceiling (#1087 review): past `ESC_PRESS_CEILING` presses
+/// with no other key, the next Esc goes to the host.
 #[test]
-fn esc_presses_with_no_frame_between_them_are_all_delivered() {
+fn an_esc_burst_is_delivered_up_to_the_press_ceiling() {
+    let ceiling = ainb_plugin_runtime::plugin_task::ESC_PRESS_CEILING;
     let (_rt, handle, id) = esc_plugin("esc-burst");
-    for n in 1..=10 {
+    for n in 1..=ceiling {
         assert!(
             handle.send_key(&id, "fixture", esc()),
             "esc {n} is delivered"
         );
     }
+    assert!(
+        !handle.send_key(&id, "fixture", esc()),
+        "past {ceiling} Esc presses in a row the next one returns to the host"
+    );
 }
