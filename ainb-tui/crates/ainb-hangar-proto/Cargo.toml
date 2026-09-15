@@ -13,7 +13,13 @@ keywords = ["ainb", "hangar", "json-rpc", "protocol", "wire"]
 name = "ainb_hangar_proto"
 path = "src/lib.rs"
 
+[features]
+# Derives `specta::Type` on the types a mirror frame carries; forwarded from
+# `ainb-app/typescript-bindings`. Off in every normal build.
+typescript-bindings = ["dep:specta"]
+
 [dependencies]
+specta = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Pure, IO-free domain vocabulary (typed ids only). No SQLite/tokio, so the

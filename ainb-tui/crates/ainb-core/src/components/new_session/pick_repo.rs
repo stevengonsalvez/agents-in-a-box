@@ -136,9 +136,9 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
             let marker = Span::styled(
                 format!("{} ", row.kind.marker()),
                 Style::default().fg(match row.kind {
-                    RowKind::Favorite => GOLD,
-                    RowKind::Recent => MUTED_GRAY,
-                    RowKind::Local => CORNFLOWER_BLUE,
+                    RepoRowKind::Favorite => GOLD,
+                    RepoRowKind::Recent => MUTED_GRAY,
+                    RepoRowKind::Local => CORNFLOWER_BLUE,
                 }),
             );
             let label_style = if is_selected {
@@ -403,13 +403,13 @@ mod tests {
                 id: "ainb-tui".into(),
                 label: "ainb-tui".into(),
                 source: RepoSource::Filter("ainb-tui".into()),
-                kind: RowKind::Favorite,
+                kind: RepoRowKind::Favorite,
             },
             PickRepoRow {
                 id: "agents".into(),
                 label: "agents".into(),
                 source: RepoSource::Filter("agents".into()),
-                kind: RowKind::Favorite,
+                kind: RepoRowKind::Favorite,
             },
         ]);
         s.selected = 1; // highlight agents
@@ -465,11 +465,11 @@ mod tests {
         let locals = vec![PathBuf::from("/tmp/local-1")];
 
         let rows = build_rows(&favorites, &defaults, &locals);
-        assert_eq!(rows[0].kind, RowKind::Favorite);
+        assert_eq!(rows[0].kind, RepoRowKind::Favorite);
         assert_eq!(rows[0].id, "fav-a");
-        assert_eq!(rows[1].kind, RowKind::Recent);
+        assert_eq!(rows[1].kind, RepoRowKind::Recent);
         assert_eq!(rows[1].id, "recent-1");
-        assert_eq!(rows[2].kind, RowKind::Local);
+        assert_eq!(rows[2].kind, RepoRowKind::Local);
     }
 
     #[test]
@@ -479,13 +479,13 @@ mod tests {
                 id: "a".into(),
                 label: "a".into(),
                 source: RepoSource::Filter("a".into()),
-                kind: RowKind::Favorite,
+                kind: RepoRowKind::Favorite,
             },
             PickRepoRow {
                 id: "b".into(),
                 label: "b".into(),
                 source: RepoSource::Filter("b".into()),
-                kind: RowKind::Favorite,
+                kind: RepoRowKind::Favorite,
             },
         ];
         let filtered = vec![0, 1];
@@ -502,7 +502,7 @@ mod tests {
             id: "a".into(),
             label: "a".into(),
             source: RepoSource::Filter("a".into()),
-            kind: RowKind::Favorite,
+            kind: RepoRowKind::Favorite,
         }];
         let filtered = vec![0];
         let defaults = SessionDefaults {
@@ -562,7 +562,7 @@ mod tests {
             id: "shotclubhouse".into(),
             label: "shotclubhouse".into(),
             source: RepoSource::Filter("shotclubhouse".into()),
-            kind: RowKind::Favorite,
+            kind: RepoRowKind::Favorite,
         }]
     }
 

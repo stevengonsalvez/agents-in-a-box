@@ -16,9 +16,11 @@ use std::path::{Path, PathBuf};
 
 /// One source row in the left panel.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SourceRow {
     pub name: String,
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub uri: String,
     /// Declared ref (branch/tag) from the manifest — `[p]` re-preview
     /// must fetch this ref, not default to `main`.
@@ -32,11 +34,13 @@ pub struct SourceRow {
 
 /// One unit row in the right table.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct UnitRow {
     pub idx: usize,
     pub name: String,
     pub kind: String,
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub source: String,
     pub git_ref: String,
     pub targets: Vec<String>,
@@ -46,13 +50,16 @@ pub struct UnitRow {
     /// the underlying `UnitEntry.uri` when the row is built; matches the
     /// `LockedUnit.declared_uri` recorded in the lockfile.
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub declared_uri: String,
 }
 
 /// Detail pane content for the currently-focused unit.
 #[derive(serde::Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct UnitDetail {
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub uri: String,
     pub deployed: Vec<String>,
     pub last_used: Option<String>,
@@ -69,6 +76,7 @@ pub struct UnitDetail {
 /// [`FocusedSkillPane::Units`] so existing behaviour — arrows drive the
 /// Units table — is unchanged when nothing has touched focus.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum FocusedSkillPane {
     /// Left "Sources" panel. Up/Down move the source cursor; Enter (or a
     /// click) applies that source as the Units filter.
@@ -134,6 +142,7 @@ pub fn step_sources_width(width: u16, grow: bool, term_w: u16) -> u16 {
 /// surface, starting from `ui_preferences.skill_manager_sources_width` or
 /// [`DEFAULT_SOURCES_WIDTH`].
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SkillsScreenData {
     pub sources: Vec<SourceRow>,
     pub units: Vec<UnitRow>,
@@ -169,6 +178,7 @@ pub struct SkillsScreenData {
         rename = "search_len",
         serialize_with = "crate::wire::fields::opt_char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<u32>))]
     pub search: Option<String>,
     /// Own-skill Library view (`[l]`). `None` in the steady state;
     /// `Some` while the Library overlay is open. Sourced from
@@ -187,6 +197,7 @@ pub struct SkillsScreenData {
     /// background — renders a "fetching…" banner and blocks a second
     /// concurrent fetch. Cleared when the fetch completes either way.
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub preview_loading: Option<String>,
     /// Source-removal confirm dialog: `Some` after `[r]` on a source row.
     /// Offers "remove skills + source", "remove skills, keep source", and
@@ -213,6 +224,7 @@ pub struct SkillsScreenData {
         rename = "source_filter_len",
         serialize_with = "crate::wire::fields::opt_char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<u32>))]
     pub source_filter: Option<String>,
     /// `Some(uri)` after the first `[r]` on a unit — arms a one-shot
     /// confirm so a single keypress can't uninstall. A second `[r]` on
@@ -252,6 +264,7 @@ impl Default for SkillsScreenData {
 /// One catalog hit row in the browse modal, projected from a
 /// [`ainb_skill_core::CatalogHit`].
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct BrowseRow {
     pub name: String,
     pub repo: String,
@@ -259,6 +272,7 @@ pub struct BrowseRow {
     /// For a `skill` kind: the unit URI fed to the install flow. For
     /// npx/plugin/mcp kinds: the shell command that installs it.
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub install_uri: String,
     pub description: String,
     /// How this entry installs — drives the shelf badge and the install
@@ -268,6 +282,7 @@ pub struct BrowseRow {
 
 /// Which phase the browse modal is in.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum BrowseMode {
     /// Typing the query — keystrokes go into the buffer; Enter searches.
     #[default]
@@ -278,6 +293,7 @@ pub enum BrowseMode {
 
 /// Which catalog the `[b]` modal is browsing. `Tab` toggles between them.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum CatalogKind {
     /// The toolkit's curated shelf (owned skills + vetted external),
     /// fetched from the pinned GitHub release index — offline-capable and
@@ -315,6 +331,7 @@ impl CatalogKind {
 /// State of the `[b]` catalog browse overlay. Rendered on top of the
 /// Sources/Units/Detail panels. Results are ephemeral.
 #[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct BrowseViewState {
     pub mode: BrowseMode,
     /// Which catalog is being browsed (`Tab` toggles). Defaults to the
@@ -326,12 +343,14 @@ pub struct BrowseViewState {
         rename = "query_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub query: String,
     pub results: Vec<BrowseRow>,
     pub selected: usize,
     /// Optional status line (e.g. an error or "no results") shown beneath
     /// the input. `None` in the happy path.
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub status: Option<String>,
     /// True after the first Enter on a command-kind (npx/plugin/mcp) row —
     /// the entry installs by RUNNING a shell command, so we require a second
@@ -412,6 +431,7 @@ pub const PREVIEW_TOOLS: [&str; 3] = ["claude", "codex", "copilot"];
 /// Source-preview picker state: the fetched-but-not-persisted source, a
 /// checkbox per discovered unit, and the target-tool checkboxes.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SourcePreviewViewState {
     /// Fetched source contents; the host keeps them, the frame carries the
     /// checkbox rows only.
@@ -545,9 +565,11 @@ impl SourceRemoveChoice {
 
 /// Confirm dialog shown by `[r]` on a source row.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SourceRemoveConfirm {
     pub source_name: String,
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub source_uri: String,
     /// Installed units belonging to this source (for the count shown).
     pub unit_count: usize,
@@ -571,6 +593,7 @@ impl SourceRemoveConfirm {
 /// (rendered as a git-style diff) and the scope that produced it so the
 /// apply step re-runs the identical scope with `--yes`.
 #[derive(serde::Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SyncConfirmState {
     /// What the sync is scoped to — a source name or a unit URI. Passed
     /// back verbatim as `SyncArgs.source_or_unit` on apply.
@@ -579,6 +602,7 @@ pub struct SyncConfirmState {
     pub label: String,
     /// The dry-run plan, one line per emitted output row.
     #[serde(serialize_with = "crate::wire::fields::scrub_lines")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<String>))]
     pub plan: Vec<String>,
     /// Vertical scroll offset into [`Self::plan`].
     pub scroll: usize,
@@ -594,6 +618,7 @@ impl SyncConfirmState {
 /// One owned-skill row in the Library view, projected from a
 /// [`ainb_skill_core::OwnedUnit`].
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct LibraryRow {
     pub name: String,
     pub kind: String,
@@ -609,6 +634,7 @@ pub struct LibraryRow {
 /// Sources/Units/Detail panels; reuses the same table chrome as the
 /// Units panel but sourced from `library.yaml`.
 #[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct LibraryViewState {
     pub rows: Vec<LibraryRow>,
     pub selected: usize,
@@ -677,6 +703,7 @@ impl LibraryViewState {
 
 /// Which kind of text the active input prompt is collecting.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum InputKind {
     /// `gh:owner/repo` source URI for `ainb source add`.
     AddSource,
@@ -686,12 +713,14 @@ pub enum InputKind {
 
 /// State of the active text-input prompt.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct InputState {
     pub kind: InputKind,
     #[serde(
         rename = "buffer_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub buffer: String,
 }
 
@@ -753,6 +782,7 @@ pub fn normalize_source_input(raw: &str) -> String {
 /// - `Visible | Details` → `Hidden` on `[Enter]` (after import) or
 ///   on `[s]` (skip, persisted via marker file).
 #[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum DiscoveryBannerState {
     #[default]
     Hidden,
@@ -776,6 +806,7 @@ impl DiscoveryBannerState {
 /// Per-category counts shown in the discovery banner. Mirrors the
 /// ASCII mockup in spec §User Flow 1.
 #[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct DiscoveryBannerCounts {
     pub marketplace_plugins: usize,
     pub orphan_units_total: usize,

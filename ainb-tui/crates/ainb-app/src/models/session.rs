@@ -13,6 +13,7 @@ pub fn is_default_model(value: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum SessionMode {
     // PascalCase variants are the canonical wire format for
     // `~/.agents-in-a-box/sessions.json` (existing on-disk corpus). The
@@ -40,6 +41,7 @@ impl Default for SessionMode {
 /// to lowercase ids by the registry. Plugin-supplied session agents in
 /// Phase 4 register straight into the registry without an enum variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum SessionAgentType {
     #[default]
     Claude,
@@ -279,6 +281,7 @@ impl ClaudeModel {
 /// spawned `codex` command". The Codex CLI's own internal default applies in
 /// that case (currently `gpt-5.5`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum CodexModel {
     /// Omit `--model` from the spawned `codex` command.
     #[default]
@@ -491,6 +494,7 @@ impl std::str::FromStr for AntigravityModel {
 
 /// SSH connection target configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SshTarget {
     pub host: String,
     pub port: u16,
@@ -589,6 +593,7 @@ impl Default for SshTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum SessionStatus {
     Running,
     Stopped,
@@ -621,6 +626,7 @@ impl SessionStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Session {
     pub id: Uuid,
     pub name: String,
@@ -632,10 +638,12 @@ pub struct Session {
     pub last_accessed: DateTime<Utc>,
     pub git_changes: GitChanges,
     #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub recent_logs: Option<String>,
     pub skip_permissions: bool, // Whether to use --dangerously-skip-permissions flag
     pub mode: SessionMode,      // Interactive or Boss mode
     #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub boss_prompt: Option<String>, // The prompt for boss mode execution
     #[serde(default)]
     pub agent_type: SessionAgentType, // The AI agent or shell for this session
@@ -647,12 +655,14 @@ pub struct Session {
     pub codex_model: Option<CodexModel>,
     #[serde(default)]
     pub ssh_target: Option<SshTarget>, // SSH connection target for SSH agent type
-    #[serde(default)]
+    // The operator's own label: kept on disk, left off a mirror frame (#983 M19).
+    #[serde(default, skip_serializing_if = "crate::wire::fields::omit_in_frame")]
     pub display_name: Option<String>, // Custom display name (overrides auto-generated name in UI)
 
     // Tmux integration fields
     pub tmux_session_name: Option<String>, // Name of the tmux session if using tmux backend
     #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub preview_content: Option<String>, // Cached preview content for display
     pub is_attached: bool,                 // Whether user is currently attached to the session
 
@@ -697,6 +707,7 @@ pub struct Session {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct GitChanges {
     pub added: u32,
     pub modified: u32,
@@ -723,6 +734,7 @@ impl GitChanges {
 
 /// Status of a shell session
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ShellSessionStatus {
     Running,  // Tmux session is active
     Detached, // Tmux session exists but not attached
@@ -754,6 +766,7 @@ impl Default for ShellSessionStatus {
 
 /// A plain shell session (no AI agent) tied to a workspace
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ShellSession {
     pub id: Uuid,
     pub name: String, // Display name (e.g., "shell-main", "shell-feature")
@@ -764,6 +777,7 @@ pub struct ShellSession {
     pub last_accessed: DateTime<Utc>,
     pub status: ShellSessionStatus,
     #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub preview_content: Option<String>, // Cached preview content for display
 }
 

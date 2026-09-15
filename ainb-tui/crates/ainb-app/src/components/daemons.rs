@@ -51,6 +51,7 @@ pub const STATUS_LINGER: Duration = Duration::from_secs(20);
 /// Cheap to clone the `Arc`; the `Mutex` is held only for the microseconds it
 /// takes to swap or clone the row vector — never across I/O.
 #[derive(serde::Serialize, Debug, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Snapshot {
     /// Most-recently-collected daemon rows.
     pub rows: Vec<DaemonStatus>,
@@ -60,6 +61,7 @@ pub struct Snapshot {
     /// the render path. Its event, detail and issue text come from the machine
     /// and the hook scripts, so a frame carries them scrubbed.
     #[serde(serialize_with = "scrub_hook_health")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<HookHealth>))]
     pub hook_health: Option<HookHealth>,
     /// Hook evidence freshness, collected beside the wiring health.
     pub evidence_census: Option<EvidenceCensus>,
@@ -89,6 +91,7 @@ pub struct Snapshot {
 /// What the Daemons screen needs to know about the ATC supervisor beyond its
 /// runtime row: which brain its heartbeat would use.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AtcModeView {
     pub name: String,
     pub provider: String,
@@ -100,6 +103,7 @@ pub struct AtcModeView {
     /// design is about keeping work off the UI thread. It is a pure function of
     /// the provider, so it belongs on the snapshot with everything else.
     #[serde(serialize_with = "crate::wire::fields::scrub_lines")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<String>))]
     pub help: Vec<String>,
 }
 
@@ -113,10 +117,12 @@ pub struct AtcModeView {
 /// lock. A mid-crash daemon, a stale socket on a slow FS, or a saturated accept
 /// backlog can stall the background thread but can NEVER freeze the UI.
 #[derive(serde::Serialize, Debug, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct DaemonsState {
     /// The snapshot the background collector publishes into. `None` until the
     /// first render lazily spawns the collector.
     #[serde(serialize_with = "crate::wire::fields::locked_shared")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<Snapshot>))]
     pub shared: Option<Arc<Mutex<Snapshot>>>,
     /// Wakes the collector for an immediate re-collect. `None` until the
     /// collector is armed.
@@ -162,6 +168,7 @@ pub struct DaemonsState {
     /// seconds, so expiry is a wall clock the reader can keep up with rather
     /// than the next collect.
     #[serde(serialize_with = "crate::wire::fields::text_of_timed")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub hooks_status: Option<(String, std::time::Instant)>,
     /// A tmux session the screen wants attached. Drained by the key handler,
     /// which owns the app-level pending-action slot; the component itself must
@@ -171,6 +178,7 @@ pub struct DaemonsState {
 
 /// A daemon action the host is running.
 #[derive(serde::Serialize, Debug, Clone, Copy)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct InFlight {
     pub action: Action,
     pub generation: u64,
@@ -180,6 +188,7 @@ pub struct InFlight {
 
 /// A daemon action asked for and not yet handed to the host.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct DaemonActionRequest {
     pub daemon: DaemonKind,
     pub action: Action,
@@ -188,6 +197,7 @@ pub struct DaemonActionRequest {
 
 /// The open action menu: which daemon it belongs to and where the cursor is.
 #[derive(serde::Serialize, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ActionMenu {
     pub kind: DaemonKind,
     /// Index into [`ActionMenu::entries`].
@@ -200,6 +210,7 @@ pub struct ActionMenu {
 
 /// The parts of a row's status that decide which entries its menu offers.
 #[derive(serde::Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 struct RowFacts {
     /// The provisioned ATC instance, when there is one. `None` means every
     /// lifecycle verb would bail. Read from a typed field, never inferred from
@@ -311,6 +322,7 @@ fn scrub_hook_health<S: serde::Serializer>(
 
 /// What a finished lifecycle action reported.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ActionOutcome {
     pub action: Action,
     pub ok: bool,

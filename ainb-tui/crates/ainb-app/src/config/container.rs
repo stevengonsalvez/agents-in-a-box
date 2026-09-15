@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ContainerTemplate {
     /// Template name
     pub name: String,
@@ -28,6 +29,7 @@ pub struct ContainerTemplate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ContainerTemplateConfig {
     /// Docker image or Dockerfile path
     pub image_source: ImageSource,
@@ -44,6 +46,7 @@ pub struct ContainerTemplateConfig {
 
     /// Environment variables
     #[serde(default, serialize_with = "crate::wire::fields::env_values_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = HashMap<String, String>))]
     pub environment: HashMap<String, String>,
 
     /// User to run as (optional)
@@ -86,6 +89,7 @@ pub struct ContainerTemplateConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ImageSource {
     /// Use a pre-built image from registry
     Image { name: String },
@@ -94,6 +98,7 @@ pub enum ImageSource {
     Dockerfile {
         path: PathBuf,
         #[serde(serialize_with = "crate::wire::fields::env_values_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = HashMap<String, String>))]
         build_args: HashMap<String, String>,
     },
 
@@ -103,11 +108,13 @@ pub enum ImageSource {
         base_image: Option<String>,
         /// Additional build args
         #[serde(serialize_with = "crate::wire::fields::env_values_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = HashMap<String, String>))]
         build_args: HashMap<String, String>,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct VolumeMount {
     pub host_path: String,
     pub container_path: String,

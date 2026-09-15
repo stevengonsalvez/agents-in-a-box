@@ -16,6 +16,7 @@ pub fn sidebar_double_click_window() -> Duration {
 
 /// Focus area on the home screen
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum HomeScreenFocus {
     Sidebar,
     ContentPanel,
@@ -23,6 +24,7 @@ pub enum HomeScreenFocus {
 
 /// State for the refreshed home screen
 #[derive(serde::Serialize, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct HomeScreenV2State {
     /// Current focus (always sidebar for now)
     pub focus: HomeScreenFocus,

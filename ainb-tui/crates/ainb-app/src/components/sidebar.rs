@@ -194,6 +194,7 @@ impl SidebarItem {
 
 /// Sidebar state
 #[derive(serde::Serialize, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SidebarState {
     /// Currently selected item index
     pub selected_index: usize,

@@ -9,14 +9,16 @@ const CHANGELOG_CONTENT: &str = include_str!("../../../../CHANGELOG.md");
 
 /// A line of rendered markdown content
 #[derive(serde::Serialize, Debug, Clone)]
-pub struct MarkdownLine {
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+pub struct ChangelogLine {
     pub content: String,
-    pub style: MarkdownStyle,
+    pub style: ChangelogStyle,
 }
 
 /// Styling categories for markdown content
 #[derive(serde::Serialize, Debug, Clone, PartialEq)]
-pub enum MarkdownStyle {
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+pub enum ChangelogStyle {
     Heading1,
     Heading2,
     Heading3,
@@ -30,9 +32,10 @@ pub enum MarkdownStyle {
 
 /// State for the changelog viewer
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ChangelogState {
     /// Parsed markdown lines
-    pub lines: Vec<MarkdownLine>,
+    pub lines: Vec<ChangelogLine>,
     /// Current scroll offset
     pub scroll_offset: usize,
     /// Total number of lines
@@ -93,7 +96,7 @@ impl ChangelogState {
     }
 
     /// Parse markdown content into styled lines
-    fn parse_markdown(content: &str) -> Vec<MarkdownLine> {
+    fn parse_markdown(content: &str) -> Vec<ChangelogLine> {
         let mut lines = Vec::new();
         let parser = Parser::new(content);
 
@@ -107,9 +110,9 @@ impl ChangelogState {
                 Event::Start(tag) => {
                     // Flush accumulated text
                     if !current_text.is_empty() && !in_code_block {
-                        lines.push(MarkdownLine {
+                        lines.push(ChangelogLine {
                             content: current_text.clone(),
-                            style: MarkdownStyle::Paragraph,
+                            style: ChangelogStyle::Paragraph,
                         });
                         current_text.clear();
                     }
@@ -118,9 +121,9 @@ impl ChangelogState {
                         Tag::Heading(level, _, _) => {
                             // Add blank line before headings (except first)
                             if !lines.is_empty() {
-                                lines.push(MarkdownLine {
+                                lines.push(ChangelogLine {
                                     content: String::new(),
-                                    style: MarkdownStyle::Paragraph,
+                                    style: ChangelogStyle::Paragraph,
                                 });
                             }
                             current_heading_level = Some(level);
@@ -140,14 +143,14 @@ impl ChangelogState {
                                 _ => None,
                             };
                             if let Some(ref l) = lang {
-                                lines.push(MarkdownLine {
+                                lines.push(ChangelogLine {
                                     content: format!("┌─ [{}] ", l.to_uppercase()),
-                                    style: MarkdownStyle::CodeBlockHeader(l.clone()),
+                                    style: ChangelogStyle::CodeBlockHeader(l.clone()),
                                 });
                             } else {
-                                lines.push(MarkdownLine {
+                                lines.push(ChangelogLine {
                                     content: "┌────────────────────".to_string(),
-                                    style: MarkdownStyle::CodeBlock,
+                                    style: ChangelogStyle::CodeBlock,
                                 });
                             }
                         }
@@ -164,9 +167,9 @@ impl ChangelogState {
                         Tag::Heading(..) => {
                             if let Some(level) = current_heading_level.take() {
                                 let style = match level {
-                                    HeadingLevel::H1 => MarkdownStyle::Heading1,
-                                    HeadingLevel::H2 => MarkdownStyle::Heading2,
-                                    _ => MarkdownStyle::Heading3,
+                                    HeadingLevel::H1 => ChangelogStyle::Heading1,
+                                    HeadingLevel::H2 => ChangelogStyle::Heading2,
+                                    _ => ChangelogStyle::Heading3,
                                 };
 
                                 // Add decorative prefix for version headers
@@ -176,7 +179,7 @@ impl ChangelogState {
                                     _ => "• ",
                                 };
 
-                                lines.push(MarkdownLine {
+                                lines.push(ChangelogLine {
                                     content: format!("{}{}", prefix, current_text.trim()),
                                     style,
                                 });
@@ -185,9 +188,9 @@ impl ChangelogState {
                         }
                         Tag::Paragraph => {
                             if !current_text.is_empty() && !in_code_block {
-                                lines.push(MarkdownLine {
+                                lines.push(ChangelogLine {
                                     content: current_text.clone(),
-                                    style: MarkdownStyle::Paragraph,
+                                    style: ChangelogStyle::Paragraph,
                                 });
                                 current_text.clear();
                             }
@@ -196,16 +199,16 @@ impl ChangelogState {
                             // Add any remaining code content
                             if !current_text.is_empty() {
                                 for code_line in current_text.lines() {
-                                    lines.push(MarkdownLine {
+                                    lines.push(ChangelogLine {
                                         content: format!("│ {}", code_line),
-                                        style: MarkdownStyle::CodeBlock,
+                                        style: ChangelogStyle::CodeBlock,
                                     });
                                 }
                                 current_text.clear();
                             }
-                            lines.push(MarkdownLine {
+                            lines.push(ChangelogLine {
                                 content: "└────────────────────".to_string(),
-                                style: MarkdownStyle::CodeBlock,
+                                style: ChangelogStyle::CodeBlock,
                             });
                             in_code_block = false;
                         }
@@ -215,9 +218,9 @@ impl ChangelogState {
                         Tag::Item => {
                             if !current_text.is_empty() {
                                 let indent = "  ".repeat(list_depth.saturating_sub(1));
-                                lines.push(MarkdownLine {
+                                lines.push(ChangelogLine {
                                     content: format!("{}• {}", indent, current_text.trim()),
-                                    style: MarkdownStyle::ListItem,
+                                    style: ChangelogStyle::ListItem,
                                 });
                                 current_text.clear();
                             }
@@ -248,9 +251,9 @@ impl ChangelogState {
 
         // Flush any remaining text
         if !current_text.is_empty() {
-            lines.push(MarkdownLine {
+            lines.push(ChangelogLine {
                 content: current_text,
-                style: MarkdownStyle::Paragraph,
+                style: ChangelogStyle::Paragraph,
             });
         }
 

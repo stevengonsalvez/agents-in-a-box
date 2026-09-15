@@ -1,0 +1,13 @@
+{
+  "name": "ainb-mirror-fanout-bench",
+  "private": true,
+  "version": "0.0.0",
+  "description": "D15 renderer fan-out bench: 100 sessions, 2,000 frames in 2 s, one SolidJS store transaction per 16 ms drain. Gated in CI (W0-mirror).",
+  "type": "module",
+  "scripts": {
+    "bench": "node --conditions=browser --expose-gc bench.mjs"
+  },
+  "dependencies": {
+    "solid-js": "1.9.15"
+  }
+}

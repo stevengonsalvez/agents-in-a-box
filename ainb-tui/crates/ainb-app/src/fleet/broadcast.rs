@@ -14,6 +14,7 @@ use ainb_hangar_proto::fleet::{ActionReceiptStatus, FleetActionReceipt};
 
 /// Where the broadcast is.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum BroadcastPhase {
     /// Typing. The composer holds the text.
     #[default]
@@ -25,9 +26,17 @@ pub enum BroadcastPhase {
     /// Kept until the operator clears it: a receipt list that vanished on the
     /// next repaint would make a partial failure unreadable, and a partial
     /// failure is the case this pane exists to show.
-    Sent(#[serde(serialize_with = "crate::wire::fields::scrub_receipts")] Vec<FleetActionReceipt>),
+    Sent(
+        #[serde(serialize_with = "crate::wire::fields::scrub_receipts")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<FleetActionReceipt>))]
+        Vec<FleetActionReceipt>,
+    ),
     /// The CALL failed, as opposed to a recipient refusing. Nothing was sent.
-    Failed(#[serde(serialize_with = "crate::wire::fields::scrub_str")] String),
+    Failed(
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        String,
+    ),
 }
 
 /// One landed effect.
@@ -39,11 +48,13 @@ enum BroadcastOutcome {
 
 /// The broadcast composer and its in-flight send.
 #[derive(serde::Serialize, Debug, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Broadcast {
     #[serde(
         rename = "text_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     text: String,
     phase: BroadcastPhase,
     #[serde(skip)]

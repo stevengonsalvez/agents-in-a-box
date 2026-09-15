@@ -37,6 +37,7 @@ const BUNDLED_PRESETS_TOML: &str = include_str!("../../../../config/default-pres
 
 /// A repository preset that defines default agent and configuration settings
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct RepositoryPreset {
     /// Unique name for this preset
     pub name: String,
@@ -75,10 +76,12 @@ pub struct RepositoryPreset {
 
     /// Custom CLAUDE.md rules to append
     #[serde(default, serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub custom_rules: Option<String>,
 
     /// Environment variables to set
     #[serde(default, serialize_with = "crate::wire::fields::env_values_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = HashMap<String, String>))]
     pub environment: HashMap<String, String>,
 }
 
@@ -92,6 +95,7 @@ fn default_model() -> String {
 
 /// Permission settings for a preset
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct PermissionSet {
     /// Allow file writes without confirmation
     #[serde(default)]

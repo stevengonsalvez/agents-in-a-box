@@ -4,6 +4,7 @@
 
 /// Type of popup being shown
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ConfigPopupType {
     /// Selection from a list of choices
     Choice {
@@ -15,6 +16,7 @@ pub enum ConfigPopupType {
         /// A plain setting's value (secret and credential-bearing rows open
         /// `SecretInput`), scrubbed in case a credential was pasted into it.
         #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
         value: String,
         cursor_position: usize,
     },
@@ -26,6 +28,7 @@ pub enum ConfigPopupType {
             rename = "value_len",
             serialize_with = "crate::wire::fields::char_count"
         )]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
         value: String,
         cursor_position: usize,
     },
@@ -37,6 +40,7 @@ pub enum ConfigPopupType {
 
 /// State for the config popup
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ConfigPopupState {
     /// Whether the popup is visible
     pub show_popup: bool,

@@ -47,6 +47,7 @@ pub use tunables::{
 /// Authentication provider for Claude API
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ClaudeAuthProvider {
     /// System authentication (Claude Pro/Max subscription)
     #[default]
@@ -106,6 +107,7 @@ impl ClaudeAuthProvider {
 /// directly with `ProviderRegistry` and have no `CliProvider` variant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum CliProvider {
     /// Claude Code CLI (default)
     #[default]
@@ -195,6 +197,7 @@ impl CliProvider {
 
 /// Authentication configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AuthenticationConfig {
     /// Active CLI provider for agent sessions
     #[serde(default)]
@@ -229,6 +232,7 @@ fn default_claude_model() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AppConfig {
     /// Every layer EXCEPT the user file, merged.
     ///
@@ -350,6 +354,7 @@ pub struct AppConfig {
 /// idle_grace_secs = 300
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct McpPoolConfig {
     /// Master switch for the shared pool. Off → sessions spawn MCP servers
     /// per-session exactly as before.
@@ -408,6 +413,7 @@ fn default_daemon_idle_grace_secs() -> u64 {
 /// Defaults to `../presets.toml` so the file sits alongside `config/` at
 /// `~/.agents-in-a-box/presets.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct PresetsConfig {
     /// Path to the presets file, relative to the config dir or absolute.
     /// Defaults to `../presets.toml` (i.e. `~/.agents-in-a-box/presets.toml`).
@@ -483,6 +489,7 @@ fn lexically_normalise(p: &Path) -> PathBuf {
 /// enabled = ["session-reader"]         # only session-reader loads
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct PluginsConfig {
     /// Allowlist — when non-empty, ONLY plugins whose `id` appears here
     /// are loaded. Takes precedence over `disabled` when both are set.
@@ -509,11 +516,14 @@ pub struct PluginsConfig {
         flatten,
         skip_serializing_if = "crate::wire::fields::omit_in_frame"
     )]
+    // Never on a frame, so never in the TypeScript.
+    #[cfg_attr(feature = "typescript-bindings", specta(skip))]
     pub values: BTreeMap<String, toml::Value>,
 }
 
 /// `[fleet.status]`: knobs for the D14 status store.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct FleetStatusConfig {
     /// Restore the pre-T0 ordering: the live `classify()` pane and transcript
     /// scan answers first, and the daemon's status read is consulted only where
@@ -552,6 +562,7 @@ pub struct FleetStatusConfig {
 /// The home for fleet-wide knobs so they share one `[fleet]` table in
 /// `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct FleetConfig {
     /// Budget caps for `ainb fleet cost`. See [`CostBudgetConfig`].
     #[serde(default)]
@@ -632,6 +643,8 @@ pub struct FleetConfig {
         default,
         skip_serializing_if = "crate::wire::fields::omit_in_frame_or_none"
     )]
+    // Never on a frame, so never in the TypeScript.
+    #[cfg_attr(feature = "typescript-bindings", specta(skip))]
     pub bridge: Option<toml::Value>,
 }
 
@@ -691,6 +704,7 @@ impl Default for FleetConfig {
 /// surface = "native"   # or "fleet" to hold for remote answering
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct InterviewConfig {
     /// `"native"` or `"fleet"`. Unrecognised values read as `"native"`, so a
     /// typo can never silently start holding tool calls.
@@ -751,6 +765,7 @@ impl InterviewConfig {
 /// "infra" = 100.0       # the infra workspace gets a $100 ceiling
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct CostBudgetConfig {
     /// Blanket per-session USD ceiling. `None` disables session caps
     /// (except where a `session_overrides` entry sets one explicitly).
@@ -795,6 +810,7 @@ impl CostBudgetConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct UsageConfig {
     #[serde(default)]
     pub plan: Option<UsagePlan>,
@@ -815,6 +831,7 @@ impl Default for UsageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct UsagePlan {
     pub id: UsagePlanId,
     pub monthly_usd: f64,
@@ -825,6 +842,7 @@ pub struct UsagePlan {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum UsagePlanId {
     ClaudePro,
     ClaudeMax,
@@ -848,6 +866,7 @@ impl UsagePlanId {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum UsagePlanProvider {
     All,
     Claude,
@@ -863,6 +882,7 @@ impl Default for UsagePlanProvider {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct CurrencyConfig {
     #[serde(default = "default_currency_code")]
     pub code: String,
@@ -895,6 +915,7 @@ fn default_exchange_rate() -> f64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct WorkspaceDefaults {
     /// Default branch prefix for new sessions
     #[serde(default = "default_branch_prefix")]
@@ -947,6 +968,7 @@ impl Default for WorkspaceDefaults {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum WorktreeCollisionBehavior {
     AutoRename,
     Error,
@@ -959,6 +981,7 @@ impl Default for WorktreeCollisionBehavior {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct UiPreferences {
     /// Color theme
     #[serde(default = "default_theme")]
@@ -1050,6 +1073,7 @@ pub struct UiPreferences {
 /// The user's recorded decision on the Claude Code statusline wiring.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum StatuslineDecision {
     /// User has never been asked, or has dismissed the prompt without
     /// accepting or declining.
@@ -1065,6 +1089,7 @@ pub enum StatuslineDecision {
 /// Mirrors [`StatuslineDecision`] semantics.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum TmuxDecision {
     /// Never asked, or dismissed without accepting/declining.
     #[default]
@@ -1099,6 +1124,7 @@ impl Default for UiPreferences {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct DockerConfig {
     /// Docker host connection string
     /// Examples:
@@ -1108,6 +1134,7 @@ pub struct DockerConfig {
     ///
     /// A `tcp://user:pass@host` URL carries a credential, so a frame scrubs it.
     #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub host: Option<String>,
 
     /// Connection timeout in seconds

@@ -20,6 +20,7 @@ pub const REFLECT_KB_INSTALL: &str = "uv tool install --force --upgrade \
 /// Which feature needs a given dependency. A dep may have several consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum Consumer {
     /// Core ainb / Claude Code session basics.
     Core,

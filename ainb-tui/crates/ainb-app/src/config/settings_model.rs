@@ -10,6 +10,7 @@
 /// actually has rows today; `CONFIG_REGISTRY` is the source of truth for the
 /// rest, and wiring it in is what removes that gap.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ConfigCategory {
     Authentication,
     Workspace,
@@ -136,6 +137,7 @@ impl ConfigCategory {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ConfigSetting {
     pub key: String,
     pub label: String,
@@ -194,10 +196,12 @@ pub fn credential_bearing_key(key: &str) -> bool {
 /// resolved value is deliberately not kept: nothing on this screen needs it, and
 /// not holding it is the cheapest way to guarantee it cannot be painted.
 #[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SecretValue {
     /// Exactly what config.toml holds: empty, a literal, `$ENV_VAR`, or
     /// `keychain:<service>`.
     #[serde(serialize_with = "crate::wire::fields::secret_source")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub reference: String,
     /// Whether `reference` resolved when the row was built. Resolving a
     /// `keychain:` reference shells out to `/usr/bin/security`, so this is
@@ -234,6 +238,7 @@ impl SecretValue {
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ConfigValue {
     Text(String),
     /// A credential. Rendered as status + source, never as the value.
@@ -277,6 +282,7 @@ impl ConfigValue {
 /// on stopped-only without losing access. Persisted in UI preferences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum SessionFilter {
     #[default]
     All,

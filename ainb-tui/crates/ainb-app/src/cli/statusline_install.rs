@@ -40,6 +40,7 @@ pub enum InstallOutcome {
 
 /// Status of the user's statusline configuration.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum StatuslineStatus {
     /// `ainb statusline` is wired as the sole statusLine command.
     Configured,
@@ -48,7 +49,11 @@ pub enum StatuslineStatus {
     /// Some other command is wired. The command line is verbatim from
     /// settings.json and can carry an inline `KEY=value`, so a mirror frame
     /// says only that another command is wired.
-    Other(#[serde(serialize_with = "crate::wire::fields::withheld")] String),
+    Other(
+        #[serde(serialize_with = "crate::wire::fields::withheld")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        String,
+    ),
 }
 
 /// Resolve `~/.claude/settings.json`.

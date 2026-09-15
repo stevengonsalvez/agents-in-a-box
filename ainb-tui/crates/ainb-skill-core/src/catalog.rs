@@ -39,6 +39,7 @@ pub const SKILLS_SH_DEFAULT_BASE: &str = "https://skills.sh";
 /// (not a unit URI) — the install router discriminates on this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum CatalogEntryKind {
     /// A git-backed skill unit (`install_uri` is a `gh:`/`git:` unit URI).
     #[default]

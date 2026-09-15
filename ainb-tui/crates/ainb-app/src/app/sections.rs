@@ -618,7 +618,22 @@ pub struct FleetSection {
     ///
     /// Same shape as [`Self::attention_error_since`]: stamped once, reused
     /// while the chip stays that kind, dropped when it does not.
-    pub attention_local_since: HashMap<(Uuid, AttentionKind, Option<String>), i64>,
+    pub attention_local_since: HashMap<AttentionLocalKey, i64>,
+}
+
+/// Which local chip an [`FleetSection::attention_local_since`] clock belongs to.
+///
+/// Named rather than a tuple: a tuple cannot be a map key on any serialised
+/// form (JSON or the TypeScript contract), and three positional fields invite
+/// swapping `kind` and `detail` at a call site.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AttentionLocalKey {
+    /// The session the chip is on.
+    pub session_id: Uuid,
+    /// The chip's kind.
+    pub kind: AttentionKind,
+    /// The chip's detail: two questions of one kind are two different waits.
+    pub detail: Option<String>,
 }
 
 impl Default for FleetSection {
@@ -858,6 +873,7 @@ mod agent_status_section_tests {
             }],
             read_revision: revision,
             unknown_events: Vec::new(),
+            read_at_ms: 0,
         }
     }
 

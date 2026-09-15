@@ -209,6 +209,7 @@ pub struct FleetNegotiateResult {
 /// Session provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum FleetProvider {
     /// Claude Code.
     Claude,
@@ -229,6 +230,7 @@ pub enum FleetProvider {
 /// Provider session lifecycle, independent from attention.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum LifecycleState {
     /// Process or provider thread is starting.
     Starting,
@@ -248,6 +250,7 @@ pub enum LifecycleState {
 /// Operator attention state, independent from lifecycle.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AttentionState {
     /// No operator action requested.
     #[default]
@@ -265,6 +268,7 @@ pub enum AttentionState {
 /// Whether Hangar has authoritative provider control.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ManagementState {
     /// Provider adapter supports authoritative actions.
     Managed,
@@ -276,6 +280,7 @@ pub enum ManagementState {
 /// Health of the preferred provider transport.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum TransportHealth {
     /// Preferred transport is responsive.
     Healthy,
@@ -291,6 +296,7 @@ pub enum TransportHealth {
 /// Authority of observed state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum FleetProvenance {
     /// Exact provider or lifecycle-hook observation.
     Authoritative,
@@ -307,6 +313,7 @@ pub enum FleetProvenance {
 /// "this agent has no pane" instead of an empty attach column.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum PaneBinding {
     /// A tmux target is resolved: the hook named it, or the daemon correlated
     /// exactly one discovered pane onto it.
@@ -323,6 +330,7 @@ pub enum PaneBinding {
 /// Confidence assigned to session identity and state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum FleetConfidence {
     /// Exact stable identity and authoritative state.
     High,
@@ -336,6 +344,7 @@ pub enum FleetConfidence {
 /// Provider and transport actions available for one session.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct FleetCapabilities {
     /// Answer exact structured provider requests.
     pub structured_answer: bool,
@@ -373,6 +382,7 @@ pub struct FleetCapabilities {
 
 /// Canonical Fleet session read-model row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct FleetSession {
     /// Stable identity, never cwd.
     pub session_key: String,
@@ -403,6 +413,9 @@ pub struct FleetSession {
     pub current_request_fingerprint: Option<String>,
     /// Complete current structured request for rendering and exact routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    // A mirror frame never carries the request (ainb-app `wire::fleet_rows`
+    // drops it), so the TypeScript contract has no field for it.
+    #[cfg_attr(feature = "typescript-bindings", specta(skip))]
     pub current_request: Option<serde_json::Value>,
     /// Managed or degraded control state.
     pub management: ManagementState,
@@ -1237,6 +1250,7 @@ pub struct FleetActionParams {
 /// Durable action delivery status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ActionReceiptStatus {
     /// Action accepted but not resolved.
     Pending,
@@ -1271,6 +1285,7 @@ pub const fn receipt_status_token(status: ActionReceiptStatus) -> &'static str {
 
 /// Durable action result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct FleetActionReceipt {
     /// Idempotent request identifier.
     pub request_id: String,

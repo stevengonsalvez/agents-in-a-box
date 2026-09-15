@@ -1,0 +1,12 @@
+{
+  "name": "ainb-app-bindings",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Type-checks the sample mirror frames against the generated AppState.ts (W0-mirror, D15).",
+  "scripts": {
+    "check": "tsc --noEmit --strict --skipLibCheck --target es2022 --moduleResolution bundler --module esnext AppState.ts sample.check.ts"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3"
+  }
+}
