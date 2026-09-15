@@ -42,9 +42,15 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// task and cadence and never holds up sessions or needs (#1055).
 const COST_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
-/// The longest one cost fetch may take. A fetch past it is abandoned (its
-/// process is killed) and the last cost value is kept.
-const COST_FETCH_TIMEOUT: Duration = Duration::from_secs(20);
+/// The first bound on one cost fetch. A fetch past it is abandoned (its process
+/// is killed), the last cost value is kept, and the next fetch gets twice the
+/// time, up to [`COST_FETCH_TIMEOUT_CAP`]; a fetch that lands resets it. A lone
+/// `fleet cost` returns in under a second, but #1055 measured 120 s under
+/// contention, so the cap sits above that.
+const COST_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The most time one cost fetch is ever given.
+const COST_FETCH_TIMEOUT_CAP: Duration = Duration::from_secs(240);
 
 /// SSE keep-alive comment cadence (keeps proxies from dropping idle streams).
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -183,7 +189,6 @@ impl AppState {
         let data = Arc::clone(&self.data);
         let tx = self.cache.clone();
         tokio::spawn(async move {
-            let mut last_fp: Option<u64> = None;
             let mut ticker = tokio::time::interval(POLL_INTERVAL);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -202,12 +207,16 @@ impl AppState {
                     }
                 };
                 let snap = FleetSnapshot::from_parts(core, cost_rx.borrow().clone());
-                if last_fp != Some(snap.fingerprint) {
-                    last_fp = Some(snap.fingerprint);
-                    // Replace the cached snapshot; SSE subscribers and every
-                    // handler observe the new value.
-                    let _ = tx.send(Some(Arc::new(snap)));
-                }
+                // Compare with what the cache holds, not a local copy: the cost
+                // task also writes the cache, and a stale local fingerprint
+                // would republish the same snapshot to every SSE stream.
+                let _ = tx.send_if_modified(|slot| {
+                    if slot.as_ref().map(|held| held.fingerprint) == Some(snap.fingerprint) {
+                        return false;
+                    }
+                    *slot = Some(Arc::new(snap));
+                    true
+                });
             }
         });
     }
@@ -221,18 +230,21 @@ impl AppState {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(COST_POLL_INTERVAL);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut bound = COST_FETCH_TIMEOUT;
             loop {
                 ticker.tick().await;
                 if tx.is_closed() {
                     break;
                 }
-                let Ok(cost) = tokio::time::timeout(COST_FETCH_TIMEOUT, data.cost()).await else {
+                let Ok(cost) = tokio::time::timeout(bound, data.cost()).await else {
                     tracing::warn!(
-                        timeout_s = COST_FETCH_TIMEOUT.as_secs(),
+                        timeout_s = bound.as_secs(),
                         "fleet cost fetch timed out; keeping the last cost"
                     );
+                    bound = (bound * 2).min(COST_FETCH_TIMEOUT_CAP);
                     continue;
                 };
+                bound = COST_FETCH_TIMEOUT;
                 if *cost_tx.borrow() == cost {
                     continue;
                 }
@@ -473,9 +485,7 @@ async fn events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::{
-        CoreFuture, CoreSnapshot, CostFuture, DataError, FleetSnapshot, SnapshotFuture,
-    };
+    use crate::data::{CoreFuture, CoreSnapshot, CostFuture, DataError};
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -513,14 +523,6 @@ mod tests {
     }
 
     impl DataSource for FakeSource {
-        fn snapshot(&self) -> SnapshotFuture<'_> {
-            Box::pin(async move {
-                let core = self.core().await?;
-                let cost = self.cost().await;
-                Ok::<_, DataError>(FleetSnapshot::from_parts(core, cost))
-            })
-        }
-
         fn core(&self) -> CoreFuture<'_> {
             Box::pin(async move {
                 let n = self.core_fetches.fetch_add(1, Ordering::SeqCst);
@@ -671,6 +673,36 @@ mod tests {
             source.cost_fetch_count(),
             2,
             "the stalled fetch was abandoned and the next one started"
+        );
+    }
+
+    /// A cost fetch that times out gives the next one twice the time, up to the
+    /// cap, so a slow but finite `fleet cost` eventually lands.
+    #[tokio::test(start_paused = true)]
+    async fn each_cost_timeout_doubles_the_next_bound_up_to_the_cap() {
+        let source = Arc::new(FakeSource::with_hanging_cost());
+        let _state = AppState::new(test_config(), Arc::clone(&source) as Arc<dyn DataSource>);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(source.cost_fetch_count(), 1);
+
+        // First bound 30 s: the second fetch starts right after it.
+        tokio::time::advance(COST_FETCH_TIMEOUT).await;
+        settle().await;
+        assert_eq!(source.cost_fetch_count(), 2);
+
+        // Second bound 60 s: nothing new until it expires.
+        tokio::time::advance(COST_FETCH_TIMEOUT * 2 - Duration::from_secs(1)).await;
+        settle().await;
+        assert_eq!(source.cost_fetch_count(), 2, "the second fetch has 60 s");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        assert_eq!(source.cost_fetch_count(), 3);
+
+        // The bound never passes the cap.
+        assert!(
+            COST_FETCH_TIMEOUT_CAP > Duration::from_secs(120),
+            "above the measured 120 s"
         );
     }
 
