@@ -1119,6 +1119,14 @@ pub struct HostOnlyState {
     /// `FleetSection::daemon_attention_seen` is the versioned copy that
     /// `refresh_daemon_attention_generation` folds it into once a frame.
     pub daemon_attention_generation: crate::fleet::attention_poll::Generation,
+    /// When each attached session was last seen attached by
+    /// `AppState::refresh_attention`.
+    ///
+    /// An attached session's clear point moves to "now" on every refresh.
+    /// Writing that to `FleetSection::attention_baseline` each time would bump
+    /// the Fleet section for nothing, so the instant is held here and folded
+    /// into the baseline once, on the refresh that sees the session detached.
+    pub attention_attached_at: HashMap<Uuid, i64>,
 }
 
 impl Default for HostOnlyState {
@@ -1154,6 +1162,7 @@ impl Default for HostOnlyState {
             session_chat: None,
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            attention_attached_at: HashMap::new(),
         }
     }
 }
