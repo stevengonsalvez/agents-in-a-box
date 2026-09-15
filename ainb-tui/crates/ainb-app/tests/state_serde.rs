@@ -1368,8 +1368,10 @@ fn no_typed_text_reaches_the_wire() {
         "TYPED_LABELS and the sample builder disagree"
     );
 
-    let blob: String =
+    let mut blob: String =
         states.iter().flat_map(all_frames).map(|(_, frame)| frame.to_string()).collect();
+    // The web needs projection is a wire too (#1081).
+    blob.push_str(&serde_json::to_string(&shape::sample_web_needs(&mut seed)).expect("needs"));
     let shown: BTreeMap<_, _> = CANARY_SHOWN.iter().copied().collect();
     let mut leaked = Vec::new();
     let mut missing = Vec::new();
@@ -1497,6 +1499,10 @@ fn no_credential_shaped_value_reaches_the_wire() {
             find_in_frame(section_name(id), &frame, &mut found);
         }
     }
+    // The web needs projection is a wire too (#1081): every credential shape
+    // seeded into a daemon card must be scrubbed out of the web card.
+    let needs = serde_json::to_value(shape::sample_web_needs(&mut seed)).expect("needs");
+    find_in_frame("web_snapshot.needs", &needs, &mut found);
     assert!(
         found.is_empty(),
         "tripwire: {} credential-shaped value(s) in the frames:\n  {}",
