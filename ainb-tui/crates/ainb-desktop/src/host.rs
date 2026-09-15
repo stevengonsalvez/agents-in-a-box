@@ -107,11 +107,22 @@ impl<S: FrameSink> DesktopHost<S> {
         self.state.start_workspace_load();
     }
 
-    /// Apply background work that finished (a workspace load), frame whatever
-    /// moved outside a dispatch, and hand back the effects that work queued.
+    /// Apply background work that finished (a workspace load, a daemon
+    /// attention poll), frame whatever moved outside a dispatch, and hand back
+    /// the effects that work queued.
     #[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
     pub fn tick(&mut self) -> Vec<Effect> {
         self.state.check_workspace_loading_complete();
+        // The poller is idempotent by an atomic, so starting it every tick is
+        // its documented use. Every read here is by shared reference: a `&mut`
+        // path through the `Versioned` Fleet section would bump it each tick.
+        ainb_app::fleet::attention_poll::spawn(
+            &self.state.fleet.daemon_attention,
+            &self.state.fleet.fleet_snapshot,
+            &self.state.host.attention_poll_running,
+            &self.state.host.daemon_attention_generation,
+        );
+        self.state.refresh_daemon_attention_generation();
         let effects = self.state.take_effects();
         self.pump();
         effects
