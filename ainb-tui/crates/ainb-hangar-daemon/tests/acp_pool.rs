@@ -3248,12 +3248,18 @@ async fn two_concurrent_arrivals_never_overshoot_the_session_cap() {
                     // a signal sent before it started waiting.
                     (AdmissionPoint::Admitted, "acp:cap-c") => {
                         c_admitted.notify_one();
-                        d_counted.notified().await;
+                        // Bounded, so a regression that deadlocks the pool here
+                        // names the point it stuck at rather than a delivery.
+                        tokio::time::timeout(Duration::from_secs(10), d_counted.notified())
+                            .await
+                            .expect("c, held at Admitted, never saw d reach Counted");
                     }
                     (AdmissionPoint::Attached, "acp:cap-c") => c_attached.notify_one(),
                     (AdmissionPoint::Counted, "acp:cap-d") => {
                         d_counted.notify_one();
-                        c_attached.notified().await;
+                        tokio::time::timeout(Duration::from_secs(10), c_attached.notified())
+                            .await
+                            .expect("d, held at Counted, never saw c reach Attached");
                     }
                     _ => {}
                 }
