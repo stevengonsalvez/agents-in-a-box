@@ -1804,6 +1804,16 @@ impl Bindings {
             }
             return;
         }
+        // A tuple: serde writes it as a JSON array, and the fixture as `[]`.
+        if let Some(elements) = ty.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            for element in split_top_level(elements, ',') {
+                let element = element.trim();
+                if !element.is_empty() {
+                    self.walk(element, &format!("{path}[]"), chain, found);
+                }
+            }
+            return;
+        }
         // A named type: resolve it, unless it is already being walked.
         let Some(body) = self.aliases.get(ty) else {
             return;
