@@ -33,7 +33,7 @@ use std::{
 // second time, so every module has one home and one set of visibility rules.
 use ainb::{app, cli, components, config, fleet, headroom, perf, plugins, tmux};
 
-use app::App;
+use ainb::App;
 use app::keymap::{KeyAction, KeyContext, Keymap, ScrollAction, UiAction};
 use components::LayoutComponent;
 use components::slash::{SlashAction, SlashCommandRegistry, SlashPalette};
@@ -1010,8 +1010,9 @@ async fn run_tui_loop(
                         let screen = &app.state.shell.current_screen;
                         let origin =
                             ui.plugin_render_origins.get(screen).copied().unwrap_or((0, 0));
-                        let area =
+                        let (width, height) =
                             ui.plugin_viewports.render_areas.get(screen).copied().unwrap_or((0, 0));
+                        let area = ainb_plugin_protocol::params::Viewport::new(width, height);
                         match route_mouse_to_focused_plugin(
                             &app.state,
                             origin,
