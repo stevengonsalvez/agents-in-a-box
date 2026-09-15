@@ -70,22 +70,55 @@ fn the_first_batch_frames_every_subscribed_section_and_nothing_else() {
     assert_eq!(framed, vec!["frame sessions", "frame shell"]);
 }
 
-/// Daemon news makes the next tick merge attention; a merge that finds
-/// nothing new moves neither the Sessions section nor Shell's refresh latch.
+/// Daemon news makes the tick merge attention: a blocking daemon row no session
+/// claims is counted elsewhere, and the merge frames neither Sessions nor Shell.
+/// A tick right after, with no news, does not merge again inside the throttle.
 #[test]
-fn an_attention_merge_that_finds_nothing_new_frames_nothing() {
+fn daemon_news_merges_attention_on_the_tick_and_frames_only_what_moved() {
+    use ainb_app::fleet::attention::{AttentionKind, DaemonAttention, SessionAttention};
+    use std::sync::atomic::Ordering;
+
     let log = Log::default();
     let mut host = host(&[SectionId::Sessions, SectionId::Shell], &log);
+    // Held off, so no poller thread overwrites the rows this test installs.
+    host.state().host.attention_poll_running.store(true, Ordering::Release);
     let _ = host.tick();
     log.borrow_mut().clear();
 
-    host.state()
-        .host
-        .daemon_attention_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Release);
+    let row = SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-unclaimed".into());
+    *host.state().fleet.daemon_attention.lock().unwrap() = DaemonAttention::up(
+        std::collections::HashMap::from([("/nowhere".to_string(), vec![row])]),
+    );
+    host.state().host.daemon_attention_generation.fetch_add(1, Ordering::Release);
     let _ = host.tick();
 
-    assert!(log.borrow().is_empty(), "nothing new: {:?}", log.borrow());
+    assert_eq!(
+        host.state().fleet.attention_elsewhere,
+        1,
+        "the tick merged the daemon row"
+    );
+    let framed = log.borrow().clone();
+    assert!(
+        !framed.iter().any(|frame| frame == "frame sessions"),
+        "no session row moved: {framed:?}"
+    );
+    // Shell moves once and once only: a merge that changed something sets the
+    // refresh latch the terminal host reads, and nothing here clears it.
+    assert_eq!(
+        framed.iter().filter(|frame| *frame == "frame shell").count(),
+        1,
+        "{framed:?}"
+    );
+
+    // No news: the row goes, but the next merge is not due yet.
+    *host.state().fleet.daemon_attention.lock().unwrap() =
+        DaemonAttention::up(std::collections::HashMap::new());
+    let _ = host.tick();
+    assert_eq!(
+        host.state().fleet.attention_elsewhere,
+        1,
+        "no merge inside the throttle"
+    );
 }
 
 #[test]
