@@ -432,6 +432,9 @@ struct Inner {
     tabs: Mutex<Vec<Tab>>,
     events: Box<dyn TabEvents>,
     reports: Mutex<mpsc::Sender<Intent>>,
+    /// The tab the webview last showed, which the cap never evicts. Locked
+    /// only while the tabs lock is held, or on its own.
+    in_view: Mutex<Option<String>>,
 }
 
 /// Every terminal tab of one host. Cheap to clone: clones share the tabs.
@@ -454,6 +457,7 @@ impl Terminals {
                 tabs: Mutex::new(Vec::new()),
                 events: Box::new(events),
                 reports: Mutex::new(reports),
+                in_view: Mutex::new(None),
             }),
         }
     }
@@ -599,14 +603,15 @@ impl Terminals {
 
     /// Size the tab's client to the webview's grid.
     ///
-    /// The webview sizes a tab whenever it shows it, so this also counts as
-    /// activity: the tab the user is looking at is never the one idle longest,
-    /// however quiet its pane.
+    /// The webview sizes a tab whenever it shows it, so this also marks the
+    /// tab in view, which the cap skips: a quiet tab on screen is not evicted
+    /// while others stream.
     pub fn resize(&self, key: &str, cols: u16, rows: u16) {
         let mut tabs = lock(&self.inner.tabs);
         let Some(index) = position(&tabs, key) else {
             return;
         };
+        *lock(&self.inner.in_view) = Some(key.to_string());
         let tab = &mut tabs[index];
         tab.flow.touch();
         // The size reaches the shared tmux window of every client on the
@@ -670,9 +675,10 @@ impl Terminals {
         if attached < MAX_ATTACHED_TABS {
             return;
         }
+        let in_view = lock(&self.inner.in_view).clone();
         let Some(tab) = tabs
             .iter_mut()
-            .filter(|tab| tab.client.is_some())
+            .filter(|tab| tab.client.is_some() && Some(tab.target.tmux()) != in_view.as_deref())
             .min_by_key(|tab| tab.flow.last_active())
         else {
             return;
