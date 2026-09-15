@@ -944,3 +944,94 @@ fn a_wedged_plugin_keeps_a_bounded_key_inbox_and_counts_drops() {
         "{KEYS} keys into a wedged plugin dropped none: {stats:?}"
     );
 }
+
+/// A fixture plugin on the render loop, for the #1087 Esc watch.
+fn esc_plugin(name: &str) -> (Runtime, ainb_plugin_runtime::RuntimeHandle, PluginId) {
+    let (rt, handle) = Runtime::new().expect("build runtime");
+    let mut manifest = fixture_manifest();
+    manifest.plugin.name = name.into();
+    let plugin = RegisteredPlugin::new(
+        manifest,
+        fixture_path(),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    let id = plugin.id.clone();
+    rt.register(plugin);
+    start(&handle, &id);
+    (rt, handle, id)
+}
+
+fn esc() -> ainb_plugin_protocol::params::KeyEvent {
+    ainb_plugin_protocol::params::KeyEvent {
+        code: ainb_plugin_protocol::params::KeyCode::Esc,
+        mods: 0,
+        kind: ainb_plugin_protocol::params::KeyKind::Press,
+    }
+}
+
+/// Paint one frame and wait for it, as the host's render tick does after a key.
+fn paint(
+    rt: &Runtime,
+    handle: &ainb_plugin_runtime::RuntimeHandle,
+    id: &PluginId,
+    generation: u64,
+) {
+    let rx = handle.render(id, Viewport::new(1, 1), generation);
+    assert!(matches!(
+        rt.tokio_handle().block_on(rx),
+        Ok(RenderOutcome::Ok(_))
+    ));
+}
+
+/// #1087: a plugin that keeps painting the same frame while ignoring Esc no
+/// longer holds its screen. After `ESC_UNANSWERED_LIMIT` unanswered presses the
+/// next Esc is refused, which the host reads as a back key it must take.
+#[test]
+fn a_plugin_ignoring_esc_gives_the_next_one_to_the_host() {
+    let limit = ainb_plugin_runtime::plugin_task::ESC_UNANSWERED_LIMIT;
+    let (rt, handle, id) = esc_plugin("ignores-esc");
+    for n in 1..=u64::from(limit) {
+        assert!(
+            handle.send_key(&id, "fixture", esc()),
+            "esc {n} is delivered"
+        );
+        paint(&rt, &handle, &id, n);
+    }
+    assert!(
+        !handle.send_key(&id, "fixture", esc()),
+        "after {limit} ignored Esc presses the next one returns to the host"
+    );
+}
+
+/// A plugin that pops one nested level per Esc answers every press with a new
+/// frame, so it is never ejected, however deep it goes.
+#[test]
+fn a_plugin_popping_a_level_per_esc_keeps_every_esc() {
+    const LEVELS: u64 = 6;
+    let (rt, handle, id) = esc_plugin("pops-levels");
+    let set = handle.dispatch_cli(&id, "echo", vec!["levels".into(), LEVELS.to_string()]);
+    assert!(matches!(
+        rt.tokio_handle().block_on(set),
+        Ok(CliOutcome::Ok(_))
+    ));
+    for n in 1..=LEVELS {
+        assert!(
+            handle.send_key(&id, "fixture", esc()),
+            "esc {n} is delivered"
+        );
+        paint(&rt, &handle, &id, n);
+    }
+}
+
+/// Esc presses with no frame painted in between carry no evidence, so a burst
+/// faster than the render tick is never ejected.
+#[test]
+fn esc_presses_with_no_frame_between_them_are_all_delivered() {
+    let (_rt, handle, id) = esc_plugin("esc-burst");
+    for n in 1..=10 {
+        assert!(
+            handle.send_key(&id, "fixture", esc()),
+            "esc {n} is delivered"
+        );
+    }
+}
