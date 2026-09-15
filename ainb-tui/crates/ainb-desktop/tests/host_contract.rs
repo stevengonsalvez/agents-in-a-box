@@ -124,6 +124,25 @@ fn reframe_sends_every_subscribed_section_again() {
     assert_eq!(framed, vec!["frame sessions", "frame shell"]);
 }
 
+/// A key-only row writes outside ainb, so a chord that lands on one is named
+/// for the shell to refuse; any other chord is not.
+#[test]
+fn a_chord_on_a_key_only_row_is_named() {
+    let log = Log::default();
+    let host = host(&[SectionId::Shell], &log);
+
+    assert_eq!(
+        host.key_only_command(&Chord::parse("W").expect("valid chord"))
+            .as_ref()
+            .map(ainb_app::CommandId::as_str),
+        Some("global.wire_statusline")
+    );
+    assert_eq!(
+        host.key_only_command(&Chord::parse("s").expect("valid chord")),
+        None
+    );
+}
+
 #[test]
 fn a_host_built_on_an_injected_config_touches_no_file_under_home() {
     let home = scratch_home();
