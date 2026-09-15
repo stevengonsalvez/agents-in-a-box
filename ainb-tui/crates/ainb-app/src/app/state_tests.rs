@@ -125,25 +125,39 @@ mod tests {
     /// lookup from the process the reducer runs in (#1077).
     #[test]
     fn the_session_the_host_reported_gets_no_observer() {
-        let own = "ainb-host-session";
+        let own = "work.main";
         let mut state = state_with_other_tmux_sessions(&[own]);
-        state.shell.current_screen = "session_list".to_string();
+        state.shell.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
         assert!(!state.is_host_tmux_session_selected());
 
-        state.set_host_tmux_session(crate::app::effect::TmuxSessionName::new(own));
-        let reported = state.versions();
-        state.set_host_tmux_session(crate::app::effect::TmuxSessionName::new(own));
+        let before = state.versions();
+        state.set_host_tmux_session(Some(own.to_string()));
         assert_eq!(
             state.versions(),
-            reported,
-            "an unchanged name is not a write"
+            before,
+            "a host fact bumps no section, so no frame carries it"
         );
-        assert!(state.is_host_tmux_session_selected());
+        assert!(
+            state.is_host_tmux_session_selected(),
+            "a dotted name tmux accepts still matches its own row"
+        );
         assert!(settled_observer_request(&mut state).is_none());
 
         state.set_host_tmux_session(None);
         assert!(!state.is_host_tmux_session_selected());
-        assert_eq!(settled_observer_request(&mut state), Some(observe(own)));
+    }
+
+    /// A reported session that is not the selected row leaves the row's
+    /// observer alone.
+    #[test]
+    fn a_row_other_than_the_host_session_still_gets_its_observer() {
+        let row = "ainb-other-row";
+        let mut state = state_with_other_tmux_sessions(&[row]);
+        state.shell.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
+        state.set_host_tmux_session(Some("ainb-host-session".to_string()));
+
+        assert!(!state.is_host_tmux_session_selected());
+        assert_eq!(settled_observer_request(&mut state), Some(observe(row)));
     }
 
     #[test]
