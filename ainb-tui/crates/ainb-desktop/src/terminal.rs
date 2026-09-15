@@ -622,6 +622,10 @@ impl Terminals {
             tab.state = TabState::Detached;
             let key = tab.target.tmux().to_string();
             self.inner.events.toast(format!("Lost {key}: reattach when it is back"));
+            self.report(reports::attach_finished(
+                &tab.target.attached_to(),
+                &AttachOutcome::Detached,
+            ));
             self.emit(tabs, None);
             return;
         }
