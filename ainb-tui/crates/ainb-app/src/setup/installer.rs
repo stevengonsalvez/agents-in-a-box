@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::setup::catalog::{Detect, Install, Tier, catalog};
+use crate::setup::catalog::{DepTier, Detect, Install, catalog};
 use crate::setup::detect::{Env, detect_dep};
 
 /// The AI agent the generated script targets — decides which CLI + statusline +
@@ -129,7 +129,7 @@ enum Inclusion {
     Skip,
 }
 
-fn classify(id: &str, tier: Tier, agent: Agent) -> Inclusion {
+fn classify(id: &str, tier: DepTier, agent: Agent) -> Inclusion {
     // Keep only the chosen agent's CLI; drop the others.
     if AI_CLI_IDS.contains(&id) {
         return if id == agent.cli_id() {
@@ -155,8 +155,8 @@ fn classify(id: &str, tier: Tier, agent: Agent) -> Inclusion {
         return Inclusion::Active;
     }
     match tier {
-        Tier::Required | Tier::Recommended => Inclusion::Active,
-        Tier::Optional | Tier::Suggested => Inclusion::Commented,
+        DepTier::Required | DepTier::Recommended => Inclusion::Active,
+        DepTier::Optional | DepTier::Suggested => Inclusion::Commented,
     }
 }
 

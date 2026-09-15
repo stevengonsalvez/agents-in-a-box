@@ -50,6 +50,51 @@ fn every_section_has_one_object_frame() {
     }
 }
 
+/// A mirror frame's body is `section_json`, byte for byte, for every section of
+/// every sample. Every check in this file therefore covers what a renderer
+/// receives, not only what the seam returns.
+#[test]
+fn mirror_frames_carry_exactly_the_checked_section_json() {
+    use ainb_app::wire::frame::{HostId, Mirror, Subscription};
+    isolated_home();
+    for state in shape::sample_states(&mut shape::PlainSeed) {
+        let batch = Mirror::new(HostId::local(), Subscription::all()).batch(&state);
+        assert_eq!(batch.frames.len(), SectionId::COUNT);
+        for frame in batch.frames {
+            let id = frame.section_id().expect("a known section");
+            assert_eq!(*frame.body(), section_json(&state, id), "{}", frame.section);
+        }
+    }
+}
+
+/// A session's working directory, its operator label and a pending request's
+/// tool input never ride a frame (W0-mirror, #983 M19). `display_name` is also
+/// the name of a file-tree row's and a log file's own label, which are not a
+/// session's, so those two owners are the only ones allowed it.
+#[test]
+fn no_frame_carries_a_sessions_cwd_label_or_pending_request() {
+    const WITHHELD: [&str; 3] = ["cwd", "current_request", "display_name"];
+    const NOT_A_SESSION: [&str; 2] = [
+        "FileTreeItem.display_name",
+        "SessionLogSummary.display_name",
+    ];
+    isolated_home();
+    let trace = shape::trace_states(&shape::sample_states(&mut shape::PlainSeed));
+    let carried: BTreeSet<String> = trace
+        .fields
+        .iter()
+        .filter(|field| {
+            let key = field.owner_field.rsplit('.').next().unwrap_or_default();
+            WITHHELD.contains(&key) && !NOT_A_SESSION.contains(&field.owner_field.as_str())
+        })
+        .map(|field| format!("{}  ({})", field.owner_field, field.path))
+        .collect();
+    assert!(
+        carried.is_empty(),
+        "session identity text on a frame: {carried:#?}"
+    );
+}
+
 #[test]
 fn leaf_key_paths_match_the_committed_fixture() {
     isolated_home();
@@ -398,15 +443,15 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "repo-relative path of a changed file, the review list row",
     ),
     (
-        "FleetSession.current_request_fingerprint",
+        "FleetRowFrame.current_request_fingerprint",
         "a hash of the pending request; the request itself never reaches a frame",
     ),
     (
-        "FleetSession.cwd",
-        "working directory the fleet pane draws on each row, a path (#983 M19)",
+        "FleetRowFrame.host_id",
+        "the host a fleet row came from, an identity, so rows from two hosts fold apart",
     ),
     (
-        "FleetSession.session_key",
+        "FleetRowFrame.session_key",
         "stable `provider:session-id` identity, not a credential",
     ),
     (
@@ -1354,6 +1399,7 @@ fn credential_samples() -> Vec<String> {
         format!("SG.{}.{}", run('G', 22), run('g', 43)),
         format!("xoxc-{}", run('1', 40)),
         format!("xoxd-{}", run('2', 40)),
+        format!("AWS_SECRET_ACCESS_KEY={}", run('w', 40)),
     ]
 }
 

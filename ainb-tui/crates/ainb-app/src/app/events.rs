@@ -80,6 +80,9 @@ pub enum AppEvent {
     WatchPluginScreen {
         screen: String,
         watching: bool,
+        /// The viewport the watching host draws the screen at.
+        width: u16,
+        height: u16,
     },
     /// Navigate to a registered screen by id. Phase 2c added this variant to
     /// collapse the per-screen `GoTo*` variants behind one dispatch path —
@@ -162,9 +165,10 @@ pub enum AppEvent {
     },
     /// Focus a pane of the session list.
     SessionListFocusPane(crate::app::state::FocusedPane),
-    /// Persist the sessions pane's width and collapsed flag as preferences.
+    /// Persist the sessions pane's width, as a fraction of its row, and its
+    /// collapsed flag as preferences.
     SaveSessionsPaneLayout {
-        width: u16,
+        fraction: f64,
         collapsed: bool,
     },
     /// Focus a Skill Manager panel without selecting anything in it.
@@ -2739,12 +2743,15 @@ impl EventHandler {
             AppEvent::SessionListFocusPane(pane) => {
                 state.shell.focused_pane = pane;
             }
-            AppEvent::SaveSessionsPaneLayout { width, collapsed } => {
+            AppEvent::SaveSessionsPaneLayout {
+                fraction,
+                collapsed,
+            } => {
                 let preferences = &mut state.config.app_config.ui_preferences;
-                preferences.sessions_sidebar_width = Some(width);
+                preferences.sessions_sidebar_fraction = Some(fraction.clamp(0.0, 1.0));
                 preferences.sessions_sidebar_collapsed = Some(collapsed);
                 state.persist_app_config([
-                    "ui_preferences.sessions_sidebar_width",
+                    "ui_preferences.sessions_sidebar_fraction",
                     "ui_preferences.sessions_sidebar_collapsed",
                 ]);
             }
@@ -4014,6 +4021,7 @@ impl EventHandler {
                 // and its section version does not move.
                 let prefs = &state.config.app_config.ui_preferences;
                 let legacy = prefs.home_sidebar_width.is_some()
+                    || prefs.sessions_sidebar_width.is_some()
                     || prefs.skill_manager_sources_width.is_some();
                 if legacy && state.config.app_config.migrate_layout_widths(columns) {
                     // The legacy counts no longer serialise, so naming them
@@ -4021,6 +4029,8 @@ impl EventHandler {
                     state.persist_app_config([
                         "ui_preferences.home_sidebar_fraction",
                         "ui_preferences.home_sidebar_width",
+                        "ui_preferences.sessions_sidebar_fraction",
+                        "ui_preferences.sessions_sidebar_width",
                         "ui_preferences.skill_manager_sources_fraction",
                         "ui_preferences.skill_manager_sources_width",
                     ]);
@@ -7086,23 +7096,45 @@ impl EventHandler {
                     ));
                 }
             }
-            AppEvent::WatchPluginScreen { screen, watching } => {
+            AppEvent::WatchPluginScreen {
+                screen,
+                watching,
+                width,
+                height,
+            } => {
+                use crate::app::sections::ScreenWatch;
                 let plugin_screen =
                     crate::app::screens::builtin::plugin_id_for_screen(&screen).is_some();
                 let watched = state.plugins_host.watched_plugin_screens.contains_key(&screen);
                 let now = std::time::Instant::now();
+                let lease = AppState::PLUGIN_SCREEN_WATCH_LEASE;
+                if watching
+                    && (width > ScreenWatch::MAX_VIEWPORT.0 || height > ScreenWatch::MAX_VIEWPORT.1)
+                {
+                    tracing::warn!(%screen, width, height, "watch viewport clamped to the maximum");
+                }
                 if !plugin_screen {
                     tracing::warn!(%screen, "watch request for a screen no plugin owns");
+                } else if watching && (width == 0 || height == 0) {
+                    tracing::warn!(%screen, width, height, "watch request with no viewport");
                 } else if watching && watched {
-                    // A renewal only moves the lease, which no frame carries.
+                    // A renewal moves the lease and maybe the render size,
+                    // neither of which a frame carries.
                     state.plugins_host.update(|host| {
-                        host.watched_plugin_screens.insert(screen, now);
+                        if let Some(watch) = host.watched_plugin_screens.get_mut(&screen) {
+                            watch.renew(now, width, height, lease);
+                        }
                         false
                     });
                 } else if watching {
-                    state.plugins_host.watched_plugin_screens.insert(screen, now);
-                } else if watched {
-                    state.plugins_host.watched_plugin_screens.remove(&screen);
+                    let mut watch = ScreenWatch::default();
+                    watch.renew(now, width, height, lease);
+                    state.plugins_host.watched_plugin_screens.insert(screen, watch);
+                } else {
+                    // A stop names no watcher, so removing the watch would end
+                    // every other host's too. The stopping host just stops
+                    // renewing, and its request lapses with the lease.
+                    tracing::debug!(%screen, "watch stop; the request lapses with its lease");
                 }
             }
             AppEvent::NavigateTo(screen_id) => {

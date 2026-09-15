@@ -4,6 +4,7 @@
 
 /// A rectangle on the host's render surface, in cells from the top-left.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Area {
     pub x: u16,
     pub y: u16,

@@ -103,6 +103,11 @@ pub struct AgentStatusEnvelope {
     pub host_id: String,
     /// Owner's local clock, epoch ms, when the read landed.
     pub read_at_ms: i64,
+    /// The daemon's own clock, epoch ms, when it served the read; 0 from a
+    /// daemon that does not stamp it. Cards age on this clock, never on the
+    /// subscriber's (W0-mirror), so a skewed host's ages stay right.
+    #[serde(default)]
+    pub daemon_clock_ms: i64,
     /// The newest Fleet revision the owner has been told about.
     pub head_revision: i64,
     /// How current the rows are.
@@ -137,6 +142,7 @@ impl AgentStatusEnvelope {
             revision: view.read_revision,
             host_id: view.host_id.clone(),
             read_at_ms: view.received_at_ms,
+            daemon_clock_ms: view.read_at_ms,
             head_revision: view.head_revision,
             health,
             rows: view
@@ -158,6 +164,7 @@ impl AgentStatusEnvelope {
             revision: head_revision,
             host_id: String::new(),
             read_at_ms: 0,
+            daemon_clock_ms: 0,
             head_revision,
             health: AgentStatusHealth::Absent {
                 reason: reason.into(),
@@ -193,6 +200,7 @@ impl AgentStatusEnvelope {
             host_id: self.host_id,
             read_revision: self.revision,
             received_at_ms: self.read_at_ms,
+            read_at_ms: self.daemon_clock_ms,
             health,
             head_revision: self.head_revision,
             cards: self
@@ -283,6 +291,7 @@ mod tests {
                 })
                 .collect(),
             read_revision: revision,
+            read_at_ms: 0,
             unknown_events: Vec::new(),
         }
     }
@@ -324,6 +333,25 @@ mod tests {
     /// A large fleet, each agent holding a 2 KiB pending request, stays under
     /// half the cap (about 1.7 MiB).
     #[test]
+    fn a_card_ages_on_the_daemon_clock_after_the_envelope_round_trip() {
+        const SKEW_MS: i64 = 90_000;
+        let local_received = 50_000;
+        let mut result = read(3, 1);
+        result.read_at_ms = local_received + SKEW_MS;
+        let view = StatusView::from_read(result, local_received);
+        let wire = serde_json::to_vec(&AgentStatusEnvelope::from_view(1, &view)).unwrap();
+        let folded = serde_json::from_slice::<AgentStatusEnvelope>(&wire)
+            .unwrap()
+            .into_view()
+            .unwrap();
+        assert_eq!(
+            folded.daemon_now_ms(local_received + 4_000),
+            local_received + SKEW_MS + 4_000,
+            "the subscriber must keep the daemon's clock, not fall back to its own"
+        );
+    }
+
+    #[test]
     fn a_five_hundred_agent_envelope_fits_under_the_cap() {
         let view = StatusView::from_read(read(1, 500), 1);
         let bytes = serde_json::to_vec(&AgentStatusEnvelope::from_view(1, &view)).unwrap();
@@ -338,6 +366,7 @@ mod tests {
     /// as `[]`, and `current_request` kept as one opaque leaf because its
     /// inside is the agent's tool input, not a shape this crate owns.
     const ENVELOPE_KEY_PATHS: &str = "
+daemon_clock_ms
 head_revision
 health.head_revision
 health.kind

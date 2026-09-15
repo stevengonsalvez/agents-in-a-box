@@ -450,7 +450,9 @@ async fn read(
 async fn two_reads(client: &DaemonClient) -> Result<RosterStatusResult, DaemonError> {
     let snapshot = client.fleet_snapshot().await?;
     let status = client.fleet_status().await?;
-    Ok(join(&snapshot, &status))
+    // Neither reply carries the daemon's clock, so the joined read has none and
+    // cards age on this surface's own now, as they did before the section read.
+    Ok(join(&snapshot, &status, 0))
 }
 
 /// Send a failure update and say how the connection ends.
@@ -708,6 +710,7 @@ mod tests {
             rows: Vec::new(),
             read_revision: 4,
             unknown_events: Vec::new(),
+            read_at_ms: 0,
         };
         assert!(apply(
             &mut state,
@@ -987,6 +990,7 @@ mod tests {
                 RosterStatusResult {
                     rows: Vec::new(),
                     read_revision: 4,
+                    read_at_ms: 0,
                     unknown_events: Vec::new(),
                 },
                 10,
@@ -1039,6 +1043,7 @@ mod tests {
                 RosterStatusResult {
                     rows: Vec::new(),
                     read_revision: 2,
+                    read_at_ms: 0,
                     unknown_events: Vec::new(),
                 },
                 5,
@@ -1073,6 +1078,7 @@ mod tests {
                 RosterStatusResult {
                     rows: Vec::new(),
                     read_revision: 3,
+                    read_at_ms: 0,
                     unknown_events: Vec::new(),
                 },
                 5,
@@ -1120,6 +1126,7 @@ mod tests {
                 RosterStatusResult {
                     rows: Vec::new(),
                     read_revision: 1,
+                    read_at_ms: 0,
                     unknown_events: Vec::new(),
                 },
                 1,
@@ -1162,6 +1169,7 @@ mod tests {
                     rows: Vec::new(),
                     read_revision: 1,
                     unknown_events: Vec::new(),
+                    read_at_ms: 0,
                 },
                 1,
             ),
@@ -1216,6 +1224,7 @@ mod tests {
                     }],
                     read_revision: 2,
                     unknown_events: Vec::new(),
+                    read_at_ms: 0,
                 },
                 2,
             ),

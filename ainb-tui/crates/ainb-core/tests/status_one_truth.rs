@@ -88,11 +88,24 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
     // covers. What is asserted is the RENDERED screen, painted into a ratatui
     // `TestBackend` the way the TUI paints the plugin's buffer.
     {
-        let joined = wire_round_trip(
+        let before_read = chrono::Utc::now().timestamp_millis();
+        let mut joined = wire_round_trip(
             &ainb_hangar_daemon::fleet::roster_status(store.pool())
                 .await
                 .expect("joined read"),
         );
+        let after_read = chrono::Utc::now().timestamp_millis();
+        // The daemon stamps `read_at_ms` from its own wall clock, at the read.
+        assert!(
+            (before_read..=after_read).contains(&joined.read_at_ms),
+            "the joined read carries the daemon's clock at the read: {} not in {before_read}..={after_read}",
+            joined.read_at_ms
+        );
+        // This fixture's evidence is on a synthetic clock: the read lands 42 s
+        // after the evidence, on the daemon's clock, at the same instant the
+        // panel receives it. Cards age on the daemon clock, so the read carries
+        // that instant from here on.
+        joined.read_at_ms = expected.4 + 42_000;
         let pane = panel_from(joined.clone(), expected.4 + 42_000);
         let held = pane.status_for(SESSION_KEY).expect("the panel holds the daemon's row");
         assert_eq!(
@@ -123,7 +136,7 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             &ainb_hangar_daemon::fleet::snapshot_wire(store.pool()).await.expect("snapshot"),
         );
         let legacy = panel_from(
-            ainb_hangar_proto::agent_status::join(&snapshot, &wire_round_trip(&status)),
+            ainb_hangar_proto::agent_status::join(&snapshot, &wire_round_trip(&status), 0),
             expected.4 + 42_000,
         );
         assert_eq!(

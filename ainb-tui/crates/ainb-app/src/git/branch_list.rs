@@ -19,6 +19,7 @@ use git2::{BranchType, Repository};
 
 /// One selectable row in the base-branch picker.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct BranchEntry {
     /// Display ref — `origin/feature-x` for remote entries, `feature-x` for
     /// local ones. This is also the start-point handed to `git worktree add`.

@@ -357,6 +357,7 @@ pub fn export_env_bridge(config: &AppConfig) {
 /// syntax_highlight = true
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct GeneralConfig {
     /// Colourise fenced code blocks in agent output. Off is a real preference
     /// on a slow terminal or a low-contrast theme; `NO_COLOR` still wins over
@@ -401,6 +402,7 @@ impl Default for GeneralConfig {
 /// inbox_list_limit = 500
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct UiConfig {
     /// Event-poll cadence in ms: how often the loop wakes to check for a
     /// keystroke. Drives perceived input latency. ~30fps by default; lower
@@ -531,6 +533,7 @@ impl Default for UiConfig {
 /// stale_after_ms = 120000
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct DaemonsConfig {
     /// A heartbeat older than this, from a pid that is STILL alive (a wedged
     /// daemon that stopped ticking), reads as stale. A dead pid is caught
@@ -582,6 +585,7 @@ impl Default for DaemonsConfig {
 /// fetch_timeout_secs = 300
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct UsageClientConfig {
     /// Port the ainb-managed Headroom compression proxy listens on.
     #[serde(default = "default_headroom_port")]
@@ -640,6 +644,7 @@ impl Default for UsageClientConfig {
 /// approval_timeout_secs = 900
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct NotifydConfig {
     /// Per-`(session, event)` debounce window for OS notifications. Keeps a
     /// noisy session from spamming Notification Center.
@@ -691,6 +696,7 @@ impl Default for NotifydConfig {
 /// read_only = true
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct WebServerConfig {
     /// Address the dashboard binds. A non-loopback value still has to clear
     /// `WebConfig::check_bind_security` at startup, so setting it here cannot
@@ -740,6 +746,7 @@ impl Default for WebServerConfig {
 /// permission_mode = "acceptEdits"
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AcpConfig {
     /// Adapter token → spawn recipe.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -748,6 +755,7 @@ pub struct AcpConfig {
 
 /// One ACP adapter's user-settable definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AcpAdapterConfig {
     /// Executable to spawn. Defaults to the adapter's own token, resolved on
     /// `PATH`.

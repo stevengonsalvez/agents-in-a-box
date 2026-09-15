@@ -227,6 +227,7 @@ pub fn canonical_hook_bin_metadata(paths: &Paths) -> PathBuf {
 /// replaced by an unrelated release binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum HookBinaryMode {
     /// Package-manager owned stable launcher, safe across upgrades.
     Release,
@@ -1210,6 +1211,7 @@ pub fn status(paths: &Paths) -> Result<Vec<StatusRow>> {
 
 /// One installed agent's hook wiring state.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct HookAgentHealth {
     /// Agent name (`claude`, `codex`, or `copilot`).
     pub agent: String,
@@ -1226,6 +1228,7 @@ pub struct HookAgentHealth {
 
 /// One actionable hook-health problem.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct HookHealthIssue {
     /// Component with the problem, for example `hook script` or `Codex`.
     pub component: String,
@@ -1241,6 +1244,7 @@ pub struct HookHealthIssue {
 /// than trusting a historical install record alone. It does not spawn agent
 /// CLIs: callers may run it repeatedly from a TUI background collector.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct HookHealth {
     /// Plugin version embedded in the running `ainb` binary.
     pub bundled_version: String,

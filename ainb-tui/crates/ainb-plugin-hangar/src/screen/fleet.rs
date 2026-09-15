@@ -871,6 +871,16 @@ impl FleetPaneState {
         self.now_ms
     }
 
+    /// The clock a card's age is measured on: the daemon's, estimated from its
+    /// last read (W0-mirror). Evidence stamps are daemon time, so subtracting
+    /// them from this surface's own now renders a skewed host's cards as `?` or
+    /// too old. Before any read, or from a daemon that does not stamp its
+    /// clock, this surface's now.
+    #[must_use]
+    pub fn evidence_clock_ms(&self) -> i64 {
+        self.view.as_ref().map_or(self.now_ms, |view| view.daemon_now_ms(self.now_ms))
+    }
+
     /// Fold one envelope the host's agent-status owner published (#1031):
     /// its view through [`Self::apply_view`], or its absent reason through
     /// [`Self::mark_absent`]. An envelope at or below the last applied
@@ -2690,7 +2700,14 @@ pub fn render_fleet(
     }
     for session in visible.iter().skip(window_start).take(capacity) {
         let selected = state.selected_key.as_deref() == Some(session.session_key.as_str());
-        render_session_card(buffer, row_y, list_width, session, selected, state.now_ms);
+        render_session_card(
+            buffer,
+            row_y,
+            list_width,
+            session,
+            selected,
+            state.evidence_clock_ms(),
+        );
         row_y = row_y.saturating_add(CARD_HEIGHT);
     }
     if visible.is_empty() && row_y < bottom {
@@ -3084,7 +3101,7 @@ fn render_detail(
     }
     y = y.saturating_add(1);
 
-    let age = format_age(state.now_ms, session.evidence_observed_at());
+    let age = format_age(state.evidence_clock_ms(), session.evidence_observed_at());
     put_str(
         buffer,
         card_content_left,
@@ -3106,7 +3123,7 @@ fn render_detail(
         left,
         y,
         &truncate_ellipsis(
-            &status_line(session, state.now_ms),
+            &status_line(session, state.evidence_clock_ms()),
             usize::from(right.saturating_sub(left)),
         ),
         MUTED,
@@ -4321,6 +4338,7 @@ mod tests {
                 rows: Vec::new(),
                 read_revision: 0,
                 unknown_events: Vec::new(),
+                read_at_ms: 0,
             },
             0,
         ));
@@ -4404,6 +4422,7 @@ mod tests {
                 .collect(),
             read_revision: revision,
             unknown_events: Vec::new(),
+            read_at_ms: 0,
         }
     }
 
@@ -4474,6 +4493,34 @@ mod tests {
             detail(&state).contains("tier 0 · 6s"),
             "a zero tick is ignored"
         );
+    }
+
+    /// W0-mirror: a daemon whose clock runs 90 s ahead of this surface. Its
+    /// evidence stamp is 5 s before its read, so the card reads 5 s, then 9 s
+    /// four seconds later. Measured on this surface's own clock the stamp is
+    /// still in the future, and the card read `?`.
+    #[test]
+    fn card_age_is_the_daemons_across_a_90_second_clock_skew() {
+        use ainb_hangar_proto::fleet::{AttentionState, LifecycleState};
+        const SKEW_MS: i64 = 90_000;
+        let local_received = 50_000;
+        let session = wire_session("claude:skew", LifecycleState::Idle, AttentionState::Ask);
+        let status = AgentStatusRow {
+            evidence_observed_at: local_received + SKEW_MS - 5_000,
+            wait_kind: None,
+            ..test_status("claude:skew", AgentState::Working)
+        };
+        let mut read = joined(3, vec![(session, status)]);
+        read.read_at_ms = local_received + SKEW_MS;
+        let mut state = FleetPaneState::default();
+        state.apply_view(StatusView::from_read(read, local_received));
+        state = reduce_fleet(&state, FleetEvent::SetFilter(FleetFilter::Running)).state;
+        state = reduce_fleet(&state, FleetEvent::Tick(local_received + 4_000)).state;
+        let mut buffer = WireBuffer::new(120, 24);
+        render_fleet(&mut buffer, 120, 0, 20, &state);
+        let text = screen_text(&buffer, 120, 20);
+        assert!(text.contains("working · hook · tier 0 · 9s"), "{text}");
+        assert!(!text.contains("tier 0 · ?"), "{text}");
     }
 
     /// #1015: a completed turn is `idle`, green, and in the done lens; the

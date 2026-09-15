@@ -93,12 +93,14 @@ pub fn focus_session_pane(pane: &FocusedPane) -> Intent {
     command(ids::SESSION_LIST_FOCUS_PANE, json!({ "pane": pane }))
 }
 
-/// Persist the sessions pane layout a renderer just changed.
+/// Persist the sessions pane layout a renderer just changed: the sidebar's
+/// share of its row as the user asked for it, before any clamp, and whether
+/// it is collapsed.
 #[must_use]
-pub fn save_sessions_pane_layout(width: u16, collapsed: bool) -> Intent {
+pub fn save_sessions_pane_layout(fraction: f64, collapsed: bool) -> Intent {
     command(
         ids::SESSION_LIST_SAVE_PANE_LAYOUT,
-        json!({ "width": width, "collapsed": collapsed }),
+        json!({ "fraction": fraction.clamp(0.0, 1.0), "collapsed": collapsed }),
     )
 }
 
@@ -217,7 +219,7 @@ struct PaneArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LayoutArgs {
-    width: u16,
+    fraction: f64,
     collapsed: bool,
 }
 
@@ -269,12 +271,12 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
                 _ => None,
             })
         }
-        AppEvent::SaveSessionsPaneLayout { .. } => {
-            parse::<LayoutArgs>(args).map(|args| AppEvent::SaveSessionsPaneLayout {
-                width: args.width,
+        AppEvent::SaveSessionsPaneLayout { .. } => parse::<LayoutArgs>(args)
+            .filter(|args| (0.0..=1.0).contains(&args.fraction))
+            .map(|args| AppEvent::SaveSessionsPaneLayout {
+                fraction: args.fraction,
                 collapsed: args.collapsed,
-            })
-        }
+            }),
         AppEvent::SkillManagerSourceClick { .. } => {
             parse::<UriArgs>(args).map(|args| AppEvent::SkillManagerSourceClick { uri: args.uri })
         }

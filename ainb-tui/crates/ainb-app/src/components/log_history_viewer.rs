@@ -14,6 +14,7 @@ pub fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
 
 /// Focus area within the log viewer
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum LogViewerFocus {
     SessionList,
     LogEntries,
@@ -21,6 +22,7 @@ pub enum LogViewerFocus {
 
 /// Filter level for log display
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum LogFilterLevel {
     All,
     Info,
@@ -59,6 +61,7 @@ impl LogFilterLevel {
 
 /// Summary of a log file for display
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SessionLogSummary {
     /// Filename (e.g., "agents-in-a-box-20260107-001310.jsonl")
     pub filename: String,
@@ -92,6 +95,7 @@ impl From<AppLogInfo> for SessionLogSummary {
 
 /// Text selection state for copy functionality
 #[derive(serde::Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct TextSelection {
     /// Start position (line index, char offset)
     pub start: Option<(usize, usize)>,
@@ -133,6 +137,7 @@ impl TextSelection {
 
 /// State for the log history viewer
 #[derive(serde::Serialize, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct LogHistoryViewerState {
     /// Currently selected log file (filename)
     pub selected_log_file: Option<String>,
@@ -152,6 +157,7 @@ pub struct LogHistoryViewerState {
         rename = "search_query_len",
         serialize_with = "crate::wire::fields::opt_char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<u32>))]
     pub search_query: Option<String>,
     /// Which pane is focused
     pub focus: LogViewerFocus,
@@ -162,6 +168,7 @@ pub struct LogHistoryViewerState {
     pub log_dir: Option<PathBuf>,
     /// Error message (if any)
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub error_message: Option<String>,
     /// Text selection state for copy
     pub selection: TextSelection,

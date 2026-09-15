@@ -32,6 +32,7 @@ const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// `#[serde(default)]` on the new fields keeps an older `ainb mcp status`
 /// reader forward-compatible.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ServerStatus {
     pub name: String,
     pub socket: String,

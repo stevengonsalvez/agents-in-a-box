@@ -1271,7 +1271,7 @@ pub fn defaults() -> Vec<Binding> {
             Context::screen("session_list"),
             "save_pane_layout",
             AppEvent::SaveSessionsPaneLayout {
-                width: 0,
+                fraction: 0.0,
                 collapsed: false,
             },
             "Save the sessions pane width and collapsed flag a renderer set",
@@ -1359,6 +1359,8 @@ pub fn defaults() -> Vec<Binding> {
             AppEvent::WatchPluginScreen {
                 screen: String::new(),
                 watching: false,
+                width: 0,
+                height: 0,
             },
             "Keep a plugin screen rendering for a host that is not showing it here",
         ),
