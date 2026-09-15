@@ -14,6 +14,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ainb_app::wire::web::WebCost;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -158,7 +159,7 @@ impl AppState {
             return Ok(snap);
         }
         let core = self.data.core().await?;
-        let snap = Arc::new(FleetSnapshot::from_parts(core, serde_json::Value::Null));
+        let snap = Arc::new(FleetSnapshot::from_parts(core, None));
         // Seed the cache so concurrent cold-start requests coalesce too.
         let _ = self.cache.send_if_modified(|slot| {
             if slot.is_none() {
@@ -184,7 +185,7 @@ impl AppState {
     /// latest cost each tick. The tasks run the only `ainb`/`tmux` subprocesses;
     /// requests and SSE streams read the cache.
     fn spawn_poller(&self) {
-        let (cost_tx, cost_rx) = watch::channel(serde_json::Value::Null);
+        let (cost_tx, cost_rx) = watch::channel(None);
         self.spawn_cost_task(cost_tx);
         let data = Arc::clone(&self.data);
         let tx = self.cache.clone();
@@ -224,7 +225,7 @@ impl AppState {
     /// The cost task: fetch cost now and every [`COST_POLL_INTERVAL`], one fetch
     /// at a time, each bounded by [`COST_FETCH_TIMEOUT`]. A fresh value goes to
     /// the fast task through `cost_tx` and straight into the cached snapshot.
-    fn spawn_cost_task(&self, cost_tx: watch::Sender<serde_json::Value>) {
+    fn spawn_cost_task(&self, cost_tx: watch::Sender<Option<WebCost>>) {
         let data = Arc::clone(&self.data);
         let tx = self.cache.clone();
         tokio::spawn(async move {
@@ -426,7 +427,7 @@ async fn answer(State(state): State<AppState>, body: Bytes) -> Response {
     }
 }
 
-/// `GET /api/cost` — cost rollups (`null` when the verb is absent).
+/// `GET /api/cost` — the projected cost panel (`null` when the verb is absent).
 async fn cost(State(state): State<AppState>) -> Response {
     project(&state, |s| &s.cost).await
 }
@@ -492,7 +493,7 @@ mod tests {
     /// A data source whose `core` and `cost` fetch counters advance
     /// independently, so a test can observe the two poll cadences separately.
     /// The `core` payload embeds the fetch count as `tick` so cache changes are
-    /// detectable; the `cost` payload embeds its own fetch count as `fetch`.
+    /// detectable; the `cost` panel embeds its own fetch count as its call count.
     struct FakeSource {
         core_fetches: AtomicU64,
         cost_fetches: AtomicU64,
@@ -539,9 +540,16 @@ mod tests {
                 if self.cost_hangs {
                     std::future::pending::<()>().await;
                 }
-                json!({ "fetch": n })
+                Some(fetched_cost(n))
             })
         }
+    }
+
+    /// A cost panel that records which fetch produced it, as its call count.
+    fn fetched_cost(n: u64) -> WebCost {
+        let mut cost = WebCost::default();
+        cost.totals.bucket.call_count = n;
+        cost
     }
 
     /// Regression: the background poller must keep refreshing the cache even
@@ -610,7 +618,7 @@ mod tests {
         assert_eq!(source.cost_fetch_count(), 1, "cost is fetched at startup");
         assert_eq!(
             state.cached().expect("cache seeded").cost,
-            json!({ "fetch": 0 }),
+            Some(fetched_cost(0)),
             "the first cost lands in the cached snapshot"
         );
 
@@ -626,7 +634,7 @@ mod tests {
         );
         assert_eq!(
             state.cached().expect("cache present").cost,
-            json!({ "fetch": 0 })
+            Some(fetched_cost(0))
         );
 
         tokio::time::advance(POLL_INTERVAL).await;
@@ -638,7 +646,7 @@ mod tests {
         );
         assert_eq!(
             state.cached().expect("cache present").cost,
-            json!({ "fetch": 1 })
+            Some(fetched_cost(1))
         );
         assert!(
             source.core_fetches.load(Ordering::SeqCst) >= fast_ticks,
@@ -657,7 +665,7 @@ mod tests {
         tokio::time::advance(Duration::from_millis(1)).await;
         settle().await;
         let first = state.cached().expect("sessions publish without waiting on cost");
-        assert_eq!(first.cost, serde_json::Value::Null, "no cost yet");
+        assert_eq!(first.cost, None, "no cost yet");
 
         tokio::time::advance(POLL_INTERVAL).await;
         settle().await;
