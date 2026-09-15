@@ -14,7 +14,7 @@
 //! stalled tab holds at most `WINDOW_BYTES + READ_QUEUE * CHUNK_BYTES`, about
 //! 8 MiB, so 64 MiB with [`MAX_ATTACHED_TABS`] attached.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
@@ -135,6 +135,40 @@ pub trait TabEvents: Send + Sync {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The tmux a tab attaches through: the program, and the server socket when
+/// it is not the user's default one.
+#[derive(Debug, Clone)]
+pub struct Tmux {
+    program: PathBuf,
+    socket: Option<PathBuf>,
+}
+
+impl Tmux {
+    /// `program` against the default server.
+    #[must_use]
+    pub fn new(program: PathBuf) -> Self {
+        Self {
+            program,
+            socket: None,
+        }
+    }
+
+    /// Against the server at `socket` (`tmux -S`) instead.
+    #[must_use]
+    pub fn on_socket(mut self, socket: PathBuf) -> Self {
+        self.socket = Some(socket);
+        self
+    }
+
+    /// `-S <socket>` when a socket was named, before any tmux command.
+    fn server_args(&self) -> Vec<&std::ffi::OsStr> {
+        self.socket
+            .as_deref()
+            .map(|socket| vec!["-S".as_ref(), socket.as_os_str()])
+            .unwrap_or_default()
+    }
 }
 
 /// `tmux` on this machine: the absolute `PATH` entries first, then where a
@@ -386,7 +420,7 @@ struct Tab {
 }
 
 struct Inner {
-    tmux: PathBuf,
+    tmux: Tmux,
     tabs: Mutex<Vec<Tab>>,
     events: Box<dyn TabEvents>,
     reports: Mutex<mpsc::Sender<Intent>>,
@@ -402,7 +436,7 @@ impl Terminals {
     /// Tabs attached through `tmux`, announced to `events`, with reports for
     /// the reducer (an ended session, a closed tab) sent on `reports`.
     pub fn new(
-        tmux: PathBuf,
+        tmux: Tmux,
         events: impl TabEvents + 'static,
         reports: mpsc::Sender<Intent>,
     ) -> Self {
@@ -809,8 +843,9 @@ fn view(tabs: &[Tab], focus: Option<String>) -> TabsView {
 }
 
 /// `tmux has-session` for exactly `name` (`=` stops a prefix match).
-fn has_session(tmux: &Path, name: &str) -> bool {
-    Command::new(tmux)
+fn has_session(tmux: &Tmux, name: &str) -> bool {
+    Command::new(&tmux.program)
+        .args(tmux.server_args())
         .args(["has-session", "-t", &format!("={name}")])
         .env_remove("TMUX")
         .stdin(Stdio::null())
@@ -820,8 +855,9 @@ fn has_session(tmux: &Path, name: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn attach_command(tmux: &Path, name: &str) -> CommandBuilder {
-    let mut command = CommandBuilder::new(tmux);
+fn attach_command(tmux: &Tmux, name: &str) -> CommandBuilder {
+    let mut command = CommandBuilder::new(&tmux.program);
+    command.args(tmux.server_args());
     command.args(["attach-session", "-t", &format!("={name}")]);
     apply_client_env(&mut command, std::env::vars());
     command
