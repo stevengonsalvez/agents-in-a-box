@@ -359,14 +359,35 @@ pub async fn authenticate_first_frame(
     // The Pal credential FIRST, and it is never the daemon token: a scoped
     // credential that also verified as the operator's would be no scope at all.
     if let Some(scope_key) = pal_scope_for(&params.token) {
-        return Ok((ack(req.id, selected), settled(Caller::Pal { scope_key })));
+        let host_id = minted_host_id(pool).await;
+        return Ok((
+            ack(req.id, selected, host_id),
+            settled(Caller::Pal { scope_key }),
+        ));
     }
     match SocketTokenRepo::verify(pool, &params.token).await {
-        Ok(true) => Ok((ack(req.id, selected), settled(Caller::Operator))),
+        Ok(true) => {
+            let host_id = minted_host_id(pool).await;
+            Ok((ack(req.id, selected, host_id), settled(Caller::Operator)))
+        }
         Ok(false) => Err(unauthorized(req.id, "invalid daemon token")),
         Err(e) => {
             tracing::warn!(error = %e, "hangar rpc: socket-token lookup failed");
             Err(unauthorized(req.id, "token verification unavailable"))
+        }
+    }
+}
+
+/// This daemon's minted `HostId` for an authenticated hello (#1066), or `None`
+/// when it has none or the read fails: a hello never fails on the identity.
+///
+/// Read only after authentication, so an unauthenticated peer never learns it.
+async fn minted_host_id(pool: &SqlitePool) -> Option<String> {
+    match ainb_hangar_store::repo::daemon_identity::DaemonIdentityRepo::read(pool).await {
+        Ok(identity) => identity.map(|identity| identity.host_id),
+        Err(error) => {
+            tracing::warn!(%error, "hangar rpc: daemon identity read failed");
+            None
         }
     }
 }
@@ -376,12 +397,13 @@ pub async fn authenticate_first_frame(
 /// A pre-W0-wire client deserializes this as the empty struct it always did
 /// (serde ignores members it does not know), so the added members cost that
 /// half of the skew matrix nothing.
-fn ack(id: RpcId, selected: u32) -> RpcResponse {
+fn ack(id: RpcId, selected: u32, host_id: Option<String>) -> RpcResponse {
     let result = HelloResult {
         protocol: ProtocolRange::supported(),
         selected: Some(selected),
         capabilities: catalogue_strings(),
         daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        host_id,
     };
     RpcResponse {
         jsonrpc: ainb_hangar_proto::jsonrpc_version(),
@@ -413,6 +435,8 @@ fn incompatible(id: RpcId, client: ProtocolRange) -> RpcResponse {
                 selected: None,
                 capabilities: catalogue_strings(),
                 daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                // Never before authentication (#1066).
+                host_id: None,
             })
             .ok(),
         }),
@@ -607,6 +631,54 @@ mod tests {
             .await
             .expect("Pal authenticates");
         assert!(!pal.transient, "a Pal connection must stay listed");
+    }
+
+    /// #1066: an authenticated hello names the daemon's minted host, a daemon
+    /// with no identity names none, and a refused hello never names it.
+    #[tokio::test]
+    async fn an_authenticated_hello_names_the_minted_host_and_a_refused_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let path = ensure_socket_token(store.pool(), dir.path()).await.unwrap();
+        let daemon = std::fs::read_to_string(&path).unwrap().trim().to_string();
+        let hello = |token: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": methods::AUTH_HELLO,
+                "params": { "token": token }
+            }))
+            .unwrap()
+        };
+        let host_of = |response: &RpcResponse| {
+            let value = response
+                .result
+                .clone()
+                .or_else(|| response.error.as_ref().and_then(|error| error.data.clone()));
+            value.and_then(|value| value.get("host_id").cloned())
+        };
+
+        let (unminted, _) = authenticate_first_frame(store.pool(), &hello(&daemon))
+            .await
+            .expect("operator authenticates");
+        assert_eq!(host_of(&unminted), None, "no identity, no host");
+
+        let minted = ainb_hangar_store::repo::daemon_identity::DaemonIdentityRepo::mint_or_read(
+            store.pool(),
+            &ainb_hangar_core::idgen::SystemIdGen,
+            &ainb_hangar_core::clock::SystemClock,
+        )
+        .await
+        .unwrap()
+        .identity
+        .host_id;
+        let (ack, _) = authenticate_first_frame(store.pool(), &hello(&daemon))
+            .await
+            .expect("operator authenticates");
+        assert_eq!(host_of(&ack), Some(serde_json::Value::String(minted)));
+
+        let refused = authenticate_first_frame(store.pool(), &hello("mdt_wrong"))
+            .await
+            .expect_err("a wrong token is refused");
+        assert_eq!(host_of(&refused), None, "never before authentication");
     }
 
     /// Pal's allowed method set is exactly the tool table's reach.
