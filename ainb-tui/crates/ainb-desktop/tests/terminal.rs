@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use ainb_app::{CommandId, Intent};
 use ainb_desktop::terminal::{
-    MAX_ATTACHED_TABS, TabEvents, TabState, TabTarget, TabsView, Terminals, Tmux,
+    MAX_ATTACHED_TABS, TabEvents, TabState, TabTarget, TabsView, Terminals, Tmux, WINDOW_BYTES,
 };
 
 /// One test's private tmux server.
@@ -395,4 +395,96 @@ fn the_executor_opens_tabs_for_session_attaches_only() {
         ainb_app::app::reports::ids::ATTACH_FINISHED,
         "a closed tab reports on the tick"
     );
+}
+
+/// A sink that counts what it is sent and acknowledges nothing.
+fn counting_sink(count: &Arc<Mutex<usize>>) -> ainb_desktop::terminal::Sink {
+    let count = Arc::clone(count);
+    Box::new(move |bytes| {
+        *count.lock().unwrap() += bytes.len();
+        true
+    })
+}
+
+/// Credit is per tab: acknowledging one tab releases nothing of another tab
+/// whose window is full, and that tab's own acknowledgement does.
+#[test]
+fn one_tabs_acknowledgement_does_not_release_another_tabs_pump() {
+    let server = Server::new();
+    let _quiet = server.start("d1c-credit-a", "sleep 600");
+    let _flood = server.start("d1c-credit-b", "sh -c 'while :; do seq 1 100000; done'");
+    let (terminals, _recorder, _reports) = terminals(&server);
+    let (a, b) = (Arc::new(Mutex::new(0usize)), Arc::new(Mutex::new(0usize)));
+    for (key, count) in [("d1c-credit-a", &a), ("d1c-credit-b", &b)] {
+        assert_eq!(terminals.open(tmux_tab(key)), None);
+        assert!(terminals.attach_output(key, counting_sink(count)));
+    }
+
+    // About 1 MiB/s through tmux, slower beside other tests.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while *b.lock().unwrap() < WINDOW_BYTES {
+        assert!(Instant::now() < deadline, "tab b never filled its window");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let b_full = *b.lock().unwrap();
+
+    terminals.ack("d1c-credit-a", usize::MAX);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        *b.lock().unwrap(),
+        b_full,
+        "tab a's acknowledgement released tab b"
+    );
+
+    terminals.ack("d1c-credit-b", usize::MAX);
+    wait_for("tab b to send on its own acknowledgement", || {
+        *b.lock().unwrap() > b_full
+    });
+}
+
+/// A redial makes room like an open does: with every slot taken while two
+/// tabs redial, the redials evict rather than exceed the cap.
+#[test]
+fn redials_do_not_take_the_attached_tabs_past_the_cap() {
+    let server = Server::new();
+    let names: Vec<String> = (0..MAX_ATTACHED_TABS + 2).map(|i| format!("d1c-rcap{i}")).collect();
+    let sessions: Vec<Session> = names.iter().map(|name| server.start(name, "sleep 600")).collect();
+    let (terminals, recorder, _reports) = terminals(&server);
+    let attached =
+        |view: &TabsView| view.tabs.iter().filter(|tab| tab.state == TabState::Attached).count();
+
+    for name in &names[..MAX_ATTACHED_TABS] {
+        assert_eq!(terminals.open(tmux_tab(name)), None);
+    }
+    for session in &sessions[..2] {
+        wait_for("the client to attach", || session.clients() > 0);
+        session.detach_clients();
+    }
+    wait_for("two tabs to be reconnecting", || {
+        terminals
+            .view()
+            .tabs
+            .iter()
+            .filter(|tab| matches!(tab.state, TabState::Reconnecting { .. }))
+            .count()
+            == 2
+    });
+    // The two freed slots go to two new rows before the redials fire.
+    for name in &names[MAX_ATTACHED_TABS..] {
+        assert_eq!(terminals.open(tmux_tab(name)), None);
+    }
+
+    wait_for("the redials to settle", || {
+        !terminals
+            .view()
+            .tabs
+            .iter()
+            .any(|tab| matches!(tab.state, TabState::Reconnecting { .. }))
+    });
+    let most = recorder.tabs.lock().unwrap().iter().map(attached).max().unwrap_or(0);
+    assert!(
+        most <= MAX_ATTACHED_TABS,
+        "at most {MAX_ATTACHED_TABS} attached at once, saw {most}"
+    );
+    assert_eq!(attached(&terminals.view()), MAX_ATTACHED_TABS);
 }
