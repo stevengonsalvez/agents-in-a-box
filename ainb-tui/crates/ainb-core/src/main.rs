@@ -887,9 +887,21 @@ async fn run_tui_loop(
                     // input such as Hangar's Ctrl+P palette shortcut.
                     {
                         use crate::app::screens::builtin::{
-                            PluginRoute, route_key_to_focused_plugin,
+                            PluginRoute, crossterm_to_protocol_key, plugin_id_for_screen,
+                            route_key_to_focused_plugin,
                         };
-                        match route_key_to_focused_plugin(&app.state, &key_event) {
+                        let route = match crossterm_to_protocol_key(&key_event) {
+                            Some(key) => route_key_to_focused_plugin(&app.state, &keymap, &key),
+                            // A key the plugin wire has no shape for (a media
+                            // key): a plugin screen still claims it.
+                            None if plugin_id_for_screen(&app.state.shell.current_screen)
+                                .is_some() =>
+                            {
+                                PluginRoute::Consumed
+                            }
+                            None => PluginRoute::Host,
+                        };
+                        match route {
                             PluginRoute::Forward(effect) => {
                                 run_effects(
                                     vec![effect],
@@ -993,9 +1005,19 @@ async fn run_tui_loop(
                     // host's own mouse handling so the two never double-act.
                     {
                         use crate::app::screens::builtin::{
-                            PluginRoute, route_mouse_to_focused_plugin,
+                            PluginRoute, crossterm_to_protocol_mouse, route_mouse_to_focused_plugin,
                         };
-                        match route_mouse_to_focused_plugin(&app.state, &ui, &mouse_event) {
+                        let screen = &app.state.shell.current_screen;
+                        let origin =
+                            ui.plugin_render_origins.get(screen).copied().unwrap_or((0, 0));
+                        let area =
+                            ui.plugin_viewports.render_areas.get(screen).copied().unwrap_or((0, 0));
+                        match route_mouse_to_focused_plugin(
+                            &app.state,
+                            origin,
+                            area,
+                            &crossterm_to_protocol_mouse(&mouse_event),
+                        ) {
                             PluginRoute::Forward(effect) => {
                                 run_effects(
                                     vec![effect],
