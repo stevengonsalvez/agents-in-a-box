@@ -10,19 +10,9 @@ use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
 use ainb_app::{Chord, Intent, Keymap, SectionId};
 use ainb_desktop::host::{DesktopHost, Executor};
 
-/// One scratch HOME for this binary, set before any host is built. Nothing in
-/// these tests may write under it.
-fn scratch_home() -> &'static std::path::Path {
-    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| {
-        let home = tempfile::tempdir().expect("scratch home");
-        std::env::set_var("HOME", home.path());
-        std::env::set_var("AINB_HOME", home.path());
-        std::env::set_var("AINB_HANGAR_HOME", home.path().join(".agents-in-a-box"));
-        home
-    })
-    .path()
-}
+mod support;
+
+use support::isolated_home as scratch_home;
 
 type Log = Rc<RefCell<Vec<String>>>;
 
@@ -132,6 +122,43 @@ fn reframe_sends_every_subscribed_section_again() {
     let mut framed = log.borrow().clone();
     framed.sort();
     assert_eq!(framed, vec!["frame sessions", "frame shell"]);
+}
+
+/// A renderer that attaches names its sections and gets exactly those, once.
+#[test]
+fn subscribe_frames_exactly_the_named_sections_in_one_batch() {
+    let log = Log::default();
+    let mut host = host(&[], &log);
+    let _ = host.tick();
+    assert!(
+        log.borrow().is_empty(),
+        "nothing is framed before a renderer subscribes"
+    );
+
+    host.subscribe(Subscription::only(&[SectionId::Sessions, SectionId::Fleet]));
+
+    let mut framed = log.borrow().clone();
+    framed.sort();
+    assert_eq!(framed, vec!["frame fleet", "frame sessions"]);
+}
+
+/// A key-only row writes outside ainb, so a chord that lands on one is named
+/// for the shell to refuse; any other chord is not.
+#[test]
+fn a_chord_on_a_key_only_row_is_named() {
+    let log = Log::default();
+    let host = host(&[SectionId::Shell], &log);
+
+    assert_eq!(
+        host.key_only_command(&Chord::parse("W").expect("valid chord"))
+            .as_ref()
+            .map(ainb_app::CommandId::as_str),
+        Some("global.wire_statusline")
+    );
+    assert_eq!(
+        host.key_only_command(&Chord::parse("s").expect("valid chord")),
+        None
+    );
 }
 
 #[test]

@@ -12,27 +12,14 @@ use std::time::Duration;
 
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
-use ainb_app::{Intent, Keymap, SectionId};
+use ainb_app::{Intent, Keymap};
 use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::{DesktopHost, FrameSink};
+use ainb_desktop::intent::RendererIntent;
 use ainb_desktop::shell::Shell;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarView};
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
-
-/// The sections the shell draws in this node: the sidebar, the header counts
-/// and the terminal tabs.
-const SECTIONS: &[SectionId] = &[
-    SectionId::Sessions,
-    SectionId::Shell,
-    SectionId::Tmux,
-    SectionId::Fleet,
-    SectionId::Config,
-    SectionId::AgentStatus,
-];
-
-/// How often the host frames work that happened outside a dispatch.
-const TICK: Duration = Duration::from_millis(250);
 
 /// The webview's frame channel, once it has subscribed.
 #[derive(Clone, Default)]
@@ -59,17 +46,27 @@ struct Window {
 /// The most of the sidecar log "show log" returns.
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
 
-/// Attach the webview's frame channel and send it every section it draws.
+/// Attach the webview's frame channel, send it every section it names, and
+/// answer with the host id its frames are held under. The webview owns the one
+/// subscription list; unknown section names are dropped.
 #[tauri::command]
-fn subscribe(window: tauri::State<'_, Window>, frames: Channel<FrameBatch>) {
+fn subscribe(
+    window: tauri::State<'_, Window>,
+    frames: Channel<FrameBatch>,
+    sections: Subscription,
+) -> HostId {
     *window.frames.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frames);
-    window.shell.reframe();
+    window.shell.subscribe(sections);
+    HostId::local()
 }
 
-/// Apply an intent from the webview: a key, a command, pasted text.
+/// Apply an intent from the webview: a key, a command, pasted text. A
+/// host-authored command id, or a key on a key-only row, is refused.
 #[tauri::command]
-fn dispatch(window: tauri::State<'_, Window>, intent: Intent) {
-    window.shell.dispatch(intent);
+fn dispatch(window: tauri::State<'_, Window>, intent: RendererIntent) {
+    if let Ok(intent) = Intent::try_from(intent) {
+        window.shell.dispatch_renderer(intent);
+    }
 }
 
 /// Where the daemon connection stands, for the banner on first paint.
@@ -173,18 +170,25 @@ fn main() {
                 tracing::warn!(%error, "config did not load; using defaults");
                 AppConfig::default()
             });
+            // How often the host frames work that happened outside a
+            // dispatch: the same `ui.app_tick_ms` the terminal host paces by.
+            let tick = Duration::from_millis(config.ui.app_tick_ms.max(1));
             let frames = ChannelSink::default();
-            let host = DesktopHost::new(
+            let mut host = DesktopHost::new(
                 config,
                 Keymap::defaults(),
                 HostId::local(),
-                Subscription::only(SECTIONS),
+                // Nothing is framed until the webview subscribes.
+                Subscription::none(),
                 frames.clone(),
             );
             let daemon_bin = daemon_bin()?;
             let sidecar_config = SidecarConfig::new(hangar_home, daemon_bin);
-            let sidecar =
-                tauri::async_runtime::block_on(async { Sidecar::start(sidecar_config.clone()) });
+            // Both spawn onto the app's tokio runtime, so they start inside it.
+            let sidecar = tauri::async_runtime::block_on(async {
+                host.start_workspace_load();
+                Sidecar::start(sidecar_config.clone())
+            });
             let mut states = sidecar.state();
             app.manage(Window {
                 shell: Shell::new(host, DesktopExecutor::new(ainb_bin())),
@@ -208,7 +212,7 @@ fn main() {
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let mut interval = tokio::time::interval(TICK);
+                let mut interval = tokio::time::interval(tick);
                 loop {
                     interval.tick().await;
                     handle.state::<Window>().shell.tick();

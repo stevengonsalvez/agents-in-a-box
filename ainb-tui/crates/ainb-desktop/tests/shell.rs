@@ -12,11 +12,11 @@ use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::DesktopHost;
 use ainb_desktop::shell::Shell;
 
+mod support;
+
 #[test]
 fn a_dispatch_during_ticks_returns() {
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
-    std::env::set_var("AINB_HOME", home.path());
+    support::isolated_home();
 
     // Frames are sent across threads in the window, so the sink here is Send.
     let (frames, received) = mpsc::channel::<FrameBatch>();

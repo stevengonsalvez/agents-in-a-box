@@ -1,12 +1,12 @@
 //! The desktop's embedded host: one `AppState`, driven through `dispatch`, with
 //! every change framed for the webview.
 
-use ainb_app::app::RendererHost;
 use ainb_app::app::intent::{Btn, Pos};
-use ainb_app::app::keymap::HostAction;
+use ainb_app::app::keymap::{HostAction, active_contexts};
+use ainb_app::app::{KEY_ONLY_COMMANDS, RendererHost};
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
-use ainb_app::{AppState, Effect, Intent, Keymap};
+use ainb_app::{AppState, Chord, CommandId, Effect, Intent, Keymap};
 
 /// Where framed state goes: the Tauri channel in the app, a recorder in tests.
 pub trait FrameSink {
@@ -100,10 +100,29 @@ impl<S: FrameSink> DesktopHost<S> {
         effects
     }
 
-    /// Frame whatever moved outside a dispatch and hand back the effects that
-    /// work queued.
+    /// Load the workspaces in the background, under the state's own load
+    /// policy; a later [`Self::tick`] applies the result. Must be called inside
+    /// a tokio runtime.
+    pub fn start_workspace_load(&mut self) {
+        self.state.start_workspace_load();
+    }
+
+    /// Apply background work that finished (a workspace load, a daemon
+    /// attention poll), frame whatever moved outside a dispatch, and hand back
+    /// the effects that work queued.
     #[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
     pub fn tick(&mut self) -> Vec<Effect> {
+        self.state.check_workspace_loading_complete();
+        // The poller is idempotent by an atomic, so starting it every tick is
+        // its documented use. Every read here is by shared reference: a `&mut`
+        // path through the `Versioned` Fleet section would bump it each tick.
+        ainb_app::fleet::attention_poll::spawn(
+            &self.state.fleet.daemon_attention,
+            &self.state.fleet.fleet_snapshot,
+            &self.state.host.attention_poll_running,
+            &self.state.host.daemon_attention_generation,
+        );
+        self.state.refresh_daemon_attention_generation();
         let effects = self.state.take_effects();
         self.pump();
         effects
@@ -132,6 +151,21 @@ impl<S: FrameSink> DesktopHost<S> {
         );
     }
 
+    /// The key-only row `chord` runs in the current state, if it runs one.
+    ///
+    /// Those rows write outside ainb (`global.wire_statusline` edits Claude
+    /// Code's settings), so the reducer runs them only from a key. A chord the
+    /// webview sends is script-reachable, so the shell refuses it there.
+    #[must_use]
+    pub fn key_only_command(&self, chord: &Chord) -> Option<CommandId> {
+        let (ctx, _) = self.keymap.resolve_with_context(&active_contexts(&self.state), chord)?;
+        self.keymap
+            .commands()
+            .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))
+            .map(|(id, _)| id)
+            .filter(|id| KEY_ONLY_COMMANDS.contains(&id.as_str()))
+    }
+
     /// Layout work for the webview queued since the last call.
     pub fn take_layout(&mut self) -> Vec<HostAction> {
         self.layout.take()
@@ -147,9 +181,16 @@ impl<S: FrameSink> DesktopHost<S> {
     /// Frame every subscribed section again, for a renderer that attached (or
     /// reloaded) after the last batch and so holds none of them.
     pub fn reframe(&mut self) {
-        let subscription = self.mirror.subscription();
-        self.mirror.resubscribe(Subscription::only(&[]));
-        self.resubscribe(subscription);
+        self.mirror.reframe();
+        self.pump();
+    }
+
+    /// Take a renderer that just attached (or reloaded) wanting
+    /// `subscription`: every section in it is framed in full, in one batch.
+    pub fn subscribe(&mut self, subscription: Subscription) {
+        self.mirror.resubscribe(subscription);
+        self.mirror.reframe();
+        self.pump();
     }
 
     fn pump(&mut self) {
