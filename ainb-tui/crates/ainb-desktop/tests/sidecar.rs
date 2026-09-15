@@ -243,6 +243,14 @@ async fn a_daemon_that_keeps_crashing_leaves_the_app_degraded() {
     assert!(error.contains("attempt 3 of 3"), "{error}");
     assert_eq!(log, config.log_path());
     assert!(log.is_file(), "the log a user is sent to exists");
+
+    // What the webview is told names no path and no pid, and offers the log.
+    let view = serde_json::to_value(state.borrow().view()).expect("view serialises");
+    assert_eq!(view["state"], "degraded");
+    assert_eq!(view["has_log"], true);
+    let text = view.to_string();
+    assert!(!text.contains('/'), "a path reached the webview: {text}");
+    assert!(ainb_desktop::sidecar::log_tail(&config, 1024).is_some());
 }
 
 /// A daemon lost more times in a row than the backoff has steps leaves the app
@@ -282,4 +290,23 @@ async fn repeated_losses_past_the_backoff_leave_the_app_degraded_until_retry() {
 
     sidecar.retry();
     wait_for(&mut state, "connected after retry", connected).await;
+}
+
+#[test]
+fn scrub_paths_hides_every_path_and_keeps_the_words() {
+    use ainb_desktop::sidecar::scrub_paths;
+    assert_eq!(
+        scrub_paths(
+            "no daemon answered on /home/me/.agents-in-a-box/hangar.sock within 60s: refused"
+        ),
+        "no daemon answered on <path> within 60s: refused"
+    );
+    assert_eq!(
+        scrub_paths("could not start the bundled daemon ~/bin/ainb-hangar-daemon: missing"),
+        "could not start the bundled daemon <path>: missing"
+    );
+    assert_eq!(
+        scrub_paths("the daemon exited with exit status: 1"),
+        "the daemon exited with exit status: 1"
+    );
 }
