@@ -3907,7 +3907,14 @@ export type SessionRecoveryState_Serialize = {
 	search_active: boolean,
 };
 
-export type SessionStatus = "Running" | "Stopped" | "Idle" | { Error: string };
+export type SessionStatus = SessionStatus_Serialize;
+
+export type SessionStatus_Serialize = "Running" | "Stopped" | "Idle" | 
+/**
+ *  Why the session failed: a Docker or tmux error, captured text, scrubbed
+ *  in a mirror frame and kept verbatim in the session store.
+ */
+{ Error: string };
 
 /**
  *  One pane of the right-hand switchboard.
@@ -3942,7 +3949,7 @@ export type Session_Serialize = {
 	workspace_path: string,
 	branch_name: string,
 	container_id: string | null,
-	status: SessionStatus,
+	status: SessionStatus_Serialize,
 	created_at: string,
 	last_accessed: string,
 	git_changes: GitChanges,
