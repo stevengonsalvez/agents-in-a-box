@@ -1588,3 +1588,335 @@ fn saves_outside_a_frame_keep_what_the_frame_withholds() {
         "identity file left out of the frame"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 5. Payload-carrying enum variants (#1145)
+// ---------------------------------------------------------------------------
+
+/// The generated bindings: the declared shape of everything on the wire.
+const BINDINGS: &str = include_str!("../bindings/AppState.ts");
+
+/// Payload variants no section sample reaches yet, each one a value the four
+/// leak checks and the key-path fixture have never seen (#1146).
+///
+/// `SessionStatus::Error` was exactly this until #1144 seeded it: it shipped a
+/// raw string past every gate. These are the same class, found when this test
+/// was written; the fix for each is to seed it in `wire::shape::sample_state`
+/// and regenerate the fixture, not to extend this list. A line that is no
+/// longer missing fails too, so the list cannot go stale.
+const UNSEEDED_VARIANTS: &[&str] = &[
+    "config.config_popup_state.popup_type.Boolean",
+    "config.config_popup_state.popup_type.Choice",
+    "config.config_popup_state.popup_type.NumberInput",
+    "fleet.broadcast.phase.Failed",
+    "fleet.broadcast.phase.Sent",
+    "fleet.daemon_attention.all{}.answerable.Broker",
+    "fleet.daemon_attention.all{}.answerable.Daemon",
+    "fleet.daemon_attention.all{}.answerable.No",
+    "fleet.daemon_attention.by_session_id{}[].answerable.Broker",
+    "fleet.daemon_attention.by_session_id{}[].answerable.Daemon",
+    "fleet.daemon_attention.by_session_id{}[].answerable.No",
+    "git_view.git_view_state.markdown_content[].style.CodeBlockHeader",
+    "new_session.new_session_state.configure_state.repo_source.GithubShorthand",
+    "new_session.new_session_state.configure_state.repo_source.LocalPath",
+    "new_session.new_session_state.configure_state.repo_source.SshSession",
+    "new_session.new_session_state.configure_state.repo_source.SshUrl",
+    "new_session.new_session_state.pick_repo_state.pending_clone_source.GithubShorthand",
+    "new_session.new_session_state.pick_repo_state.pending_clone_source.LocalPath",
+    "new_session.new_session_state.pick_repo_state.pending_clone_source.SshSession",
+    "new_session.new_session_state.pick_repo_state.pending_clone_source.SshUrl",
+    "new_session.new_session_state.pick_repo_state.rows[].source.GithubShorthand",
+    "new_session.new_session_state.pick_repo_state.rows[].source.HttpsUrl",
+    "new_session.new_session_state.pick_repo_state.rows[].source.SshSession",
+    "new_session.new_session_state.pick_repo_state.rows[].source.SshUrl",
+    "onboarding.onboarding_state.auth_pane.MethodPicker",
+    "onboarding.onboarding_state.focus.Item",
+    "session_labels.session_context_menu.target.OtherTmux",
+    "session_labels.session_context_menu.target.SshSession",
+    "session_labels.session_context_menu.target.WorkspaceSession",
+    "session_labels.session_context_menu.target.WorkspaceShell",
+    "session_labels.session_label_rename_target.OtherTmux",
+    "session_labels.session_label_rename_target.SshSession",
+    "session_labels.session_label_rename_target.WorkspaceSession",
+    "session_labels.session_label_rename_target.WorkspaceShell",
+    // Seeding these two trips the credential tripwire: the payload reaches a
+    // section frame unredacted, so seeding alone is not the fix for them.
+    "sessions.workspaces[].sessions[].status.Error",
+    "ssh.ssh_sessions[].status.Error",
+    "shell.confirmation_dialog.confirm_action.BulkDeleteSessions",
+    "shell.confirmation_dialog.confirm_action.BulkStopSessions",
+    "shell.confirmation_dialog.confirm_action.KillOtherTmux",
+    "shell.confirmation_dialog.confirm_action.KillOtherTmuxSessions",
+    "shell.confirmation_dialog.confirm_action.KillWorkspaceShell",
+    "shell.confirmation_dialog.confirm_action.McpStopServer",
+    "shell.confirmation_dialog.confirm_action.StopSession",
+    "shell.confirmation_dialog.options[].action.BulkDeleteSessions",
+    "shell.confirmation_dialog.options[].action.BulkStopSessions",
+    "shell.confirmation_dialog.options[].action.KillOtherTmux",
+    "shell.confirmation_dialog.options[].action.KillOtherTmuxSessions",
+    "shell.confirmation_dialog.options[].action.KillWorkspaceShell",
+    "shell.confirmation_dialog.options[].action.McpStopServer",
+    "shell.confirmation_dialog.options[].action.StopSession",
+    "skills.skill_manager_state.banner.Details",
+    "skills.skill_manager_state.banner.Visible",
+];
+
+/// Every payload-carrying enum variant the wire can express is seeded by the
+/// sample, so the leak checks and the key-path fixture see its payload (#1145).
+///
+/// The tracer walks the values `section_json` emits, so an UNSEEDED variant is
+/// invisible to every gate in this file: add `SessionStatus::Failed(String)`
+/// and leave the sample on `Error`, and the new variant ships verbatim. The
+/// generated bindings declare what the wire can carry, so walking them from
+/// each section's view type gives the variants that must appear; the committed
+/// key-path fixture is what the sample actually reached.
+#[test]
+fn every_payload_variant_of_a_wire_enum_is_seeded() {
+    let bindings = Bindings::parse(BINDINGS);
+    let expected = bindings.payload_variant_paths();
+    assert!(
+        expected.len() > 30,
+        "the bindings walk found only {} payload variants, so it has drifted \
+         from the generated shape and proves nothing",
+        expected.len()
+    );
+    let committed = shape::committed_key_paths();
+    let reached = |variant: &String| {
+        committed.contains(variant)
+            || committed.iter().any(|path| {
+                path.starts_with(&format!("{variant}.")) || path.starts_with(&format!("{variant}["))
+            })
+    };
+
+    let allowed: BTreeSet<&str> = UNSEEDED_VARIANTS.iter().copied().collect();
+    let missing: Vec<&String> = expected
+        .iter()
+        .filter(|variant| !reached(variant) && !allowed.contains(variant.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "a payload-carrying wire variant that no section sample seeds: its \
+         payload has never been through a leak check. Seed it in \
+         `wire::shape::sample_state` and regenerate the key-path fixture:\n{missing:#?}"
+    );
+
+    let stale: Vec<&&str> = UNSEEDED_VARIANTS
+        .iter()
+        .filter(|variant| {
+            let variant = (*variant).to_string();
+            reached(&variant) || !expected.contains(&variant)
+        })
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "UNSEEDED_VARIANTS names a variant that is now seeded or no longer \
+         exists; drop these lines:\n{stale:#?}"
+    );
+}
+
+/// The generated bindings, parsed into `type name -> body`.
+struct Bindings {
+    aliases: BTreeMap<String, String>,
+}
+
+impl Bindings {
+    fn parse(source: &str) -> Self {
+        let mut aliases = BTreeMap::new();
+        let mut rest = source;
+        while let Some(start) = rest.find("export type ") {
+            let after = &rest[start + "export type ".len()..];
+            let Some(equals) = after.find('=') else { break };
+            let name = after[..equals].trim().to_string();
+            let Some(end) = end_of_declaration(after, equals + 1) else {
+                break;
+            };
+            aliases.insert(name, strip_comments(&after[equals + 1..end]));
+            rest = &after[end..];
+        }
+        Self { aliases }
+    }
+
+    /// `"<section>.<path to the enum>.<Variant>"` for every payload-carrying
+    /// variant reachable from a section's view type.
+    fn payload_variant_paths(&self) -> BTreeSet<String> {
+        let mut found = BTreeSet::new();
+        for id in SectionId::ALL {
+            let root = format!("{id:?}View");
+            let mut chain = Vec::new();
+            self.walk(&root, section_name(id), &mut chain, &mut found);
+        }
+        found
+    }
+
+    /// Walk `ty` as it would be serialised at `path`, recording variant paths.
+    ///
+    /// `chain` holds the named types currently being walked, so a type that
+    /// contains itself terminates instead of recursing forever.
+    fn walk(&self, ty: &str, path: &str, chain: &mut Vec<String>, found: &mut BTreeSet<String>) {
+        let ty = strip_comments(ty);
+        let ty = ty.trim();
+        // `T | null` is an optional `T`, not an enum.
+        let members = split_top_level(ty, '|');
+        let real: Vec<&String> = members
+            .iter()
+            .filter(|member| !matches!(member.trim(), "null" | "undefined"))
+            .collect();
+        if real.len() > 1 {
+            for member in real {
+                let member = member.trim().trim_start_matches('(').trim();
+                let Some(inner) = member.strip_prefix('{') else {
+                    // A bare string literal is a unit variant: no payload.
+                    continue;
+                };
+                let Some((key, value)) = first_entry(inner) else {
+                    continue;
+                };
+                if key.ends_with('?') {
+                    // `Name?: never` names a variant this member is NOT.
+                    continue;
+                }
+                if !key.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    // An internally tagged enum: every member leads with the
+                    // same tag field (`kind`), and the variant name is that
+                    // field's VALUE, which no key path can carry. The tag
+                    // itself is already a leaf the fixture locks.
+                    continue;
+                }
+                let variant_path = format!("{path}.{key}");
+                found.insert(variant_path.clone());
+                self.walk(&value, &variant_path, chain, found);
+            }
+            return;
+        }
+        let ty = real.first().map_or("", |member| member.trim());
+        let ty = ty.trim_start_matches('(').trim_end_matches(')').trim();
+        if let Some(inner) = ty.strip_suffix("[]") {
+            self.walk(inner, &format!("{path}[]"), chain, found);
+            return;
+        }
+        if let Some(value) = map_value_type(ty) {
+            self.walk(&value, &format!("{path}{{}}"), chain, found);
+            return;
+        }
+        if ty.starts_with('{') {
+            for (field, field_ty) in struct_fields(ty) {
+                self.walk(&field_ty, &format!("{path}.{field}"), chain, found);
+            }
+            return;
+        }
+        // A named type: resolve it, unless it is already being walked.
+        let Some(body) = self.aliases.get(ty) else {
+            return;
+        };
+        if chain.iter().any(|seen| seen == ty) {
+            return;
+        }
+        chain.push(ty.to_string());
+        let body = body.clone();
+        self.walk(&body, path, chain, found);
+        chain.pop();
+    }
+}
+
+/// The index of the `;` that ends a declaration started at `from`.
+fn end_of_declaration(text: &str, from: usize) -> Option<usize> {
+    let mut depth = 0_i32;
+    for (index, byte) in text.as_bytes().iter().enumerate().skip(from) {
+        match byte {
+            b'{' | b'(' | b'[' => depth += 1,
+            b'}' | b')' | b']' => depth -= 1,
+            b';' if depth == 0 => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split on `separator` at nesting depth zero, outside string literals.
+fn split_top_level(text: &str, separator: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0_i32;
+    let mut quote = None::<char>;
+    for ch in text.chars() {
+        match (quote, ch) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(ch),
+            (None, '{' | '(' | '[' | '<') => depth += 1,
+            (None, '}' | ')' | ']' | '>') => depth -= 1,
+            (None, c) if c == separator && depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+                continue;
+            }
+            (None, _) => {}
+        }
+        current.push(ch);
+    }
+    parts.push(current);
+    parts
+}
+
+/// `(key, value type)` of the first entry of an object body, given its inside.
+fn first_entry(inner: &str) -> Option<(String, String)> {
+    let body = inner.trim_end().trim_end_matches('}');
+    let entry = split_top_level(body, ',').into_iter().next()?;
+    let colon = split_top_level(&entry, ':');
+    if colon.len() < 2 {
+        return None;
+    }
+    let key = colon[0].trim().trim_matches('"').trim().to_string();
+    let value = colon[1..].join(":").trim().to_string();
+    Some((key, value))
+}
+
+/// Every `(field, type)` of an object type, optional markers stripped.
+fn struct_fields(ty: &str) -> Vec<(String, String)> {
+    let inner = ty.trim().trim_start_matches('{').trim_end().trim_end_matches('}');
+    split_top_level(inner, ',')
+        .into_iter()
+        .filter_map(|entry| {
+            let parts = split_top_level(&entry, ':');
+            if parts.len() < 2 {
+                return None;
+            }
+            let field = parts[0].trim().trim_matches('"').trim_end_matches('?').trim();
+            if field.is_empty() || field.starts_with('[') {
+                return None;
+            }
+            Some((field.to_string(), parts[1..].join(":").trim().to_string()))
+        })
+        .collect()
+}
+
+/// The value type of a map type (`Record<string, T>`, `{ [key in string]: T }`).
+fn map_value_type(ty: &str) -> Option<String> {
+    let ty = ty.trim();
+    if let Some(args) = ty.strip_prefix("Record<").and_then(|rest| rest.strip_suffix('>')) {
+        let parts = split_top_level(args, ',');
+        return parts.get(1).map(|value| value.trim().to_string());
+    }
+    let inner = ty.strip_prefix('{')?.trim_end().strip_suffix('}')?;
+    let inner = inner.trim();
+    if !inner.starts_with('[') {
+        return None;
+    }
+    let colon = inner.find(']')?;
+    let value = inner[colon + 1..].trim().strip_prefix(':')?;
+    Some(value.trim().trim_end_matches(',').trim().to_string())
+}
+
+/// Drop `/* ... */` blocks so prose never parses as structure.
+fn strip_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find("*/") else {
+            return out;
+        };
+        rest = &rest[start + end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
