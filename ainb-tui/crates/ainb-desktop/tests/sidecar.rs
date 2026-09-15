@@ -229,7 +229,7 @@ async fn a_killed_daemon_leaves_the_app_reconnecting_then_connected_again() {
 async fn a_daemon_that_keeps_crashing_leaves_the_app_degraded() {
     let world = World::new();
     let mut config = world.config();
-    config.daemon_bin = PathBuf::from("/bin/false");
+    config.daemon_bin = PathBuf::from("false");
     let sidecar = Sidecar::start(config.clone());
     let mut state = sidecar.state();
 
