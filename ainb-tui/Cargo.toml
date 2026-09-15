@@ -37,6 +37,9 @@ members = [
     "crates/ainb-plugin-hangar",
     "xtask",
 ]
+# The desktop shell is its own workspace with its own lockfile: it builds Tauri
+# and the platform webview, which no job of this workspace should need.
+exclude = ["crates/ainb-desktop"]
 # `ainb hangar daemon start` launches the sibling `ainb-hangar-daemon` binary
 # (built beside `ainb` in the same target dir). It MUST be in default-members so
 # a plain `cargo build` rebuilds it alongside `ainb` — otherwise the sibling
