@@ -377,6 +377,20 @@ fn build_payload(key: &str, kind: &str, snap: &crate::data::FleetSnapshot) -> Va
             }
         }
     }
+    // The web needs card has no `cwd` (#1081), so a card keys on its session id
+    // and the session list above does not match it. Title the push with the
+    // workspace name the card carries instead of the bare id.
+    if title_name == key {
+        let card_name = snap.needs.as_array().into_iter().flatten().find_map(|card| {
+            (card.get("sessionId").and_then(Value::as_str) == Some(key))
+                .then(|| card.get("workspaceName").and_then(Value::as_str))
+                .flatten()
+                .filter(|name| !name.is_empty())
+        });
+        if let Some(name) = card_name {
+            title_name = name.to_string();
+        }
+    }
     let label = match kind {
         "ASK" => "needs an answer",
         "ERR" => "hit an error",
@@ -935,6 +949,23 @@ mod tests {
             "must resolve via cwd, not worktree_path"
         );
         assert!(p["title"].as_str().unwrap().contains("managed"));
+    }
+
+    #[test]
+    fn a_needs_card_without_cwd_titles_its_push_with_the_workspace_name() {
+        let snap = crate::data::FleetSnapshot::from_parts(
+            crate::data::CoreSnapshot {
+                sessions: json!([]),
+                needs: json!([
+                    { "kind": "ASK", "sessionId": "s1", "workspaceName": "repo", "channels": ["web"] }
+                ]),
+            },
+            Value::Null,
+        );
+        let key = attention_by_key(&snap.needs).into_keys().next().expect("one key");
+        assert_eq!(key, "s1", "a card with no cwd keys on its session id");
+        let p = build_payload(&key, "ASK", &snap);
+        assert_eq!(p["title"], "ainb · repo");
     }
 
     #[cfg(unix)]
