@@ -9,7 +9,9 @@ import type { FrameStore } from "./store.ts";
 
 type RootSelector = (store: FrameStore, host: HostId | undefined) => number | boolean;
 
-const ring = (kind: AttentionKind): RootSelector => (store, host) =>
+const ring =
+  (kind: AttentionKind) =>
+  (store: FrameStore, host: HostId | undefined): number =>
   host === undefined ? 0 : ringCount(store.section(host, "sessions"), store.section(host, "fleet"), kind);
 
 export const ROOT_SELECTORS = {
