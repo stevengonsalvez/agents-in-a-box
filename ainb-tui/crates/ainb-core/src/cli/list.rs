@@ -185,7 +185,11 @@ fn web_rows(sessions: &[SessionInfo]) -> Vec<ainb_app::wire::web::WebSessionRow>
     }
     let mut state = ainb_app::AppState::new();
     state.sessions.get_mut().workspaces = workspaces;
-    ainb_app::wire::web::session_rows(&state)
+    // The frame groups sessions by workspace; the web list draws newest first,
+    // as `ainb list` does. RFC 3339 UTC stamps sort in time order as text.
+    let mut rows = ainb_app::wire::web::session_rows(&state);
+    rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    rows
 }
 
 /// Output sessions as JSON
@@ -241,13 +245,15 @@ mod tests {
     #[test]
     fn the_frame_rows_withhold_a_label_and_keep_each_sessions_health() {
         let canary = "ghp_ProofCanary0123456789abcdefghijklmnopq";
+        // One instant for all three, so the newest-first sort keeps this order.
+        let created_at = chrono::Utc::now();
         let info = |id: &str, running: bool, active: bool| SessionInfo {
             session_id: id.to_string(),
             tmux_session_name: format!("tmux_repo-{id}"),
             workspace_name: "repo".to_string(),
             display_name: Some(format!("deploy {canary}")),
             worktree_path: format!("/w/repo-{id}"),
-            created_at: chrono::Utc::now(),
+            created_at,
             is_running: running,
             claude_active: active,
         };
@@ -277,6 +283,27 @@ mod tests {
             rows[2].worktree_path,
             "/w/repo-5b1f2a8e-0000-4000-8000-000000000003"
         );
+    }
+
+    #[test]
+    fn frame_rows_are_newest_first_across_workspaces() {
+        let row = |id: &str, workspace: &str, minutes_ago: i64| SessionInfo {
+            session_id: id.to_string(),
+            tmux_session_name: format!("tmux_{workspace}-{id}"),
+            workspace_name: workspace.to_string(),
+            display_name: None,
+            worktree_path: format!("/w/{workspace}"),
+            created_at: chrono::Utc::now() - chrono::Duration::minutes(minutes_ago),
+            is_running: true,
+            claude_active: false,
+        };
+        let rows = web_rows(&[
+            row("5b1f2a8e-0000-4000-8000-000000000001", "alpha", 30),
+            row("5b1f2a8e-0000-4000-8000-000000000002", "beta", 10),
+            row("5b1f2a8e-0000-4000-8000-000000000003", "alpha", 20),
+        ]);
+        let ids: Vec<_> = rows.iter().map(|row| &row.session_id[33..]).collect();
+        assert_eq!(ids, ["002", "003", "001"]);
     }
 
     #[test]
