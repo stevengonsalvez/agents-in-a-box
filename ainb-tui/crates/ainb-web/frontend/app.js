@@ -107,8 +107,9 @@
     return (row.kind || "").toUpperCase() || "ASK";
   }
 
-  // The card carries no cwd (#1081): the workspace name is the last path
-  // component, the same name the session list shows.
+  // The card carries no cwd (#1081): `workspaceName` is its last path
+  // component, which for an ainb worktree is the worktree directory, not the
+  // session list's workspace name.
   function needTitle(row) {
     return row.workspaceName || row.workspaceId || row.sessionId || "session";
   }
