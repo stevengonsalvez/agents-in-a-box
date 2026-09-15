@@ -5,8 +5,10 @@
 //   AppState.sessions ──Frame::new──▶ redacted body ──session_rows──▶ /api/snapshot.sessions[]
 //
 // The projection only picks and renames values already in the frame body, so
-// whatever the frame withholds (`display_name`) or scrubs cannot reappear on
-// the web. `wire::shape` traces these rows into the committed key-path
+// what the frame withholds (`display_name`) cannot reappear on the web. The
+// other row values pass through as the session stores them: the frame scrubs
+// `recent_logs`, `boss_prompt` and `preview_content`, none of which is a row
+// key, and `tmux_session_name` and `workspace_path` are not scrubbed. `wire::shape` traces these rows into the committed key-path
 // fixture, so a new row field fails the same gate a new frame field does.
 
 use crate::app::AppState;
