@@ -20,7 +20,7 @@ use ainb_desktop::host::{DesktopHost, FrameSink};
 use ainb_desktop::intent::RendererIntent;
 use ainb_desktop::shell::Shell;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarView};
-use ainb_desktop::terminal::{TabEvents, TabsView, Terminals};
+use ainb_desktop::terminal::{TabEvents, TabsView, Terminals, Tmux};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Emitter, Manager};
 
@@ -275,7 +275,7 @@ fn main() {
             // PATH entries `find_tmux` leaves out.
             let terminals = ainb_desktop::terminal::find_tmux().map(|tmux| {
                 Terminals::new(
-                    tmux,
+                    Tmux::new(tmux),
                     WebviewTabs(app.handle().clone()),
                     executor.report_sender(),
                 )
