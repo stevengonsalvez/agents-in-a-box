@@ -6125,28 +6125,28 @@ impl EventHandler {
             }
             AppEvent::ChangelogScrollUp => {
                 tracing::debug!("Changelog scroll up");
-                state.config.changelog_state.scroll_up();
+                state.changelog.changelog_state.scroll_up();
             }
             AppEvent::ChangelogScrollDown => {
                 tracing::debug!("Changelog scroll down");
                 // Use a reasonable visible height for scrolling
-                state.config.changelog_state.scroll_down(30);
+                state.changelog.changelog_state.scroll_down(30);
             }
             AppEvent::ChangelogPageUp => {
                 tracing::debug!("Changelog page up");
-                state.config.changelog_state.page_up(30);
+                state.changelog.changelog_state.page_up(30);
             }
             AppEvent::ChangelogPageDown => {
                 tracing::debug!("Changelog page down");
-                state.config.changelog_state.page_down(30);
+                state.changelog.changelog_state.page_down(30);
             }
             AppEvent::ChangelogToTop => {
                 tracing::debug!("Changelog scroll to top");
-                state.config.changelog_state.scroll_to_top();
+                state.changelog.changelog_state.scroll_to_top();
             }
             AppEvent::ChangelogToBottom => {
                 tracing::debug!("Changelog scroll to bottom");
-                state.config.changelog_state.scroll_to_bottom(30);
+                state.changelog.changelog_state.scroll_to_bottom(30);
             }
             // Usage analytics events: removed. The burndown plugin owns
             // every Analytics-screen state mutation now (period, filters,
