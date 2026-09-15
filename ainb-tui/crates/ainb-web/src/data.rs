@@ -9,6 +9,7 @@ use std::ffi::OsString;
 use std::future::Future;
 use std::pin::Pin;
 
+use ainb_app::wire::web::WebNeedCard;
 use serde_json::Value;
 
 /// A `'static` boxed future, the return shape of [`DataSource::snapshot`].
@@ -24,8 +25,8 @@ pub struct CoreSnapshot {
     /// `ainb --format json list --frame`: the live session list, as rows
     /// projected from the redacted Sessions frame (#1056).
     pub sessions: Value,
-    /// The daemon `attention/list` inbox mapped to ASK/ERR/WAIT cards (D18).
-    pub needs: Value,
+    /// The daemon `attention/list` inbox as allow-listed web cards (#1081).
+    pub needs: Vec<WebNeedCard>,
 }
 
 /// A `'static` boxed future, the return shape of [`DataSource::core`].
@@ -48,8 +49,9 @@ pub struct FleetSnapshot {
     /// The daemon `attention/list` inbox mapped to ASK/ERR/WAIT cards (D18),
     /// projected by `ainb_app::wire::web::need_cards`: no `cwd`, no raw
     /// request, payload text scrubbed (#1081). Each card carries `attentionId`
-    /// so an ASK can be answered via `POST /api/answer`.
-    pub needs: Value,
+    /// so an ASK can be answered via `POST /api/answer`. Typed, so nothing can
+    /// put a daemon card here without going through the projection.
+    pub needs: Vec<WebNeedCard>,
     /// `ainb --format json fleet cost` — cost rollups. `null` when the verb is
     /// absent from this build (cost-surface not yet merged) so the dashboard
     /// degrades gracefully instead of failing.
@@ -67,7 +69,8 @@ impl FleetSnapshot {
     /// that skip the slow cost fetch.
     #[must_use]
     pub fn from_parts(core: CoreSnapshot, cost: Value) -> Self {
-        let fingerprint = Self::compute_fingerprint(&core.sessions, &core.needs, &cost);
+        let needs = serde_json::to_value(&core.needs).unwrap_or(Value::Null);
+        let fingerprint = Self::compute_fingerprint(&core.sessions, &needs, &cost);
         Self {
             sessions: core.sessions,
             needs: core.needs,
@@ -286,7 +289,7 @@ fn legacy_classify_primary() -> bool {
 /// the whole poll. This is the read half of the web-on-the-bus retarget: the
 /// old `ainb fleet needs` subprocess (which cold-booted a plugin runtime and
 /// capture-paned every session) is gone.
-async fn daemon_needs() -> Value {
+async fn daemon_needs() -> Vec<WebNeedCard> {
     match crate::daemon::DaemonClient::from_env() {
         Ok(client) => match client.attention_list_fleet().await {
             Ok(rows) => {
@@ -318,17 +321,16 @@ async fn daemon_needs() -> Value {
                 // `cwd` and the raw request stay behind, as section 20's frame
                 // keeps them (#1081).
                 let cards = crate::daemon::attention_to_needs_with_status(&rows, &status.rows);
-                serde_json::to_value(ainb_app::wire::web::need_cards(&cards))
-                    .unwrap_or_else(|_| Value::Array(Vec::new()))
+                ainb_app::wire::web::need_cards(&cards)
             }
             Err(e) => {
                 tracing::debug!(error = %e, "attention/list unavailable; needs degrades to empty");
-                Value::Array(Vec::new())
+                Vec::new()
             }
         },
         Err(e) => {
             tracing::debug!(error = %e, "daemon client unavailable; needs degrades to empty");
-            Value::Array(Vec::new())
+            Vec::new()
         }
     }
 }
