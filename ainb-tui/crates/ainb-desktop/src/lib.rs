@@ -6,6 +6,7 @@
 //! - [`executor::DesktopExecutor`] carries out the effects a dispatch returns,
 //!   and answers the ones this shell cannot run yet with their documented
 //!   failure report.
+//! - [`intent::RendererIntent`] is what the webview may send.
 //! - [`shell::Shell`] locks the host and the executor together for the
 //!   window's commands and tick.
 //! - [`sidecar`] finds or starts the bundled hangar daemon and holds this
@@ -16,5 +17,6 @@
 
 pub mod executor;
 pub mod host;
+pub mod intent;
 pub mod shell;
 pub mod sidecar;
