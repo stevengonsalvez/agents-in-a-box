@@ -627,9 +627,20 @@ fn classified_contexts(state: &AppState) -> Vec<(KeyContext, bool)> {
                 screen_ids::SESSION_LIST,
                 SubContext::Named("ask"),
             )),
-            SessionTab::Thread | SessionTab::Pal if state.session_tab_owns_keys() => contexts.push(
-                KeyContext::Screen(screen_ids::SESSION_LIST, SubContext::Named("composer")),
-            ),
+            SessionTab::Thread | SessionTab::Pal if state.session_tab_owns_keys() => {
+                contexts.push(KeyContext::Screen(
+                    screen_ids::SESSION_LIST,
+                    SubContext::Named("composer"),
+                ));
+                // Typed text is the composer's ahead of the focused pane's
+                // rows: the logs pane binds space. Only while it captures text:
+                // a focused card leaves `q` and `d` to their rows and answers
+                // its own keys through the event handler.
+                if state.session_composer_captures_text() {
+                    contexts.push(KeyContext::TextInput);
+                    text_context_pushed = true;
+                }
+            }
             _ => {}
         }
     }

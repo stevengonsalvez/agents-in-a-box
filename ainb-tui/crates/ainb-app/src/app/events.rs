@@ -1455,7 +1455,19 @@ impl EventHandler {
         }
 
         let contexts = active_contexts(state);
-        match keymap.resolve_with_context(&contexts, &chord) {
+        let resolved = keymap.resolve_with_context(&contexts, &chord);
+        // A focused confirm card answers its own keys ahead of the sessions
+        // screen's rows, which bind `n`, `e` and `k`. Every other printable
+        // keeps its row, so `q` still leaves and `d` still deletes.
+        if let Some(character) = Self::session_card_key(&chord, state) {
+            let screen_row_or_none = resolved.as_ref().is_none_or(|(context, _)| {
+                matches!(context, KeyContext::Screen(screen, _) if *screen == screen_ids::SESSION_LIST)
+            });
+            if screen_row_or_none {
+                return Self::route_session_composer_char(character, state);
+            }
+        }
+        match resolved {
             Some((context, _))
                 if state.shell.help_visible
                     && context != KeyContext::HelpVisible
@@ -1949,6 +1961,30 @@ impl EventHandler {
         turn(&mut state.host.pal_dial);
         state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
+    }
+
+    /// The key a confirm card answers, when a chat tab on the sessions screen
+    /// has its cards focused: `y` and `n` answer, `e` edits, `j` and `k` move.
+    fn session_card_key(chord: &Chord, state: &AppState) -> Option<char> {
+        use crate::components::session_tabs::SessionTab;
+        use ainb_plugin_hangar::screen::fleet_chat::ChatFocus;
+
+        let character = chord
+            .printable()
+            .filter(|character| matches!(character, 'y' | 'n' | 'e' | 'j' | 'k'))?;
+        if state.shell.current_screen != screen_ids::SESSION_LIST
+            || (state.shell.session_tab == SessionTab::Thread
+                && !state.broadcast_targets().is_empty())
+        {
+            return None;
+        }
+        let host = match state.shell.session_tab {
+            SessionTab::Pal => state.host.pal_chat.as_ref(),
+            SessionTab::Thread => state.host.session_chat.as_ref().map(|(_, host)| host),
+            SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
+        }?;
+        let chat = host.state();
+        (matches!(chat.focus(), ChatFocus::Cards) && !chat.is_capturing_text()).then_some(character)
     }
 
     fn route_session_composer_char(character: char, state: &mut AppState) -> Option<AppEvent> {
@@ -9150,6 +9186,112 @@ mod session_composer_key_tests {
         assert!(matches!(
             press(&mut state, Tab),
             Some(AppEvent::SessionTabNext)
+        ));
+    }
+
+    /// A space typed with the logs pane focused is a space in the message, not
+    /// the logs pane's auto-scroll toggle (#1051).
+    #[test]
+    fn a_space_types_into_the_composer_with_the_logs_pane_focused() {
+        let mut state = composing();
+        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+        let event = press(&mut state, Char(' '));
+        assert!(
+            matches!(event, Some(AppEvent::Consumed)),
+            "a space must reach the composer: {event:?}"
+        );
+        let chat = state.host.pal_chat.as_ref().expect("pal chat").state();
+        assert_eq!(chat.composer(), " ");
+    }
+
+    /// Run `body` with `AINB_HANGAR_HOME` on a scratch directory, restoring the
+    /// prior value after: answering a card starts a daemon write, which must
+    /// not reach the real home.
+    fn with_scratch_hangar_home(body: impl FnOnce()) {
+        let hangar_home = tempfile::tempdir().expect("scratch hangar home");
+        let previous = std::env::var_os("AINB_HANGAR_HOME");
+        std::env::set_var("AINB_HANGAR_HOME", hangar_home.path());
+        body();
+        match previous {
+            Some(value) => std::env::set_var("AINB_HANGAR_HOME", value),
+            None => std::env::remove_var("AINB_HANGAR_HOME"),
+        }
+    }
+
+    /// The composer with one open confirm card selected and the cards focused.
+    fn a_card_focused() -> AppState {
+        use ainb_plugin_hangar::screen::fleet_chat::{ChatFocus, ChatSnapshot};
+
+        let mut state = composing();
+        let chat = state.host.pal_chat.as_mut().expect("pal chat").state_mut();
+        chat.apply_snapshot(ChatSnapshot {
+            scope_key: Some("channel:01J0SCOPE".into()),
+            confirms: vec![serde_json::json!({
+                "confirm_id": "01J0CONFIRM",
+                "scope_key": "channel:01J0SCOPE",
+                "tool": "kill",
+                "arguments": { "session": "claude:one" },
+                "target_session_key": "claude:one",
+                "state": "open",
+                "created_at": 1_700_000_000_000_i64,
+                "expires_at": 1_700_000_600_000_i64,
+            })],
+            ..ChatSnapshot::default()
+        });
+        EventHandler::handle_key_event(Chord::new(Tab, Mods::SHIFT), &mut state);
+        press(&mut state, Down);
+        let chat = state.host.pal_chat.as_ref().expect("pal chat").state();
+        assert!(
+            matches!(chat.focus(), ChatFocus::Cards) && chat.selected_index() == Some(0),
+            "precondition: the card is focused and selected"
+        );
+        assert!(!state.session_composer_captures_text());
+        state
+    }
+
+    /// With a confirm card focused, `y` answers it: the routed key does exactly
+    /// what the card reducer does for `y`, which is a confirm answer (#1051).
+    #[test]
+    fn a_card_answer_key_reaches_the_conversation_with_cards_focused() {
+        use ainb_plugin_hangar::screen::fleet_chat::{
+            ChatIntent, ChatKey, ChatKeyOutcome, reduce_chat_key,
+        };
+
+        let mut state = a_card_focused();
+        let mut expected = state.host.pal_chat.as_ref().expect("pal chat").state().clone();
+        let outcome = reduce_chat_key(&mut expected, ChatKey::Char('y'));
+        assert!(
+            matches!(
+                outcome,
+                ChatKeyOutcome::Intent(ChatIntent::ConfirmAnswer(_))
+            ),
+            "precondition: y on this card is a confirm answer: {outcome:?}"
+        );
+
+        let mut event = None;
+        with_scratch_hangar_home(|| event = press(&mut state, Char('y')));
+
+        assert!(matches!(event, Some(AppEvent::Consumed)), "{event:?}");
+        assert_eq!(
+            state.host.pal_chat.as_ref().expect("pal chat").state(),
+            &expected,
+            "y must answer the focused card"
+        );
+    }
+
+    /// A focused card takes only its own keys: `q` still leaves and `d` still
+    /// deletes, so the operator is never stranded on the cards.
+    #[test]
+    fn session_shortcuts_still_resolve_with_a_card_focused() {
+        let mut state = a_card_focused();
+        assert!(matches!(
+            press(&mut state, Char('q')),
+            Some(AppEvent::GoToHomeScreen)
+        ));
+        let mut state = a_card_focused();
+        assert!(matches!(
+            press(&mut state, Char('d')),
+            Some(AppEvent::DeleteSession)
         ));
     }
 
