@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
-use ainb_app::{Keymap, SectionId};
+use ainb_app::{Intent, Keymap, SectionId};
 use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::{DesktopHost, FrameSink};
 use ainb_desktop::intent::RendererIntent;
@@ -64,10 +64,13 @@ fn subscribe(window: tauri::State<'_, Window>, frames: Channel<FrameBatch>) {
     window.shell.reframe();
 }
 
-/// Apply an intent from the webview: a key, a command, pasted text.
+/// Apply an intent from the webview: a key, a command, pasted text. A
+/// host-authored command id, or a key on a key-only row, is refused.
 #[tauri::command]
 fn dispatch(window: tauri::State<'_, Window>, intent: RendererIntent) {
-    window.shell.dispatch(intent.into());
+    if let Ok(intent) = Intent::try_from(intent) {
+        window.shell.dispatch_renderer(intent);
+    }
 }
 
 /// Where the daemon connection stands, for the banner on first paint.
