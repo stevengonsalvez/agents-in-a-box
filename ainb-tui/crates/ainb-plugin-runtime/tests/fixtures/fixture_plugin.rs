@@ -13,8 +13,8 @@
 //!   topic (the reply is read and ignored). With argv `publish <topic>` it
 //!   first publishes `b"from-plugin"` on the topic. With argv `hang` it never replies,
 //!   leaving the request in flight. With argv `levels <n>` it
-//!   gives Esc `n` nested levels to pop. With argv `wedge` it stops reading stdin
-//!   altogether and never replies.
+//!   gives Esc `n` nested levels to pop. With argv `wedge` it publishes
+//!   `fixture.wedged`, then stops reading stdin altogether and never replies.
 //! - `plugin/handle_event` → notification: recorded on stderr, and a delivery
 //!   for a subscribed (non-`socket:`) topic is re-published verbatim under
 //!   `fixture.received`, so a host test can read back exactly what arrived.
@@ -128,6 +128,9 @@ fn main() {
                     // `wedge`: stop reading stdin for good, so the host's
                     // writes back up once the pipe is full.
                     if dispatch.argv.first().map(String::as_str) == Some("wedge") {
+                        // Say so first, so a host test floods only once the
+                        // fixture has really stopped reading.
+                        publish_snapshot(&mut writer, "fixture.wedged", b"1");
                         std::thread::park();
                     }
                     // `hang`: never answer, so the request stays in flight.
