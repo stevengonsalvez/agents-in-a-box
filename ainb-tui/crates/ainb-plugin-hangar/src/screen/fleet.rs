@@ -15,8 +15,7 @@ use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 use serde::{Deserialize, Serialize};
 
 use super::fleet_chat::{
-    ChatIntent, ChatKey, ChatKeyOutcome, ChatSnapshot, ChatState, chat_tick, reduce_chat_key,
-    render_chat,
+    ChatIntent, ChatKey, ChatKeyOutcome, ChatSnapshot, ChatState, reduce_chat_key, render_chat,
 };
 
 const BROADCAST_MAX_PARALLEL: usize = 8;
@@ -855,8 +854,9 @@ impl Default for FleetPaneState {
 impl FleetPaneState {
     /// Set the clock cards age against from the host's card-clock tick (#1054).
     ///
-    /// Only the clock: unlike [`FleetEvent::Tick`] it drives no other timer
-    /// (the chat surface's poll), so a host tick cannot start work of its own.
+    /// Only the clock: it drives no other timer, so a host tick cannot start
+    /// work of its own. The chat poll (`chat_tick`) is the host Fleet panel's;
+    /// this screen answers every chat intent with a pointer there (#1090).
     /// A non-positive clock is ignored, since the panel then renders `?`
     /// rather than an age measured from zero.
     pub fn set_clock_ms(&mut self, clock_ms: i64) {
@@ -1176,7 +1176,6 @@ pub enum FleetEvent {
     /// conversation with the wrong send targets.
     ChannelsListed(Vec<ainb_hangar_proto::fleet::FleetChannel>),
     Feedback(String),
-    Tick(i64),
 }
 
 /// Side effect requested by the pure Fleet reducer.
@@ -1324,16 +1323,6 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
         FleetEvent::Feedback(message) => {
             next.feedback = Some(message);
             None
-        }
-        FleetEvent::Tick(now_ms) => {
-            next.now_ms = now_ms;
-            // The chat surface polls on the pane's existing tick rather than
-            // holding a second socket open. Its own in-flight latch is what
-            // keeps one intent per interval instead of one per frame.
-            match &mut next.mode {
-                FleetMode::Chat(chat) => chat_tick(chat, now_ms).map(FleetIntent::Chat),
-                _ => None,
-            }
         }
     };
     FleetReduction {
@@ -4445,7 +4434,7 @@ mod tests {
         ));
         assert!(state.visible_sessions().is_empty(), "working is not a wait");
         state = reduce_fleet(&state, FleetEvent::SetFilter(FleetFilter::Running)).state;
-        state = reduce_fleet(&state, FleetEvent::Tick(54_000)).state;
+        state.set_clock_ms(54_000);
         let mut buffer = WireBuffer::new(120, 24);
         render_fleet(&mut buffer, 120, 0, 20, &state);
         let text = screen_text(&buffer, 120, 20);
@@ -4515,7 +4504,7 @@ mod tests {
         let mut state = FleetPaneState::default();
         state.apply_view(StatusView::from_read(read, local_received));
         state = reduce_fleet(&state, FleetEvent::SetFilter(FleetFilter::Running)).state;
-        state = reduce_fleet(&state, FleetEvent::Tick(local_received + 4_000)).state;
+        state.set_clock_ms(local_received + 4_000);
         let mut buffer = WireBuffer::new(120, 24);
         render_fleet(&mut buffer, 120, 0, 20, &state);
         let text = screen_text(&buffer, 120, 20);
@@ -4605,7 +4594,7 @@ mod tests {
 
         view.mark_unreachable("connection refused", 2_000);
         state.apply_view(view);
-        state = reduce_fleet(&state, FleetEvent::Tick(62_000)).state;
+        state.set_clock_ms(62_000);
         let mut buffer = WireBuffer::new(140, 24);
         render_fleet(&mut buffer, 140, 0, 20, &state);
         let text = screen_text(&buffer, 140, 20);
@@ -5814,7 +5803,8 @@ mod tests {
 
     #[test]
     fn attention_first_render_uses_operator_cards_and_compact_action_detail() {
-        let state = apply(&state_with_roster(), FleetEvent::Tick(10_000)).state;
+        let mut state = state_with_roster();
+        state.set_clock_ms(10_000);
         let mut buffer = WireBuffer::new(120, 24);
         render_fleet(&mut buffer, 120, 0, 20, &state);
         // Crisp B2 §2.1: the lens row speaks the shared vocabulary, lowercase, and
