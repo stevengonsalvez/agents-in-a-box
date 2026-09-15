@@ -24,6 +24,10 @@ required-features = ["app"]
 [features]
 default = []
 app = ["dep:tauri", "dep:tauri-build", "dep:ainb-hangar-core", "dep:tracing-subscriber"]
+# The embedded WebDriver the wdio journey drives, off in every normal build and
+# in every bundle: the CI bundle smoke asserts the release binary carries no
+# WebDriver symbol and binds no driver port.
+wdio = ["app", "dep:tauri-plugin-wdio-webdriver"]
 
 [dependencies]
 ainb-app = { path = "../ainb-app" }
@@ -40,6 +44,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", optional = true, features = ["fmt"] }
 uuid = { version = "1.5", features = ["serde"] }
 tauri = { version = "~2.11.5", optional = true }
+tauri-plugin-wdio-webdriver = { version = "1.4", optional = true }
 
 [build-dependencies]
 tauri-build = { version = "~2.6.3", optional = true }
