@@ -9,9 +9,7 @@ use ainb_hangar_proto::events::EVENT_METHOD;
 use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
-use ainb_web::data::{
-    CoreFuture, CoreSnapshot, CostFuture, DataSource, FleetSnapshot, SnapshotFuture,
-};
+use ainb_web::data::{CoreFuture, CoreSnapshot, CostFuture, DataSource};
 use ainb_web::{ServeError, WebConfig, serve};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -358,18 +356,6 @@ async fn web_listen_failure_never_registers_presence() {
 struct WebServerSource;
 
 impl DataSource for WebServerSource {
-    fn snapshot(&self) -> SnapshotFuture<'_> {
-        Box::pin(async {
-            Ok(FleetSnapshot::from_parts(
-                CoreSnapshot {
-                    sessions: serde_json::json!([]),
-                    needs: Vec::new(),
-                },
-                serde_json::Value::Null,
-            ))
-        })
-    }
-
     fn core(&self) -> CoreFuture<'_> {
         Box::pin(async {
             Ok(CoreSnapshot {
