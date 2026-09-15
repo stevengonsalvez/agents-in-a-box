@@ -4466,7 +4466,6 @@ export type TmuxSessionName = string;
 
 export type TmuxView = {
 	embed_session: TmuxSessionName | null,
-	host_session: TmuxSessionName | null,
 	other_tmux_sessions: OtherTmuxSession[],
 	other_tmux_expanded: boolean,
 	selected_other_tmux_index: number | null,
