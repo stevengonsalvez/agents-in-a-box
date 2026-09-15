@@ -25,10 +25,10 @@ pub mod trace;
 
 use crate::app::AppState;
 use crate::app::sections::{
-    ChangelogSection, ClaudeChatSection, ConfigSection, FleetSection, GitViewSection,
-    HangarSection, LogsSection, McpPoolSection, NewSessionSection, OnboardingSection,
-    PluginsHostSection, RecoverySection, SessionLabelsSection, SessionsSection, ShellSection,
-    SkillsSection, SshSection, TmuxSection, WorkspaceLoadSection,
+    ClaudeChatSection, ConfigSection, FleetSection, GitViewSection, HangarSection, LogsSection,
+    McpPoolSection, NewSessionSection, OnboardingSection, PluginsHostSection, RecoverySection,
+    SessionLabelsSection, SessionsSection, ShellSection, SkillsSection, SshSection, TmuxSection,
+    WorkspaceLoadSection,
 };
 use crate::app::versioned::SectionId;
 use serde::{Serialize, Serializer};
@@ -89,8 +89,7 @@ pub fn daemon_read(state: &AppState, id: SectionId) -> Option<frame::DaemonRead>
         | SectionId::Skills
         | SectionId::Recovery
         | SectionId::Onboarding
-        | SectionId::Shell
-        | SectionId::Changelog => None,
+        | SectionId::Shell => None,
     }
 }
 
@@ -118,7 +117,6 @@ pub const fn section_name(id: SectionId) -> &'static str {
         SectionId::Onboarding => "onboarding",
         SectionId::Shell => "shell",
         SectionId::AgentStatus => "agent_status",
-        SectionId::Changelog => "changelog",
     }
 }
 
@@ -163,7 +161,6 @@ pub fn serialize_section<S: Serializer>(
         SectionId::Onboarding => OnboardingView::from(&*state.onboarding).serialize(serializer),
         SectionId::Shell => ShellView::from(&*state.shell).serialize(serializer),
         SectionId::AgentStatus => AgentStatusView::from(&*state.agent_status).serialize(serializer),
-        SectionId::Changelog => ChangelogView::from(&*state.changelog).serialize(serializer),
     }
 }
 
@@ -600,10 +597,6 @@ view!(OnboardingView<'a> for OnboardingSection {
     auth_provider_popup_state: crate::app::state::AuthProviderPopupState,
 });
 
-view!(ChangelogView<'a> for ChangelogSection {
-    changelog_state: crate::components::ChangelogState,
-});
-
 view!(ShellView<'a> for ShellSection {
     current_screen: crate::app::screens::ScreenId,
     previous_screen: Option<crate::app::screens::ScreenId>,
@@ -623,26 +616,6 @@ view!(ShellView<'a> for ShellSection {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// #1052: the changelog's rendered lines are static content, so no frame
-    /// carries them. The Config frame is its settings, and the changelog frame
-    /// is a scroll position.
-    #[test]
-    fn neither_the_config_nor_the_changelog_frame_carries_the_changelog_text() {
-        let state = shape::sample_state(&mut shape::PlainSeed);
-        let config = serde_json::to_vec(&section_json(&state, SectionId::Config)).unwrap();
-        let changelog = serde_json::to_vec(&section_json(&state, SectionId::Changelog)).unwrap();
-        assert!(
-            config.len() < 64 * 1024,
-            "Config frame is {} bytes",
-            config.len()
-        );
-        assert!(
-            changelog.len() < 1024,
-            "changelog frame is {} bytes",
-            changelog.len()
-        );
-    }
     use crate::app::state::ConfigValue;
     use crate::components::config_popup::ConfigPopupType;
 
@@ -661,6 +634,24 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
         out
+    }
+
+    /// #1052: the changelog is static content and its scroll is renderer-local,
+    /// so the Config frame names no changelog state and carries none of its text.
+    #[test]
+    fn the_config_frame_carries_no_changelog_state_or_text() {
+        let body = with_scratch_home(|| section_json(&AppState::new(), SectionId::Config));
+        let keys: Vec<&String> = body.as_object().expect("an object body").keys().collect();
+        assert!(
+            !keys.iter().any(|key| key.as_str() == "changelog_state"),
+            "{keys:?}"
+        );
+        let text = serde_json::to_string(&body).expect("serialises");
+        let opening = &crate::components::changelog::CHANGELOG_MARKDOWN[..64];
+        assert!(
+            !text.contains(opening),
+            "the Config frame carries changelog text"
+        );
     }
 
     #[test]
@@ -736,7 +727,6 @@ struct SectionBodies<'a> {
     onboarding: OnboardingView<'a>,
     shell: ShellView<'a>,
     agent_status: AgentStatusView<'a>,
-    changelog: ChangelogView<'a>,
 }
 
 /// Register every section view with the TypeScript export, named for its section.
@@ -764,5 +754,4 @@ pub(crate) fn register_section_views(types: specta::Types) -> specta::Types {
         .register::<OnboardingView<'static>>()
         .register::<ShellView<'static>>()
         .register::<AgentStatusView<'static>>()
-        .register::<ChangelogView<'static>>()
 }
