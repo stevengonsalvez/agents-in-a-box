@@ -65,9 +65,13 @@ jobs:
           node-version: "22"
           cache: "npm"
           cache-dependency-path: ainb-tui/crates/ainb-desktop/ui/package-lock.json
-      # The window build embeds `ui/dist`, and `tsc --noEmit` runs strict first.
+      # The window build embeds `ui/dist`, and `tsc --noEmit --strict` runs first.
       - name: Build the shell frontend
         run: npm ci --no-audit --no-fund && npm run build
+        working-directory: ainb-tui/crates/ainb-desktop/ui
+      # The frame store's D15 invariants and the sidebar's ring projection.
+      - name: Frontend store tests
+        run: npm test
         working-directory: ainb-tui/crates/ainb-desktop/ui
       # Builds the daemon the sidecar tests run and stages it for
       # `bundle.externalBin`, which the window build checks for.
