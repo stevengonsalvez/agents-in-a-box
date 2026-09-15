@@ -19,6 +19,7 @@
 import { batch, createMemo, type Accessor } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type {
+  DaemonRead,
   FrameBatch_Serialize,
   Frame_Serialize,
   HostId,
@@ -30,6 +31,11 @@ export type SectionName = keyof SectionBodies_Serialize;
 
 export interface HeldSection<S extends SectionName> {
   version: number;
+  /**
+   * The daemon read behind the body, for a section that has one: the D18
+   * fence value and the revision a stale badge names.
+   */
+  daemon_read: DaemonRead | null;
   body: SectionBodies_Serialize[S];
 }
 
@@ -82,8 +88,8 @@ export function createFrameStore(subscribed: readonly SectionName[]): FrameStore
   const [state, setState] = createStore<FrameState>({ hosts: {}, stale: {} });
 
   function applyDrain(peer: HostId, batches: readonly FrameBatch_Serialize[]) {
-    const held = new Set([...Object.keys(state.hosts), ...Object.keys(state.stale)]);
-    if (!held.has(peer) && held.size >= MAX_HOSTS) return;
+    const hosts = new Set([...Object.keys(state.hosts), ...Object.keys(state.stale)]);
+    if (!hosts.has(peer) && hosts.size >= MAX_HOSTS) return;
     // Decide in plain objects first, so the store is written once per
     // (host, section) however many frames the drain carried for it.
     const plans = new Map<HostId, Plan>();
@@ -123,11 +129,13 @@ export function createFrameStore(subscribed: readonly SectionName[]): FrameStore
           const held = state.hosts[host].sections[name];
           if (held) {
             setState("hosts", host, "sections", name, "version", frame.version);
+            setState("hosts", host, "sections", name, "daemon_read", frame.daemon_read ?? null);
             // Diff against the held body so only changed fields notify.
             setState("hosts", host, "sections", name, "body", reconcile(frame.body as never, { key: "id" }));
           } else {
             setState("hosts", host, "sections", name, {
               version: frame.version,
+              daemon_read: frame.daemon_read ?? null,
               body: structuredClone(frame.body),
             } as never);
           }
