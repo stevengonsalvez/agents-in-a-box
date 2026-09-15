@@ -577,9 +577,9 @@ impl Default for TmuxSection {
 pub struct FleetSection {
     /// Per-session "cleared up to" timestamp (epoch ms). A hook event
     /// only marks a session if its `ts` is newer than this. Defaults to
-    /// `0` (any event in the lookback window can mark); bumped to "now"
-    /// while the user is attached, so re-marking only happens for
-    /// activity that arrives after they look away.
+    /// `0` (any event in the lookback window can mark); folded from
+    /// `HostOnlyState::attention_attached_at` once, on the refresh that sees
+    /// the session detach; read through `AppState::attention_clear_point`.
     pub attention_baseline: HashMap<Uuid, i64>,
     /// The watcher's latest snapshot, copied in on the tick when it changes.
     /// Renderers draw the status bar's quota widget from this, so a host that
@@ -1119,6 +1119,14 @@ pub struct HostOnlyState {
     /// `FleetSection::daemon_attention_seen` is the versioned copy that
     /// `refresh_daemon_attention_generation` folds it into once a frame.
     pub daemon_attention_generation: crate::fleet::attention_poll::Generation,
+    /// When each attached session was last seen attached by
+    /// `AppState::refresh_attention`.
+    ///
+    /// An attached session's clear point moves to "now" on every refresh.
+    /// Writing that to `FleetSection::attention_baseline` each time would bump
+    /// the Fleet section for nothing, so the instant is held here and folded
+    /// into the baseline once, on the refresh that sees the session detached.
+    pub attention_attached_at: HashMap<Uuid, i64>,
 }
 
 impl Default for HostOnlyState {
@@ -1154,6 +1162,7 @@ impl Default for HostOnlyState {
             session_chat: None,
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            attention_attached_at: HashMap::new(),
         }
     }
 }

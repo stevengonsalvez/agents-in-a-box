@@ -517,6 +517,10 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "agent question text, scrubbed through redact::scrub",
     ),
     (
+        "AttentionMark.detail",
+        "a session row's attention detail, the same agent question text scrubbed through redact::scrub",
+    ),
+    (
         "SessionLabelsView.session_label_rename_buffer",
         "session label being typed; a display name, shown so the surface can edit it",
     ),
@@ -924,6 +928,7 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "AgentAuthStatus.has_key",
     "AnswerPhase::Failed.draft_len",
     "AnswerPhase::Failed.reason",
+    "AttentionMark.detail",
     "AskState.free_text_len",
     "AtcModeView.help",
     "AttentionOption.description",
@@ -993,6 +998,7 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "RepositoryPreset.environment",
     "SecretValue.reference",
     "Session.boss_prompt",
+    "Session.attention",
     "Session.preview_content",
     "Session.recent_logs",
     "SessionAttention.detail",

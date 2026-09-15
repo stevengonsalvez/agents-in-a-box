@@ -622,6 +622,8 @@ sessions.shell_selected
 sessions.workspaces[].name
 sessions.workspaces[].path
 sessions.workspaces[].sessions[].agent_type
+sessions.workspaces[].sessions[].attention[].detail
+sessions.workspaces[].sessions[].attention[].kind
 sessions.workspaces[].sessions[].boss_prompt
 sessions.workspaces[].sessions[].branch_name
 sessions.workspaces[].sessions[].codex_model
@@ -768,6 +770,8 @@ ssh.selected_ssh_session_index
 ssh.ssh_session_rename_buffer
 ssh.ssh_session_rename_mode
 ssh.ssh_sessions[].agent_type
+ssh.ssh_sessions[].attention[].detail
+ssh.ssh_sessions[].attention[].kind
 ssh.ssh_sessions[].boss_prompt
 ssh.ssh_sessions[].branch_name
 ssh.ssh_sessions[].codex_model
