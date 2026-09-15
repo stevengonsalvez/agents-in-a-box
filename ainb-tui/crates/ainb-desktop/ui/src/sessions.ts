@@ -28,6 +28,9 @@ export function rowStatus(status: SessionStatus): RowStatus {
       return "idle";
     case "Stopped":
       return "stopped";
+    // A host at another version may send a status this build does not know.
+    default:
+      return "stopped";
   }
 }
 
@@ -41,8 +44,9 @@ export function rowStatus(status: SessionStatus): RowStatus {
  */
 export function ringFor(session: Session_Serialize, fleet: FleetView_Serialize | undefined): AttentionKind | null {
   if (session.is_attached) return null;
-  const provider = fleet?.fleet_metadata[session.id]?.provider_session_id;
-  const rows = provider ? (fleet?.daemon_attention.by_session_id[provider] ?? []) : [];
+  // Optional at every level: a host at another version may omit any of it.
+  const provider = fleet?.fleet_metadata?.[session.id]?.provider_session_id;
+  const rows = provider ? (fleet?.daemon_attention?.by_session_id?.[provider] ?? []) : [];
   let ring: AttentionKind | null = typeof session.status === "object" ? "Err" : null;
   for (const row of rows) {
     if (ring === null || ATTENTION_ORDER.indexOf(row.kind) < ATTENTION_ORDER.indexOf(ring)) ring = row.kind;
