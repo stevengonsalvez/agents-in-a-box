@@ -913,27 +913,15 @@ jobs:
           # Plugin tripwires SKIP without staged plugins, which would pass
           # them without exercising anything.
           bash scripts/build-plugins.sh
-          filter='binary(/^tripwire_/)'
-          while read -r name _; do
-            case "$name" in ''|'#'*) continue ;; esac
-            filter="$filter & not binary(=$name)"
-          done < crates/ainb-core/tests/tripwire_ci_exclusions.txt
           # Real-TUI tripwires time out on a slow runner; a test must fail
           # three times to fail the job, and each retry is named below.
           cargo nextest run -p ainb --test-threads 1 --no-fail-fast --retries 2 \
-            --success-output final -E "$filter" \
+            --success-output final -E "$(bash scripts/tripwire-ci-filter.sh)" \
             2>&1 | tee "$RUNNER_TEMP/core-tripwires.log"
-          # nextest colours its summary, so strip escapes first; read its own
-          # line because test binaries print their own "N passed".
-          sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/core-tripwires.log" > "$RUNNER_TEMP/core-tripwires.txt"
-          passed=$(grep -oE '[0-9]+ tests run: [0-9]+ passed' "$RUNNER_TEMP/core-tripwires.txt" | tail -1 | grep -oE '[0-9]+ passed' | cut -d' ' -f1 || true)
-          skipped=$(grep -cE '^\s*SKIP:' "$RUNNER_TEMP/core-tripwires.txt" || true)
-          echo "passed=$passed skip_lines=$skipped"
-          grep -E '^\s*FLAKY ' "$RUNNER_TEMP/core-tripwires.txt" | sed 's/^\s*/::warning::passed on retry: /' || true
-          if [ -z "$passed" ] || [ "$skipped" -ge "$passed" ]; then
-            echo "::error::every ainb-core tripwire SKIPped (or none ran), so this job exercised nothing"
-            exit 1
-          fi
+          # A test that SKIPs passes without exercising anything: the set that
+          # SKIPped must be exactly the committed one.
+          bash scripts/tripwire-ci-guard.sh "$RUNNER_TEMP/core-tripwires.log" \
+            crates/ainb-core/tests/tripwire_ci_skips.txt
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────

@@ -7,8 +7,7 @@ use super::keymap::test_key_codes::*;
 use crate::app::effect::{Effect, TerminalTarget, ToolTerminal};
 use crate::app::intent::{Btn, Intent, Pos};
 use crate::app::keymap::{
-    Chord, HostAction, HostFlags, KeyAction, KeyContext, Keymap, ScrollAction, UiAction,
-    active_contexts,
+    Chord, HostAction, KeyAction, KeyContext, Keymap, ScrollAction, UiAction, active_contexts,
 };
 #[cfg(test)]
 use crate::app::keymap::{Key, Mods};
@@ -1455,7 +1454,7 @@ impl EventHandler {
             return Self::handle_new_session_keys(chord, state);
         }
 
-        let contexts = active_contexts(state, &HostFlags::default());
+        let contexts = active_contexts(state);
         match keymap.resolve_with_context(&contexts, &chord) {
             Some((context, _))
                 if state.shell.help_visible
@@ -1502,19 +1501,18 @@ impl EventHandler {
                 // its plugin) run from any screen. A row that writes outside
                 // ainb runs only from its key, so no other surface can fire it
                 // by name. Every other row passes the gate a key passes: it
-                // runs only while its context is active, so a click resolved
-                // on one screen cannot act after the user has left it.
+                // runs only while its context is active and no overlay covers
+                // it, so a click resolved on one screen cannot act after the
+                // user has left it or opened a dialog over it.
                 if KEY_ONLY_COMMANDS.contains(&id.as_str()) {
                     tracing::warn!("command `{id}` runs only from its key");
                     return None;
                 }
                 let host_authored = crate::app::reports::ids::ALL.contains(&id.as_str())
                     || crate::app::plugin_action::ids::ALL.contains(&id.as_str());
-                let flags = HostFlags {
-                    embed_interactive: state.is_interactive_pane(),
-                    ..HostFlags::default()
-                };
-                if !host_authored && !active_contexts(state, &flags).contains(&binding.ctx) {
+                if !host_authored
+                    && !crate::app::keymap::command_contexts(state).contains(&binding.ctx)
+                {
                     tracing::warn!("command `{id}` is not active on this screen");
                     return None;
                 }

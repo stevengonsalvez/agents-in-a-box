@@ -150,3 +150,57 @@ fn review_commands_do_nothing_off_the_git_view() {
 
     assert!(bumped(&before, &state.versions()).is_empty());
 }
+
+/// A confirmation dialog covers the review: the wheel command aimed at the
+/// diff beneath it changes nothing, and the dialog's own command still runs.
+#[test]
+fn a_confirmation_dialog_blocks_the_review_scroll_but_not_its_own_commands() {
+    use ainb_app::app::state::{ConfirmAction, ConfirmationDialog};
+    use ainb_app::{CommandId, Intent};
+
+    let keymap = Keymap::defaults();
+    let mut state = reviewing(&["a.rs"]);
+    state.shell.confirmation_dialog = Some(ConfirmationDialog {
+        title: "Stop session".to_string(),
+        message: "Stop it?".to_string(),
+        confirm_action: ConfirmAction::DismissNotifyPrompt,
+        selected_option: false,
+        warning: None,
+        options: None,
+        selected_index: 0,
+    });
+    let before = state.versions();
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        pointer::scroll_git_view(3),
+    );
+    assert!(bumped(&before, &state.versions()).is_empty());
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        Intent::Command(
+            CommandId::new("confirm_dialog.cancel"),
+            serde_json::Value::Null,
+        ),
+    );
+    assert!(
+        state.shell.confirmation_dialog.is_none(),
+        "the dialog's command ran"
+    );
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        pointer::scroll_git_view(3),
+    );
+    assert_eq!(
+        state.git_view.git_view_state.as_ref().expect("git view").review_ui.scroll,
+        3,
+        "with the dialog gone the wheel scrolls again"
+    );
+}

@@ -342,7 +342,6 @@ pub enum KeyContext {
     SessionContextMenu,
     HelpVisible,
     QuickCommit,
-    SkillManagerOverlay,
     ConfigPopup,
     AuthProviderPopup,
     TextInput,
@@ -352,13 +351,6 @@ pub enum KeyContext {
 
 /// The keymap row that releases the in-place interactive pane.
 pub const EMBED_DETACH_ROW: &str = "detach";
-
-/// Terminal-host state that is intentionally outside `AppState` until Phase 3.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HostFlags {
-    pub embed_interactive: bool,
-    pub preview_scroll_mode: bool,
-}
 
 impl KeyContext {
     /// Screen context without a sub-state.
@@ -381,7 +373,6 @@ impl KeyContext {
             Self::SessionContextMenu => "session_context_menu".to_string(),
             Self::HelpVisible => "help_visible".to_string(),
             Self::QuickCommit => "quick_commit".to_string(),
-            Self::SkillManagerOverlay => "skill_manager_overlay".to_string(),
             Self::ConfigPopup => "config_popup".to_string(),
             Self::AuthProviderPopup => "auth_provider_popup".to_string(),
             Self::TextInput => "text_input".to_string(),
@@ -405,7 +396,6 @@ impl KeyContext {
             "session_context_menu" => Self::SessionContextMenu,
             "help_visible" => Self::HelpVisible,
             "quick_commit" => Self::QuickCommit,
-            "skill_manager_overlay" => Self::SkillManagerOverlay,
             "config_popup" => Self::ConfigPopup,
             "auth_provider_popup" => Self::AuthProviderPopup,
             "text_input" => Self::TextInput,
@@ -541,10 +531,38 @@ pub(crate) fn onboarding_sub_context(
     }
 }
 
+/// The contexts a named command may run in: [`active_contexts`] up to the end
+/// of the topmost overlay, when one is open, and then [`KeyContext::Global`].
+///
+/// A command is a click or a palette pick resolved against what a renderer
+/// drew. While a dialog, popup, menu or the live terminal pane covers the
+/// screen, a command for the screen beneath it (a wheel over the diff, a row
+/// click) was aimed at something the user can no longer act on, so it runs
+/// only if it belongs to the overlay or is global. Keys are not cut: a key the
+/// overlay does not bind still reaches the screen, because the user pressed it
+/// looking at the screen.
+#[must_use]
+pub fn command_contexts(state: &AppState) -> Vec<KeyContext> {
+    let mut contexts = classified_contexts(state);
+    if let Some(first) = contexts.iter().position(|(_, overlay)| *overlay) {
+        let end = first + contexts[first..].iter().take_while(|(_, overlay)| *overlay).count();
+        contexts.truncate(end);
+        contexts.push((KeyContext::Global, false));
+    }
+    contexts.into_iter().map(|(context, _)| context).collect()
+}
+
 /// Mirror host dispatch precedence without allowing renderer state into `AppState`.
 #[must_use]
-pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
-    let mut contexts = Vec::new();
+pub fn active_contexts(state: &AppState) -> Vec<KeyContext> {
+    classified_contexts(state).into_iter().map(|(context, _)| context).collect()
+}
+
+/// Every context a key resolves through, in precedence order, each marked
+/// where it is pushed with whether it is an overlay drawn over the screen. The
+/// preview-scroll mode is the terminal host's own and is never pushed here.
+fn classified_contexts(state: &AppState) -> Vec<(KeyContext, bool)> {
+    let mut contexts = ContextList::default();
     let mut text_context_pushed = false;
     let text_input_active = crate::app::events::EventHandler::is_in_text_input_context(state);
     let auth_setup_api_input = state.shell.current_screen == screen_ids::AUTH_SETUP
@@ -562,37 +580,36 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     let plugin_screen_active =
         crate::app::screens::builtin::plugin_id_for_screen(&state.shell.current_screen).is_some();
 
-    if host.embed_interactive {
-        contexts.push(KeyContext::EmbedInteractive);
-    }
-    if host.preview_scroll_mode {
-        contexts.push(KeyContext::PreviewScroll);
+    if state.is_interactive_pane() {
+        contexts.overlay(KeyContext::EmbedInteractive);
     }
     if state.shell.confirmation_dialog.is_some() {
-        contexts.push(KeyContext::ConfirmDialog);
+        contexts.overlay(KeyContext::ConfirmDialog);
     }
     if state.mcp_pool.mcp_overlay.is_some() {
-        contexts.push(KeyContext::McpOverlay);
+        contexts.overlay(KeyContext::McpOverlay);
     }
     if state.tmux.other_tmux_rename_mode {
-        contexts.push(KeyContext::OtherTmuxRename);
+        contexts.overlay(KeyContext::OtherTmuxRename);
     }
     if state.ssh.ssh_session_rename_mode {
-        contexts.push(KeyContext::SshRename);
+        contexts.overlay(KeyContext::SshRename);
     }
     if state.session_labels.session_label_rename_mode {
-        contexts.push(KeyContext::SessionRename);
+        contexts.overlay(KeyContext::SessionRename);
     }
     if state.session_labels.session_context_menu.is_some() {
-        contexts.push(KeyContext::SessionContextMenu);
+        contexts.overlay(KeyContext::SessionContextMenu);
     }
     if state.shell.help_visible {
         if text_input_active {
-            contexts.push(KeyContext::Screen("help", SubContext::Named("text")));
+            contexts.overlay(KeyContext::Screen("help", SubContext::Named("text")));
         } else {
-            contexts.push(KeyContext::HelpVisible);
+            contexts.overlay(KeyContext::HelpVisible);
         }
     }
+    // Toasts are not an overlay: any live notice shows one, and it covers
+    // nothing the user clicks.
     if state.has_visible_notifications() {
         contexts.push(KeyContext::Screen(
             "notifications",
@@ -600,7 +617,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
         ));
     }
     if state.is_in_quick_commit_mode() {
-        contexts.push(KeyContext::QuickCommit);
+        contexts.overlay(KeyContext::QuickCommit);
     }
     if state.shell.current_screen == screen_ids::SESSION_LIST {
         use crate::components::session_tabs::{SessionTab, resolve};
@@ -618,28 +635,28 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     }
     if state.onboarding.auth_provider_popup_state.show_popup {
         if state.onboarding.auth_provider_popup_state.is_entering_key {
-            contexts.push(KeyContext::Screen(
+            contexts.overlay(KeyContext::Screen(
                 "auth_provider_popup",
                 SubContext::Named("input"),
             ));
             // Text ownership precedes the popup's `d` delete shortcut. This
             // keeps a typed `d` in an API key from deleting the stored key.
-            contexts.push(KeyContext::TextInput);
+            contexts.overlay(KeyContext::TextInput);
             text_context_pushed = true;
         }
-        contexts.push(KeyContext::AuthProviderPopup);
+        contexts.overlay(KeyContext::AuthProviderPopup);
     }
     if state.config.config_popup_state.show_popup {
         if state.config.config_popup_state.is_text_entry() {
-            contexts.push(KeyContext::Screen(
+            contexts.overlay(KeyContext::Screen(
                 "config_popup",
                 SubContext::Named("input"),
             ));
             // Text ownership precedes the popup's j/k navigation rows.
-            contexts.push(KeyContext::TextInput);
+            contexts.overlay(KeyContext::TextInput);
             text_context_pushed = true;
         }
-        contexts.push(KeyContext::ConfigPopup);
+        contexts.overlay(KeyContext::ConfigPopup);
     }
 
     let screen = match state.shell.current_screen.as_str() {
@@ -722,7 +739,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
             }
             screen_ids::SESSION_RECOVERY => {
                 if state.recovery.session_recovery_state.recovery_overlay.is_some() {
-                    contexts.push(KeyContext::Screen(screen, SubContext::Named("overlay")));
+                    contexts.overlay(KeyContext::Screen(screen, SubContext::Named("overlay")));
                 } else if state.recovery.session_recovery_state.search_active {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("search")));
                 } else if !state.recovery.session_recovery_state.search_query.is_empty() {
@@ -739,12 +756,12 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 if skills.input.is_some() {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("input")));
                 } else if skills.sync_confirm.is_some() {
-                    contexts.push(KeyContext::Screen(
+                    contexts.overlay(KeyContext::Screen(
                         screen,
                         SubContext::Named("sync_confirm"),
                     ));
                 } else if skills.source_remove_confirm.is_some() {
-                    contexts.push(KeyContext::Screen(
+                    contexts.overlay(KeyContext::Screen(
                         screen,
                         SubContext::Named("source_remove"),
                     ));
@@ -785,20 +802,18 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 }
             }
             screen_ids::SETUP_MENU => {
-                let sub = if state.onboarding.setup_menu_state.showing_confirmation {
-                    "confirm"
+                if state.onboarding.setup_menu_state.showing_confirmation {
+                    contexts.overlay(KeyContext::Screen(screen, SubContext::Named("confirm")));
                 } else {
-                    "menu"
-                };
-                contexts.push(KeyContext::Screen(screen, SubContext::Named(sub)));
+                    contexts.push(KeyContext::Screen(screen, SubContext::Named("menu")));
+                }
             }
             screen_ids::DAEMONS => {
-                let sub = if state.hangar.daemons_state.has_overlay() {
-                    "overlay"
+                if state.hangar.daemons_state.has_overlay() {
+                    contexts.overlay(KeyContext::Screen(screen, SubContext::Named("overlay")));
                 } else {
-                    "list"
-                };
-                contexts.push(KeyContext::Screen(screen, SubContext::Named(sub)));
+                    contexts.push(KeyContext::Screen(screen, SubContext::Named("list")));
+                }
             }
             _ => {}
         }
@@ -821,7 +836,22 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
         contexts.push(KeyContext::screen(screen));
     }
     contexts.push(KeyContext::Global);
-    contexts
+    contexts.0
+}
+
+/// Contexts in push order, each marked with whether it is an overlay.
+#[derive(Default)]
+struct ContextList(Vec<(KeyContext, bool)>);
+
+impl ContextList {
+    fn push(&mut self, context: KeyContext) {
+        self.0.push((context, false));
+    }
+
+    /// Push a context drawn over the screen: a named command stops at it.
+    fn overlay(&mut self, context: KeyContext) {
+        self.0.push((context, true));
+    }
 }
 
 /// A renderer-local scroll intent.

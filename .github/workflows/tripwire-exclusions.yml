@@ -1,0 +1,75 @@
+name: Tripwire exclusions
+
+# Runs only the ainb-core tripwire tests `core-tripwires` skips
+# (ainb-tui/crates/ainb-core/tests/tripwire_ci_exclusions.txt) and fails when
+# one passes, naming it, so an exclusion does not outlive the fix that made its
+# test green. Red tests are the expected state here; a run in which nothing ran
+# fails too.
+#
+# GitHub reads `schedule` only from the default branch. Until this file is on
+# it, the run happens on every push to v2 that touches the tripwires.
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  push:
+    branches: [v2]
+    paths:
+      - "ainb-tui/crates/**"
+      - "ainb-tui/scripts/tripwire-ci-filter.sh"
+      - ".github/workflows/tripwire-exclusions.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  WORKING_DIR: ainb-tui
+
+jobs:
+  excluded-tripwires:
+    name: Excluded ainb-core tripwires (ubuntu-latest)
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'v2' || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "ainb-tui -> target"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.143
+      - name: Install tmux, jq and lsof
+        run: sudo apt-get update && sudo apt-get install -y tmux jq lsof
+      - name: Every excluded tripwire test, serially
+        run: |
+          cargo build -p ainb-plugin-runtime --bins
+          bash scripts/build-plugins.sh
+          filter=$(bash scripts/tripwire-ci-filter.sh --excluded)
+          # Retried like core-tripwires, so a test counts as green here only
+          # when it would pass there.
+          cargo nextest run -p ainb --test-threads 1 --no-fail-fast --retries 2 \
+            -E "$filter" 2>&1 | tee "$RUNNER_TEMP/excluded.log" || true
+          plain=$(sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/excluded.log")
+          summary=$(grep -oE '[0-9]+ tests run: [0-9]+ passed' <<<"$plain" | tail -1 || true)
+          if [ -z "$summary" ]; then
+            echo "::error::no excluded tripwire test ran"
+            exit 1
+          fi
+          passed=$(grep -oE '[0-9]+ passed' <<<"$summary" | cut -d' ' -f1)
+          echo "excluded run: $summary"
+          if [ "$passed" -gt 0 ]; then
+            grep -oE '^\s*(PASS|FLAKY [0-9/]+) \[[^]]*\] +\([^)]*\) ainb::[^ ]+ [^ ]+' <<<"$plain" \
+              | sed -E 's/.*ainb::([^ ]+) ([^ ]+)$/::error::\1::\2 passes; remove its line from tripwire_ci_exclusions.txt/' \
+              | sort -u || true
+            echo "::error::$passed excluded tripwire test(s) pass"
+            exit 1
+          fi
+        working-directory: ${{ env.WORKING_DIR }}
