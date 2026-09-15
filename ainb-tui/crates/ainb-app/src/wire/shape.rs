@@ -559,6 +559,8 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
         session.tmux_session_name = Some(format!("ainb-{name}"));
         session.display_name = Some(format!("{name} label"));
         session.model = Some("claude-sonnet-4-5".to_string());
+        session.status =
+            crate::models::SessionStatus::Error(seed.text("session.status.error", Captured));
         session.live_attention = vec![
             crate::fleet::attention::SessionAttention::local(
                 crate::fleet::attention::AttentionKind::Ask,
