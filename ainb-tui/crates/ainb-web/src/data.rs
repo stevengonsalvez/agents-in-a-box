@@ -389,6 +389,48 @@ mod tests {
         assert!(shown.contains("exit status: 3"), "{shown}");
     }
 
+    fn panel_snapshot(cost: Option<WebCost>) -> FleetSnapshot {
+        let core = CoreSnapshot {
+            sessions: json!([]),
+            needs: Vec::new(),
+        };
+        FleetSnapshot::from_parts(core, cost)
+    }
+
+    #[test]
+    fn a_present_cost_panel_serialises_to_the_bytes_the_value_path_served() {
+        let report = json!({
+            "totals": {"cost_usd": 0.5, "session_count": 1, "model_count": 1,
+                "bucket": {"input_tokens": 10, "output_tokens": 5, "call_count": 1, "cost_usd": 0.5}},
+            "models": [{"model": "claude-sonnet", "cost_usd": 0.5, "bucket": {"call_count": 1}}],
+            "groups": [{"group": "repo", "cost_usd": 0.5, "session_count": 1, "bucket": {}}],
+        });
+        let panel = ainb_app::wire::web::cost_panel(&report).expect("a report object");
+        // Before #1119 the snapshot held the panel as a `Value`; the typed field
+        // must put the same bytes on the wire and hash the same.
+        let served = serde_json::to_value(&panel).expect("panel serialises");
+
+        let snapshot = panel_snapshot(Some(panel));
+        let body = serde_json::to_string(&snapshot).expect("snapshot serialises");
+
+        let expected = format!(
+            "{{\"sessions\":[],\"needs\":[],\"cost\":{}}}",
+            serde_json::to_string(&served).expect("value serialises")
+        );
+        assert_eq!(body, expected);
+        assert_eq!(
+            snapshot.fingerprint,
+            FleetSnapshot::compute_fingerprint(&json!([]), &json!([]), &served)
+        );
+    }
+
+    #[test]
+    fn an_absent_cost_panel_serialises_as_null() {
+        let snapshot = panel_snapshot(None);
+        let body = serde_json::to_string(&snapshot).expect("snapshot serialises");
+        assert_eq!(body, r#"{"sessions":[],"needs":[],"cost":null}"#);
+    }
+
     #[test]
     fn fingerprint_is_stable_and_change_sensitive() {
         let s1 = json!([{"id": 1}]);
