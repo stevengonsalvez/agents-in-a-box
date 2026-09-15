@@ -2819,6 +2819,58 @@ mod tests {
         assert_eq!(chips[0].detail.as_deref(), Some("Decide the sqlite path"));
     }
 
+    /// A `SessionEnd` hook row ends the session behind a row: the merge projects
+    /// `Stopped` onto it, which is what a desktop tick applies every refresh.
+    #[test]
+    fn a_session_end_hook_moves_a_row_to_stopped_through_the_merge() {
+        use crate::models::{SessionAgentType, SessionStatus};
+        let _lock = crate::config::tunables::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("scratch home");
+        let previous = std::env::var_os("AINB_HANGAR_HOME");
+        std::env::set_var("AINB_HANGAR_HOME", home.path());
+
+        let cwd = "/work/ended";
+        let now_ms = 1_800_000_000_000;
+        let paths = ainb_plugin_notifyd::Paths::under(home.path());
+        std::fs::create_dir_all(&paths.base).expect("store directory");
+        let store = ainb_plugin_notifyd::Store::open(&paths.db).expect("notifications store");
+        store
+            .insert(&ainb_plugin_notifyd::Envelope {
+                protocol_version: 1,
+                agent: "codex".to_string(),
+                raw_event: "SessionEnd".to_string(),
+                // No provider id: the row is correlated by agent and cwd, which
+                // is allowed only while that cwd holds one session.
+                session_id: String::new(),
+                cwd: cwd.to_string(),
+                project: "ended".to_string(),
+                ts: now_ms - 1_000,
+                payload: serde_json::json!({}),
+            })
+            .expect("the hook row lands");
+
+        let mut state = state_with_session_at(cwd, Some("tmux_ended"));
+        {
+            let session = &mut state.sessions.workspaces[0].sessions[0];
+            session.agent_type = SessionAgentType::Codex;
+            session.status = SessionStatus::Running;
+        }
+
+        state.merge_attention(now_ms);
+
+        assert_eq!(
+            state.sessions.workspaces[0].sessions[0].status,
+            SessionStatus::Stopped,
+            "the hook row ended the session"
+        );
+        match previous {
+            Some(value) => std::env::set_var("AINB_HANGAR_HOME", value),
+            None => std::env::remove_var("AINB_HANGAR_HOME"),
+        }
+    }
+
     /// The merge runs at once on daemon news and otherwise on its cadence, so a
     /// host may call it every tick.
     #[test]
