@@ -37,7 +37,8 @@ pub struct SidecarConfig {
     /// How long a spawned child has to either exit 0 (it lost the flock to a
     /// daemon that already owns this home) or keep running.
     pub grace: Duration,
-    /// How long a daemon has to answer hello once it is running.
+    /// How long a daemon has to answer hello once it is running. Longer than
+    /// a cold store migration takes.
     pub hello_budget: Duration,
     /// Spawns that crash or never answer before the supervisor gives up.
     pub max_spawn_attempts: u32,
@@ -54,7 +55,10 @@ impl SidecarConfig {
             hangar_home,
             daemon_bin,
             grace: Duration::from_secs(2),
-            hello_budget: Duration::from_secs(60),
+            // Past the longest cold boot the tests allow (a fresh store's
+            // migrations on a cold runner, 90 s), so a slow first start is
+            // waited for rather than given up on.
+            hello_budget: Duration::from_secs(180),
             max_spawn_attempts: 3,
             reconnect_backoff: RECONNECT_BACKOFF.to_vec(),
         }
@@ -353,8 +357,18 @@ async fn find_or_start(config: &SidecarConfig) -> Result<bool, String> {
                     return Ok(true);
                 }
                 Err(error) => {
-                    // Never answered: stop it and reap it rather than leave a
-                    // half-started daemon or a zombie behind.
+                    // A child that took the home's lock is the daemon for this
+                    // home, still booting: killing it would kill the only
+                    // daemon, and every retry would kill the next. Leave it,
+                    // reap it when it exits, and stop spawning more.
+                    if daemon_pid(&config.hangar_home) == Some(child.id()) {
+                        reap_when_done(child);
+                        return Err(format!(
+                            "{error}; the daemon holds this home and is still starting"
+                        ));
+                    }
+                    // It never owned the home: stop it and reap it rather than
+                    // leave a half-started process or a zombie behind.
                     let _ = child.kill();
                     let _ = child.wait();
                     last_error = format!("{error} (attempt {attempt})");
