@@ -706,7 +706,7 @@ impl Screen for ChangelogScreen {
         ids::CHANGELOG
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        ChangelogComponent::render(frame, area, &state.config.changelog_state);
+        ChangelogComponent::render(frame, area, &state.changelog.changelog_state);
     }
 }
 
