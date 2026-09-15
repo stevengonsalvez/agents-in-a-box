@@ -41,7 +41,7 @@
 
   // The session list (`ainb list --frame --format json`) is an array of rows
   // projected from the redacted Sessions frame (#1056): { session_id,
-  // tmux_session_name, workspace_name, worktree_path, created_at, is_running,
+  // tmux_session_name, workspace_name, worktree_name, created_at, is_running,
   // claude_active }. No label: the frame withholds it.
   function sessionStatus(s) {
     if (!s.is_running) return { label: "stopped", cls: "status-stopped" };
@@ -69,8 +69,8 @@
       const main = el("div", "row-main");
       main.appendChild(el("div", "row-name", s.workspace_name || s.tmux_session_name || "session"));
       const meta = el("div", "row-meta");
-      if (s.worktree_path) {
-        const code = el("code", null, s.worktree_path);
+      if (s.worktree_name) {
+        const code = el("code", null, s.worktree_name);
         meta.appendChild(code);
       }
       if (s.tmux_session_name) meta.appendChild(el("span", null, s.tmux_session_name));
