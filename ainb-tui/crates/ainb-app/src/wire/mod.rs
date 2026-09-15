@@ -569,6 +569,7 @@ struct InboxView {}
 // host bookkeeping, not something a host draws.
 view!(PluginsHostView<'a> for PluginsHostSection {
     plugin_captures_text: std::collections::HashMap<crate::app::screens::ScreenId, bool>,
+    plugin_presence: std::collections::BTreeMap<String, crate::app::sections::PluginPresence>,
     #[serde(serialize_with = "scrubbed_values")]
     #[cfg_attr(feature = "typescript-bindings", specta(type = std::collections::HashMap<crate::app::screens::ScreenId, String>))]
     plugin_render_errors: std::collections::HashMap<crate::app::screens::ScreenId, String>,
