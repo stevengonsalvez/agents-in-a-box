@@ -100,10 +100,18 @@ impl<S: FrameSink> DesktopHost<S> {
         effects
     }
 
-    /// Frame whatever moved outside a dispatch and hand back the effects that
-    /// work queued.
+    /// Load the workspaces in the background, under the state's own load
+    /// policy; a later [`Self::tick`] applies the result. Must be called inside
+    /// a tokio runtime.
+    pub fn start_workspace_load(&mut self) {
+        self.state.start_workspace_load();
+    }
+
+    /// Apply background work that finished (a workspace load), frame whatever
+    /// moved outside a dispatch, and hand back the effects that work queued.
     #[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
     pub fn tick(&mut self) -> Vec<Effect> {
+        self.state.check_workspace_loading_complete();
         let effects = self.state.take_effects();
         self.pump();
         effects
