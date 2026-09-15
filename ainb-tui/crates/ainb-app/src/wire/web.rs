@@ -114,12 +114,8 @@ pub struct WebNeedCard {
 pub struct WebNeedPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub header: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub multi_select: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,14 +202,12 @@ fn need_payload(payload: &Value) -> WebNeedPayload {
         },
         Value::Object(_) => WebNeedPayload {
             question: text("question"),
-            header: text("header"),
             options: payload["options"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(|option| option.as_str().map(card_text))
                 .collect(),
-            multi_select: payload["multiSelect"].as_bool(),
             text: text("text"),
             marker: text("marker"),
             snippet: text("snippet"),
