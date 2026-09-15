@@ -43,9 +43,12 @@ function Shell() {
   // drain is applied as that host's.
   const [peer, setPeer] = createSignal<HostId>();
 
+  // Registered synchronously: an `onCleanup` after an `await` has left the
+  // owner and never runs.
+  const unlisten = listen<SidecarState>("sidecar", (event) => setSidecar(event.payload));
+  onCleanup(() => void unlisten.then((stop) => stop()));
+
   onMount(async () => {
-    const unlisten = await listen<SidecarState>("sidecar", (event) => setSidecar(event.payload));
-    onCleanup(unlisten);
     setSidecar(await invoke<SidecarState>("sidecar_state"));
 
     // A timer, not an animation frame: a hidden window still drains, so the
