@@ -638,6 +638,43 @@ mod tests {
         out
     }
 
+    /// #1131: a session's merged attention rides its row on the frame as
+    /// `attention`, kind and scrubbed detail only, and never reaches the disk
+    /// form of the session.
+    #[test]
+    fn the_sessions_frame_carries_each_rows_merged_attention_scrubbed() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz";
+        let mut session = crate::models::Session::new("s".to_string(), "/work/s".to_string());
+        session.live_attention = vec![
+            SessionAttention::local(AttentionKind::Ask, 1_000)
+                .with_detail(format!("Paste {key} into the prompt?")),
+        ];
+        let body = with_scratch_home(|| {
+            let mut state = AppState::new();
+            let mut workspace =
+                crate::models::Workspace::new("w".to_string(), std::path::PathBuf::from("/work/s"));
+            workspace.add_session(session.clone());
+            state.sessions.get_mut().workspaces = vec![workspace];
+            section_json(&state, SectionId::Sessions)
+        });
+
+        let attention = &body["workspaces"][0]["sessions"][0]["attention"];
+        assert_eq!(attention[0]["kind"], "Ask", "{attention}");
+        let detail = attention[0]["detail"].as_str().expect("a detail");
+        assert!(detail.starts_with("Paste "), "{detail}");
+        assert!(!detail.contains(key), "the detail is scrubbed: {detail}");
+        assert_eq!(
+            attention[0].as_object().map(serde_json::Map::len),
+            Some(2),
+            "kind and detail only: {attention}"
+        );
+
+        let disk = serde_json::to_value(&session).expect("serialises");
+        assert!(disk.get("attention").is_none(), "{disk}");
+        assert!(disk.get("live_attention").is_none(), "{disk}");
+    }
+
     /// #1052: the changelog is static content and its scroll is renderer-local,
     /// so the Config frame names no changelog state and carries none of its text.
     #[test]
