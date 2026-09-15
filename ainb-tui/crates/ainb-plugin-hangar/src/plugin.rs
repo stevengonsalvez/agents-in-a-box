@@ -370,6 +370,8 @@ pub struct HangarPlugin {
     agent_status_seed: Option<
         tokio::sync::oneshot::Receiver<std::result::Result<Vec<(&'static str, Vec<u8>)>, String>>,
     >,
+    /// The init-time agent-status seeder, aborted on shutdown or drop.
+    agent_status_seeder: Option<AbortOnDrop>,
     /// The surface hosting this plugin, from `plugin/init` (#1040).
     host: Option<ainb_plugin_sdk::PluginHost>,
     /// The daemon refused the `plugin` hello as undecodable (a build that
@@ -590,6 +592,17 @@ struct WizardDispatch {
     target_branch: Option<String>,
 }
 
+/// A spawned task that is aborted when this handle drops, so a background task
+/// holding a `HostClient` cannot outlive the plugin and hold its process open.
+#[derive(Debug)]
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// The `auth/hello` params for this plugin's daemon connection (#1040).
 ///
 /// The plugin announces itself as a `plugin` surface under its own pid, and
@@ -717,6 +730,7 @@ impl Default for HangarPlugin {
             snapshot_generation: 1,
             snapshot_response_ids: BTreeMap::new(),
             agent_status_seed: None,
+            agent_status_seeder: None,
             host: None,
             legacy_hello: false,
             first_run: FirstRunModal::default(),
@@ -5726,6 +5740,15 @@ impl Plugin for HangarPlugin {
         MANIFEST_TOML
     }
 
+    async fn on_shutdown(&mut self, _host: &HostClient) -> Result<()> {
+        // The seeder holds a `HostClient` clone, which keeps the SDK's writer,
+        // and so the process, alive until it finishes. A request it sends after
+        // the host has closed stdin is never answered, so it would never finish:
+        // stop it here (CTS A11, #1063 review).
+        self.agent_status_seeder = None;
+        Ok(())
+    }
+
     async fn on_init(&mut self, host: &HostClient, ctx: InitContext<'_>) -> Result<()> {
         self.host = ctx.host.cloned();
         // P5.6: decide whether to show the first-run danger-full-access modal
@@ -5743,7 +5766,7 @@ impl Plugin for HangarPlugin {
         let (seed_tx, seed_rx) = tokio::sync::oneshot::channel();
         self.agent_status_seed = Some(seed_rx);
         let seeder = host.clone();
-        tokio::spawn(async move {
+        let seeder_task = tokio::spawn(async move {
             if let Err(error) = seeder.snapshot_subscribe(AGENT_STATUS_TOPIC).await {
                 let _ = seeder
                     .log_info(format!(
@@ -5775,6 +5798,7 @@ impl Plugin for HangarPlugin {
                 let _ = seed_tx.send(Ok(latest));
             }
         });
+        self.agent_status_seeder = Some(AbortOnDrop(seeder_task));
         self.connect(host).await;
         Ok(())
     }
@@ -9816,6 +9840,27 @@ mod tests {
         plugin.apply_agent_status_clock(b"not json");
         assert_eq!(plugin.pending_logs.len(), logs + 1);
         assert_eq!(plugin.screens.fleet.now_ms(), 1_789_409_605_000);
+    }
+
+    /// #1063 review (CTS A11): shutdown stops the init seeder, whose
+    /// `HostClient` clone would otherwise hold the process open after the host
+    /// closes stdin with a request still unanswered.
+    #[tokio::test]
+    async fn shutdown_aborts_the_agent_status_seeder() {
+        let mut plugin = HangarPlugin::new();
+        let task = tokio::spawn(std::future::pending::<()>());
+        plugin.agent_status_seeder = Some(AbortOnDrop(task));
+        let handle = plugin
+            .agent_status_seeder
+            .as_ref()
+            .map(|seeder| seeder.0.abort_handle())
+            .unwrap();
+        plugin.agent_status_seeder = None;
+        tokio::task::yield_now().await;
+        assert!(
+            handle.is_finished(),
+            "the seeder is aborted once its handle drops"
+        );
     }
 
     /// #1063 review item 3: the init seed carries the latest card clock beside
