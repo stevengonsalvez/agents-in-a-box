@@ -52,7 +52,7 @@ scenario() {
   check "the own session shows the placeholder" \
     wait_screen own-tui 'This is the tmux session ainb is running in' 10
   check "the placeholder names the session" \
-    bash -c "tmux -L proof capture-pane -t '=own-tui:' -p | grep -A3 'This is the tmux session ainb is running in' | grep -q 'own-tui'"
+    bash -c "tmux -L proof capture-pane -t '=own-tui:' -p | cut -c $((PROOF_COLS / 2))- | grep -A3 'This is the tmux session ainb is running in' | grep -q 'own-tui'"
   check "the placeholder says why there is no preview" \
     wait_screen own-tui 'A live preview would show this screen inside itself' 5
   capture own-tui own-session-selected
