@@ -68,6 +68,23 @@ struct Window {
     sidecar_config: SidecarConfig,
 }
 
+/// The most section names, and the most characters of one, a renderer report
+/// carries: it is a log line, not a channel.
+const REPORT_NAMES: usize = 32;
+
+/// What the renderer applied, for the proof harness to read from the log: the
+/// section names of a batch and how many session rows the sidebar holds. Names
+/// and counts only, never a body.
+#[tauri::command]
+fn renderer_applied(sections: Vec<String>, sessions: usize) {
+    let named: Vec<String> = sections
+        .into_iter()
+        .take(REPORT_NAMES)
+        .map(|name| name.chars().take(REPORT_NAMES).collect())
+        .collect();
+    tracing::info!(sections = ?named, sessions, "renderer applied");
+}
+
 /// The terminal's copy: put the selection on the platform clipboard.
 ///
 /// A webview cannot reach the clipboard under this CSP, and the pane's own
@@ -292,7 +309,11 @@ fn init_logging(hangar_home: &std::path::Path) {
 }
 
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Only a `wdio` build carries the embedded WebDriver the journey drives.
+    #[cfg(feature = "wdio")]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+    builder
         .setup(|app| {
             let hangar_home = ainb_hangar_core::hangar_home()
                 .ok_or("the hangar home cannot be resolved: set AINB_HANGAR_HOME")?;
@@ -383,6 +404,7 @@ fn main() {
             show_log,
             retry_sidecar,
             palette,
+            renderer_applied,
             clipboard_read,
             clipboard_write,
             terminal_tabs,
