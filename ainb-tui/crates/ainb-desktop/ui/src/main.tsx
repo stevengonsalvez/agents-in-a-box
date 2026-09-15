@@ -18,18 +18,19 @@ interface FrameBatch {
   oversize?: { section: string; version: number; bytes: number }[];
 }
 
-/** `ainb_desktop::sidecar::SidecarState`. */
+/** `ainb_desktop::sidecar::SidecarView`: no pid and no filesystem path. */
 type SidecarState =
   | { state: "starting" }
-  | { state: "connected"; daemon_pid: number | null; spawned: boolean }
+  | { state: "connected"; spawned: boolean }
   | { state: "reconnecting"; error: string }
-  | { state: "degraded"; error: string; log: string };
+  | { state: "degraded"; error: string; has_log: boolean };
 
 function Shell() {
   const [sidecar, setSidecar] = createSignal<SidecarState>({ state: "starting" });
   // Section name to the latest version and epoch this renderer applied.
   const [sections, setSections] = createSignal<Record<string, Frame>>({});
   const [stale, setStale] = createSignal<string[]>([]);
+  const [log, setLog] = createSignal<string | null>(null);
 
   onMount(async () => {
     const unlisten = await listen<SidecarState>("sidecar", (event) => setSidecar(event.payload));
@@ -54,9 +55,7 @@ function Shell() {
       case "starting":
         return "Connecting to the hangar daemon";
       case "connected":
-        return state.spawned
-          ? `Started the hangar daemon (pid ${state.daemon_pid ?? "unknown"})`
-          : `Attached to the hangar daemon (pid ${state.daemon_pid ?? "unknown"})`;
+        return state.spawned ? "Started the hangar daemon" : "Attached to the hangar daemon";
       case "reconnecting":
         return `Reconnecting: ${state.error}`;
       case "degraded":
@@ -69,11 +68,32 @@ function Shell() {
       <header class={`banner ${sidecar().state}`}>
         <span>{banner()}</span>
         <Show when={sidecar().state === "degraded"}>
-          <button type="button" onClick={() => invoke("retry_sidecar")}>
-            Retry
-          </button>
+          <span class="actions">
+            <Show when={(sidecar() as { has_log?: boolean }).has_log}>
+              <button
+                type="button"
+                onClick={async () => setLog((await invoke<string | null>("show_log")) ?? "")}
+              >
+                Show log
+              </button>
+            </Show>
+            <button
+              type="button"
+              onClick={() => {
+                setLog(null);
+                void invoke("retry_sidecar");
+              }}
+            >
+              Retry
+            </button>
+          </span>
         </Show>
       </header>
+      <Show when={log() !== null}>
+        <pre class="sidecar-log" aria-label="Sidecar log">
+          {log()}
+        </pre>
+      </Show>
       <section class="sections" aria-label="Sections this window holds">
         <For each={Object.values(sections()).sort((a, b) => a.section.localeCompare(b.section))}>
           {(frame) => (
