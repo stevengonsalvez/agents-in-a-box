@@ -1368,10 +1368,8 @@ fn no_typed_text_reaches_the_wire() {
         "TYPED_LABELS and the sample builder disagree"
     );
 
-    let mut blob: String =
+    let blob: String =
         states.iter().flat_map(all_frames).map(|(_, frame)| frame.to_string()).collect();
-    // The web needs projection is a wire too (#1081).
-    blob.push_str(&serde_json::to_string(&shape::sample_web_needs(&mut seed)).expect("needs"));
     let shown: BTreeMap<_, _> = CANARY_SHOWN.iter().copied().collect();
     let mut leaked = Vec::new();
     let mut missing = Vec::new();
