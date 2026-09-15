@@ -9,7 +9,7 @@ import type {
   Session_Serialize,
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
-import { idleCount, ringCount, ringFor } from "./sessions.ts";
+import { idleCount, label, LABEL_CHARS, ringCount, ringFor } from "./sessions.ts";
 
 function session(id: string, status: SessionStatus = "Running", is_attached = false): Session_Serialize {
   return { id, name: id, workspace_path: "/repo", status, is_attached } as unknown as Session_Serialize;
@@ -57,4 +57,9 @@ test("header counts are per ring kind and idle status", () => {
   assert.equal(ringCount(sessions, view, "Err"), 1);
   assert.equal(ringCount(sessions, view, "Wait"), 0);
   assert.equal(idleCount(sessions), 2);
+});
+
+test("a label drops control and format characters and stops at the cap", () => {
+  assert.equal(label("feat/\u202Eevil\u001b[31m\u200Bx"), "feat/evil[31mx");
+  assert.equal(label("\u{1F600}".repeat(100)), "\u{1F600}".repeat(LABEL_CHARS));
 });
