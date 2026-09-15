@@ -793,6 +793,7 @@ ssh.ssh_sessions[].tmux_session_name
 ssh.ssh_sessions[].workspace_path
 ssh.ssh_sessions_expanded
 tmux.embed_session
+tmux.host_session
 tmux.other_tmux_expanded
 tmux.other_tmux_rename_buffer
 tmux.other_tmux_rename_mode
