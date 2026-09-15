@@ -30,7 +30,7 @@ impl FakeSource {
                 "session_id": "abc",
                 "tmux_session_name": "tmux_demo",
                 "workspace_name": "demo",
-                "worktree_path": "/tmp/demo",
+                "worktree_name": "demo",
                 "created_at": "2026-06-14T00:00:00Z",
                 "is_running": true,
                 "claude_active": true
