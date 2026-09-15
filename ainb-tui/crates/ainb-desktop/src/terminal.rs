@@ -413,10 +413,13 @@ impl Terminals {
     /// failure report when the session is gone or tmux would not start.
     pub fn open(&self, target: TabTarget) -> Option<Intent> {
         let key = target.tmux().to_string();
+        // Probed before the tabs lock: it forks tmux, and a wedged tmux must
+        // not freeze every tab (or the shell tick waiting on this call).
+        let alive = has_session(&self.inner.tmux, &key);
         let mut tabs = lock(&self.inner.tabs);
         if let Some(index) = position(&tabs, &key) {
             if tabs[index].state == TabState::Detached {
-                if let Err(report) = self.reattach_at(&mut tabs, index) {
+                if let Err(report) = self.reattach_at(&mut tabs, index, alive) {
                     // The tab may be gone with its session: the strip hears it
                     // before the reducer does.
                     self.emit(&tabs, None);
@@ -426,7 +429,7 @@ impl Terminals {
             self.emit(&tabs, Some(key));
             return None;
         }
-        if !has_session(&self.inner.tmux, &key) {
+        if !alive {
             return Some(reports::attach_finished(
                 &target.attached_to(),
                 &AttachOutcome::TargetMissing(format!("tmux session `{key}` is gone")),
@@ -599,9 +602,9 @@ impl Terminals {
         ));
     }
 
-    fn reattach_at(&self, tabs: &mut Vec<Tab>, index: usize) -> Result<(), Intent> {
+    fn reattach_at(&self, tabs: &mut Vec<Tab>, index: usize, alive: bool) -> Result<(), Intent> {
         let key = tabs[index].target.tmux().to_string();
-        if !has_session(&self.inner.tmux, &key) {
+        if !alive {
             return Err(self.remove_ended(tabs, index));
         }
         self.make_room(tabs);
@@ -626,6 +629,7 @@ impl Terminals {
 
     /// The client of generation `generation` ended its output.
     fn client_exited(&self, key: &str, generation: u64) {
+        let alive = has_session(&self.inner.tmux, key);
         let mut tabs = lock(&self.inner.tabs);
         let Some(index) = position(&tabs, key) else {
             return;
@@ -641,7 +645,7 @@ impl Terminals {
             tab.redials = 0;
         }
         drop(client);
-        if !has_session(&self.inner.tmux, key) {
+        if !alive {
             let report = self.remove_ended(&mut tabs, index);
             self.report(report);
             self.emit(&tabs, None);
@@ -683,6 +687,7 @@ impl Terminals {
     }
 
     fn redial(&self, key: &str, generation: u64) {
+        let alive = has_session(&self.inner.tmux, key);
         let mut tabs = lock(&self.inner.tabs);
         let Some(index) = position(&tabs, key) else {
             return;
@@ -691,7 +696,7 @@ impl Terminals {
         if tab.generation != generation || !matches!(tab.state, TabState::Reconnecting { .. }) {
             return;
         }
-        if !has_session(&self.inner.tmux, key) {
+        if !alive {
             let report = self.remove_ended(&mut tabs, index);
             self.report(report);
             self.emit(&tabs, None);
