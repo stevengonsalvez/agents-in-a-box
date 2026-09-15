@@ -80,19 +80,21 @@ pub fn sanitize_session_name(name: &str) -> String {
     cap_session_name(format!("tmux_{cleaned}"))
 }
 
-/// Fit a minted `tmux_...` name within
+/// Fit a minted tmux session name within
 /// [`TmuxSessionName::MAX_BYTES`](crate::app::effect::TmuxSessionName::MAX_BYTES).
 ///
 /// Discovery skips any session past the cap (#1096), so an uncapped long
 /// workspace or branch name spawned a session the list then never showed
-/// (#1122). A name within the cap is returned unchanged. A longer one keeps
-/// its TAIL, which is where the part that tells sessions apart lives (the
-/// `-<id>` of `ainb run`, the branch of `tmux_<folder>_<branch>`), and replaces
-/// the head with a hash of the whole name, so two long names that share a tail
-/// but differ earlier still mint different sessions. Deterministic: the
+/// (#1122). Any name is accepted, whatever its prefix (`tmux_...`, `ssh-...`,
+/// a resumed session). A name within the cap is returned unchanged. A longer
+/// one keeps its TAIL, which is where the part that tells sessions apart lives
+/// (the `-<id>` of `ainb run`, the branch of `tmux_<folder>_<branch>`, the port
+/// of `ssh-<host>-<port>`), and replaces the head with `tmux_<hash>_`, a hash
+/// of the whole name, so two long names that share a tail but differ earlier
+/// still mint different sessions. The original prefix is not kept. Deterministic: the
 /// spawner and every later targeter compute the same name.
 #[must_use]
-pub fn cap_session_name(name: String) -> String {
+pub(crate) fn cap_session_name(name: String) -> String {
     use crate::app::effect::TmuxSessionName;
     if TmuxSessionName::within_cap(&name) {
         return name;
