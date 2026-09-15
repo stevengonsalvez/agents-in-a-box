@@ -5,31 +5,6 @@
 # shellcheck disable=SC2034  # read by write_result in lib.sh
 EXPECT="an ASK answered from the web retires the TUI control-center card at once with 'answered by web@<host>'; an ASK answered in the TUI shows 'answered by tui@<host>' and the web's later POST /api/answer returns already_answered by tui"
 
-# web_card_id <question regex> <capture name>: the attentionId the web snapshot
-# lists for a card, waited on up to 180 s. The web's poller can sit behind
-# `ainb fleet cost` runs (#1055); past 15 s the scenario records which cost
-# runs the world has, so a slow card is explained by evidence, not assumed.
-WEB_CARD_ID=""
-web_card_id() {
-  local question="$1" name="$2" start=$SECONDS noted=0 p cmd
-  WEB_CARD_ID=""
-  while (( SECONDS - start < 180 )); do
-    WEB_CARD_ID="$(web_attention_id "$question")"
-    [[ -n "$WEB_CARD_ID" ]] && break
-    if (( !noted && SECONDS - start >= 15 )); then
-      noted=1
-      for p in $(world_pids); do
-        cmd="$( { tr '\0' ' ' <"/proc/$p/cmdline"; } 2>/dev/null)"
-        if grep -F 'fleet cost' <<<"$cmd" >/dev/null; then printf '%s %s\n' "$p" "$cmd"; fi
-      done >"$NODE_DIR/$name-cost-runs.txt"
-      CAPTURES+=("$name-cost-runs.txt")
-      observe "web had no card after 15 s; ainb fleet cost runs in this world: $(wc -l <"$NODE_DIR/$name-cost-runs.txt")"
-    fi
-    sleep 1
-  done
-  observe "web snapshot card for '$question' after $((SECONDS - start))s: ${WEB_CARD_ID:-none}"
-}
-
 scenario() {
   start_tui tui || { check "the TUI reaches the home screen" false; return; }
   start_web || { check "ainb web answers /api/snapshot" false; return; }
