@@ -166,6 +166,50 @@ fn open_sessions_moves_the_reducer_to_the_session_list_through_its_rows() {
     );
 }
 
+/// The palette and the dispatch seam share one refusal set, so the palette
+/// cannot offer a row the seam would refuse.
+#[test]
+fn every_palette_entry_passes_the_seam_and_no_refused_row_is_offered() {
+    use ainb_desktop::intent::{RendererIntent, refused_from_webview};
+
+    let log = Log::default();
+    let host = host(&[SectionId::Shell], &log);
+    let palette = host.palette();
+    assert!(!palette.is_empty(), "the keymap has commands to offer");
+
+    for entry in &palette {
+        assert!(
+            !refused_from_webview(&entry.id),
+            "the palette offers a refused row: {}",
+            entry.id.as_str()
+        );
+        let intent = RendererIntent::Command(entry.id.clone(), serde_json::Value::Null);
+        assert!(
+            Intent::try_from(intent).is_ok(),
+            "the seam refuses a palette row: {}",
+            entry.id.as_str()
+        );
+    }
+
+    let offered: Vec<&str> = palette.iter().map(|entry| entry.id.as_str()).collect();
+    for refused in ainb_app::app::reports::ids::ALL
+        .iter()
+        .chain(ainb_app::app::plugin_action::ids::ALL)
+        .chain(ainb_app::app::KEY_ONLY_COMMANDS)
+        .chain(ainb_app::app::pointer::ids::ALL)
+    {
+        assert!(!offered.contains(refused), "the palette offers `{refused}`");
+    }
+
+    // A row that is not active is still offered, so the list does not shift
+    // under the user; `global.go_home` is bound and always active.
+    assert!(palette.iter().any(|entry| entry.active), "{offered:?}");
+    assert!(
+        palette.iter().any(|entry| entry.chord.is_some()),
+        "{offered:?}"
+    );
+}
+
 /// A key-only row writes outside ainb, so a chord that lands on one is named
 /// for the shell to refuse; any other chord is not.
 #[test]
