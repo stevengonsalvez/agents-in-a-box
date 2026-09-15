@@ -68,6 +68,39 @@ struct Window {
     sidecar_config: SidecarConfig,
 }
 
+/// The terminal's copy: put the selection on the platform clipboard.
+///
+/// A webview cannot reach the clipboard under this CSP, and the pane's own
+/// ctrl+shift+c never leaves the PTY, so the shell does it. Bounded by the
+/// same limit as typed input.
+#[tauri::command]
+fn clipboard_write(text: String) {
+    if text.len() > MAX_INPUT_BYTES {
+        tracing::warn!(bytes = text.len(), "clipboard write over 1 MiB refused");
+        return;
+    }
+    if let Err(error) = arboard::Clipboard::new().and_then(|mut board| board.set_text(text)) {
+        tracing::warn!(%error, "the selection did not reach the clipboard");
+    }
+}
+
+/// The terminal's paste: the clipboard's text, for the webview to type into
+/// the pane. Empty when the clipboard holds no text or cannot be read.
+#[tauri::command]
+fn clipboard_read() -> String {
+    match arboard::Clipboard::new().and_then(|mut board| board.get_text()) {
+        Ok(text) if text.len() <= MAX_INPUT_BYTES => text,
+        Ok(text) => {
+            tracing::warn!(bytes = text.len(), "clipboard read over 1 MiB refused");
+            String::new()
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the clipboard was not read");
+            String::new()
+        }
+    }
+}
+
 /// Every command the palette may offer, with whether each is active now.
 #[tauri::command]
 fn palette(window: tauri::State<'_, Window>) -> Vec<ainb_desktop::host::PaletteEntry> {
@@ -350,6 +383,8 @@ fn main() {
             show_log,
             retry_sidecar,
             palette,
+            clipboard_read,
+            clipboard_write,
             terminal_tabs,
             terminal_output,
             terminal_ack,
