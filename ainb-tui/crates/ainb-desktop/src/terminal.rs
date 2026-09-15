@@ -214,14 +214,12 @@ impl Flow {
         drop(state);
         let sent = sink(bytes);
         let mut state = lock(&self.state);
-        if state.sink_epoch == epoch && !state.closed {
-            if sent {
-                state.sink = Some(sink);
-                state.unacked += len;
-                state.last_active = Instant::now();
-            }
-            // Otherwise the webview went away (a reload); the next sink starts
-            // clean.
+        // An unsent chunk means the webview went away (a reload); the next
+        // sink starts clean.
+        if sent && state.sink_epoch == epoch && !state.closed {
+            state.sink = Some(sink);
+            state.unacked += len;
+            state.last_active = Instant::now();
         }
         true
     }
