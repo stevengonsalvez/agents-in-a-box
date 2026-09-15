@@ -154,6 +154,9 @@ struct Flow {
 
 struct FlowState {
     sink: Option<Sink>,
+    /// Bumped by every new sink, so a send that finishes after a reload does
+    /// not put back the sink the reload replaced.
+    sink_epoch: u64,
     unacked: usize,
     /// The client generation allowed to deliver; an older pump stops.
     generation: u64,
@@ -166,6 +169,7 @@ impl Flow {
         Arc::new(Self {
             state: Mutex::new(FlowState {
                 sink: None,
+                sink_epoch: 0,
                 unacked: 0,
                 generation,
                 closed: false,
@@ -201,14 +205,23 @@ impl Flow {
                 state.unacked = 0;
             }
         }
+        // Sent with the lock released: an IPC send can be slow, and an ack or
+        // a new sink must not wait behind it.
         let len = bytes.len();
-        let sent = state.sink.as_mut().is_some_and(|sink| sink(bytes));
-        if sent {
-            state.unacked += len;
-            state.last_active = Instant::now();
-        } else {
-            // The webview went away (a reload); the next sink starts clean.
-            state.sink = None;
+        let (Some(mut sink), epoch) = (state.sink.take(), state.sink_epoch) else {
+            return true;
+        };
+        drop(state);
+        let sent = sink(bytes);
+        let mut state = lock(&self.state);
+        if state.sink_epoch == epoch && !state.closed {
+            if sent {
+                state.sink = Some(sink);
+                state.unacked += len;
+                state.last_active = Instant::now();
+            }
+            // Otherwise the webview went away (a reload); the next sink starts
+            // clean.
         }
         true
     }
@@ -216,6 +229,7 @@ impl Flow {
     fn set_sink(&self, sink: Sink) {
         let mut state = lock(&self.state);
         state.sink = Some(sink);
+        state.sink_epoch += 1;
         state.unacked = 0;
         self.wake.notify_all();
     }
@@ -460,21 +474,32 @@ impl Terminals {
 
     /// The webview painted `bytes` of the tab's output.
     pub fn ack(&self, key: &str, bytes: usize) {
-        let tabs = lock(&self.inner.tabs);
-        if let Some(index) = position(&tabs, key) {
-            tabs[index].flow.ack(bytes);
+        // The tabs lock is held only to find the flow.
+        if let Some(flow) = self.flow(key) {
+            flow.ack(bytes);
         }
+    }
+
+    fn flow(&self, key: &str) -> Option<Arc<Flow>> {
+        let tabs = lock(&self.inner.tabs);
+        position(&tabs, key).map(|index| Arc::clone(&tabs[index].flow))
     }
 
     /// Type `bytes` into the tab's pane.
     pub fn input(&self, key: &str, bytes: Vec<u8>) {
-        let tabs = lock(&self.inner.tabs);
-        let Some(tab) = position(&tabs, key).map(|index| &tabs[index]) else {
-            return;
+        let (flow, input) = {
+            let tabs = lock(&self.inner.tabs);
+            let Some(tab) = position(&tabs, key).map(|index| &tabs[index]) else {
+                return;
+            };
+            (
+                Arc::clone(&tab.flow),
+                tab.client.as_ref().map(|client| client.input.clone()),
+            )
         };
-        tab.flow.touch();
-        if let Some(client) = &tab.client {
-            if client.input.try_send(bytes).is_err() {
+        flow.touch();
+        if let Some(input) = input {
+            if input.try_send(bytes).is_err() {
                 tracing::warn!(
                     tab = key,
                     "terminal input queue full or closed; input dropped"
