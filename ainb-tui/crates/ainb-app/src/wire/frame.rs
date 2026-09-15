@@ -269,7 +269,10 @@ pub type DaemonReadSource = fn(&AppState, SectionId) -> Option<DaemonRead>;
 /// never been sent it; unsubscribed sections are never framed, whatever they
 /// do.
 pub struct Mirror {
-    host_id: HostId,
+    /// The host stamped on every frame, pinned at construction. `None` means
+    /// "whatever the daemon names now" ([`Mirror::for_daemon`]), read per batch
+    /// because the first `auth/hello` can land after the mirror is built.
+    host_id: Option<HostId>,
     epoch: u64,
     subscription: Subscription,
     sent: [Option<u64>; SectionId::COUNT],
@@ -296,11 +299,29 @@ impl Mirror {
         Self::with_epoch(host_id, subscription, host_epoch())
     }
 
+    /// A mirror that stamps the host the daemon named in `auth/hello`
+    /// ([`HostId::daemon`]), or `local` until one names one (#1066).
+    ///
+    /// The id is read at each batch, not here: a surface builds its mirror
+    /// before it has dialled the daemon, and a mirror that pinned `local` then
+    /// would name `local` for the life of the process.
+    #[must_use]
+    pub fn for_daemon(subscription: Subscription) -> Self {
+        Self {
+            host_id: None,
+            epoch: host_epoch(),
+            subscription,
+            sent: [None; SectionId::COUNT],
+            daemon_read: crate::wire::daemon_read,
+            max_frame_bytes: MAX_FRAME_BYTES,
+        }
+    }
+
     /// A mirror stamped with an explicit epoch: a host restart in a test.
     #[must_use]
     pub fn with_epoch(host_id: HostId, subscription: Subscription, epoch: u64) -> Self {
         Self {
-            host_id,
+            host_id: Some(host_id),
             epoch,
             subscription,
             sent: [None; SectionId::COUNT],
@@ -355,7 +376,7 @@ impl Mirror {
             self.sent[id.index()] = Some(version);
             let frame = Frame {
                 epoch: self.epoch,
-                host_id: self.host_id.clone(),
+                host_id: self.host_id.clone().unwrap_or_else(HostId::daemon),
                 daemon_read: (self.daemon_read)(state, id),
                 ..Frame::new(state, id)
             };
