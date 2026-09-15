@@ -160,12 +160,13 @@ pub struct PluginsHostSection {
     /// placeholder, which is the difference between a screen that explains it
     /// cannot start the plugin and one that claims to be loading forever.
     pub plugin_render_errors: std::collections::HashMap<crate::app::screens::ScreenId, String>,
-    /// What the host's plugin runtime knows about each plugin a screen routes
-    /// to, keyed by plugin id, as `App::tick_plugin_renders` last read it.
+    /// What the host's plugin runtime knows about the plugin behind each
+    /// plugin-owned screen, keyed by screen id like its neighbours, as
+    /// `App::tick_plugin_renders` last read it.
     /// Empty until the runtime is up. The reducer decides from this whether a
     /// key goes to the plugin or back to the host, and a renderer whether the
     /// screen is loading or its plugin is absent; neither asks the runtime.
-    pub plugin_presence: std::collections::BTreeMap<String, PluginPresence>,
+    pub plugin_presence: std::collections::BTreeMap<crate::app::screens::ScreenId, PluginPresence>,
     /// Each plugin's last `ui.state` view, keyed by plugin id, for a renderer
     /// that draws the plugin's screen itself. Refreshed by
     /// `tick_plugin_renders`; the host stores the JSON and never reads into
