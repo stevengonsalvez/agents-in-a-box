@@ -8418,7 +8418,9 @@ impl AppState {
         // tmux session name: `ssh-<host>-<port>` matches the convention parsed
         // by `auto-detect` in load_real_workspaces (search "name.starts_with(\"ssh-\")").
         let safe_host = target.host.replace(['.', '/', ' '], "-");
-        let tmux_name = format!("ssh-{}-{}", safe_host, target.port);
+        // Capped like every mint (#1122): a 253-byte hostname would otherwise
+        // pass the cap and the session would vanish from the list.
+        let tmux_name = crate::tmux::cap_session_name(format!("ssh-{}-{}", safe_host, target.port));
         let ssh_cmd = target.to_ssh_command();
 
         tracing::info!(
