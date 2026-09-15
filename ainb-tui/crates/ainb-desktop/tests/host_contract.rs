@@ -70,6 +70,24 @@ fn the_first_batch_frames_every_subscribed_section_and_nothing_else() {
     assert_eq!(framed, vec!["frame sessions", "frame shell"]);
 }
 
+/// Daemon news makes the next tick merge attention; a merge that finds
+/// nothing new moves neither the Sessions section nor Shell's refresh latch.
+#[test]
+fn an_attention_merge_that_finds_nothing_new_frames_nothing() {
+    let log = Log::default();
+    let mut host = host(&[SectionId::Sessions, SectionId::Shell], &log);
+    let _ = host.tick();
+    log.borrow_mut().clear();
+
+    host.state()
+        .host
+        .daemon_attention_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+    let _ = host.tick();
+
+    assert!(log.borrow().is_empty(), "nothing new: {:?}", log.borrow());
+}
+
 #[test]
 fn a_section_that_did_not_move_frames_nothing() {
     let log = Log::default();
