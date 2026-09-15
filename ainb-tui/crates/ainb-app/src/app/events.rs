@@ -9170,6 +9170,37 @@ mod session_composer_key_tests {
         ));
     }
 
+    /// A space typed with the logs pane focused is a space in the message, not
+    /// the logs pane's auto-scroll toggle (#1051).
+    #[test]
+    fn a_space_types_into_the_composer_with_the_logs_pane_focused() {
+        let mut state = composing();
+        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+        let event = press(&mut state, Char(' '));
+        assert!(
+            matches!(event, Some(AppEvent::Consumed)),
+            "a space must reach the composer: {event:?}"
+        );
+    }
+
+    /// With a confirm card focused the composer is not capturing text, and
+    /// `y` still reaches the card reducer instead of resolving to nothing
+    /// (#1051).
+    #[test]
+    fn a_card_answer_key_reaches_the_conversation_with_cards_focused() {
+        let mut state = composing();
+        EventHandler::handle_key_event(Chord::new(Tab, Mods::SHIFT), &mut state);
+        assert!(
+            !state.session_composer_captures_text(),
+            "precondition: cards focused, the composer is not capturing"
+        );
+        let event = press(&mut state, Char('y'));
+        assert!(
+            matches!(event, Some(AppEvent::Consumed)),
+            "y must reach the confirm cards: {event:?}"
+        );
+    }
+
     /// A digit typed into a message is a digit. The footer stops advertising
     /// the attach digits here for exactly this reason.
     #[test]
