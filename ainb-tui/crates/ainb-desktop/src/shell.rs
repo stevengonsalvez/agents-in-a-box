@@ -76,6 +76,13 @@ impl<S: FrameSink> Shell<S> {
         }
     }
 
+    /// Put the reducer on the session list; see [`DesktopHost::open_sessions`].
+    pub fn open_sessions(&self) {
+        let mut core = self.core();
+        let Core { host, executor } = &mut *core;
+        host.open_sessions(executor);
+    }
+
     /// Frame every section in `subscription`, and only those, for a renderer
     /// that just attached.
     pub fn subscribe(&self, subscription: Subscription) {

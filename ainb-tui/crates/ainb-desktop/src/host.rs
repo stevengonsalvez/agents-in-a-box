@@ -151,6 +151,20 @@ impl<S: FrameSink> DesktopHost<S> {
         );
     }
 
+    /// Put the reducer on the session list, which the desktop's sidebar is.
+    ///
+    /// The state starts on the home screen, where the session list's rows (a
+    /// row click among them) are refused by the context gate. The move goes
+    /// through the home sidebar's own rows, two clicks on its Sessions item as
+    /// a double click opens it, so the host writes no state of its own.
+    pub fn open_sessions(&mut self, executor: &mut impl Executor) {
+        use ainb_app::app::pointer::click_home_sidebar_item;
+        use ainb_app::components::sidebar::SidebarItem;
+        for _ in 0..2 {
+            self.run(click_home_sidebar_item(SidebarItem::Sessions), executor);
+        }
+    }
+
     /// The key-only row `chord` runs in the current state, if it runs one.
     ///
     /// Those rows write outside ainb (`global.wire_statusline` edits Claude

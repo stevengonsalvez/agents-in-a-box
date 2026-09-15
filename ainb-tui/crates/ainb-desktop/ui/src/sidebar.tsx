@@ -6,16 +6,23 @@ interface Props {
   sessions: SessionsView_Serialize | undefined;
   fleet: FleetView_Serialize | undefined;
   stale: boolean;
+  /** The host is loading workspaces (the WorkspaceLoad section). */
+  loading: boolean;
+  /** A row was chosen: open its session's terminal tab. */
+  onOpen(sessionId: string): void;
+  /** The sidebar element, for Esc Esc to return focus to. */
+  ref(element: HTMLElement): void;
 }
 
 /**
  * The sidebar: the home menu's nav merged into the shell, and the sessions
  * tree grouped by workspace with one attention ring per row. Selection is the
- * Sessions section's own; the sidebar draws it and keeps none.
+ * Sessions section's own; the sidebar draws it and keeps none. A row is a
+ * button, so a click or Enter opens its terminal tab.
  */
 export function Sidebar(props: Props) {
   return (
-    <aside class="sidebar" aria-label="Sessions">
+    <aside class="sidebar" aria-label="Sessions" tabIndex={-1} ref={props.ref}>
       <div class="nav-title">
         SESSIONS
         <Show when={props.stale}>
@@ -24,7 +31,7 @@ export function Sidebar(props: Props) {
       </div>
       <Show
         when={(props.sessions?.workspaces.length ?? 0) > 0}
-        fallback={<p class="empty">{props.sessions ? "No sessions" : "Loading sessions"}</p>}
+        fallback={<p class="empty">{props.loading || !props.sessions ? "Loading sessions" : "No sessions"}</p>}
       >
         <For each={props.sessions?.workspaces}>
           {(workspace, w) => (
@@ -38,17 +45,21 @@ export function Sidebar(props: Props) {
                       props.sessions?.selected_session_index === s();
                     const ring = () => ringFor(session, props.fleet);
                     return (
-                      <li
-                        class="session-row"
-                        classList={{ selected: selected() }}
-                        data-session={session.id}
-                        data-ring={ring()?.toLowerCase() ?? "none"}
-                        aria-current={selected() ? "true" : undefined}
-                      >
-                        <span class="cursor">{selected() ? "▶" : ""}</span>
-                        <span class={`ring ${rowStatus(session.status)}`} title={ring() ?? rowStatus(session.status)} />
-                        <span class="name">{label(session.name)}</span>
-                        <span class="branch">{label(session.branch_name)}</span>
+                      <li>
+                        <button
+                          type="button"
+                          class="session-row"
+                          classList={{ selected: selected() }}
+                          data-session={session.id}
+                          data-ring={ring()?.toLowerCase() ?? "none"}
+                          aria-current={selected() ? "true" : undefined}
+                          onClick={() => props.onOpen(session.id)}
+                        >
+                          <span class="cursor">{selected() ? "▶" : ""}</span>
+                          <span class={`ring ${rowStatus(session.status)}`} title={ring() ?? rowStatus(session.status)} />
+                          <span class="name">{label(session.name)}</span>
+                          <span class="branch">{label(session.branch_name)}</span>
+                        </button>
                       </li>
                     );
                   }}

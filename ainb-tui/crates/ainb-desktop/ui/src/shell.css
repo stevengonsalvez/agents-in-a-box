@@ -45,8 +45,7 @@ body {
   color: var(--gold);
 }
 
-.header .settings,
-.tabs .tab {
+.header .settings {
   background: transparent;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -54,8 +53,7 @@ body {
   padding: 2px 10px;
 }
 
-.header .settings:disabled,
-.tabs .tab:disabled {
+.header .settings:disabled {
   color: var(--muted);
 }
 
@@ -160,6 +158,13 @@ body {
 }
 
 .session-row {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   display: grid;
   /* Both labels shrink; the branch keeps at most 100px of the 260px sidebar. */
   grid-template-columns: 12px 12px minmax(0, 1fr) minmax(0, max-content);
@@ -213,14 +218,118 @@ body {
   box-shadow: 0 0 0 2px var(--border);
 }
 
+.session-row:hover,
+.session-row:focus-visible {
+  background: var(--highlight);
+  outline: none;
+}
+
 .workarea {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.workarea > .empty {
+  margin: 16px;
+  color: var(--muted);
 }
 
 .tabs {
   display: flex;
   gap: 4px;
+  min-height: 30px;
   padding: 6px 12px;
+  overflow-x: auto;
   border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.tab.active {
+  border-color: var(--gold);
+}
+
+.tab[data-state="detached"] .tab-title {
+  color: var(--muted);
+}
+
+.tab[data-state="reconnecting"] .tab-title {
+  color: var(--gold);
+}
+
+.tab button {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.tab-title {
+  max-width: 180px;
+  padding: 2px 4px 2px 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-close {
+  padding: 2px 8px;
+  color: var(--muted);
+}
+
+.terminal {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.xterm-host {
+  position: absolute;
+  inset: 4px 8px;
+}
+
+.terminal-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(25, 25, 35, 0.8);
+  color: var(--gold);
+}
+
+.terminal-overlay button {
+  background: transparent;
+  border: 1px solid var(--gold);
+  border-radius: 6px;
+  color: var(--gold);
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: grid;
+  gap: 8px;
+}
+
+.toast {
+  max-width: 360px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
 }
