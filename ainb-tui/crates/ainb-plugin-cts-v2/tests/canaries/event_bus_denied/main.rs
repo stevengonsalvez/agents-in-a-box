@@ -1,9 +1,9 @@
 //! CTS canary for the `event_bus` capability axis.
 //!
-//! Registered without the grant, it tries every snapshot-bus call when the
-//! host runs `bus probe`, and prints what each returned:
-//! `get:<code or ok> subscribe:<code or ok>`. It also publishes on
-//! `cts.event_bus`, which the host must drop.
+//! Registered without a grant for the topic, it tries every snapshot-bus call
+//! when the host runs `bus probe [topic]`, and prints what each returned:
+//! `get:<code or ok> subscribe:<code or ok>`. It also publishes on the topic,
+//! which the host must drop. The topic defaults to `cts.event_bus`.
 
 use ainb_plugin_sdk::{
     Cell, CliOutput, Coord, HostClient, Plugin, RenderParams, Result, SdkError, Server, WireBuffer,
@@ -41,9 +41,10 @@ impl Plugin for EventBusDenied {
         if argv.first().map(String::as_str) != Some("probe") {
             return Ok(CliOutput::ok(b"ok".to_vec()));
         }
-        let get = code(host.snapshot_get("cts.event_bus").await);
-        let subscribe = code(host.snapshot_subscribe("cts.event_bus").await);
-        host.snapshot_publish("cts.event_bus", b"leaked".to_vec()).await?;
+        let topic = argv.get(1).map_or("cts.event_bus", String::as_str);
+        let get = code(host.snapshot_get(topic).await);
+        let subscribe = code(host.snapshot_subscribe(topic).await);
+        host.snapshot_publish(topic, b"leaked".to_vec()).await?;
         Ok(CliOutput::ok(format!("get:{get} subscribe:{subscribe}\n")))
     }
 }
