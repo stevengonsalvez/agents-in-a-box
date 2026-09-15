@@ -9,8 +9,9 @@ use uuid::Uuid;
 /// Work the reducer asks its host to do.
 ///
 /// Effects are queued while an intent or a tick is applied and handed back by
-/// [`crate::app::dispatch`] and [`crate::app::App::tick`] once that step has
-/// finished writing state, so a host always acts on committed state. Each
+/// [`crate::app::dispatch`] and the host's tick (`App::tick` in `ainb-core`)
+/// once that step has finished writing state, so a host always acts on
+/// committed state. Each
 /// variant says which host executes it and what that host does when it cannot.
 ///
 /// A host never writes state, and it never reads it either: everything an

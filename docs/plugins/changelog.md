@@ -17,7 +17,7 @@ Additive to the v2 contract (existing plugins keep passing CTS). The Rust crate 
 
 - **`[subscribes].latest_state`** (#1040): marks subscribed topics that carry the latest state. Only a subscription outside it keeps a plugin from idle reap. Must be a subset of `snapshots`; `[subscribes]` now refuses unknown keys.
 - **`PluginInitParams.host`** (#1040): `{ kind, pid }` of the surface hosting the plugin, so a plugin that talks to the hangar daemon can name its host.
-- **`event_bus` list form** (#1038): the allow-list covers exactly the topics it names (`*` suffix for a prefix). The blanket `true` covers every topic except `fleet.` ones.
+- **`event_bus` list form** (#1038): the allow-list covers exactly the topics it names (`*` suffix for a prefix). The blanket `true` covers every topic except `fleet.` ones, and so does every wildcard entry, `*` and `fleet.*` included (#1101): a `fleet.` topic is reached only by its exact name. The `event_stream_subscribe` allow-list uses the same matcher.
 - **Idle reap**: a plugin whose screen is on display is not reaped; a reap answers requests still in flight with a runtime error.
 
 ## v2: 2026-05-14

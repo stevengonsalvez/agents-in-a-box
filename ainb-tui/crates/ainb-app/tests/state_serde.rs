@@ -513,10 +513,6 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "attention message text on a web needs card, scrubbed through redact::scrub",
     ),
     (
-        "WebSessionRow.worktree_path",
-        "the web session list's worktree path, Session.workspace_path from the Sessions frame",
-    ),
-    (
         "SessionAttention.detail",
         "agent question text, scrubbed through redact::scrub",
     ),

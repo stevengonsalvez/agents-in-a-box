@@ -437,13 +437,21 @@ fn process_and_clipboard_call_sites_match_the_allow_list() {
 /// that do and why. Paths are under `ainb-core/src/`. `HostOnlyState` is this
 /// process's handles and timers; a line here that draws from it is something
 /// a mirrored host cannot draw, so a new one belongs in a versioned section.
-const HOST_STATE_READS: &[(&str, usize, &str)] = &[(
-    "components/layout.rs",
-    6,
-    "accepted draw inputs until D1: the session log handle, the Pal dial and the \
-     daemon start offer are drawn from the handles their workers write (3 lines); \
-     the Log tab starts the session log worker and the Pal tab ticks its dial (3 lines)",
-)];
+const HOST_STATE_READS: &[(&str, usize, &str)] = &[
+    (
+        "host.rs",
+        9,
+        "`App`, the process that owns HostOnlyState: init and tick start the log \
+         streaming and live window workers and stamp their timers; nothing here draws",
+    ),
+    (
+        "components/layout.rs",
+        6,
+        "accepted draw inputs until D1: the session log handle, the Pal dial and the \
+         daemon start offer are drawn from the handles their workers write (3 lines); \
+         the Log tab starts the session log worker and the Pal tab ticks its dial (3 lines)",
+    ),
+];
 
 #[test]
 fn terminal_host_reads_of_host_only_state_match_the_allow_list() {
@@ -493,6 +501,32 @@ fn no_plugin_runtime_handle_lives_in_app_state_or_a_section() {
             "{file} holds the plugin runtime again: {holding:?}"
         );
     }
+}
+
+/// No field in `ainb-app` owns the plugin runtime or its handle, and the crate
+/// defines no `App` to hold them (#1086): the terminal host's `App` owns both
+/// in `ainb-core`, and any other host brings its own.
+#[test]
+fn no_module_in_the_crate_owns_the_plugin_runtime() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = BTreeMap::new();
+    count_call_sites(
+        &src,
+        &src,
+        &[
+            "Option<ainb_plugin_runtime::Runtime>",
+            "Option<ainb_plugin_runtime::RuntimeHandle>",
+            "Option<RuntimeHandle>",
+            "Option<Runtime>",
+            "pub struct App ",
+            "struct App {",
+        ],
+        &mut found,
+    );
+    assert!(
+        found.is_empty(),
+        "the plugin runtime is held in ainb-app again: {found:?}"
+    );
 }
 
 /// `HostOnlyState` never serialises: nothing in it may reach a frame.

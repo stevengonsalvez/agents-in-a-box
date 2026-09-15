@@ -118,7 +118,8 @@ section 20 frame leaves out, so it is not a mirror surface and D1 renders
 `event_bus` grant for the topic. The list form covers exactly the topics it
 names (an entry ending in `*` is a prefix). The blanket `event_bus = true`
 covers every topic except `fleet.` ones, which only a list entry naming them
-covers. So the reader set is: the TUI host, which publishes it, and the in-tree
+exactly covers: no wildcard reaches a `fleet.` topic, not `*` and not
+`fleet.*`. So the reader set is: the TUI host, which publishes it, and the in-tree
 hangar plugin, granted `["fleet.agent_status", "ui.state*", "ui.close_request"]`.
 Learnings, session-reader and witr hold `event_bus = true` and are denied
 `-32001`; a third-party plugin reads it only by naming the topic in its
