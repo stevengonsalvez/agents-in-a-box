@@ -394,6 +394,10 @@ pub struct UiState {
     /// Scroll offset of the Log History session list, mirroring core's
     /// selection for the same reason as [`Self::session_recovery_list`].
     pub log_history_list: ListState,
+    /// First changelog line drawn. The lines are static content
+    /// (`changelog_lines`), so this offset is all the viewer keeps, and it is
+    /// this renderer's alone: another renderer scrolls its own copy (#1052).
+    pub changelog_scroll: usize,
     /// Layout work resolved from the keymap this iteration, drained by the run
     /// loop into [`Self::apply_host`]. The reducer never sees it: scrolling a
     /// pane or collapsing the sidebar is renderer-local by definition.
@@ -500,8 +504,33 @@ impl UiState {
             ScrollAction::PreviewPageUp => layout.tmux_preview_mut().scroll_page_up(),
             ScrollAction::PreviewPageDown => layout.tmux_preview_mut().scroll_page_down(),
             ScrollAction::PreviewExitScroll => layout.tmux_preview_mut().exit_scroll_mode(),
+            ScrollAction::ChangelogUp
+            | ScrollAction::ChangelogDown
+            | ScrollAction::ChangelogPageUp
+            | ScrollAction::ChangelogPageDown
+            | ScrollAction::ChangelogToTop
+            | ScrollAction::ChangelogToBottom => {
+                self.changelog_scroll = changelog_scroll(action, self.changelog_scroll);
+            }
         }
         self.needs_redraw = true;
+    }
+}
+
+/// The changelog offset after `action`. A page is the 30 lines the viewer
+/// always paged by; the last page stops at the final line, and the renderer
+/// clamps whatever height it actually has.
+fn changelog_scroll(action: ScrollAction, offset: usize) -> usize {
+    const PAGE: usize = 30;
+    let last = crate::components::changelog::changelog_lines().len().saturating_sub(PAGE);
+    match action {
+        ScrollAction::ChangelogUp => offset.saturating_sub(1),
+        ScrollAction::ChangelogDown => (offset + 1).min(last),
+        ScrollAction::ChangelogPageUp => offset.saturating_sub(PAGE),
+        ScrollAction::ChangelogPageDown => (offset + PAGE).min(last),
+        ScrollAction::ChangelogToTop => 0,
+        ScrollAction::ChangelogToBottom => last,
+        _ => offset,
     }
 }
 

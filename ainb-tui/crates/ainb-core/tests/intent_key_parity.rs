@@ -181,10 +181,10 @@ fn key_intent_resolves_to_the_event_the_key_event_path_produced_for_every_row() 
     }
     // Screen and global rows resolve to their own event from a fresh state;
     // overlay rows need their overlay open and resolve elsewhere, identically
-    // on both paths. Renderer-local rows (the sidebar toggle) resolve to no
-    // event at all.
+    // on both paths. Renderer-local rows (the sidebar toggle, and since #1052
+    // the eight changelog scroll rows) resolve to no event at all.
     assert!(
-        reached >= 154,
+        reached >= 146,
         "only {reached} rows reached their own event"
     );
 }
