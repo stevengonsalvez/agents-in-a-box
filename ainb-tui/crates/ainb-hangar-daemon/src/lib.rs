@@ -134,6 +134,8 @@ mod fsm;
 ///
 /// The rolling task-throughput ring buffer + the bounded claim-slot cache figure.
 pub mod health_stats;
+/// The minted host identity's boot-time adoption of `local` fleet events (#1066).
+pub mod host_identity;
 /// The inbox aggregator: the writer that turns the live event stream into the
 /// durable notification inbox (e38.14).
 ///
@@ -876,6 +878,32 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         }
 
         let store: Store = Store::open_in(&dir).await?;
+
+        // D11 host identity (#1066), FIRST: every row written from here on names
+        // this daemon's ULID, and the sessions a previous binary wrote under
+        // `local` are adopted in the same transaction as the mint. Non-fatal: a
+        // daemon that cannot mint keeps writing `local`, which is today's shape.
+        match ainb_hangar_store::repo::daemon_identity::DaemonIdentityRepo::mint_or_read(
+            store.pool(),
+            &ainb_hangar_core::idgen::SystemIdGen,
+            &ainb_hangar_core::clock::SystemClock,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                tracing::info!(
+                    host_id = %outcome.identity.host_id,
+                    minted = outcome.minted,
+                    adopted_sessions = outcome.adopted_sessions,
+                    "daemon identity"
+                );
+                crate::host_identity::spawn_event_adoption(
+                    store.pool().clone(),
+                    outcome.identity.host_id,
+                );
+            }
+            Err(error) => tracing::error!(%error, "could not mint the daemon identity"),
+        }
 
         // D14 boot order, step one: every row that survived the restart is a
         // MEMORY of the last incarnation until something in this one confirms
