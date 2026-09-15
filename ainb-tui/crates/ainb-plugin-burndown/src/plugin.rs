@@ -225,7 +225,7 @@ impl Plugin for BurndownPlugin {
     /// - `Backspace` → `pop_filter_chip` / `zoom_handle_esc` (plan:
     ///   `pop_filter`). `Esc` performs the same one-level pop and, at
     ///   the root view, publishes `ui.close_request` so the host closes
-    ///   the screen — see `is_host_reserved_key` in ainb-core.
+    ///   the screen — see `is_host_reserved_key` in ainb-app.
     /// - `C`   → `clear_all_filter_chips` (plan: `clear_filters`).
     /// - `d` when zoomed → `toggle_zoom_detail` (plan: `zoom_toggle_detail`).
     ///
@@ -1129,7 +1129,7 @@ impl BurndownPlugin {
             // left to pop) makes the async `handle_key` publish
             // `ui.close_request` so the host closes the screen back to
             // wherever it was opened from. See `is_host_reserved_key`
-            // in ainb-core/src/app/screens/builtin.rs for the host side.
+            // in ainb-app/src/app/screens/builtin.rs for the host side.
             KeyCode::Esc => {
                 if self.ui.zoom_handle_esc() {
                     // Consumed by the zoom ladder.
