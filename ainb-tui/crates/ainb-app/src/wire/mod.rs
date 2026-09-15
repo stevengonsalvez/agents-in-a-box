@@ -22,6 +22,7 @@ pub mod frame;
 pub mod shape;
 pub mod store;
 pub mod trace;
+pub mod web;
 
 use crate::app::AppState;
 use crate::app::sections::{
