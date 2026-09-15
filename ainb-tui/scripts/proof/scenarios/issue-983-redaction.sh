@@ -42,8 +42,11 @@ scenario() {
   # One recorded Claude turn in the fixture's directory, so `fleet cost` has a
   # session row with an absolute cwd and the web cost panel is populated: the
   # no-absolute-path check below then covers cost too (#1113).
-  local projects="$HOME/.claude/projects/-proof-983"
+  # Claude names a project directory after its cwd with `/` and `.` turned
+  # into `-`; derive it from the fixture's cwd rather than hardcode one.
+  local projects="$HOME/.claude/projects/$(sed 's#[/.]#-#g' <<<"$FIXTURE_CWD")"
   mkdir -p "$projects"
+  observe "recorded Claude turn under .claude/projects/${projects##*/}"
   jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cwd "$FIXTURE_CWD" '{
     type: "assistant", timestamp: $ts, sessionId: "proof-983-usage", cwd: $cwd,
     gitBranch: "main", message: {model: "claude-sonnet-4-5",
