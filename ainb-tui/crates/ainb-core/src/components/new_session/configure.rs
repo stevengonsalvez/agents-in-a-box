@@ -262,19 +262,53 @@ fn render_preset_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     let mut options: Vec<String> = state.available_presets.clone();
     options.push(CUSTOM_PRESET_LABEL.to_string());
 
-    let line = build_pills_line("Preset:  ", &options, &current, focused, &[], area.width);
-
-    // Tack on the modified badge to the same line (after the pills).
-    let line = if modified {
-        let mut spans: Vec<Span<'static>> = line.spans;
+    // Width-fit gate (as render_agent_row and render_model_row do), counting
+    // the modified badge too: it is the one thing on this row that must stay
+    // visible. Drop the `←/→ to change` hint first; if the pills still do not
+    // fit, show the single `◀ value ▶` cycle display, whose name gives way
+    // so the badge still fits.
+    const MODIFIED_BADGE: &str = "  \u{2022} modified";
+    let badge_width = if modified {
+        MODIFIED_BADGE.chars().count()
+    } else {
+        0
+    };
+    let width = area.width as usize;
+    let mut spans: Vec<Span<'static>> =
+        if estimate_pill_width("Preset:  ", &options, &[], focused) + badge_width <= width {
+            build_pills_line("Preset:  ", &options, &current, focused, &[], focused).spans
+        } else if estimate_pill_width("Preset:  ", &options, &[], false) + badge_width <= width {
+            build_pills_line("Preset:  ", &options, &current, focused, &[], false).spans
+        } else {
+            // Indicator, label and both arrows take 15 cells around the name.
+            let room = width.saturating_sub(15 + badge_width);
+            let name = if current.chars().count() > room {
+                let mut name: String = current.chars().take(room.saturating_sub(1)).collect();
+                if room > 0 {
+                    name.push('\u{2026}');
+                }
+                name
+            } else {
+                current.clone()
+            };
+            vec![
+                focus_indicator(focused),
+                label_span("Preset:  "),
+                cyclable_arrow_left(focused),
+                Span::styled(
+                    name,
+                    Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+                ),
+                cyclable_arrow_right(focused),
+            ]
+        };
+    if modified {
         spans.push(Span::styled(
-            "  \u{2022} modified",
+            MODIFIED_BADGE,
             Style::default().fg(SELECTION_GREEN),
         ));
-        Line::from(spans)
-    } else {
-        line
-    };
+    }
+    let line = Line::from(spans);
 
     // Two-line block: name line + a contextual sub-line.
     //
@@ -345,14 +379,7 @@ fn render_agent_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
         return;
     }
 
-    let line = build_pills_line(
-        "Agent:   ",
-        &options,
-        &current,
-        focused,
-        &disabled,
-        area.width,
-    );
+    let line = build_pills_line("Agent:   ", &options, &current, focused, &disabled, focused);
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -413,7 +440,7 @@ fn render_model_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
         return;
     }
 
-    let line = build_pills_line("Model:   ", &options, &current, focused, &[], area.width);
+    let line = build_pills_line("Model:   ", &options, &current, focused, &[], focused);
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -476,7 +503,7 @@ fn render_yolo_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
         return;
     }
     let options = vec!["ON".to_string(), "OFF".to_string()];
-    let line = build_pills_line("Yolo:    ", &options, &current, focused, &[], area.width);
+    let line = build_pills_line("Yolo:    ", &options, &current, focused, &[], focused);
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -501,7 +528,7 @@ fn render_headroom_row(f: &mut Frame, state: &ConfigureState, area: Rect, focuse
         "off".to_string()
     };
     let options = vec!["on".to_string(), "off".to_string()];
-    let mut line = build_pills_line("Headroom: ", &options, &current, focused, &[], area.width);
+    let mut line = build_pills_line("Headroom: ", &options, &current, focused, &[], focused);
     // Brief muted explainer + link. Terminals auto-linkify the bare URL, so a
     // cmd/ctrl-click opens it — no OSC-8 escape juggling needed.
     line.spans.push(Span::styled(
@@ -563,7 +590,7 @@ fn render_rtk_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bo
         "off".to_string()
     };
     let options = vec!["on".to_string(), "off".to_string()];
-    let mut line = build_pills_line("RTK:      ", &options, &current, focused, &[], area.width);
+    let mut line = build_pills_line("RTK:      ", &options, &current, focused, &[], focused);
     line.spans.push(Span::styled(
         "  \u{2014} compress tool output via hooks \u{00b7} Claude only \u{00b7} github.com/rtk-ai/rtk",
         Style::default().fg(MUTED_GRAY),
@@ -988,20 +1015,18 @@ fn cyclable_arrow_right(focused: bool) -> Span<'static> {
 
 /// Build a pill row: every option rendered inline, with the current one
 /// highlighted in SELECTION_GREEN + bold + `[…]` markers. Separator is
-/// ` · ` in MUTED_GRAY. When the row is focused, a "←/→ to change" hint is
-/// appended in MUTED_GRAY italic.
+/// ` · ` in MUTED_GRAY. With `hint`, a "←/→ to change" hint is appended in
+/// MUTED_GRAY italic.
 ///
-/// Width-aware: if the rendered pill row would exceed `available_width`, the
-/// caller is expected to have already gated on `estimate_pill_width` and
-/// fallen back to the `◀ value ▶` single-cycle display. This function still
-/// builds the line — the gate is a render-time decision in the row fn.
+/// Not width-aware: the caller gates on `estimate_pill_width` and falls back
+/// to the `◀ value ▶` single-cycle display when the row does not fit.
 fn build_pills_line(
     label: &'static str,
     options: &[String],
     current: &str,
     focused: bool,
     disabled: &[&str],
-    _available_width: u16,
+    hint: bool,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     spans.push(focus_indicator(focused));
@@ -1047,7 +1072,7 @@ fn build_pills_line(
         }
     }
 
-    if focused {
+    if hint {
         spans.push(Span::styled(
             "   \u{2190}/\u{2192} to change",
             Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
@@ -1513,7 +1538,7 @@ mod tests {
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        let line = build_pills_line("Agent:   ", &options, "Claude", false, &["Gemini"], 200);
+        let line = build_pills_line("Agent:   ", &options, "Claude", false, &["Gemini"], false);
 
         let find = |needle: &str| {
             line.spans.iter().find(|s| s.content.as_ref() == needle).unwrap_or_else(|| {
@@ -1599,6 +1624,74 @@ mod tests {
         );
     }
 
+    /// The focused Preset row keeps its `• modified` badge visible at any
+    /// width: the hint goes first, then the pills fold to the cycle display,
+    /// and there the preset name gives way before the badge does (#1050).
+    #[test]
+    fn render_preset_row_keeps_the_modified_badge_when_the_row_is_tight() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        fn draw(state: &ConfigureState, width: u16) -> String {
+            let mut terminal = Terminal::new(TestBackend::new(width, 2)).unwrap();
+            terminal.draw(|f| render_preset_row(f, state, f.size(), true)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .take(width as usize)
+                .map(|c| c.symbol())
+                .collect()
+        }
+        const BADGE: &str = "\u{2022} modified";
+
+        let mut state = mk_state();
+        state.preset_selection = PresetSelection::Named(1);
+        assert!(
+            state.is_modified(),
+            "precondition: b differs from the loaded a"
+        );
+
+        // Pills with the hint need 65 cells, pills alone 49.
+        let full = draw(&state, 65);
+        assert!(
+            full.contains(BADGE) && full.contains("to change"),
+            "{full:?}"
+        );
+        for width in [64, 49] {
+            let pills = draw(&state, width);
+            assert!(
+                pills.contains(BADGE) && pills.contains("Custom"),
+                "{width}: {pills:?}"
+            );
+            assert!(!pills.contains("to change"), "{width}: {pills:?}");
+        }
+        let cycle = draw(&state, 48);
+        assert!(
+            cycle.contains(BADGE) && !cycle.contains("Custom"),
+            "{cycle:?}"
+        );
+
+        // The longest shipped preset name at 40 columns: the name is cut, the
+        // badge is whole.
+        let long = "antigravity-interactive-yolo";
+        state.available_presets[1] = long.to_string();
+        state.presets_cache.insert(
+            long.to_string(),
+            RepositoryPreset {
+                name: long.to_string(),
+                ..Default::default()
+            },
+        );
+        assert!(
+            state.is_modified(),
+            "precondition: the long preset is modified"
+        );
+        let narrow = draw(&state, 40);
+        assert!(narrow.trim_end().ends_with(BADGE), "{narrow:?}");
+        assert!(narrow.contains("antigravity-\u{2026}"), "{narrow:?}");
+    }
+
     #[test]
     fn render_agent_row_shows_gemini_greyed_and_copilot() {
         use ratatui::{Terminal, backend::TestBackend};
@@ -1646,7 +1739,7 @@ mod tests {
         // The row must still bracket it (muted) so a selection always reads,
         // and must never render it in the green current style.
         let options: Vec<String> = ["Claude", "Gemini"].iter().map(|s| (*s).to_string()).collect();
-        let line = build_pills_line("Agent:   ", &options, "Gemini", false, &["Gemini"], 200);
+        let line = build_pills_line("Agent:   ", &options, "Gemini", false, &["Gemini"], false);
         assert!(
             line.spans.iter().any(|s| s.content.as_ref() == "["),
             "disabled-current must still show a bracket; otherwise nothing reads selected"
