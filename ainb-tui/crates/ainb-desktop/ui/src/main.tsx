@@ -114,10 +114,16 @@ function Shell() {
         if (key !== null) void invoke("terminal_close", { key });
         return;
       }
-      // ponytail: the palette is D1d, the attention jump D2, the host switcher R1.
-      case "palette":
+      // ponytail: the attention jump is D2, the host switcher R1.
       case "attention":
       case "hosts":
+        return;
+      // Answered by the terminal that has focus; outside one there is no
+      // selection to copy and nowhere to paste.
+      case "copy":
+      case "paste":
+        return;
+      case "palette":
         return;
     }
   };
