@@ -27,8 +27,9 @@ use ainb_plugin_runtime::registry::RegisteredPlugin;
 use ainb_plugin_runtime::types::{PluginId, RenderOutcome};
 use ainb_plugin_runtime::{Runtime, RuntimeConfig};
 
-/// A render this size is held by the slow fixture until it receives a key.
-/// Mirrors `HOLD_VIEWPORT_WIDTH` in `tests/fixtures/slow_fixture_plugin.rs`.
+/// A render this size is held by the slow fixture until it receives `r`.
+/// Mirrors `HOLD_VIEWPORT_WIDTH` in `tests/fixtures/slow_fixture_plugin.rs`, as
+/// does `ainb-core/tests/plugin_forward_executor.rs`.
 const HOLD_VIEWPORT: Viewport = Viewport {
     width: 4093,
     height: 8,
@@ -142,7 +143,8 @@ fn the_wedge_lifts_once_the_same_plugin_renders_again() {
     // reply to, so the late render answer is the only frame that can reach the
     // runtime, and it is that answer, on THIS plugin, that must lift the wedge.
     let key = KeyEvent {
-        code: KeyCode::Char { ch: 'j' },
+        // The fixture's `RELEASE_KEY`.
+        code: KeyCode::Char { ch: 'r' },
         mods: 0,
         kind: KeyKind::Press,
     };
