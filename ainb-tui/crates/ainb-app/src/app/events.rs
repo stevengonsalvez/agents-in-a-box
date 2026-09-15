@@ -7,8 +7,7 @@ use super::keymap::test_key_codes::*;
 use crate::app::effect::{Effect, TerminalTarget, ToolTerminal};
 use crate::app::intent::{Btn, Intent, Pos};
 use crate::app::keymap::{
-    Chord, HostAction, HostFlags, KeyAction, KeyContext, Keymap, ScrollAction, UiAction,
-    active_contexts,
+    Chord, HostAction, KeyAction, KeyContext, Keymap, ScrollAction, UiAction, active_contexts,
 };
 #[cfg(test)]
 use crate::app::keymap::{Key, Mods};
@@ -1455,7 +1454,7 @@ impl EventHandler {
             return Self::handle_new_session_keys(chord, state);
         }
 
-        let contexts = active_contexts(state, &HostFlags::default());
+        let contexts = active_contexts(state);
         match keymap.resolve_with_context(&contexts, &chord) {
             Some((context, _))
                 if state.shell.help_visible
@@ -1511,12 +1510,8 @@ impl EventHandler {
                 }
                 let host_authored = crate::app::reports::ids::ALL.contains(&id.as_str())
                     || crate::app::plugin_action::ids::ALL.contains(&id.as_str());
-                let flags = HostFlags {
-                    embed_interactive: state.is_interactive_pane(),
-                    ..HostFlags::default()
-                };
                 if !host_authored
-                    && !crate::app::keymap::command_contexts(state, &flags).contains(&binding.ctx)
+                    && !crate::app::keymap::command_contexts(state).contains(&binding.ctx)
                 {
                     tracing::warn!("command `{id}` is not active on this screen");
                     return None;
