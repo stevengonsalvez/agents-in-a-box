@@ -5,7 +5,7 @@
 #
 # The regenerator REFUSES to write while the surface has changed but
 # ainb-plugin-protocol's version has not. Bump the version first.
-protocol_version = "0.2.0"
+protocol_version = "0.2.1"
 
 [lib]
 reexport errors :: { ProtocolError , RpcError }
@@ -373,13 +373,13 @@ struct Color [# [derive (Debug , Clone , Copy , PartialEq , Eq , Hash , Serializ
   field g: u8
   field b: u8
 Color::const fn rgb (r : u8 , g : u8 , b : u8) -> Self
-struct Cell [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+struct Cell [# [derive (Debug , Clone , PartialEq , Eq , Hash , Serialize , Deserialize)]]
   field symbol: String
   field fg: Option < Color > [# [serde (default , skip_serializing_if = "Option::is_none")]]
   field bg: Option < Color > [# [serde (default , skip_serializing_if = "Option::is_none")]]
   field modifier: u16 [# [serde (default)]]
 Cell::fn new (symbol : impl Into < String >) -> Self
-struct WireBuffer [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+struct WireBuffer [# [derive (Debug , Clone , PartialEq , Eq , Hash , Serialize , Deserialize)]]
   field width: u16
   field height: u16
   field cells: Vec < (Coord , Cell) >
