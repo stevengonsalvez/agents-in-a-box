@@ -119,10 +119,14 @@ pub enum SectionId {
     Shell,
     /// Section 20: agent status from one joined daemon read (#1015).
     AgentStatus,
+    /// Section 21: where the changelog viewer is scrolled (#1052). Its own
+    /// section, so a scroll does not re-frame Config and a settings change
+    /// does not re-frame the changelog.
+    Changelog,
 }
 
 impl SectionId {
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 21;
 
     pub const ALL: [Self; Self::COUNT] = [
         Self::Sessions,
@@ -145,6 +149,7 @@ impl SectionId {
         Self::Onboarding,
         Self::Shell,
         Self::AgentStatus,
+        Self::Changelog,
     ];
 
     pub const fn index(self) -> usize {
