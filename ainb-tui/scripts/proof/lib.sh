@@ -453,6 +453,32 @@ web_answer() {
     -d "$(jq -nc --arg id "$1" --arg a "$2" '{attentionId: $id, answer: $a}')"
 }
 
+# web_card_id <question regex> <capture name>: the attentionId the web snapshot
+# lists for a card, waited on up to 180 s. The web's poller can sit behind
+# `ainb fleet cost` runs (#1055); past 15 s it records which cost runs the
+# world has, so a slow card is explained by evidence, not assumed. Sets
+# WEB_CARD_ID; the observed line keeps the measured lag visible against #1055.
+WEB_CARD_ID=""
+web_card_id() {
+  local question="$1" name="$2" start=$SECONDS noted=0 p cmd
+  WEB_CARD_ID=""
+  while (( SECONDS - start < 180 )); do
+    WEB_CARD_ID="$(web_attention_id "$question")"
+    [[ -n "$WEB_CARD_ID" ]] && break
+    if (( !noted && SECONDS - start >= 15 )); then
+      noted=1
+      for p in $(world_pids); do
+        cmd="$( { tr '\0' ' ' <"/proc/$p/cmdline"; } 2>/dev/null)"
+        if grep -F 'fleet cost' <<<"$cmd" >/dev/null; then printf '%s %s\n' "$p" "$cmd"; fi
+      done >"$NODE_DIR/$name-cost-runs.txt"
+      CAPTURES+=("$name-cost-runs.txt")
+      observe "web had no card after 15 s; ainb fleet cost runs in this world: $(wc -l <"$NODE_DIR/$name-cost-runs.txt")"
+    fi
+    sleep 1
+  done
+  observe "web snapshot card for '$question' after $((SECONDS - start))s (#1055 web lag): ${WEB_CARD_ID:-none}"
+}
+
 # connections_json: the daemon's connection registry as JSON.
 connections_json() { "$AINB_BIN" hangar connections list --format json 2>/dev/null; }
 
