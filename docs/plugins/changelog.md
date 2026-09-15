@@ -19,6 +19,7 @@ Additive to the v2 contract (existing plugins keep passing CTS). The Rust crate 
 - **`PluginInitParams.host`** (#1040): `{ kind, pid }` of the surface hosting the plugin, so a plugin that talks to the hangar daemon can name its host.
 - **`event_bus` list form** (#1038): the allow-list covers exactly the topics it names (`*` suffix for a prefix). The blanket `true` covers every topic except `fleet.` ones.
 - **Idle reap**: a plugin whose screen is on display is not reaped; a reap answers requests still in flight with a runtime error.
+- **Input inboxes** (#1087): a plugin's key and mouse inboxes hold 64 events each and drop the oldest when full, so a plugin that stops reading stdin loses its oldest queued input. After three Esc presses in a row that a later frame shows no change for, the host takes the next Esc and leaves the screen. A plugin that repaints on each Esc (popping a nested level, say) is unaffected.
 
 ## v2: 2026-05-14
 
