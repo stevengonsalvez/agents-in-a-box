@@ -555,6 +555,12 @@ impl Terminals {
             "Detached {}: at most {MAX_ATTACHED_TABS} terminals stay attached",
             tab.target.tmux()
         ));
+        // The reducer marked the session attached when it opened; only this
+        // report marks it detached again, and an attached row never rings.
+        self.report(reports::attach_finished(
+            &tab.target.attached_to(),
+            &AttachOutcome::Detached,
+        ));
     }
 
     fn reattach_at(&self, tabs: &mut Vec<Tab>, index: usize) -> Result<(), Intent> {
