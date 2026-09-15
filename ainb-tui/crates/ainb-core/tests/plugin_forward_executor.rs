@@ -11,6 +11,26 @@ use ainb::{AppState, Effect, Keymap, dispatch};
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
+#[path = "tripwire_helpers.rs"]
+#[allow(dead_code, unused_variables)]
+mod tripwire_helpers;
+
+/// One scratch HOME for the whole binary: the tests run in parallel threads,
+/// and a HOME each one set and dropped could pull the other's out from under it.
+fn isolated_home() {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let home = tempfile::tempdir().expect("scratch home");
+        std::env::set_var("HOME", home.path());
+        home
+    });
+}
+
+fn is_input_undelivered(report: &ainb::Intent) -> bool {
+    matches!(report, ainb::Intent::Command(id, _)
+        if id.as_str() == ainb::app::reports::ids::PLUGIN_INPUT_UNDELIVERED)
+}
+
 fn forward(back: bool) -> Effect {
     Effect::ForwardToPlugin {
         plugin: "burndown".to_string(),
@@ -26,8 +46,7 @@ fn forward(back: bool) -> Effect {
 
 #[tokio::test]
 async fn an_undelivered_back_key_leaves_the_plugin_screen_and_other_input_is_dropped() {
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
+    isolated_home();
     let mut terminal = Terminal::with_options(
         ratatui::backend::CrosstermBackend::new(std::io::stdout()),
         TerminalOptions {
@@ -63,7 +82,10 @@ async fn an_undelivered_back_key_leaves_the_plugin_screen_and_other_input_is_dro
     )
     .await
     .expect("executor ran");
-    assert_eq!(reports.len(), 1, "an undelivered back key is reported");
+    assert!(
+        matches!(reports.as_slice(), [report] if is_input_undelivered(report)),
+        "an undelivered back key is reported: {reports:?}"
+    );
 
     let mut state = AppState::new();
     state.shell.previous_screen = Some(ainb::app::screens::ids::SESSION_LIST.to_string());
@@ -84,21 +106,10 @@ async fn an_undelivered_back_key_leaves_the_plugin_screen_and_other_input_is_dro
 /// a back key sent to it is reported, so Esc still leaves a wedged screen.
 #[tokio::test]
 async fn a_back_key_sent_to_a_wedged_plugin_is_reported() {
-    use ainb_plugin_protocol::manifest::{
-        Capabilities, Lifecycle, Manifest, PluginMeta, Provides, SpawnMode, Subscribes,
-    };
     use std::time::Duration;
 
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
-    let fixture = std::path::PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
-        .parent()
-        .expect("target dir")
-        .join("ainb-slow-fixture-plugin");
-    assert!(
-        fixture.exists(),
-        "slow fixture not found at {fixture:?}: run `cargo build -p ainb-plugin-runtime --bins`"
-    );
+    isolated_home();
+    let fixture = tripwire_helpers::sibling_bin("ainb-slow-fixture-plugin");
     // The slow fixture sleeps 200ms in render; a 20ms budget wedges it.
     let (runtime, handle) =
         ainb_plugin_runtime::Runtime::with_config(ainb_plugin_runtime::RuntimeConfig {
@@ -106,34 +117,7 @@ async fn a_back_key_sent_to_a_wedged_plugin_is_reported() {
             ..ainb_plugin_runtime::RuntimeConfig::default()
         })
         .expect("runtime");
-    let manifest = Manifest {
-        plugin: PluginMeta {
-            name: "burndown".into(),
-            version: "0.1.0".into(),
-            abi_version: 2,
-            description: "renders slower than the budget".into(),
-        },
-        capabilities: Capabilities::default(),
-        provides: Provides {
-            screens: vec![],
-            commands: vec![],
-            cli_namespaces: vec![],
-            snapshots: vec![],
-        },
-        subscribes: Subscribes::default(),
-        lifecycle: Lifecycle {
-            spawn: SpawnMode::Lazy,
-            idle_reap_secs: 600,
-        },
-        config: Vec::new(),
-    };
-    let plugin = ainb_plugin_runtime::registry::RegisteredPlugin::new(
-        manifest,
-        fixture,
-        std::path::PathBuf::from("/dev/null/manifest.toml"),
-    );
-    let id = plugin.id.clone();
-    runtime.register(plugin);
+    let id = tripwire_helpers::register_plugin(&runtime, "burndown", fixture);
     let rx = handle.render(&id, ainb_plugin_protocol::params::Viewport::new(40, 8), 0);
     let _ = tokio::time::timeout(Duration::from_secs(5), rx)
         .await
@@ -159,10 +143,9 @@ async fn a_back_key_sent_to_a_wedged_plugin_is_reported() {
     )
     .await
     .expect("executor ran");
-    assert_eq!(
-        reports.len(),
-        1,
-        "a back key to a wedged plugin is reported"
+    assert!(
+        matches!(reports.as_slice(), [report] if is_input_undelivered(report)),
+        "a back key to a wedged plugin is reported: {reports:?}"
     );
 
     runtime.shutdown();
