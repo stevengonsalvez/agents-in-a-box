@@ -14,7 +14,7 @@ amendments 15-21.
 ```
 ┌────────┐  auth/hello { token, surface?, protocol{min,max}, capabilities[], device?, transient? }  ┌────────┐
 │ client │ ─────────────────────────────────────────────────────────────────────────────────────▶ │ daemon │
-│        │ ◀───────────────────── { protocol{min,max}, selected, capabilities[], daemon_version } ─│        │
+│        │ ◀───────────── { protocol{min,max}, selected, capabilities[], daemon_version, host_id? } ─│        │
 └────────┘                       no overlap ──▶ error -32007                                        └────────┘
 ```
 
@@ -39,6 +39,20 @@ const, then the file) in one change. Removing one is a `PROTOCOL_VERSION` bump.
 defaults, and every reply member defaults. A pre-W0-wire client sending
 `{ token }` negotiates version 1; a pre-W0-wire daemon answering `{}` reads as
 "protocol 1, declares nothing". Both legs are asserted by the skew harness.
+
+**`host_id`** (#1066, capability `hangar.host_identity`, spec D11). The
+daemon's `HostId`: a ULID minted once at the first boot that applies migration
+0100, stored in the single-row `daemon_identity` table, never derived from the
+hostname. A backup restore keeps it; a fresh install mints a new one. Only an
+authenticated reply carries it: a refused hello, including `-32007`, never
+names the host. A daemon that predates the mint omits the member and its rows
+name `local`, which is how a client reads the missing member too.
+
+At the mint, in the same transaction, every `fleet_session` row still named
+`local` is adopted by the minted id. `fleet_event` rows are adopted after boot
+in batches of 5,000, because that table can be gigabytes. New sessions and
+events are stamped with the minted id in the transaction that writes them, and
+an event names the host of the session it belongs to.
 
 **`transient`** (#963, capability `hangar.connections.transient`). A surface
 that holds one long-lived presence connection marks its other, short request
@@ -76,7 +90,8 @@ refuses the hello's shape), the hangar plugin redials with the pre-#1040 hello,
 read that returns every visible session's roster entry and its D14 status row
 joined per `session_key`, both derived from ONE Fleet projection, so they
 describe the same instant. Each row carries the `read_revision`, and the status
-half carries `host_id` (`local` until paired hosts), `turn_complete`, the
+half carries `host_id` (the row's stored host: the minted id, or `local` on a
+daemon without one), `turn_complete`, the
 `wait_kind` enum, `has_open_request`, `pane_unbound` and the `attachment` enum.
 A surface renders a Fleet card from this reply alone. `fleet/snapshot` and
 `fleet/status` stay for callers that need only one half; a client that reads
@@ -237,8 +252,11 @@ At boot (`receipt_sweep::run`, before the socket accepts anything):
 
 Table `mutation_ledger` (migration 0097), keyed `(host_id, principal, op_id)`.
 `principal` is `local` on the unix leg, `pal:<scope>` for Pal's tool server, and
-`device:<id>` off-box in R1. `host_id` defaults to `local` until R1 mints a
-per-daemon ULID.
+`device:<id>` off-box in R1. A new claim is keyed under the daemon's minted
+`host_id` (#1066). A claim written under `local` before the mint keeps that
+key, and a retry of its op id is looked up under `local` first, so a retry
+across the upgrade replays and never runs twice. The boot receipt sweep and
+retention walk both hosts.
 
 Retention is two-stage, because D18 wants both a storage bound and an
 answerable `unknown{op_expired}`:
