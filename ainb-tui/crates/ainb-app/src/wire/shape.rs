@@ -83,9 +83,10 @@ pub fn trace_states(states: &[AppState]) -> trace::Trace {
 
 /// The web dashboard's session rows (`/api/snapshot`'s `sessions[]`), projected
 /// from the Sessions frame by [`crate::wire::web::session_rows`]. Traced like a
-/// frame, so the key-path fixture, the name and type deny-lists, the canary and
-/// the tripwire all see the row keys and values: a field the frame withholds
-/// cannot come back on the web through a new row key (#1056).
+/// frame, so the key-path fixture and the name and type deny-lists see the row
+/// keys and values: a field the frame withholds cannot come back on the web
+/// through a new row key (#1056). The canary and the tripwire build from the
+/// frames alone and do not see these rows.
 fn web_snapshot_trace(state: &AppState) -> trace::Trace {
     #[derive(serde::Serialize)]
     struct WebSnapshotSessions {
