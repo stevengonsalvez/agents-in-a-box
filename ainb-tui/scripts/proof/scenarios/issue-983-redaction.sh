@@ -3,7 +3,7 @@
 # committed fixture, and credential-shaped text never reaches a frame.
 
 # shellcheck disable=SC2034  # read by write_result in lib.sh
-EXPECT="ainb doctor --wire-shape reports no drift from the committed fixture, a token-shaped string in a session label never appears in hangar connections list, the wire-shape frame output, or the web snapshot frame, and an ASK whose question carries the token reaches the web snapshot as a card with no cwd and no token"
+EXPECT="ainb doctor --wire-shape reports no drift from the committed fixture, a token-shaped string in a session label never appears in hangar connections list, the wire-shape frame output, or the web snapshot frame, an ASK whose question carries the token reaches the web snapshot as a card with no cwd and no token, and no absolute path appears anywhere in the web snapshot"
 
 # Shaped like a GitHub classic token so the redactor's table matches it. Built
 # from two halves so no token-shaped literal sits in the source, and replaced
@@ -60,6 +60,14 @@ scenario() {
   check "no web needs card carries a cwd" jq -e 'all(.[]; has("cwd") | not)' "$NODE_DIR/web-needs.json"
   check "the fixture session's directory never appears in the web needs cards" \
     bash -c "! grep -qF '$FIXTURE_CWD' '$NODE_DIR/web-needs.json'"
+  # No absolute path anywhere in the response, and no path into this world
+  # even inside a longer string (#1097).
+  local absolute
+  absolute="$(jq '[.. | strings | select(startswith("/"))] | length' "$NODE_DIR/web-snapshot.json")"
+  observe "strings in the web snapshot that are absolute paths: $absolute"
+  check "no string in the web snapshot is an absolute path" test "$absolute" -eq 0
+  check "the proof world's directory never appears in the web snapshot" \
+    bash -c "! grep -qF '$PROOF_WORLD' '$NODE_DIR/web-snapshot.json'"
 
   # Checks are done; keep the canary out of what gets published.
   local file

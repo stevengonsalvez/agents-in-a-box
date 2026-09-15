@@ -876,7 +876,7 @@ mod tests {
         let snap = crate::data::FleetSnapshot::from_parts(
             crate::data::CoreSnapshot {
                 sessions: json!([
-                    { "session_id": "id-1", "workspace_name": "demo", "worktree_path": "/a" }
+                    { "session_id": "id-1", "workspace_name": "demo", "worktree_name": "a" }
                 ]),
                 needs: Vec::new(),
             },
@@ -896,7 +896,7 @@ mod tests {
         let snap = crate::data::FleetSnapshot::from_parts(
             crate::data::CoreSnapshot {
                 sessions: json!([
-                    { "session_id": "id-9", "workspace_name": "managed", "worktree_path": "/w/x" }
+                    { "session_id": "id-9", "workspace_name": "managed", "worktree_name": "x" }
                 ]),
                 needs: need_cards(&json!([
                     { "kind": "ASK", "sessionId": "id-9", "cwd": "/w/managed--ainb-session-9", "channels": ["web"] }

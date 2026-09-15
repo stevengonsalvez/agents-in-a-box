@@ -19,13 +19,16 @@ use serde::Serialize;
 use serde_json::Value;
 
 /// One row of the web dashboard's session list, in the shape `frontend/app.js`
-/// draws: the keys `ainb list --format json` has always used, minus the label.
+/// draws: the keys `ainb list --format json` uses, minus the label, and the
+/// worktree named by its directory rather than its absolute path (#1097).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WebSessionRow {
     pub session_id: String,
     pub tmux_session_name: Option<String>,
     pub workspace_name: String,
-    pub worktree_path: String,
+    /// The worktree's directory name. The browser never gets the absolute
+    /// path: it only draws the name, and attaching resolves the session by id.
+    pub worktree_name: String,
     pub created_at: String,
     /// The tmux session exists.
     pub is_running: bool,
@@ -58,7 +61,11 @@ pub fn rows_from_frame(frame: &Frame) -> Vec<WebSessionRow> {
                     session_id: text(&session["id"]).unwrap_or_default(),
                     tmux_session_name: text(&session["tmux_session_name"]),
                     workspace_name: workspace_name.clone(),
-                    worktree_path: text(&session["workspace_path"]).unwrap_or_default(),
+                    worktree_name: session["workspace_path"]
+                        .as_str()
+                        .and_then(|path| std::path::Path::new(path).file_name())
+                        .map(|name| card_text(&name.to_string_lossy()))
+                        .unwrap_or_default(),
                     created_at: text(&session["created_at"]).unwrap_or_default(),
                     is_running: matches!(status, Some("Running" | "Idle")),
                     claude_active: status == Some("Running"),
@@ -318,7 +325,21 @@ mod tests {
         assert!(!json.contains("display_name"), "{json}");
         assert_eq!(rows[0].workspace_name, "sample-repo");
         assert_eq!(rows[0].tmux_session_name.as_deref(), Some("tmux_repo-1"));
-        assert_eq!(rows[0].worktree_path, "/work/sample-repo");
+        assert_eq!(rows[0].worktree_name, "sample-repo");
+        assert!(!json.contains("/work/"), "no absolute path: {json}");
+    }
+
+    #[test]
+    fn a_credential_shaped_worktree_directory_is_scrubbed_in_the_row() {
+        let mut state = sample_state(&mut PlainSeed);
+        state.sessions.get_mut().workspaces[0].sessions[0].workspace_path =
+            format!("/work/{CANARY}");
+        let rows = session_rows(&state);
+        assert!(
+            !rows[0].worktree_name.contains(CANARY),
+            "{:?}",
+            rows[0].worktree_name
+        );
     }
 
     #[test]
