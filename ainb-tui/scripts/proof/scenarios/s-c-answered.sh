@@ -10,6 +10,10 @@ EXPECT="an ASK answered from the web retires the TUI control-center card at once
 # `ainb fleet cost` runs (#1055); past 15 s the scenario records which cost
 # runs the world has, so a slow card is explained by evidence, not assumed.
 WEB_CARD_ID=""
+WEB_CARD_WAIT=0
+# How far behind the web may list a new session or card (#1055): its poller
+# reads sessions and needs every 2 s and never waits on `fleet cost`.
+WEB_LAG_BOUND=10
 web_card_id() {
   local question="$1" name="$2" start=$SECONDS noted=0 p cmd
   WEB_CARD_ID=""
@@ -27,7 +31,8 @@ web_card_id() {
     fi
     sleep 1
   done
-  observe "web snapshot card for '$question' after $((SECONDS - start))s: ${WEB_CARD_ID:-none}"
+  WEB_CARD_WAIT=$((SECONDS - start))
+  observe "web snapshot card for '$question' after ${WEB_CARD_WAIT}s: ${WEB_CARD_ID:-none}"
 }
 
 scenario() {
@@ -35,13 +40,13 @@ scenario() {
   start_web || { check "ainb web answers /api/snapshot" false; return; }
   observe "web on ${WEB_URL##*:} (port)"
 
-  # The web's snapshot poller starts behind two concurrent `ainb fleet cost`
-  # runs that take 120 s each (#1055); the answer path is only testable once
-  # the web has caught up with the session list.
+  # The web lists a session created after it started within a poll or two:
+  # `fleet cost` runs on its own task and never gates sessions (#1055).
   fixture_session || { check "the first fixture session starts" false; return; }
   local waited
   if waited="$(web_sync_sessions 180)"; then
     observe "web snapshot listed the fixture session after ${waited}s (#1055)"
+    check "the web lists the new session within ${WEB_LAG_BOUND} s" test "$waited" -le "$WEB_LAG_BOUND"
   else
     check "the web snapshot lists the fixture session within 180 s" false
     return
@@ -54,6 +59,7 @@ scenario() {
   capture tui control-before-web-answer
   local id reply
   web_card_id 'answered from the web' web-card
+  check "the web lists the web-bound card within ${WEB_LAG_BOUND} s" test "$WEB_CARD_WAIT" -le "$WEB_LAG_BOUND"
   id="$WEB_CARD_ID"
   curl -sS "$WEB_URL/api/snapshot" | redact_host >"$NODE_DIR/web-snapshot-before-answer.json"
   CAPTURES+=("web-snapshot-before-answer.json")
@@ -69,6 +75,7 @@ scenario() {
   ask_session "Proof S-C: answered in the TUI?" proof-sc-tui || { check "second ASK session" false; return; }
   check "the TUI shows the second card" wait_screen tui '1 need you' 20
   web_card_id 'answered in the TUI' tui-card
+  check "the web lists the TUI-bound card within ${WEB_LAG_BOUND} s" test "$WEB_CARD_WAIT" -le "$WEB_LAG_BOUND"
   id="$WEB_CARD_ID"
   capture tui control-before-tui-answer
   keys tui Enter
