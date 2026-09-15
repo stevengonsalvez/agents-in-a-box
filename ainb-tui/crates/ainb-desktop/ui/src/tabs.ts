@@ -49,7 +49,9 @@ export type Accelerator =
   | { kind: "close" }
   | { kind: "palette" }
   | { kind: "attention" }
-  | { kind: "hosts" };
+  | { kind: "hosts" }
+  | { kind: "copy" }
+  | { kind: "paste" };
 
 interface KeyLike {
   /** The physical key (`KeyW`, `Digit1`), so Shift does not change it. */
@@ -71,6 +73,11 @@ export function accelerator(event: KeyLike, mac: boolean): Accelerator | null {
   if (!mod || event.altKey) return null;
   if (event.code === "KeyH" && (!mac || event.shiftKey)) return { kind: "hosts" };
   if (mac && event.shiftKey) return null;
+  // Copy and paste: macOS has them on the Edit menu, natively. Elsewhere the
+  // pane owns ctrl+c and ctrl+v, so the shell's ctrl+shift pair does it.
+  if (!mac && (event.code === "KeyC" || event.code === "KeyV")) {
+    return { kind: event.code === "KeyC" ? "copy" : "paste" };
+  }
   const digit = /^Digit([1-9])$/.exec(event.code);
   if (digit) return { kind: "tab", index: Number(digit[1]) - 1 };
   switch (event.code) {
