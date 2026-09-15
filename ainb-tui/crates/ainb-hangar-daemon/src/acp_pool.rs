@@ -3440,6 +3440,16 @@ impl AcpPool {
     async fn make_room(&self, process: &Arc<ProviderProcess>, incoming: &str) -> bool {
         let _one_at_a_time = process.evicting.lock().await;
         let cap = self.config.max_sessions_per_provider;
+        // ONE cut of occupancy, read back to back before any await, and in THIS
+        // order (#958). An arrival registers its route and only then stops
+        // counting as attaching. Reading `attaching` first and the routes
+        // second means that arrival is counted in at least one of the two
+        // whenever it moves between them; at worst it is counted in both,
+        // which refuses early and never overshoots. The routes used to be read
+        // first and `attaching` only after a store read per tenant, so an
+        // arrival that attached during those reads was counted in neither, and
+        // the process settled at cap+1.
+        let attaching = process.attaching.load(Ordering::Relaxed) as usize;
         let hosted: Vec<String> = process
             .routes
             .lock()
@@ -3470,7 +3480,6 @@ impl AcpPool {
                 candidates.push(row);
             }
         }
-        let attaching = process.attaching.load(Ordering::Relaxed) as usize;
         let Some(over) = (tenants + attaching).checked_sub(cap).filter(|over| *over > 0) else {
             return true;
         };
