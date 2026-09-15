@@ -1,8 +1,8 @@
 //! The desktop host's effect executor.
 //!
 //! Each `Effect` variant documents its desktop half; this runs the halves the
-//! shell can reach in D1a and answers the rest with the failure report the
-//! variant documents, so the reducer tells the operator instead of waiting on
+//! shell can reach and answers the rest with the failure report the variant
+//! documents, so the reducer tells the operator instead of waiting on
 //! work that never happens. Like the terminal host's executor it neither reads
 //! nor writes state: the effect carries what it needs and the outcome comes
 //! back as report intents.
@@ -17,9 +17,12 @@ use ainb_app::app::reports::{
 use ainb_app::app::{Effect, TerminalTarget, ToolTerminal};
 
 use crate::host::Executor;
+use crate::terminal::{TabTarget, Terminals};
 
-/// Why this shell answers an attach with a failure: terminal tabs are D1c.
-const NO_TERMINAL_TABS: &str = "this desktop build has no terminal tabs yet";
+/// Why this shell answers an attach with a failure: its tabs attach ainb
+/// sessions and named tmux sessions, and no other target yet.
+const NO_TERMINAL_TABS: &str =
+    "this desktop build opens terminal tabs only on sessions and tmux sessions";
 /// Why plugin work is refused: this shell runs no plugin runtime.
 const NO_PLUGIN_RUNTIME: &str = "this desktop build runs no plugin runtime";
 
@@ -30,6 +33,8 @@ const NO_PLUGIN_RUNTIME: &str = "this desktop build runs no plugin runtime";
 pub struct DesktopExecutor {
     /// The `ainb` binary daemon verbs run through, when one was found.
     ainb: Option<std::path::PathBuf>,
+    /// The terminal tabs attaches open, when the shell has them.
+    terminals: Option<Terminals>,
     deferred_tx: mpsc::Sender<Intent>,
     deferred_rx: mpsc::Receiver<Intent>,
 }
@@ -42,9 +47,24 @@ impl DesktopExecutor {
         let (deferred_tx, deferred_rx) = mpsc::channel();
         Self {
             ainb,
+            terminals: None,
             deferred_tx,
             deferred_rx,
         }
+    }
+
+    /// Open terminal tabs on `terminals` for the attaches they can hold.
+    #[must_use]
+    pub fn with_terminals(mut self, terminals: Terminals) -> Self {
+        self.terminals = Some(terminals);
+        self
+    }
+
+    /// Where background work (a terminal tab that closed) sends its reports,
+    /// for [`Self::take_deferred`] to hand back.
+    #[must_use]
+    pub fn report_sender(&self) -> mpsc::Sender<Intent> {
+        self.deferred_tx.clone()
     }
 
     /// Reports from finished background work, oldest first.
@@ -56,7 +76,10 @@ impl DesktopExecutor {
 impl Executor for DesktopExecutor {
     fn execute(&mut self, effect: Effect) -> Vec<Intent> {
         match effect {
-            Effect::AttachTerminal(target) => vec![attach_unsupported(target)],
+            Effect::AttachTerminal(target) => match (&self.terminals, tab_target(&target)) {
+                (Some(terminals), Some(tab)) => terminals.open(tab).into_iter().collect(),
+                _ => vec![attach_unsupported(target)],
+            },
             // Desktop host: returns keyboard focus from the terminal tab to the
             // app, which the reducer hears as the user having left it.
             Effect::Detach => vec![reports::detached()],
@@ -112,7 +135,21 @@ impl Executor for DesktopExecutor {
     }
 }
 
-/// The failure report an attach documents, for a shell with no terminal tabs.
+/// The tab an attach opens, for the targets a tab can hold.
+fn tab_target(target: &TerminalTarget) -> Option<TabTarget> {
+    match target {
+        TerminalTarget::Session { id, tmux_session } => Some(TabTarget::Session {
+            id: *id,
+            tmux: tmux_session.as_str().to_string(),
+        }),
+        TerminalTarget::Tmux(name) => Some(TabTarget::Tmux {
+            tmux: name.as_str().to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// The failure report an attach documents, for a target no tab holds.
 fn attach_unsupported(target: TerminalTarget) -> Intent {
     let failed = AttachOutcome::Failed(NO_TERMINAL_TABS.to_string());
     match target {
