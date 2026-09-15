@@ -350,7 +350,8 @@ fn build_payload(key: &str, kind: &str, snap: &crate::data::FleetSnapshot) -> Va
     // gives the deep link. The card's own `workspaceName` (the last component
     // of its cwd, which need not be the list's name) is the fallback title.
     let mut title_name = key.to_string();
-    let mut session_id = String::new();
+    // The key is the card's session id, so the deep link holds either way.
+    let session_id = key.to_string();
     let row = snap
         .sessions
         .as_array()
@@ -361,7 +362,6 @@ fn build_payload(key: &str, kind: &str, snap: &crate::data::FleetSnapshot) -> Va
         if let Some(name) = row.get("workspace_name").and_then(Value::as_str) {
             title_name = name.to_string();
         }
-        session_id = key.to_string();
     } else if let Some(card) = snap
         .needs
         .iter()
@@ -924,6 +924,7 @@ mod tests {
         assert_eq!(key, "s1", "a card with no cwd keys on its session id");
         let p = build_payload(&key, "ASK", &snap);
         assert_eq!(p["title"], "ainb · repo");
+        assert_eq!(p["sessionId"], "s1", "the fallback keeps the deep link");
     }
 
     #[cfg(unix)]
