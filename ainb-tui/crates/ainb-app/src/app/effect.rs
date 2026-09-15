@@ -289,12 +289,19 @@ impl TmuxSessionName {
     /// (`tmux_<repo>_<branch>`), and small enough to put in every frame.
     pub const MAX_BYTES: usize = 128;
 
+    /// Whether `name` is within the length cap. The one rule the constructor,
+    /// tmux session discovery and the name minter share (#1122).
+    #[must_use]
+    pub const fn within_cap(name: &str) -> bool {
+        name.len() <= Self::MAX_BYTES
+    }
+
     /// The name, or `None` when tmux could not address a session by it.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Option<Self> {
         let name = name.into();
         let addressable = !name.is_empty()
-            && name.len() <= Self::MAX_BYTES
+            && Self::within_cap(&name)
             && name.trim() == name
             && !name.contains([':', '.'])
             && !name.starts_with(['$', '%', '@', '='])
