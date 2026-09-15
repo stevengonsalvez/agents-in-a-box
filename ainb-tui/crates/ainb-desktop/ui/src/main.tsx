@@ -2,15 +2,17 @@ import { render } from "solid-js/web";
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AttentionKind, FrameBatch_Serialize } from "../../../ainb-app/bindings/AppState";
+import type { AttentionKind, FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
 import { createFrameStore, type SectionName } from "./store.ts";
 import { idleCount, ringCount } from "./sessions.ts";
 import { Sidebar } from "./sidebar.tsx";
 import "./shell.css";
 
 /**
- * The sections this window subscribes to, as `main.rs` `SECTIONS` asks the
- * host for them: the sidebar, the header counts and the terminal tabs.
+ * The one list of sections this window subscribes to; `subscribe` hands it to
+ * the host. Sessions and Fleet feed the sidebar and the header counts. Shell,
+ * Tmux, Config and AgentStatus are subscribed ahead of their readers (the
+ * terminal tabs in D1c, settings in D3, agent cards in D2).
  */
 const SUBSCRIBED: SectionName[] = ["sessions", "shell", "tmux", "fleet", "config", "agent_status"];
 
@@ -37,6 +39,10 @@ function Shell() {
   const [sidecar, setSidecar] = createSignal<SidecarState>({ state: "starting" });
   const [log, setLog] = createSignal<string | null>(null);
 
+  // The host the channel is connected to, from the `subscribe` answer. Every
+  // drain is applied as that host's.
+  const [peer, setPeer] = createSignal<HostId>();
+
   onMount(async () => {
     const unlisten = await listen<SidecarState>("sidecar", (event) => setSidecar(event.payload));
     onCleanup(unlisten);
@@ -45,20 +51,26 @@ function Shell() {
     // A timer, not an animation frame: a hidden window still drains, so the
     // queue never grows while nobody looks.
     let queue: FrameBatch_Serialize[] = [];
+    const drain = () => {
+      const host = peer();
+      // The first batches can arrive before `subscribe` answers: hold them.
+      if (host === undefined) {
+        setTimeout(drain, DRAIN_MS);
+        return;
+      }
+      const batches = queue;
+      queue = [];
+      store.applyDrain(host, batches);
+    };
     const frames = new Channel<FrameBatch_Serialize>();
     frames.onmessage = (batch) => {
-      if (queue.push(batch) > 1) return;
-      setTimeout(() => {
-        const drain = queue;
-        queue = [];
-        store.applyDrain(drain);
-      }, DRAIN_MS);
+      if (queue.push(batch) === 1) setTimeout(drain, DRAIN_MS);
     };
-    await invoke("subscribe", { frames });
+    setPeer(await invoke<HostId>("subscribe", { frames, sections: SUBSCRIBED }));
   });
 
   // In this node the window holds exactly one host, the local one.
-  const host = createMemo(() => Object.keys(store.state.hosts)[0]);
+  const host = peer;
   const sessions = () => (host() ? store.section(host()!, "sessions") : undefined);
   const fleet = () => (host() ? store.section(host()!, "fleet") : undefined);
   const counts = HEADER_KINDS.map(([kind, label]) => ({
@@ -66,7 +78,10 @@ function Shell() {
     count: createMemo(() => ringCount(sessions(), fleet(), kind)),
   }));
   const idle = createMemo(() => idleCount(sessions()));
-  const sessionsStale = createMemo(() => store.state.stale.includes("sessions"));
+  const sessionsStale = createMemo(() => {
+    const id = host();
+    return id !== undefined && store.state.stale[id]?.sessions === true;
+  });
 
   const banner = () => {
     const state = sidecar();
