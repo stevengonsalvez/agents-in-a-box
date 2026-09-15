@@ -220,6 +220,9 @@ impl AinbCliSource {
         let mut cmd = tokio::process::Command::new(&self.bin);
         cmd.arg("--format").arg("json").args(args);
         cmd.stdin(std::process::Stdio::null());
+        // A caller that stops waiting (the cost task's timeout, #1055) drops this
+        // future; the child is killed with it instead of running on unattended.
+        cmd.kill_on_drop(true);
 
         let output = match cmd.output().await {
             Ok(o) => o,
