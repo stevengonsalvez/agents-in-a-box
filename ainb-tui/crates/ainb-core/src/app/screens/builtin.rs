@@ -141,9 +141,9 @@ pub fn crossterm_to_protocol_key(
 /// the panel was opened from. This replaces the old behaviour where
 /// Esc on a zoomed plugin view discarded zoom state and jumped
 /// straight home. `Backspace` remains a plugin-internal alias for the
-/// same one-level pop. When the plugin is missing or its runtime is
-/// down, the forwarder returns `NotHandled` and Esc falls through to
-/// the central dispatch, which still closes the placeholder screen.
+/// same one-level pop. When the plugin is missing or its render is
+/// wedged, [`route_key_to_focused_plugin`] returns `Host` for Esc and q,
+/// so the central dispatch still closes the placeholder screen.
 ///
 /// `q`, `a`, `Tab`, `Enter`, etc. remain plugin-owned — the burndown
 /// plugin re-binds them to period switches, panel focus, and zoom
@@ -196,10 +196,15 @@ pub fn route_key_to_focused_plugin(
         // it to Quit / ToggleHelp / etc.
         return PluginRoute::Host;
     }
-    // No runtime up yet: nothing to send to, the host dispatches.
-    let Some(presence) = state.plugins_host.plugin_presence.get(plugin_name) else {
-        return PluginRoute::Host;
-    };
+    // A screen the tick has not reported on yet (the runtime is not up, or
+    // this frame came first) is treated as absent, never as the host's: the
+    // host's rows on the screen beneath include destructive ones.
+    let presence = state
+        .plugins_host
+        .plugin_presence
+        .get(&state.shell.current_screen)
+        .copied()
+        .unwrap_or_default();
     // Esc and q leave the screen. When the plugin is absent or its render is
     // wedged the key would not be acted on, so the central dispatch takes it
     // (PanelBack) rather than trapping the user with only Ctrl+C.
@@ -307,8 +312,15 @@ pub fn route_mouse_to_focused_plugin(
     let Some(plugin_name) = plugin_id_for_screen(&state.shell.current_screen) else {
         return PluginRoute::Host;
     };
-    if !state.plugins_host.plugin_presence.contains_key(plugin_name) {
-        return PluginRoute::Host;
+    // Absent or not yet reported: the plugin screen still owns the pointer,
+    // so the host's click handling never runs on it.
+    let registered = state
+        .plugins_host
+        .plugin_presence
+        .get(&state.shell.current_screen)
+        .is_some_and(|presence| presence.registered);
+    if !registered {
+        return PluginRoute::Consumed;
     }
 
     let mut mouse = crossterm_to_protocol_mouse(event);
@@ -405,9 +417,12 @@ fn build_placeholder_for_unloaded_plugin(
     };
 
     let plugin_name = plugin_id_for_screen(screen_id);
-    let plugin_registered = plugin_name
-        .and_then(|name| state.plugins_host.plugin_presence.get(name))
-        .is_some_and(|presence| presence.registered);
+    let plugin_registered = plugin_name.is_some()
+        && state
+            .plugins_host
+            .plugin_presence
+            .get(screen_id)
+            .is_some_and(|presence| presence.registered);
 
     // A recorded render failure outranks the loading beat: the plugin is
     // registered, so case 3 would otherwise paint "connecting…" forever.
@@ -1255,11 +1270,11 @@ mod tests {
         }
     }
 
-    fn on_plugin_screen(screen: &str, plugin: &str, registered: bool, wedged: bool) -> AppState {
+    fn on_plugin_screen(screen: &str, registered: bool, wedged: bool) -> AppState {
         let mut state = crate::app::state::AppState::default();
         state.shell.current_screen = screen.to_string();
         state.plugins_host.plugin_presence.insert(
-            plugin.to_string(),
+            screen.to_string(),
             crate::app::sections::PluginPresence { registered, wedged },
         );
         state
@@ -1276,7 +1291,7 @@ mod tests {
         use crossterm::event::{KeyCode as CtKey, KeyModifiers};
 
         for (registered, wedged) in [(false, false), (true, true)] {
-            let state = on_plugin_screen(ids::ANALYTICS, "burndown", registered, wedged);
+            let state = on_plugin_screen(ids::ANALYTICS, registered, wedged);
             for code in [CtKey::Esc, CtKey::Char('q')] {
                 assert_eq!(
                     route_key_to_focused_plugin(&state, &key(code, KeyModifiers::NONE)),
@@ -1285,22 +1300,30 @@ mod tests {
                 );
             }
         }
-        let absent = on_plugin_screen(ids::ANALYTICS, "burndown", false, false);
+        let absent = on_plugin_screen(ids::ANALYTICS, false, false);
         assert_eq!(
             route_key_to_focused_plugin(&absent, &key(CtKey::Char('d'), KeyModifiers::NONE)),
             PluginRoute::Consumed,
             "no destructive fallthrough from an absent plugin"
         );
 
-        let no_runtime = {
+        // Nothing reported for the screen yet (the runtime is not up, or the
+        // first tick has not run): absent, so `d` is claimed and Esc still
+        // leaves.
+        let unreported = {
             let mut state = crate::app::state::AppState::default();
             state.shell.current_screen = ids::ANALYTICS.to_string();
             state
         };
         assert_eq!(
-            route_key_to_focused_plugin(&no_runtime, &key(CtKey::Char('d'), KeyModifiers::NONE)),
+            route_key_to_focused_plugin(&unreported, &key(CtKey::Char('d'), KeyModifiers::NONE)),
+            PluginRoute::Consumed,
+            "an unreported plugin screen never hands `d` to the session list"
+        );
+        assert_eq!(
+            route_key_to_focused_plugin(&unreported, &key(CtKey::Esc, KeyModifiers::NONE)),
             PluginRoute::Host,
-            "before the runtime is up the host dispatches"
+            "and Esc still leaves it"
         );
     }
 
@@ -1310,7 +1333,7 @@ mod tests {
     fn a_key_for_a_live_plugin_is_an_effect_for_the_host() {
         use crossterm::event::{KeyCode as CtKey, KeyModifiers};
 
-        let state = on_plugin_screen(ids::HANGAR, "hangar-tui", true, false);
+        let state = on_plugin_screen(ids::HANGAR, true, false);
         let PluginRoute::Forward(crate::app::Effect::ForwardToPlugin {
             plugin,
             screen,
@@ -1344,7 +1367,7 @@ mod tests {
     fn plugin_screen_forwards_help_keys_regardless_of_capture_flag() {
         use crossterm::event::{KeyCode as CtKey, KeyModifiers};
 
-        let mut state = on_plugin_screen(ids::HANGAR, "hangar-tui", true, false);
+        let mut state = on_plugin_screen(ids::HANGAR, true, false);
         let forwarded = |state: &AppState, ch: char| {
             matches!(
                 route_key_to_focused_plugin(state, &key(CtKey::Char(ch), KeyModifiers::NONE)),
