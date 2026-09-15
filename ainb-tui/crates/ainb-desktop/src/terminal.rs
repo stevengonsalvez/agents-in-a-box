@@ -10,7 +10,9 @@
 //! output leaves through the sink the webview hands it, and input comes back
 //! as calls. The pump sends only while the webview has acknowledged all but
 //! [`WINDOW_BYTES`] of what it was sent, so a slow webview stalls the reader
-//! and tmux holds the output, instead of a queue growing without bound.
+//! and tmux holds the output, instead of a queue growing without bound. A
+//! stalled tab holds at most `WINDOW_BYTES + READ_QUEUE * CHUNK_BYTES`, about
+//! 8 MiB, so 64 MiB with [`MAX_ATTACHED_TABS`] attached.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
