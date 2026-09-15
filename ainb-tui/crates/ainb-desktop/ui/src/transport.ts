@@ -18,29 +18,32 @@ export interface TerminalTransport {
 
 /** The local leg: tab `key`'s output over a raw-buffer channel. */
 export function tauriTransport(key: string): TerminalTransport {
-  let listener: ((bytes: Uint8Array) => Promise<void> | void) | undefined;
-  const early: Uint8Array[] = [];
-
-  const deliver = (bytes: Uint8Array) => {
-    void Promise.resolve(listener?.(bytes)).then(() =>
-      invoke("terminal_ack", { key, bytes: bytes.byteLength }),
-    );
-  };
-
-  const output = new Channel<ArrayBuffer>();
-  output.onmessage = (buffer) => {
-    const bytes = new Uint8Array(buffer);
-    if (listener) deliver(bytes);
-    else early.push(bytes);
-  };
-  void invoke<boolean>("terminal_output", { key, bytes: output });
-
   return {
     send: (data) => void invoke("terminal_input", { key, data }),
     resize: (cols, rows) => void invoke("terminal_resize", { key, cols, rows }),
-    onBytes(next) {
-      listener = next;
-      early.splice(0).forEach(deliver);
+    onBytes(listener) {
+      // The channel opens only now, with its listener in place, so no output
+      // arrives before there is somewhere to paint it and nothing is buffered.
+      const output = new Channel<ArrayBuffer>();
+      output.onmessage = (buffer) => {
+        const bytes = new Uint8Array(buffer);
+        const acknowledge = () => {
+          invoke("terminal_ack", { key, bytes: bytes.byteLength }).catch((error: unknown) =>
+            console.warn("terminal acknowledgement not delivered", error),
+          );
+        };
+        // Credit comes back however the paint went: a throwing or rejected
+        // paint must not leave the tab's window closed.
+        try {
+          void Promise.resolve(listener(bytes))
+            .catch((error: unknown) => console.warn("terminal paint failed", error))
+            .finally(acknowledge);
+        } catch (error) {
+          console.warn("terminal paint failed", error);
+          acknowledge();
+        }
+      };
+      void invoke<boolean>("terminal_output", { key, bytes: output });
     },
   };
 }
