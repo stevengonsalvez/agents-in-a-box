@@ -132,12 +132,30 @@ pub struct WebNeedPayload {
     pub message: Option<String>,
 }
 
+/// The most characters any projected string keeps, after scrubbing. A card is
+/// a summary; a longer value is cut with `…` rather than shipped whole.
+pub const MAX_CARD_TEXT_CHARS: usize = 512;
+
+/// What an unparsed payload shows. The raw request is not a summary the card
+/// can bound safely, so none of it reaches the browser.
+pub const UNPARSED_PAYLOAD_TEXT: &str = "(request details are in the session)";
+
+/// Scrub `text`, then keep at most [`MAX_CARD_TEXT_CHARS`] characters.
+fn card_text(text: &str) -> String {
+    let scrubbed = crate::fleet::bridge::redact::scrub(text);
+    if scrubbed.chars().count() <= MAX_CARD_TEXT_CHARS {
+        return scrubbed;
+    }
+    let mut cut: String = scrubbed.chars().take(MAX_CARD_TEXT_CHARS - 1).collect();
+    cut.push('…');
+    cut
+}
+
 /// The web cards for a `needs` array of daemon cards. Anything that is not an
 /// object is dropped; a key the allow-list does not name never reaches a card.
 #[must_use]
 pub fn need_cards(needs: &Value) -> Vec<WebNeedCard> {
-    use crate::fleet::bridge::redact::scrub;
-    let text = |value: &Value| value.as_str().map(scrub);
+    let text = |value: &Value| value.as_str().map(card_text);
     needs
         .as_array()
         .into_iter()
@@ -147,7 +165,7 @@ pub fn need_cards(needs: &Value) -> Vec<WebNeedCard> {
             let workspace_name = card["cwd"]
                 .as_str()
                 .and_then(|cwd| std::path::Path::new(cwd).file_name())
-                .map(|name| scrub(&name.to_string_lossy()))
+                .map(|name| card_text(&name.to_string_lossy()))
                 .unwrap_or_default();
             WebNeedCard {
                 attention_id: text(&card["attentionId"]),
@@ -178,12 +196,12 @@ pub fn need_cards(needs: &Value) -> Vec<WebNeedCard> {
 }
 
 fn need_payload(payload: &Value) -> WebNeedPayload {
-    use crate::fleet::bridge::redact::scrub;
-    let text = |key: &str| payload[key].as_str().map(scrub);
+    let text = |key: &str| payload[key].as_str().map(card_text);
     match payload {
-        // A payload that did not parse is shown as its (scrubbed) text.
-        Value::String(raw) => WebNeedPayload {
-            text: Some(scrub(raw)),
+        // A payload that did not parse is the raw request: a placeholder, never
+        // the text itself.
+        Value::String(_) => WebNeedPayload {
+            text: Some(UNPARSED_PAYLOAD_TEXT.to_string()),
             ..WebNeedPayload::default()
         },
         Value::Object(_) => WebNeedPayload {
@@ -193,7 +211,7 @@ fn need_payload(payload: &Value) -> WebNeedPayload {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|option| option.as_str().map(scrub))
+                .filter_map(|option| option.as_str().map(card_text))
                 .collect(),
             multi_select: payload["multiSelect"].as_bool(),
             text: text("text"),
@@ -255,12 +273,38 @@ mod tests {
     }
 
     #[test]
-    fn an_unparsed_payload_is_shown_as_scrubbed_text() {
-        let needs = serde_json::json!([{"kind": "ERR", "payload": format!("token {CANARY}")}]);
+    fn an_unparsed_payload_is_a_placeholder_not_the_raw_request() {
+        let needs = serde_json::json!([{"kind": "ERR", "payload": "raw request text"}]);
         let cards = need_cards(&needs);
-        let text = cards[0].payload.text.as_deref().unwrap_or_default();
-        assert!(text.starts_with("token "), "{text}");
-        assert!(!text.contains(CANARY), "{text}");
+        assert_eq!(
+            cards[0].payload.text.as_deref(),
+            Some(UNPARSED_PAYLOAD_TEXT)
+        );
+    }
+
+    #[test]
+    fn every_projected_string_is_clamped_after_scrubbing() {
+        let long = "q".repeat(MAX_CARD_TEXT_CHARS * 4);
+        let needs = serde_json::json!([{
+            "kind": long,
+            "sessionId": long,
+            "cwd": format!("/w/{long}"),
+            "payload": {"question": long, "options": [long], "message": long},
+        }]);
+        let card = &need_cards(&needs)[0];
+        let lengths = [
+            card.kind.chars().count(),
+            card.session_id.chars().count(),
+            card.workspace_name.chars().count(),
+            card.payload.question.as_deref().unwrap_or_default().chars().count(),
+            card.payload.options[0].chars().count(),
+            card.payload.message.as_deref().unwrap_or_default().chars().count(),
+        ];
+        assert!(
+            lengths.iter().all(|len| *len == MAX_CARD_TEXT_CHARS),
+            "{lengths:?}"
+        );
+        assert!(card.payload.question.as_deref().is_some_and(|q| q.ends_with('…')));
     }
 
     #[test]
