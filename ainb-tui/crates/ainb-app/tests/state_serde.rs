@@ -1858,16 +1858,45 @@ fn split_top_level(text: &str, separator: char) -> Vec<String> {
 }
 
 /// `(key, value type)` of the first entry of an object body, given its inside.
+///
+/// The value ENDS at the object's own closing brace, not at the end of the
+/// member: specta writes an exclusive union member as
+/// `({ Sent: FleetActionReceipt[] }) & { Failed?: never }`, so everything from
+/// the `&` on belongs to the exclusion, not to the payload.
 fn first_entry(inner: &str) -> Option<(String, String)> {
-    let body = inner.trim_end().trim_end_matches('}');
-    let entry = split_top_level(body, ',').into_iter().next()?;
+    let entry = split_top_level(inner, ',').into_iter().next()?;
     let colon = split_top_level(&entry, ':');
     if colon.len() < 2 {
         return None;
     }
     let key = colon[0].trim().trim_matches('"').trim().to_string();
-    let value = colon[1..].join(":").trim().to_string();
+    let value = colon[1..].join(":");
+    let value = value[..balanced_end(&value)].trim().to_string();
     Some((key, value))
+}
+
+/// The byte index at which `value` stops being the first object's content: the
+/// `}` that closes the object the entry sits in, or the whole string when the
+/// value is not wrapped in one.
+fn balanced_end(value: &str) -> usize {
+    let mut depth = 0_i32;
+    let mut quote = None::<char>;
+    for (index, ch) in value.char_indices() {
+        match (quote, ch) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(ch),
+            (None, '{' | '(' | '[' | '<') => depth += 1,
+            (None, '}' | ')' | ']' | '>') => {
+                if depth == 0 {
+                    return index;
+                }
+                depth -= 1;
+            }
+            (None, _) => {}
+        }
+    }
+    value.len()
 }
 
 /// Every `(field, type)` of an object type, optional markers stripped.
