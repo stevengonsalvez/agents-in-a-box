@@ -69,6 +69,34 @@ impl Server {
     }
 }
 
+impl Drop for Server {
+    /// Declared before its sessions and tabs, a server drops after them: every
+    /// session has been killed by its exact name and every tab client with it,
+    /// so tmux exits on its own (`exit-empty`). Waiting for that before the
+    /// directory goes leaves no server and no directory behind; nothing here
+    /// kills a server.
+    fn drop(&mut self) {
+        let running = || {
+            self.command()
+                .arg("list-sessions")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if running() {
+            eprintln!(
+                "tmux server on {} still up: a session leaked",
+                self.socket().display()
+            );
+        }
+    }
+}
+
 struct Session<'a> {
     server: &'a Server,
     name: String,
