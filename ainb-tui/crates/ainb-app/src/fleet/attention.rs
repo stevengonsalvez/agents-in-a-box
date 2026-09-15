@@ -242,6 +242,27 @@ pub struct AttentionOption {
     pub description: String,
 }
 
+/// One chip of a session row's merged attention, as a mirror frame carries it:
+/// the kind the row paints and the detail it can show, scrubbed. How the chip
+/// is answered stays on the host.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+pub struct AttentionMark {
+    pub kind: AttentionKind,
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
+    pub detail: Option<String>,
+}
+
+impl From<&SessionAttention> for AttentionMark {
+    fn from(chip: &SessionAttention) -> Self {
+        Self {
+            kind: chip.kind,
+            detail: chip.detail.clone(),
+        }
+    }
+}
+
 /// One live attention state on one session row.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
