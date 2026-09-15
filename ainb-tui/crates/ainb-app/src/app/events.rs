@@ -235,6 +235,11 @@ pub enum AppEvent {
         plugin: String,
         action_id: String,
     },
+    /// A key leaving `screen` found `plugin` unable to take it.
+    PluginInputUndelivered {
+        plugin: String,
+        screen: String,
+    },
     /// The user left the live terminal.
     Detached,
     /// Opening an editor went this way.
@@ -3947,6 +3952,14 @@ impl EventHandler {
                 state.add_error_notification(format!(
                     "Could not run `{action_id}`: the {plugin} plugin is not running"
                 ));
+            }
+            AppEvent::PluginInputUndelivered { plugin, screen } => {
+                // Still on the screen the key was for: leave it, as the key
+                // would have had the plugin been able to take it.
+                if state.shell.current_screen == screen {
+                    tracing::debug!(%plugin, %screen, "plugin could not take a back key");
+                    Self::process_event(AppEvent::PanelBack, state);
+                }
             }
             AppEvent::Detached => {
                 if state.is_interactive_pane() {
