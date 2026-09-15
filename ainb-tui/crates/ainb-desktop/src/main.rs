@@ -8,6 +8,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod menu;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -309,6 +311,8 @@ fn main() {
                 sidecar,
                 sidecar_config,
             });
+
+            menu::install(app.handle());
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
