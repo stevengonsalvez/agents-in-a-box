@@ -78,6 +78,8 @@ pub enum AppEvent {
     /// the terminal shows something else, or no longer does.
     WatchPluginScreen {
         screen: String,
+        /// The host watching, so its stop ends only its own request.
+        host: crate::wire::frame::HostId,
         watching: bool,
         /// The viewport the watching host draws the screen at.
         width: u16,
@@ -239,6 +241,10 @@ pub enum AppEvent {
     PluginInputUndelivered {
         plugin: String,
         screen: String,
+    },
+    /// `host` went away: release what it held.
+    HostDisconnected {
+        host: crate::wire::frame::HostId,
     },
     /// The user left the live terminal.
     Detached,
@@ -3984,6 +3990,9 @@ impl EventHandler {
                     "Could not run `{action_id}`: the {plugin} plugin is not running"
                 ));
             }
+            AppEvent::HostDisconnected { host } => {
+                state.release_host_screen_watches(&host, None);
+            }
             AppEvent::PluginInputUndelivered { plugin, screen } => {
                 // Still on the screen the key was for: leave it, as the key
                 // would have had the plugin been able to take it.
@@ -7115,6 +7124,7 @@ impl EventHandler {
             }
             AppEvent::WatchPluginScreen {
                 screen,
+                host,
                 watching,
                 width,
                 height,
@@ -7137,21 +7147,20 @@ impl EventHandler {
                 } else if watching && watched {
                     // A renewal moves the lease and maybe the render size,
                     // neither of which a frame carries.
-                    state.plugins_host.update(|host| {
-                        if let Some(watch) = host.watched_plugin_screens.get_mut(&screen) {
-                            watch.renew(now, width, height, lease);
+                    state.plugins_host.update(|plugins| {
+                        if let Some(watch) = plugins.watched_plugin_screens.get_mut(&screen) {
+                            watch.renew(host, now, width, height, lease);
                         }
                         false
                     });
                 } else if watching {
                     let mut watch = ScreenWatch::default();
-                    watch.renew(now, width, height, lease);
+                    watch.renew(host, now, width, height, lease);
                     state.plugins_host.watched_plugin_screens.insert(screen, watch);
-                } else {
-                    // A stop names no watcher, so removing the watch would end
-                    // every other host's too. The stopping host just stops
-                    // renewing, and its request lapses with the lease.
-                    tracing::debug!(%screen, "watch stop; the request lapses with its lease");
+                } else if watched {
+                    // A stop ends this host's request only; the screen stays
+                    // watched while another host's request is live.
+                    state.release_host_screen_watches(&host, Some(&screen));
                 }
             }
             AppEvent::NavigateTo(screen_id) => {
