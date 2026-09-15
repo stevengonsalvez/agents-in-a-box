@@ -1,0 +1,161 @@
+//! The desktop's embedded host: one `AppState`, driven through `dispatch`, with
+//! every change framed for the webview.
+
+use ainb_app::app::RendererHost;
+use ainb_app::app::intent::{Btn, Pos};
+use ainb_app::app::keymap::HostAction;
+use ainb_app::config::AppConfig;
+use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
+use ainb_app::{AppState, Effect, Intent, Keymap};
+
+/// Where framed state goes: the Tauri channel in the app, a recorder in tests.
+pub trait FrameSink {
+    fn send(&mut self, batch: FrameBatch);
+}
+
+impl<F: FnMut(FrameBatch)> FrameSink for F {
+    fn send(&mut self, batch: FrameBatch) {
+        self(batch);
+    }
+}
+
+/// Carries out one effect and returns the reports it produced, in order.
+pub trait Executor {
+    fn execute(&mut self, effect: Effect) -> Vec<Intent>;
+}
+
+/// The renderer-local half of [`RendererHost`] for a DOM renderer.
+///
+/// Layout work the keymap resolves (a pane scroll, the sidebar toggle) is
+/// queued for the webview, which owns that layout. Pointer presses never reach
+/// it: the webview hit-tests its own DOM and sends the command the press means
+/// as an `Intent::Command`, so there is nothing under a `Pos` to find here.
+#[derive(Debug, Default)]
+pub struct DesktopLayout {
+    queued: Vec<HostAction>,
+}
+
+impl DesktopLayout {
+    /// The layout work queued since the last call, oldest first.
+    pub fn take(&mut self) -> Vec<HostAction> {
+        std::mem::take(&mut self.queued)
+    }
+}
+
+impl RendererHost for DesktopLayout {
+    fn queue(&mut self, action: HostAction) {
+        self.queued.push(action);
+    }
+
+    fn pointer(&mut self, _state: &AppState, _pos: Pos, _btn: Btn) -> Option<Intent> {
+        None
+    }
+}
+
+/// Reports an effect may lead to before the chain is cut. A report that queued
+/// another effect that reported again is legitimate; one that loops is a bug,
+/// and a bounded chain keeps it from wedging the shell.
+const MAX_REPORT_ROUNDS: usize = 32;
+
+/// One `AppState` hosted for the desktop renderer.
+pub struct DesktopHost<S: FrameSink> {
+    state: AppState,
+    keymap: Keymap,
+    layout: DesktopLayout,
+    mirror: Mirror,
+    sink: S,
+}
+
+impl<S: FrameSink> DesktopHost<S> {
+    /// Host a state built on `config`, as given: nothing is read from disk for
+    /// it. Frames for the sections in `subscription` go to `sink`, stamped with
+    /// `host_id`.
+    pub fn new(
+        config: AppConfig,
+        keymap: Keymap,
+        host_id: HostId,
+        subscription: Subscription,
+        sink: S,
+    ) -> Self {
+        Self {
+            state: AppState::with_config(config),
+            keymap,
+            layout: DesktopLayout::default(),
+            mirror: Mirror::new(host_id, subscription),
+            sink,
+        }
+    }
+
+    /// The hosted state, read-only: the host never writes it outside dispatch.
+    pub const fn state(&self) -> &AppState {
+        &self.state
+    }
+
+    /// Apply `intent`, frame what it moved, and return the effects it queued.
+    /// The state write has finished before any effect is handed back.
+    #[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
+    pub fn dispatch(&mut self, intent: Intent) -> Vec<Effect> {
+        let effects = ainb_app::dispatch(&mut self.state, &self.keymap, &mut self.layout, intent);
+        self.pump();
+        effects
+    }
+
+    /// Frame whatever moved outside a dispatch and hand back the effects that
+    /// work queued.
+    #[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
+    pub fn tick(&mut self) -> Vec<Effect> {
+        let effects = self.state.take_effects();
+        self.pump();
+        effects
+    }
+
+    /// Apply `intent`, run each effect it queued with `executor` once the
+    /// write is done, and apply the reports those effects produced the same
+    /// way, until nothing more is queued.
+    pub fn run(&mut self, intent: Intent, executor: &mut impl Executor) {
+        let mut pending = vec![intent];
+        for _ in 0..MAX_REPORT_ROUNDS {
+            if pending.is_empty() {
+                return;
+            }
+            let mut reports = Vec::new();
+            for intent in pending {
+                for effect in self.dispatch(intent) {
+                    reports.extend(executor.execute(effect));
+                }
+            }
+            pending = reports;
+        }
+        tracing::error!(
+            dropped = pending.len(),
+            "effect reports kept queueing effects; the chain was cut"
+        );
+    }
+
+    /// Layout work for the webview queued since the last call.
+    pub fn take_layout(&mut self) -> Vec<HostAction> {
+        self.layout.take()
+    }
+
+    /// Change the sections the renderer wants. A newly added one is framed in
+    /// full now.
+    pub fn resubscribe(&mut self, subscription: Subscription) {
+        self.mirror.resubscribe(subscription);
+        self.pump();
+    }
+
+    /// Frame every subscribed section again, for a renderer that attached (or
+    /// reloaded) after the last batch and so holds none of them.
+    pub fn reframe(&mut self) {
+        let subscription = self.mirror.subscription();
+        self.mirror.resubscribe(Subscription::only(&[]));
+        self.resubscribe(subscription);
+    }
+
+    fn pump(&mut self) {
+        let batch = self.mirror.batch(&self.state);
+        if !batch.is_empty() {
+            self.sink.send(batch);
+        }
+    }
+}

@@ -44,5 +44,5 @@ pub use intent::{Args, Btn, Intent, Pos, dispatch};
 pub use keymap::{Chord, CommandId, Key, Keymap, Mods};
 pub use screens::ScreenId;
 pub use session_loader::SessionLoader;
-pub use state::{App, AppState};
+pub use state::AppState;
 pub use versioned::{SectionId, Versioned};

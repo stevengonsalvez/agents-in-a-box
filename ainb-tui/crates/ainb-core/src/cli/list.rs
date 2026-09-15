@@ -145,8 +145,8 @@ pub async fn list_sessions(args: &ListArgs) -> Result<Vec<SessionInfo>> {
 /// included, and the rows are projected from that section's redacted frame
 /// (`ainb_app::wire::web`). The label is withheld by the frame, so the browser
 /// gets what a mirror renderer gets, never the operator's own list as typed
-/// (#1056). The tmux session name and worktree path pass through as stored:
-/// the frame does not scrub them.
+/// (#1056). The tmux session name passes through as stored; the worktree is
+/// sent as its scrubbed directory name, never its absolute path (#1097).
 fn web_rows(sessions: &[SessionInfo]) -> Vec<ainb_app::wire::web::WebSessionRow> {
     use ainb_app::models::{Session, SessionStatus as ModelStatus, Workspace};
     let mut workspaces: Vec<Workspace> = Vec::new();
@@ -294,8 +294,8 @@ mod tests {
             ]
         );
         assert_eq!(
-            rows[2].worktree_path,
-            "/w/repo-5b1f2a8e-0000-4000-8000-000000000003"
+            rows[2].worktree_name,
+            "repo-5b1f2a8e-0000-4000-8000-000000000003"
         );
     }
 
@@ -306,7 +306,7 @@ mod tests {
                 session_id: "bad".to_string(),
                 tmux_session_name: None,
                 workspace_name: "repo".to_string(),
-                worktree_path: "/w".to_string(),
+                worktree_name: "w".to_string(),
                 created_at: "not a stamp".to_string(),
                 is_running: true,
                 claude_active: false,
@@ -315,7 +315,7 @@ mod tests {
                 session_id: "good".to_string(),
                 tmux_session_name: None,
                 workspace_name: "repo".to_string(),
-                worktree_path: "/w".to_string(),
+                worktree_name: "w".to_string(),
                 created_at: "2026-09-15T00:00:00Z".to_string(),
                 is_running: true,
                 claude_active: false,

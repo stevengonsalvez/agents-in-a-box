@@ -482,6 +482,12 @@ pub struct PoolConfig {
     pub writer: WriterConfig,
     /// Per-provider-process breaker tuning.
     pub circuit: CircuitConfig,
+    /// Fault injection: how long the process supervisor holds a dead process's
+    /// `ProcessExited` notice before sending it to the sessions it hosted.
+    /// Zero in production. A test sets it to force the order in which an actor
+    /// sees its turn's transport error first and the exit notice second, which
+    /// is the order a loaded runner produces by chance (#1091).
+    pub exit_notice_delay: Duration,
 }
 
 impl Default for PoolConfig {
@@ -504,6 +510,7 @@ impl Default for PoolConfig {
             sweep_interval: DEFAULT_SWEEP_INTERVAL,
             writer: WriterConfig::default(),
             circuit: CircuitConfig::default(),
+            exit_notice_delay: Duration::ZERO,
         }
     }
 }
@@ -1638,6 +1645,9 @@ impl AcpPool {
             // Convergence runs IN the actor so exactly one writer per session
             // touches the open turn; the actor falls back to the shared
             // function, which is the same one the boot scan calls.
+            if !pool.config.exit_notice_delay.is_zero() {
+                tokio::time::sleep(pool.config.exit_notice_delay).await;
+            }
             let sessions = pool.sessions.lock().await;
             for session_key in hosted {
                 if let Some(handle) = sessions.get(&session_key) {
@@ -2445,6 +2455,18 @@ impl SessionActor {
             return;
         };
         self.quiesce().await;
+        // A transport error means the adapter process is gone (#1091). This
+        // actor tears down HERE rather than waiting for the supervisor's
+        // `ProcessExited`, which lands a quiesce and two locks later: in between,
+        // the prompt arm would read the next queued job, respawn the adapter
+        // under the I6 requeue and deliver a prompt that never reached the dead
+        // one. The error kind is the proof, not `is_alive()`: pending replies
+        // fail before the connection reads closed. Stragglers are drained first
+        // so they land before the turn's marker.
+        let transport_lost = matches!(result, Err(AcpError::Transport(_)));
+        if transport_lost {
+            self.drain_updates().await;
+        }
         if let Ok(mut slot) = self.stats.turn_started_at.lock() {
             *slot = None;
         }
@@ -2550,6 +2572,16 @@ impl SessionActor {
         // repair. The process-exit route gets here an `EXIT_QUIESCE` later at
         // best, and only once this actor finishes the write set below.
         self.cancel_parked("hangar-turn-end").await;
+        if transport_lost {
+            // BEFORE the receipt: queued prompts never reached the adapter, so
+            // they fail with its exit (I16), and a client that waits on this
+            // receipt submits into a detached actor. Not `converge`: its shared
+            // sweep resolves every PENDING leg UNKNOWN, including one submitted
+            // right after the receipt lands. The late `ProcessExited` is dropped
+            // by `holds_process`, since this actor no longer holds the corpse.
+            self.detach();
+            self.drain_queue(ConvergeCause::AdapterExit.detail()).await;
+        }
         // ONE transaction (I4): the reply, its receipt and the released session
         // land together or not at all. Four separate commits left a daemon
         // death between them showing an answer with no receipt, or a receipt

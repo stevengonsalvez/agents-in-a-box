@@ -861,6 +861,6 @@ web_snapshot.sessions[].is_running
 web_snapshot.sessions[].session_id
 web_snapshot.sessions[].tmux_session_name
 web_snapshot.sessions[].workspace_name
-web_snapshot.sessions[].worktree_path
+web_snapshot.sessions[].worktree_name
 workspace_load.is_loading_workspaces
 workspace_load.workspace_load_error
