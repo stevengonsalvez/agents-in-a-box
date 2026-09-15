@@ -1455,7 +1455,19 @@ impl EventHandler {
         }
 
         let contexts = active_contexts(state);
-        match keymap.resolve_with_context(&contexts, &chord) {
+        let resolved = keymap.resolve_with_context(&contexts, &chord);
+        // A focused confirm card answers its own keys ahead of the sessions
+        // screen's rows, which bind `n`, `e` and `k`. Every other printable
+        // keeps its row, so `q` still leaves and `d` still deletes.
+        if let Some(character) = Self::session_card_key(&chord, state) {
+            let screen_row_or_none = resolved.as_ref().is_none_or(|(context, _)| {
+                matches!(context, KeyContext::Screen(screen, _) if *screen == screen_ids::SESSION_LIST)
+            });
+            if screen_row_or_none {
+                return Self::route_session_composer_char(character, state);
+            }
+        }
+        match resolved {
             Some((context, _))
                 if state.shell.help_visible
                     && context != KeyContext::HelpVisible
@@ -1949,6 +1961,30 @@ impl EventHandler {
         turn(&mut state.host.pal_dial);
         state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
+    }
+
+    /// The key a confirm card answers, when a chat tab on the sessions screen
+    /// has its cards focused: `y` and `n` answer, `e` edits, `j` and `k` move.
+    fn session_card_key(chord: &Chord, state: &AppState) -> Option<char> {
+        use crate::components::session_tabs::SessionTab;
+        use ainb_plugin_hangar::screen::fleet_chat::ChatFocus;
+
+        let character = chord
+            .printable()
+            .filter(|character| matches!(character, 'y' | 'n' | 'e' | 'j' | 'k'))?;
+        if state.shell.current_screen != screen_ids::SESSION_LIST
+            || (state.shell.session_tab == SessionTab::Thread
+                && !state.broadcast_targets().is_empty())
+        {
+            return None;
+        }
+        let host = match state.shell.session_tab {
+            SessionTab::Pal => state.host.pal_chat.as_ref(),
+            SessionTab::Thread => state.host.session_chat.as_ref().map(|(_, host)| host),
+            SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
+        }?;
+        let chat = host.state();
+        (matches!(chat.focus(), ChatFocus::Cards) && !chat.is_capturing_text()).then_some(character)
     }
 
     fn route_session_composer_char(character: char, state: &mut AppState) -> Option<AppEvent> {
