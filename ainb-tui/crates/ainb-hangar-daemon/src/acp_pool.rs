@@ -482,6 +482,12 @@ pub struct PoolConfig {
     pub writer: WriterConfig,
     /// Per-provider-process breaker tuning.
     pub circuit: CircuitConfig,
+    /// Fault injection: how long the process supervisor holds a dead process's
+    /// `ProcessExited` notice before sending it to the sessions it hosted.
+    /// Zero in production. A test sets it to force the order in which an actor
+    /// sees its turn's transport error first and the exit notice second, which
+    /// is the order a loaded runner produces by chance (#1091).
+    pub exit_notice_delay: Duration,
 }
 
 impl Default for PoolConfig {
@@ -504,6 +510,7 @@ impl Default for PoolConfig {
             sweep_interval: DEFAULT_SWEEP_INTERVAL,
             writer: WriterConfig::default(),
             circuit: CircuitConfig::default(),
+            exit_notice_delay: Duration::ZERO,
         }
     }
 }
@@ -1638,6 +1645,9 @@ impl AcpPool {
             // Convergence runs IN the actor so exactly one writer per session
             // touches the open turn; the actor falls back to the shared
             // function, which is the same one the boot scan calls.
+            if !pool.config.exit_notice_delay.is_zero() {
+                tokio::time::sleep(pool.config.exit_notice_delay).await;
+            }
             let sessions = pool.sessions.lock().await;
             for session_key in hosted {
                 if let Some(handle) = sessions.get(&session_key) {
