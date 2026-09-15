@@ -125,10 +125,9 @@ mod tests {
     /// lookup from the process the reducer runs in (#1077).
     #[test]
     fn the_session_the_host_reported_gets_no_observer() {
-        let own = "work.main";
+        let own = "ainb-host-session";
         let mut state = state_with_other_tmux_sessions(&[own]);
         state.shell.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
-        assert!(!state.is_host_tmux_session_selected());
 
         let before = state.versions();
         state.set_host_tmux_session(Some(own.to_string()));
@@ -137,14 +136,23 @@ mod tests {
             before,
             "a host fact bumps no section, so no frame carries it"
         );
-        assert!(
-            state.is_host_tmux_session_selected(),
-            "a dotted name tmux accepts still matches its own row"
-        );
+        assert!(state.is_host_tmux_session_selected());
         assert!(settled_observer_request(&mut state).is_none());
 
         state.set_host_tmux_session(None);
         assert!(!state.is_host_tmux_session_selected());
+        assert_eq!(settled_observer_request(&mut state), Some(observe(own)));
+    }
+
+    /// A dotted name tmux accepts but `TmuxSessionName` refuses still matches
+    /// its own row.
+    #[test]
+    fn a_dotted_host_session_matches_its_own_row() {
+        let own = "work.main";
+        let mut state = state_with_other_tmux_sessions(&[own]);
+        assert!(!state.is_host_tmux_session_selected());
+        state.set_host_tmux_session(Some(own.to_string()));
+        assert!(state.is_host_tmux_session_selected());
     }
 
     /// A reported session that is not the selected row leaves the row's
