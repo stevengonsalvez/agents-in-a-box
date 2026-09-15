@@ -278,13 +278,6 @@ fn refusal_reason(method: &str, value: &Value) -> Option<&'static str> {
     }
 }
 
-/// Map a ledger fault onto the wire with a FIXED message.
-///
-/// The dispatcher's own `store_err` forwards the SQLite text, which is right
-/// for a handler whose query a caller shaped. These are the ledger's own
-/// statements: their text describes the daemon's schema (table names, CHECK
-/// bodies, constraint names) and none of it is a caller's business or any use
-/// to one. The detail goes to the log, where an operator can read it.
 /// The `host_id` a claim is keyed under (#1066).
 ///
 /// An op id a pre-#1066 daemon already holds under `local` stays there, so a
@@ -304,6 +297,13 @@ async fn ledger_host(pool: &SqlitePool, op_id: &str) -> Result<String, RpcError>
     host_id_on(&mut conn).await.map_err(|e| store_error(&e))
 }
 
+/// Map a ledger fault onto the wire with a FIXED message.
+///
+/// The dispatcher's own `store_err` forwards the SQLite text, which is right
+/// for a handler whose query a caller shaped. These are the ledger's own
+/// statements: their text describes the daemon's schema (table names, CHECK
+/// bodies, constraint names) and none of it is a caller's business or any use
+/// to one. The detail goes to the log, where an operator can read it.
 fn store_error(error: &sqlx::Error) -> RpcError {
     tracing::warn!(error = %error, "mutation ledger store fault");
     RpcError {
