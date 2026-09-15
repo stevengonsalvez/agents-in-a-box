@@ -203,6 +203,12 @@ pub struct ListArgs {
     /// Show only sessions for a specific workspace
     #[arg(long)]
     pub workspace: Option<String>,
+
+    /// Print the web dashboard's session rows as JSON, projected from the
+    /// redacted Sessions frame: labels withheld, text scrubbed. `ainb web`
+    /// reads this; an operator's own list keeps the plain form.
+    #[arg(long, hide = true)]
+    pub frame: bool,
 }
 
 /// Set or clear a durable session label.
