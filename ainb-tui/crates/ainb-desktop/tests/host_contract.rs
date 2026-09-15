@@ -142,6 +142,30 @@ fn subscribe_frames_exactly_the_named_sections_in_one_batch() {
     assert_eq!(framed, vec!["frame fleet", "frame sessions"]);
 }
 
+/// The desktop's sidebar is the session list, so the host moves the reducer
+/// there through the home sidebar's own rows, and the list's row click is then
+/// in context.
+#[test]
+fn open_sessions_moves_the_reducer_to_the_session_list_through_its_rows() {
+    let log = Log::default();
+    let mut host = host(&[SectionId::Shell], &log);
+    assert_eq!(host.state().shell.current_screen, "home");
+    assert!(
+        !ainb_app::app::keymap::command_contexts(host.state())
+            .iter()
+            .any(|context| context.name() == "session_list")
+    );
+
+    host.open_sessions(&mut Recorder(Rc::clone(&log)));
+
+    assert_eq!(host.state().shell.current_screen, "session_list");
+    assert!(
+        ainb_app::app::keymap::command_contexts(host.state())
+            .iter()
+            .any(|context| context.name() == "session_list")
+    );
+}
+
 /// A key-only row writes outside ainb, so a chord that lands on one is named
 /// for the shell to refuse; any other chord is not.
 #[test]
