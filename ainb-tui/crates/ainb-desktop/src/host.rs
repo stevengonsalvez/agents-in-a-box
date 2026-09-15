@@ -57,11 +57,6 @@ impl RendererHost for DesktopLayout {
 /// and a bounded chain keeps it from wedging the shell.
 const MAX_REPORT_ROUNDS: usize = 32;
 
-/// How often the tick re-reads local hook events into the merged attention
-/// when the daemon has published nothing new: the terminal host's preview
-/// cadence, since each refresh reads the notifications store.
-const ATTENTION_REFRESH: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
     state: AppState,
@@ -69,8 +64,6 @@ pub struct DesktopHost<S: FrameSink> {
     layout: DesktopLayout,
     mirror: Mirror,
     sink: S,
-    /// When the tick last merged attention.
-    attention_refreshed: Option<std::time::Instant>,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -90,7 +83,6 @@ impl<S: FrameSink> DesktopHost<S> {
             layout: DesktopLayout::default(),
             mirror: Mirror::new(host_id, subscription),
             sink,
-            attention_refreshed: None,
         }
     }
 
@@ -130,16 +122,10 @@ impl<S: FrameSink> DesktopHost<S> {
             &self.state.host.attention_poll_running,
             &self.state.host.daemon_attention_generation,
         );
-        // The merged attention each session row carries on its frame. Merged
-        // at once on daemon news, and otherwise on the terminal host's cadence
-        // for local hook events; a merge that finds nothing new bumps nothing.
-        let daemon_news = self.state.refresh_daemon_attention_generation();
-        if daemon_news
-            || self.attention_refreshed.is_none_or(|last| last.elapsed() >= ATTENTION_REFRESH)
-        {
-            self.state.refresh_attention(now_ms());
-            self.attention_refreshed = Some(std::time::Instant::now());
-        }
+        // The merged attention each session row carries on its frame. The
+        // reducer paces it: at once on daemon news, otherwise on its own
+        // cadence, and a merge that finds nothing new bumps nothing.
+        self.state.refresh_attention(ainb_app::fleet::daemons::heartbeat::now_ms());
         let effects = self.state.take_effects();
         self.pump();
         effects
@@ -230,13 +216,4 @@ impl<S: FrameSink> DesktopHost<S> {
             self.sink.send(batch);
         }
     }
-}
-
-/// Wall-clock milliseconds, the clock hook events are stamped in.
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
-        })
 }
