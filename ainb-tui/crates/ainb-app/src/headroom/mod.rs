@@ -681,17 +681,22 @@ mod tests {
             .port();
         write_fake_headroom(&fake_headroom);
 
-        let mut fake_proxy = std::process::Command::new(&fake_headroom)
-            .env("AINB_HEADROOM_CROSS_PROCESS_SPAWN_LOG", &spawn_log)
-            .env("AINB_HEADROOM_CROSS_PROCESS_TEST_EXE", &test_exe)
-            .env("AINB_HEADROOM_PORT", port.to_string())
-            .spawn()
-            .expect("spawn test-owned fake proxy");
+        let mut fake_proxy = spawn_retrying_busy_text(
+            std::process::Command::new(&fake_headroom)
+                .env("AINB_HEADROOM_CROSS_PROCESS_SPAWN_LOG", &spawn_log)
+                .env("AINB_HEADROOM_CROSS_PROCESS_TEST_EXE", &test_exe)
+                .env("AINB_HEADROOM_PORT", port.to_string()),
+        );
         let fake_proxy_pid = fake_proxy.id();
         let cleanup = TestProcessCleanup::new(pid_path, spawn_log.clone());
 
-        wait_for_path(&spawn_log, "fake proxy spawn record");
-        std::thread::sleep(Duration::from_millis(50));
+        // #1129: wait on the facts the checks below depend on, never on a
+        // fixed sleep. The log FILE appears before its line is written (`>>`
+        // creates it first), and a cleanup that read an empty log signalled
+        // nothing and left `wait` below blocked. Children are listed only once
+        // the script has exec'd the proxy, which is the process under test.
+        wait_for_spawn_record(&spawn_log, fake_proxy_pid);
+        wait_for_exec(fake_proxy_pid, &test_exe);
         let child_pids = direct_child_pids(fake_proxy_pid);
         let child_cleanup = ExactPidCleanup(child_pids.clone());
 
@@ -699,7 +704,9 @@ mod tests {
         let surviving_children: Vec<u32> =
             child_pids.iter().copied().filter(|pid| process_is_alive(*pid)).collect();
         drop(child_cleanup);
-        let _ = fake_proxy.wait().expect("reap test-owned fake proxy");
+        // Judged on the child handle, not by probing the PID after the reap: a
+        // reaped PID can be handed to an unrelated process.
+        let exited = wait_for_exit(&mut fake_proxy);
 
         assert!(
             child_pids.is_empty(),
@@ -710,9 +717,81 @@ mod tests {
             "failure cleanup left fake proxy children alive: {surviving_children:?}"
         );
         assert!(
-            TestProcessCleanup::wait_until_gone(fake_proxy_pid),
+            exited,
             "test-owned fake proxy {fake_proxy_pid} survived exact cleanup"
         );
+    }
+
+    /// Spawn `command`, retrying while the kernel reports its executable busy.
+    ///
+    /// The fake `headroom` script was just written. Under `cargo test` another
+    /// test thread can fork while that write descriptor is open, and until the
+    /// forked child execs it holds the descriptor, so exec'ing the script
+    /// fails with `ETXTBSY` (#1129). The condition clears when that child
+    /// execs; the retry is bounded.
+    fn spawn_retrying_busy_text(command: &mut std::process::Command) -> std::process::Child {
+        for _ in 0..500 {
+            match command.spawn() {
+                Ok(child) => return child,
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("spawn test-owned fake proxy: {error}"),
+            }
+        }
+        panic!("spawn test-owned fake proxy: executable stayed busy for 5s");
+    }
+
+    /// Wait until the spawn log holds `pid`, not merely until the file exists.
+    fn wait_for_spawn_record(spawn_log: &std::path::Path, pid: u32) {
+        for _ in 0..500 {
+            let recorded = std::fs::read_to_string(spawn_log)
+                .is_ok_and(|log| log.lines().any(|line| line.trim() == pid.to_string()));
+            if recorded {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "timed out waiting for fake proxy {pid} in the spawn log: {}",
+            spawn_log.display()
+        );
+    }
+
+    /// Wait until `pid` runs `exe`, i.e. the fake script has exec'd the proxy.
+    fn wait_for_exec(pid: u32, exe: &std::path::Path) {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+        let wanted = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+        let target = Pid::from_u32(pid);
+        let mut system = System::new();
+        for _ in 0..500 {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[target]),
+                true,
+                ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
+            );
+            let running =
+                system.process(target).and_then(|process| process.exe()).is_some_and(|path| {
+                    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()) == wanted
+                });
+            if running {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("fake proxy {pid} never exec'd {}", exe.display());
+    }
+
+    /// Whether `child` exits within five seconds; reaps it when it does.
+    fn wait_for_exit(child: &mut std::process::Child) -> bool {
+        for _ in 0..500 {
+            if child.try_wait().expect("read fake proxy status").is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
     }
 
     /// Starts two independent test binaries at one barrier. Both callers see
