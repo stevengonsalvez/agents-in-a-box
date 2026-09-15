@@ -521,6 +521,10 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "tmux session name being typed, shown so the surface can edit it",
     ),
     (
+        "TmuxView.host_session",
+        "the tmux session name the host runs in (`host` in the key), not an address",
+    ),
+    (
         "ShellView.home_screen_v2_state",
         "home screen copy (`home` in the section name), static text",
     ),
@@ -1037,6 +1041,10 @@ const LEAF_TYPE_PREFIXES: &[&str] = &[
 const UNFILLED_WAIVED: &[(&str, &str)] = &[
     (
         "TmuxView.embed_session",
+        "a TmuxSessionName written as a bare string: filled, and a leaf by shape",
+    ),
+    (
+        "TmuxView.host_session",
         "a TmuxSessionName written as a bare string: filled, and a leaf by shape",
     ),
     (
