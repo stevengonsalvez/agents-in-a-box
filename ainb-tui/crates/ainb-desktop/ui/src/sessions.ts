@@ -50,10 +50,6 @@ export function ringFor(session: Session_Serialize, fleet: FleetView_Serialize |
   return ring;
 }
 
-export function displayName(session: Session_Serialize): string {
-  return session.display_name || session.name;
-}
-
 /** Every session row the Sessions frame lists, across its workspaces. */
 export function allSessions(view: SessionsView_Serialize | undefined): Session_Serialize[] {
   return view?.workspaces.flatMap((workspace) => workspace.sessions) ?? [];
