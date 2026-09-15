@@ -10,19 +10,9 @@ use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
 use ainb_app::{Chord, Intent, Keymap, SectionId};
 use ainb_desktop::host::{DesktopHost, Executor};
 
-/// One scratch HOME for this binary, set before any host is built. Nothing in
-/// these tests may write under it.
-fn scratch_home() -> &'static std::path::Path {
-    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| {
-        let home = tempfile::tempdir().expect("scratch home");
-        std::env::set_var("HOME", home.path());
-        std::env::set_var("AINB_HOME", home.path());
-        std::env::set_var("AINB_HANGAR_HOME", home.path().join(".agents-in-a-box"));
-        home
-    })
-    .path()
-}
+mod support;
+
+use support::isolated_home as scratch_home;
 
 type Log = Rc<RefCell<Vec<String>>>;
 
