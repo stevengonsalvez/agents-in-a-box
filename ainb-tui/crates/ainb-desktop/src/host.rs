@@ -5,7 +5,7 @@ use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
 use ainb_app::app::{KEY_ONLY_COMMANDS, RendererHost};
 use ainb_app::config::AppConfig;
-use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
+use ainb_app::wire::frame::{FrameBatch, Mirror, Subscription};
 use ainb_app::{AppState, Chord, CommandId, Effect, Intent, Keymap};
 
 /// Where framed state goes: the Tauri channel in the app, a recorder in tests.
@@ -69,19 +69,14 @@ pub struct DesktopHost<S: FrameSink> {
 impl<S: FrameSink> DesktopHost<S> {
     /// Host a state built on `config`, as given: nothing is read from disk for
     /// it. Frames for the sections in `subscription` go to `sink`, stamped with
-    /// `host_id`.
-    pub fn new(
-        config: AppConfig,
-        keymap: Keymap,
-        host_id: HostId,
-        subscription: Subscription,
-        sink: S,
-    ) -> Self {
+    /// the host the daemon named in `auth/hello`, or `local` until it names one
+    /// (#1066).
+    pub fn new(config: AppConfig, keymap: Keymap, subscription: Subscription, sink: S) -> Self {
         Self {
             state: AppState::with_config(config),
             keymap,
             layout: DesktopLayout::default(),
-            mirror: Mirror::new(host_id, subscription),
+            mirror: Mirror::for_daemon(subscription),
             sink,
         }
     }
