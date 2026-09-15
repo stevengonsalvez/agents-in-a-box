@@ -28,6 +28,36 @@ mod presence;
 
 pub use presence::{Dialer, PresenceLease, PresenceState, mark_process_as_surface};
 
+/// The `host_id` the daemon named in the last `auth/hello` this process
+/// completed (#1066), or `None` from a daemon with no minted id.
+///
+/// Recorded in the one place the handshake is decoded, and never taken from a
+/// hello's own params: the id is the daemon's answer about itself, not
+/// something a caller can assert.
+///
+/// Process-wide, because the id belongs to the home this process talks to and
+/// not to one connection: ordinary calls dial afresh every time, so one
+/// completed hello names the host for all of them.
+#[must_use]
+pub fn daemon_host_id() -> Option<String> {
+    OBSERVED_HOST_ID.read().ok().and_then(|held| held.clone())
+}
+
+/// The last hello's `host_id`. A hello that names none leaves the last known
+/// id in place, so an older daemon answering one dial does not unname the host.
+fn remember_host_id(host_id: Option<&str>) {
+    let Some(host_id) = host_id else {
+        return;
+    };
+    if let Ok(mut held) = OBSERVED_HOST_ID.write() {
+        if held.as_deref() != Some(host_id) {
+            *held = Some(host_id.to_string());
+        }
+    }
+}
+
+static OBSERVED_HOST_ID: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -767,13 +797,14 @@ impl DaemonClient {
                 message: error.message,
             });
         }
-        let hello = serde_json::from_value(
+        let hello: auth::HelloResult = serde_json::from_value(
             reply
                 .result
                 .filter(|result| !result.is_null())
                 .unwrap_or_else(|| Value::Object(serde_json::Map::default())),
         )
         .map_err(|error| DaemonError::Decode(format!("decoding auth/hello: {error}")))?;
+        remember_host_id(hello.host_id.as_deref());
         Ok((reader, writer, hello))
     }
 
