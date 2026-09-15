@@ -87,16 +87,60 @@ pub fn trace_states(states: &[AppState]) -> trace::Trace {
 /// keys and values: a field the frame withholds cannot come back on the web
 /// through a new row key (#1056). The canary and the tripwire build from the
 /// frames alone and do not see these rows.
+///
+/// `needs[]` is traced the same way from a sample daemon card that carries
+/// every key the daemon writes, so a card key the allow-list starts passing
+/// shows up as a new path (#1081).
 fn web_snapshot_trace(state: &AppState) -> trace::Trace {
     #[derive(serde::Serialize)]
     struct WebSnapshotSessions {
         sessions: Vec<crate::wire::web::WebSessionRow>,
+        needs: Vec<crate::wire::web::WebNeedCard>,
     }
     let rows = WebSnapshotSessions {
         sessions: crate::wire::web::session_rows(state),
+        needs: crate::wire::web::need_cards(&sample_need_cards()),
     };
     trace::trace("web_snapshot", &rows)
         .unwrap_or_else(|error| panic!("web snapshot rows failed to serialise: {error}"))
+}
+
+/// Daemon needs cards with every key `ainb-web`'s inbox mapping writes and a
+/// fully populated ASK payload, plus one unparsed payload.
+fn sample_need_cards() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "attentionId": "01J0SAMPLEATTENTION",
+            "kind": "ASK",
+            "wireKind": "ask_user_question",
+            "sessionId": "sample-session",
+            "cwd": "/work/sample-repo",
+            "workspaceId": "sample-workspace",
+            "degraded": false,
+            "createdAt": 1_700_000_000_000_i64,
+            "channels": ["web"],
+            "sessionKey": "claude:sample-session",
+            "state": "waiting",
+            "provenance": "hook",
+            "tier": 0,
+            "evidenceObservedAt": 1_700_000_000_000_i64,
+            "hostId": "local",
+            "paneUnbound": false,
+            "payload": {
+                "question": "sample question",
+                "header": "sample header",
+                "options": ["sample option"],
+                "multiSelect": false,
+                "text": "sample text",
+                "marker": "sample marker",
+                "snippet": "sample snippet",
+                "pattern": "sample pattern",
+                "message": "sample message",
+                "tool_input": {"questions": []},
+            },
+        },
+        {"kind": "ERR", "payload": "sample unparsed payload"},
+    ])
 }
 
 /// The frame around a section body, as it is serialised: `frame.section`,
