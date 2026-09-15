@@ -101,9 +101,21 @@ fn terminal_ack(window: tauri::State<'_, Window>, key: String, bytes: usize) {
     }
 }
 
+/// The most text one input call may carry. The input queue bounds how many
+/// calls wait, so this bounds the bytes they hold; a larger paste is refused.
+const MAX_INPUT_BYTES: usize = 1024 * 1024;
+
 /// Typed or pasted text for the tab's pane.
 #[tauri::command]
 fn terminal_input(window: tauri::State<'_, Window>, key: String, data: String) {
+    if data.len() > MAX_INPUT_BYTES {
+        tracing::warn!(
+            tab = key,
+            bytes = data.len(),
+            "terminal input over 1 MiB refused"
+        );
+        return;
+    }
     if let Some(terminals) = &window.terminals {
         terminals.input(&key, data.into_bytes());
     }
