@@ -19,6 +19,22 @@ export interface TabsView {
   focus: string | null;
 }
 
+/** A session-list row, as `ainb_app::app::state::SessionListRowId` spells it. */
+export type RowId = { session: string } | { other_tmux: string };
+
+/** The session-list row a tab's target is. */
+export function rowOf(target: TabTarget): RowId {
+  return target.kind === "session" ? { session: target.id } : { other_tmux: target.tmux };
+}
+
+/**
+ * The intent that selects `row` and attaches it. Opening goes through the
+ * session list's own row, so the reducer marks the session attached each time.
+ */
+export function openRowIntent(row: RowId) {
+  return { Command: ["session_list.select_row", { target: row, open: true }] };
+}
+
 /** Automatic re-attaches before a tab offers "reattach": `REDIAL_DELAYS`. */
 export const REDIALS = 3;
 
