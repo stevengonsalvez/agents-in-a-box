@@ -28,8 +28,6 @@ pub const EVENT_ADOPTION_BATCH: i64 = 5_000;
 pub struct DaemonIdentity {
     /// The ULID this daemon names itself with.
     pub host_id: String,
-    /// The operator-facing label. `None` until R1 lets an operator set one.
-    pub display_name: Option<String>,
     /// Unix milliseconds of the mint.
     pub created_at: i64,
 }
@@ -138,15 +136,12 @@ pub async fn host_id_on(conn: &mut SqliteConnection) -> Result<String, sqlx::Err
 }
 
 async fn read_on(conn: &mut SqliteConnection) -> Result<Option<DaemonIdentity>, sqlx::Error> {
-    let row = sqlx::query(
-        "SELECT host_id, display_name, created_at FROM daemon_identity WHERE singleton = 1",
-    )
-    .fetch_optional(conn)
-    .await?;
+    let row = sqlx::query("SELECT host_id, created_at FROM daemon_identity WHERE singleton = 1")
+        .fetch_optional(conn)
+        .await?;
     row.map(|row| {
         Ok(DaemonIdentity {
             host_id: row.try_get("host_id")?,
-            display_name: row.try_get("display_name")?,
             created_at: row.try_get("created_at")?,
         })
     })
