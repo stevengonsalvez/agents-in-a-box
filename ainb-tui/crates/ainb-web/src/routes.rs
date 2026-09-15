@@ -427,7 +427,7 @@ async fn answer(State(state): State<AppState>, body: Bytes) -> Response {
     }
 }
 
-/// `GET /api/cost` — the projected cost panel (`null` when the verb is absent).
+/// `GET /api/cost`: the projected cost panel (`null` when the verb is absent).
 async fn cost(State(state): State<AppState>) -> Response {
     project(&state, |s| &s.cost).await
 }
