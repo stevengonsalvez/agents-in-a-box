@@ -36,8 +36,10 @@ impl FakeSource {
                 "claude_active": true
             }
         ]);
-        let needs = json!([]);
-        CoreSnapshot { sessions, needs }
+        CoreSnapshot {
+            sessions,
+            needs: Vec::new(),
+        }
     }
 }
 
