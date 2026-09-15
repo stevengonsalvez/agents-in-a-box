@@ -417,7 +417,7 @@ impl AppState {
             self.release_interactive_pane();
             return None;
         };
-        if crate::tmux::process_detection::host_tmux_session_name() == Some(name.as_str()) {
+        if self.is_host_tmux_session(&name) {
             self.release_interactive_pane();
             return None;
         }
@@ -579,9 +579,21 @@ impl AppState {
     /// Its preview would mirror the TUI into itself, so the preview pane shows
     /// a placeholder instead and no observer is started.
     pub fn is_host_tmux_session_selected(&self) -> bool {
-        self.selected_tmux_name().is_some_and(|name| {
-            crate::tmux::process_detection::host_tmux_session_name() == Some(name.as_str())
-        })
+        self.selected_tmux_name().is_some_and(|name| self.is_host_tmux_session(&name))
+    }
+
+    /// Whether `name` is the tmux session the host reported running in.
+    fn is_host_tmux_session(&self, name: &str) -> bool {
+        self.tmux.host_session.as_ref().is_some_and(|host| host.as_str() == name)
+    }
+
+    /// Record the tmux session the host runs in, or `None` outside tmux.
+    ///
+    /// A host calls this as often as it likes: an unchanged name is not a write.
+    pub fn set_host_tmux_session(&mut self, session: Option<crate::app::effect::TmuxSessionName>) {
+        if self.tmux.host_session != session {
+            self.tmux.host_session = session;
+        }
     }
 
     /// True while an interactive embed is focused.
