@@ -888,13 +888,14 @@ impl SessionRecoveryState {
     }
 
     /// Generate a tmux-compatible session name from folder and branch
-    /// Matches the naming convention in InteractiveSessionManager
+    /// Matches the naming convention in InteractiveSessionManager, cap included
+    /// (#1122).
     fn generate_tmux_name(folder: &str, branch: &str) -> String {
         let sanitized_folder =
             folder.replace(' ', "_").replace('.', "_").replace('/', "_").replace(':', "_");
         let sanitized_branch =
             branch.replace(' ', "_").replace('.', "_").replace('/', "_").replace(':', "_");
-        format!("tmux_{}_{}", sanitized_folder, sanitized_branch)
+        crate::tmux::cap_session_name(format!("tmux_{}_{}", sanitized_folder, sanitized_branch))
     }
 
     /// Resume a single orphaned worktree by creating a new tmux session and starting Claude.
@@ -1217,11 +1218,13 @@ impl SessionRecoveryState {
         // Guard: `can_resume` already implies a transcript exists; double-check.
         session.transcript_path.as_ref().ok_or("No transcript path")?;
 
-        let new_session = format!(
+        // Capped like every other mint (#1122): `session.session` comes from an
+        // agent's JSON on disk, so its length is whatever that file says.
+        let new_session = crate::tmux::cap_session_name(format!(
             "{}-resumed-{}",
             session.session,
             chrono::Utc::now().timestamp()
-        );
+        ));
         let directory = &session.directory;
 
         let create_result = Command::new("tmux")

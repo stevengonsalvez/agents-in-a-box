@@ -5393,7 +5393,7 @@ impl AppState {
                 // every renderer, and a local process could otherwise rename a
                 // session to a string of any size (#1096). Logged at debug:
                 // discovery runs on every poll, so the same session repeats.
-                if name.len() > crate::app::effect::TmuxSessionName::MAX_BYTES {
+                if !crate::app::effect::TmuxSessionName::within_cap(&name) {
                     debug!(
                         bytes = name.len(),
                         "skipping a tmux session whose name is past {} bytes",
@@ -8497,7 +8497,21 @@ impl AppState {
         // tmux session name: `ssh-<host>-<port>` matches the convention parsed
         // by `auto-detect` in load_real_workspaces (search "name.starts_with(\"ssh-\")").
         let safe_host = target.host.replace(['.', '/', ' '], "-");
+        // Capped like every mint (#1122): a 253-byte hostname would otherwise
+        // pass the cap and the session would vanish from the list. Not through
+        // `cap_session_name`, whose `tmux_` head would drop the `ssh-` prefix
+        // discovery classifies SSH sessions by: keep the prefix and the port,
+        // and hash the host.
         let tmux_name = format!("ssh-{}-{}", safe_host, target.port);
+        let tmux_name = if crate::app::effect::TmuxSessionName::within_cap(&tmux_name) {
+            tmux_name
+        } else {
+            format!(
+                "ssh-{:08x}-{}",
+                crate::tmux::fnv1a_32(tmux_name.as_bytes()),
+                target.port
+            )
+        };
         let ssh_cmd = target.to_ssh_command();
 
         tracing::info!(

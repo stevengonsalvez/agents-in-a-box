@@ -110,10 +110,15 @@ pub async fn discover() -> Vec<TargetSession> {
 /// stripping the `tmux_` prefix yields the (sanitised) run-name. Falls back to
 /// `workspace` when the prefix is absent or the stripped remainder is empty, so
 /// a non-ainb tmux name never produces an empty routing key.
+///
+/// Also falls back for a name the minter capped (#1122): its head is a hash,
+/// so the stripped remainder is a key nobody could type as `name:<run-name>`.
 #[must_use]
 fn run_name_from_tmux(tmux: &str, workspace: &str) -> String {
     match tmux.strip_prefix("tmux_") {
-        Some(stripped) if !stripped.is_empty() => stripped.to_string(),
+        Some(stripped) if !stripped.is_empty() && !crate::tmux::is_capped_name(tmux) => {
+            stripped.to_string()
+        }
         _ => workspace.to_string(),
     }
 }
@@ -611,6 +616,27 @@ mod tests {
         assert_eq!(
             run_name_from_tmux("weird-name", "agents-in-a-box"),
             "agents-in-a-box"
+        );
+    }
+
+    /// #1122 review: a run name long enough to be capped routes by its
+    /// workspace, not by the hash head nobody can type.
+    #[test]
+    fn run_name_falls_back_to_workspace_for_a_capped_tmux_name() {
+        let long_run = "a-run-name-long-enough-to-be-capped-".repeat(6);
+        let tmux = crate::tmux::sanitize_session_name(&long_run);
+        assert!(
+            tmux.len() < format!("tmux_{long_run}").len(),
+            "{tmux} was capped"
+        );
+        assert_eq!(
+            run_name_from_tmux(&tmux, "agents-in-a-box"),
+            "agents-in-a-box"
+        );
+        // A short name that merely looks hashed is still its own run name.
+        assert_eq!(
+            run_name_from_tmux("tmux_deadbeef_x", "agents-in-a-box"),
+            "deadbeef_x"
         );
     }
 
