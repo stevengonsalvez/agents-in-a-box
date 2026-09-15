@@ -40,7 +40,7 @@ pub type CostFuture<'a> = Pin<Box<dyn Future<Output = Value> + Send + 'a>>;
 /// and `needs` are projections through `ainb_app::wire::web` allow-lists, so a
 /// field the CLI or the daemon adds does NOT reach the browser until the
 /// projection names it and the key-path fixture locks it (#1056, #1081).
-/// `cost` is proxied as the CLI prints it.
+/// `cost` is projected the same way (#1113).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FleetSnapshot {
     /// `ainb --format json list --frame`: the live session list, as rows
@@ -52,9 +52,11 @@ pub struct FleetSnapshot {
     /// so an ASK can be answered via `POST /api/answer`. Typed, so nothing can
     /// put a daemon card here without going through the projection.
     pub needs: Vec<WebNeedCard>,
-    /// `ainb --format json fleet cost` — cost rollups. `null` when the verb is
-    /// absent from this build (cost-surface not yet merged) so the dashboard
-    /// degrades gracefully instead of failing.
+    /// `ainb --format json fleet cost`, projected by
+    /// `ainb_app::wire::web::cost_panel` to the totals, models and groups the
+    /// dashboard draws: no per-session rows, no cwd (#1113). `null` when the
+    /// verb is absent from this build or fails, so the dashboard degrades
+    /// gracefully instead of failing.
     pub cost: Value,
     /// Content fingerprint, used by the SSE layer to suppress duplicate pushes
     /// when nothing changed. Skipped from the API payload — it's internal.
@@ -364,7 +366,12 @@ impl DataSource for AinbCliSource {
             // Cost is best-effort: `run_json(.., allow_absent=true)` already
             // resolves spawn errors / non-zero exits to `Value::Null`, so any
             // residual error here also degrades to `Null` rather than failing.
-            self.run_json(&["fleet", "cost"], true).await.unwrap_or(Value::Null)
+            let report = self.run_json(&["fleet", "cost"], true).await.unwrap_or(Value::Null);
+            // The report's per-session rows carry absolute cwds; the browser gets
+            // only the totals, models and groups the dashboard draws (#1113).
+            ainb_app::wire::web::cost_panel(&report)
+                .and_then(|panel| serde_json::to_value(panel).ok())
+                .unwrap_or(Value::Null)
         })
     }
 }
