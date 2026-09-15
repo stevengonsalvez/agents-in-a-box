@@ -28,13 +28,11 @@ scenario() {
   waited="$(web_sync_sessions 180)" || { check "the web snapshot lists the fixture within 180 s" false; return; }
   observe "web snapshot caught up after ${waited}s"
   raise_ask "Proof S-D: race?" proof-sd >/dev/null
-  local id=""
-  for _ in $(seq 1 40); do
-    id="$(web_attention_id 'Proof S-D')"
-    [[ -n "$id" ]] && break
-    sleep 0.5
-  done
-  observe "attentionId: ${id:-none}"
+  # Up to 180 s, as in s-c-answered: the web's poller can lag behind the
+  # daemon for minutes (#1055), and a shorter wait failed run 11 on that alone.
+  local id
+  web_card_id 'Proof S-D' race-card
+  id="$WEB_CARD_ID"
   web_answer "$id" 1 >"$PROOF_WORLD/race-1.json" &
   web_answer "$id" 2 >"$PROOF_WORLD/race-2.json" &
   wait
