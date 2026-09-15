@@ -2357,9 +2357,6 @@ impl InteractiveSessionManager {
                     // "feat-auth-2" would answer for "feat-auth" and we would
                     // then kill the exact "feat-auth", which matches nothing,
                     // leaving the real session running with its worktree gone.
-                    let check_new = std::process::Command::new("tmux")
-                        .args(["has-session", "-t", &format!("={tmux_name}")])
-                        .output();
                     let exists = |name: &str| {
                         std::process::Command::new("tmux")
                             .args(["has-session", "-t", &format!("={name}")])
@@ -2367,7 +2364,7 @@ impl InteractiveSessionManager {
                             .map(|o| o.status.success())
                             .unwrap_or(false)
                     };
-                    let final_name = if check_new.map(|o| o.status.success()).unwrap_or(false) {
+                    let final_name = if exists(&tmux_name) {
                         info!("Found tmux session with new format: {}", tmux_name);
                         tmux_name
                     } else if uncapped_name != tmux_name && exists(&uncapped_name) {
