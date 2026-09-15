@@ -87,11 +87,13 @@ impl<T> DropOldestSender<T> {
     /// Hands `item` back when the receiver is gone: nothing will ever read it,
     /// the same answer an `mpsc` sender gives for a closed channel.
     pub fn send(&self, item: T) -> Result<(), T> {
-        if self.shared.closed.load(Ordering::Acquire) {
-            return Err(item);
-        }
         {
+            // Checked under the lock the receiver's drop takes, so a send
+            // cannot slip in after the receiver has gone and still answer `Ok`.
             let mut queue = self.shared.queue.lock();
+            if self.shared.closed.load(Ordering::Acquire) {
+                return Err(item);
+            }
             if queue.len() >= self.shared.capacity {
                 queue.pop_front();
                 self.shared.dropped.fetch_add(1, Ordering::Relaxed);
@@ -159,7 +161,9 @@ impl<T> DropOldestReceiver<T> {
 
 impl<T> Drop for DropOldestReceiver<T> {
     fn drop(&mut self) {
+        let mut queue = self.shared.queue.lock();
         self.shared.closed.store(true, Ordering::Release);
+        queue.clear();
     }
 }
 
