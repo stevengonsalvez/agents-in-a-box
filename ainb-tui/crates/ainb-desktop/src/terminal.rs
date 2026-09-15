@@ -821,10 +821,41 @@ fn has_session(tmux: &Path, name: &str) -> bool {
 fn attach_command(tmux: &Path, name: &str) -> CommandBuilder {
     let mut command = CommandBuilder::new(tmux);
     command.args(["attach-session", "-t", &format!("={name}")]);
-    command.env("TERM", "xterm-256color");
-    // Started from inside tmux, the client would refuse to nest.
-    command.env_remove("TMUX");
+    apply_client_env(&mut command, std::env::vars());
     command
+}
+
+/// The environment a tab's tmux client needs, as the terminal host's embed
+/// client sets it (`ainb-core/src/tmux/embed_client.rs`): `PATH`, the locale
+/// and `TMUX_TMPDIR` from the parent, `TERM` for the xterm.js it draws into,
+/// and no `TMUX`, or a desktop started inside tmux would refuse to nest.
+///
+/// An app started from a desktop launcher often has no locale at all, and
+/// under the C locale tmux draws UTF-8 as underscores, so one is supplied.
+fn apply_client_env(
+    command: &mut CommandBuilder,
+    vars: impl IntoIterator<Item = (String, String)>,
+) {
+    let mut locale = false;
+    for (key, value) in vars {
+        if key == "PATH" || key == "LANG" || key == "TMUX_TMPDIR" || key.starts_with("LC_") {
+            locale |= (key == "LANG" || key == "LC_ALL" || key == "LC_CTYPE")
+                && value.to_uppercase().contains("UTF-8");
+            command.env(key, value);
+        }
+    }
+    if !locale {
+        command.env(
+            "LANG",
+            if cfg!(target_os = "macos") {
+                "en_US.UTF-8"
+            } else {
+                "C.UTF-8"
+            },
+        );
+    }
+    command.env("TERM", "xterm-256color");
+    command.env_remove("TMUX");
 }
 
 #[cfg(test)]
@@ -880,6 +911,43 @@ mod tests {
             received as f64 / 1_048_576.0 / elapsed.as_secs_f64()
         );
         assert_eq!(received, TOTAL, "every byte the child wrote was delivered");
+    }
+
+    fn env_of(command: &CommandBuilder, key: &str) -> Option<String> {
+        command.get_env(key).map(|value| value.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn a_client_without_a_locale_gets_a_utf8_one_and_keeps_the_rest() {
+        let vars = [
+            ("PATH", "/usr/bin"),
+            ("TMUX_TMPDIR", "/tmp/t"),
+            ("TMUX", "/tmp/s,1,0"),
+            ("TERM", "dumb"),
+        ]
+        .map(|(key, value)| (key.to_string(), value.to_string()));
+        let mut command = CommandBuilder::new("tmux");
+        command.env_clear();
+        apply_client_env(&mut command, vars);
+
+        assert_eq!(env_of(&command, "PATH").as_deref(), Some("/usr/bin"));
+        assert_eq!(env_of(&command, "TMUX_TMPDIR").as_deref(), Some("/tmp/t"));
+        assert!(env_of(&command, "LANG").is_some_and(|lang| lang.ends_with("UTF-8")));
+        assert_eq!(env_of(&command, "TERM").as_deref(), Some("xterm-256color"));
+        assert_eq!(env_of(&command, "TMUX"), None);
+
+        let mut command = CommandBuilder::new("tmux");
+        command.env_clear();
+        apply_client_env(
+            &mut command,
+            [("LC_ALL".to_string(), "de_DE.UTF-8".to_string())],
+        );
+        assert_eq!(env_of(&command, "LC_ALL").as_deref(), Some("de_DE.UTF-8"));
+        assert_eq!(
+            env_of(&command, "LANG"),
+            None,
+            "a UTF-8 locale from the parent is kept as is"
+        );
     }
 
     /// A pump whose webview acknowledges nothing stops at the window.
