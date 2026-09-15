@@ -101,21 +101,6 @@ impl DaemonIdentityRepo {
         read_on(&mut conn).await
     }
 
-    /// Every `host_id` this home's rows can carry: [`UNMINTED_HOST_ID`], then
-    /// the minted id once there is one. A sweep keyed on `host_id` walks both,
-    /// so a row written before the mint is still swept.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`sqlx::Error`] if the query fails.
-    pub async fn known_host_ids(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
-        let mut hosts = vec![UNMINTED_HOST_ID.to_string()];
-        if let Some(identity) = Self::read(pool).await? {
-            hosts.push(identity.host_id);
-        }
-        Ok(hosts)
-    }
-
     /// Move up to `limit` `fleet_event` rows from [`UNMINTED_HOST_ID`] to
     /// `host_id`, returning how many moved. Call until it returns 0.
     ///
