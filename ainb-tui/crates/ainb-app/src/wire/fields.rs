@@ -65,6 +65,21 @@ pub fn omit_in_frame_or_none<T>(value: &Option<T>) -> bool {
     in_frame() || value.is_none()
 }
 
+/// `skip_serializing_if`: carry the field in a frame only, never to disk.
+#[must_use]
+pub fn omit_outside_frame<T>(_: &T) -> bool {
+    !in_frame()
+}
+
+/// A session's merged attention chips, as each chip's kind and scrubbed detail
+/// ([`AttentionMark`](crate::fleet::attention::AttentionMark)).
+pub fn attention_marks<S: Serializer>(
+    chips: &[crate::fleet::attention::SessionAttention],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(chips.iter().map(crate::fleet::attention::AttentionMark::from))
+}
+
 /// Captured text: scrubbed in a frame, verbatim elsewhere.
 pub fn scrub_in_frame<S: Serializer>(value: &str, serializer: S) -> Result<S::Ok, S::Error> {
     if in_frame() {
