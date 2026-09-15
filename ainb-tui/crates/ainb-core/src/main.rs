@@ -619,6 +619,13 @@ async fn run_tui_loop(
         if app.state.tick_terminal_pane() {
             needs_redraw = true;
         }
+        // The own-session rule reads the session this host runs in from state;
+        // looking it up is the host's job. The lookup caches a hit and paces a
+        // miss, so asking every pass is cheap.
+        app.state.set_host_tmux_session(
+            ainb_app::tmux::process_detection::host_tmux_session_name()
+                .and_then(crate::app::effect::TmuxSessionName::new),
+        );
 
         // Read-only preview is a real tmux client feeding the same vt100
         // parser used after input focus is granted. Keep it aligned with the
