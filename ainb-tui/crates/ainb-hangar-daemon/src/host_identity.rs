@@ -35,7 +35,7 @@ pub fn spawn_event_adoption(pool: SqlitePool, host_id: String) -> tokio::task::J
                     adopted += moved;
                     contended = 0;
                 }
-                Err(error) if is_lock_contention(&error) && contended + 1 < WRITE_LOCK_ATTEMPTS => {
+                Err(error) if is_lock_contention(&error) && contended < WRITE_LOCK_ATTEMPTS - 1 => {
                     contended += 1;
                 }
                 Err(error) => {
