@@ -98,14 +98,44 @@ fn attach_in_place(
     rows: u16,
     cols: u16,
 ) -> bool {
-    use ainb::app::{Effect, TerminalTarget};
-
-    let keymap = ainb::Keymap::defaults();
     let command = ainb::Intent::Command(
         ainb::CommandId::new("session_list.attach_interactive"),
         serde_json::Value::Null,
     );
-    for effect in ainb::dispatch(state, &keymap, &mut ainb::app::NoRenderer, command) {
+    let keymap = ainb::Keymap::defaults();
+    let effects = ainb::dispatch(state, &keymap, &mut ainb::app::NoRenderer, command);
+    open_in_place(state, clients, effects, rows, cols)
+}
+
+/// The same attach reached while the pane is already live. A command cannot
+/// reach the list past the live pane, so this drives the reducer event the
+/// command resolves to, as the in-place retarget rules are still the reducer's.
+fn reattach_in_place(
+    state: &mut AppState,
+    clients: &mut TerminalClients,
+    rows: u16,
+    cols: u16,
+) -> bool {
+    ainb::app::events::EventHandler::process_event(
+        ainb::app::events::AppEvent::EnterInteractivePane,
+        state,
+    );
+    let effects = state.take_effects();
+    open_in_place(state, clients, effects, rows, cols)
+}
+
+/// Open what `effects` ask for in place, dispatch the report and reconcile.
+fn open_in_place(
+    state: &mut AppState,
+    clients: &mut TerminalClients,
+    effects: Vec<ainb::app::Effect>,
+    rows: u16,
+    cols: u16,
+) -> bool {
+    use ainb::app::{Effect, TerminalTarget};
+
+    let keymap = ainb::Keymap::defaults();
+    for effect in effects {
         if let Effect::AttachTerminal(TerminalTarget::InPlace { tmux_session, .. }) = effect {
             let report = clients.open_in_place(&tmux_session, rows, cols);
             let _ = ainb::dispatch(state, &keymap, &mut ainb::app::NoRenderer, report);
@@ -299,7 +329,7 @@ fn reentering_on_a_different_row_retargets_the_embed() {
 
     // Same row again = self-healing no-op, embed target unchanged.
     assert!(
-        attach_in_place(&mut state, &mut clients, 26, 100),
+        reattach_in_place(&mut state, &mut clients, 26, 100),
         "same-row re-entry"
     );
     let same_row_target = target(&clients);
@@ -307,7 +337,7 @@ fn reentering_on_a_different_row_retargets_the_embed() {
     // Different row: must swap the embed onto the newly selected session.
     state.tmux.selected_other_tmux_index = Some(1);
     assert!(
-        attach_in_place(&mut state, &mut clients, 26, 100),
+        reattach_in_place(&mut state, &mut clients, 26, 100),
         "re-target to second"
     );
     let swapped_target = target(&clients);

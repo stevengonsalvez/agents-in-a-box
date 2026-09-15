@@ -211,7 +211,15 @@ fn a_full_screen_attach_runs_with_the_released_preview_client_closed() {
     let keymap = Keymap::defaults();
     let mut state = session_list_with(&["ainb-contract-d"]);
     let mut host = HeadlessHost::default();
-    host.command(&mut state, &keymap, "session_list.attach_interactive");
+    // The read-only preview: a live pane takes every command, so the attach
+    // below comes from the list while its row is only mirrored.
+    let tick = |state: &mut AppState, host: &mut HeadlessHost| {
+        let effects = state.request_terminal_observer().into_iter().collect();
+        host.run(state, &keymap, effects);
+    };
+    tick(&mut state, &mut host);
+    std::thread::sleep(Duration::from_millis(300));
+    tick(&mut state, &mut host);
     assert_eq!(host.held.as_deref(), Some("ainb-contract-d"));
 
     host.command(&mut state, &keymap, "session_list.attach_tmux");
@@ -221,7 +229,6 @@ fn a_full_screen_attach_runs_with_the_released_preview_client_closed() {
         vec![None],
         "the full-screen attach ran with the preview client already closed"
     );
-    assert!(!state.is_interactive_pane());
 }
 
 #[test]

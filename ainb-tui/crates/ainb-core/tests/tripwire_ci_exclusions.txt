@@ -1,23 +1,27 @@
-# ainb-core tripwire binaries the `core-tripwires` CI job does NOT run.
+# ainb-core tripwire tests the `core-tripwires` CI job does NOT run.
 #
-# Every tripwire_*.rs under tests/ runs in that job unless it is listed here.
-# One binary per line: name, issue, reason. `ci_tripwire_exclusions.rs` fails
-# on a line with no issue or reason, a name with no test file, or a duplicate.
-# Remove a line in the PR that makes its tripwire green.
-tripwire_burndown_keys                          #1028  red on v2 and this branch on the lane F box, and in CI
-tripwire_new_session_agent_pills_visible        #1023  red on v2 before and after #1008 on the lane F box
-tripwire_new_session_branch_auto_derive         #1023  red on v2 before and after #1008 on the lane F box
-tripwire_new_session_favorite_toggle            #1023  red on v2 before and after #1008 on the lane F box
-tripwire_new_session_modified_badge             #1023  one of two tests red on v2 before and after #1008
-tripwire_new_session_persists_half_typed_prompt #1023  red on v2 before and after #1008 on the lane F box
-tripwire_new_session_custom_unlocks_editing     #1027  red in CI only; green on v2 and this branch on the lane F box
-tripwire_new_session_save_preset                #1027  red in CI only; green on v2 and this branch on the lane F box
-tripwire_new_session_yolo_toggle                #1027  red in CI only; green on v2 and this branch on the lane F box
-tripwire_sessions_answer_daemon_down            #1024  red on v2 before and after #1008 on the lane F box
-tripwire_sessions_answer_daemon_up              #1024  red on v2 before and after #1008 on the lane F box
-tripwire_sessions_approve_unblocks_hook         #1024  red on v2 before and after #1008 on the lane F box
-tripwire_sessions_broadcast                     #1024  red on v2 before and after #1008 on the lane F box
-tripwire_sessions_daemon_attention              #1024  red on v2 before and after #1008 on the lane F box
-tripwire_sessions_err_pane                      #1024  red on v2 before and after #1008 on the lane F box
-tripwire_fleet_chat_screen                      #1025  red on v2 before and after #1008 on the lane F box
-tripwire_fleet_session_thread                   #1025  red on v2 before and after #1008 on the lane F box
+# Every test in a tripwire_*.rs under tests/ runs in that job unless it is
+# listed here. One test per line: binary::test, issue, reason.
+# `ci_tripwire_exclusions.rs` fails on a line with no issue or reason, a test
+# that does not exist, or a duplicate. The scheduled `tripwire-exclusions`
+# workflow runs only these and warns when one passes; remove its line in the
+# PR that makes it green.
+tripwire_burndown_keys::burndown_interactive_keys_change_render                                                        #1028  test rot: the p filter text left the plugin in 18bb42f67
+tripwire_new_session_agent_pills_visible::agent_row_renders_inline_pills_in_custom                                     #1023  test rot: picks presets by position, and b56efb7a2 reordered them
+tripwire_new_session_branch_auto_derive::branch_line_is_random_hex_and_stable_across_prompt_edits                      #1023  test rot: picks presets by position, and b56efb7a2 reordered them
+tripwire_new_session_favorite_toggle::ctrl_f_toggles_favorite_on_and_off                                               #1023  test rot: the removal toast matches the star check
+tripwire_new_session_modified_badge::modified_badge_toggles_with_mode_toggle_alone                                     #1023  test rot: waits for the Boss mode fabdd92a2 removed
+tripwire_new_session_modified_badge::modified_badge_toggles_with_preset_cycle                                          #1050  product bug: the focused Preset row cuts off the modified badge
+tripwire_new_session_persists_half_typed_prompt::half_typed_prompt_persists_across_esc_back                            #1023  test rot: picks presets by position, and b56efb7a2 reordered them
+tripwire_new_session_custom_unlocks_editing::custom_preset_unlocks_agent_model_mode_yolo_editing                       #1050  product bug: the focused Preset row cuts off the modified badge
+tripwire_new_session_save_preset::ctrl_s_saves_new_preset_and_selects_it                                               #1050  product bug: the focused Preset row cuts off the modified badge
+tripwire_new_session_yolo_toggle::yolo_toggle_key_flips_on_off_and_marks_modified                                      #1027  test rot: preset order and an always-true OFF check, plus #1050
+tripwire_sessions_answer_daemon_down::an_answer_reaches_the_agents_pane_with_the_hangar_daemon_stopped                 #1049  product bug: no provider_session_id for Claude sessions; also expects ASK for WAIT
+tripwire_sessions_answer_daemon_up::picking_the_second_option_answers_the_daemons_row_with_the_second_option           #1049  product bug: no provider_session_id for Claude sessions
+tripwire_sessions_approve_unblocks_hook::approving_from_the_ask_pane_unblocks_a_parked_hook_with_no_daemon             #1049  product bug: no provider_session_id for Claude sessions
+tripwire_sessions_broadcast::checking_rows_turns_the_thread_tab_into_a_broadcast_and_shows_every_leg                   #1049  product bug: no provider_session_id for Claude sessions
+tripwire_sessions_daemon_attention::a_daemon_raised_approval_reaches_its_session_row_and_an_orphan_is_counted_elsewhere #1049  product bug: no provider_session_id for Claude sessions
+tripwire_sessions_err_pane::a_stale_err_leaves_the_row_and_the_err_pane_says_why                                       #1049  product bug: no provider_session_id for Claude sessions
+tripwire_fleet_chat_screen::the_composer_puts_the_operators_message_in_the_conversation                                #1051  product bug: the logs pane takes space before the composer
+tripwire_fleet_chat_screen::the_pal_chat_opens_attributes_and_answers_a_confirm_card                                   #1051  product bug: y on a focused card resolves to no row
+tripwire_fleet_session_thread::a_session_thread_opens_orders_its_replies_and_takes_a_message                           #1049  product bug: thread tab disabled without provider_session_id
