@@ -73,8 +73,22 @@ pub fn trace_states(states: &[AppState]) -> trace::Trace {
             all.leaf_paths.extend(one.leaf_paths);
             frame_envelope_paths(state, id, &mut all.leaf_paths);
         }
+        web_snapshot_paths(state, &mut all.leaf_paths);
     }
     all
+}
+
+/// The web dashboard's session rows (`/api/snapshot`'s `sessions[]`), projected
+/// from the Sessions frame by [`crate::wire::web::session_rows`]. Locked with
+/// the frames, so a field the frame withholds or scrubs cannot come back on
+/// the web through a new row key (#1056).
+fn web_snapshot_paths(state: &AppState, into: &mut BTreeSet<String>) {
+    for row in crate::wire::web::session_rows(state) {
+        let row = serde_json::to_value(row).expect("a web row serialises");
+        for key in row.as_object().into_iter().flat_map(serde_json::Map::keys) {
+            into.insert(format!("web_snapshot.sessions[].{key}"));
+        }
+    }
 }
 
 /// The frame around a section body, as it is serialised: `frame.section`,
