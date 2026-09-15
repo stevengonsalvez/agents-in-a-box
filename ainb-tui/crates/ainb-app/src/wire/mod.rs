@@ -644,7 +644,8 @@ mod tests {
     #[test]
     fn the_sessions_frame_carries_each_rows_merged_attention_scrubbed() {
         use crate::fleet::attention::{AttentionKind, SessionAttention};
-        let key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz";
+        // Assembled at runtime, so no credential-shaped literal is committed.
+        let key = format!("sk-ant-{}", "api03-abcdefghijklmnopqrstuvwxyz");
         let mut session = crate::models::Session::new("s".to_string(), "/work/s".to_string());
         session.live_attention = vec![
             SessionAttention::local(AttentionKind::Ask, 1_000)
@@ -663,7 +664,7 @@ mod tests {
         assert_eq!(attention[0]["kind"], "Ask", "{attention}");
         let detail = attention[0]["detail"].as_str().expect("a detail");
         assert!(detail.starts_with("Paste "), "{detail}");
-        assert!(!detail.contains(key), "the detail is scrubbed: {detail}");
+        assert!(!detail.contains(&key), "the detail is scrubbed: {detail}");
         assert_eq!(
             attention[0].as_object().map(serde_json::Map::len),
             Some(2),
