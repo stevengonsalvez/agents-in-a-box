@@ -314,8 +314,10 @@ impl RuntimeHandle {
     /// it back via the next `plugin/render` and the host can prove the
     /// keystroke landed before the frame was painted.
     ///
-    /// Returns `false` if the plugin is unknown or the task is gone;
-    /// the keystroke is dropped on the floor in either case. Caller is
+    /// Returns `false` if the plugin is unknown or the task is gone, or when
+    /// the key is an Esc and the plugin has painted no answer to the last
+    /// [`crate::plugin_task::ESC_UNANSWERED_LIMIT`] in a row (#1087); the
+    /// keystroke is dropped on the floor in every case. Caller is
     /// expected to surface a soft error or simply ignore — interactive
     /// keys are tolerant of loss compared to snapshots.
     pub fn send_key(
@@ -328,6 +330,17 @@ impl RuntimeHandle {
             return false;
         };
         let generation = self.inner.key_generation.fetch_add(1, Ordering::Relaxed);
+        // A plugin that keeps painting while ignoring Esc would otherwise hold
+        // its screen with Ctrl+C as the only exit (#1087). Refusing the key
+        // reads to the host as an undelivered back key, which leaves the
+        // screen, the same way out a dead or wedged plugin already gets.
+        if !handle.cache.admit_key(&key, generation) {
+            tracing::warn!(
+                plugin = %plugin_id,
+                "plugin left repeated Esc presses unanswered; returning the screen to the host"
+            );
+            return false;
+        }
         let params = HandleKeyParams {
             screen_id: screen_id.into(),
             key,
