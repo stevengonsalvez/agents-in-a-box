@@ -4013,7 +4013,7 @@ impl AppState {
     }
 
     /// Refresh OAuth tokens using the refresh token
-    pub async fn refresh_oauth_tokens(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn refresh_oauth_tokens(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Attempting to refresh OAuth tokens");
 
         let home_dir = dirs::home_dir().ok_or("Could not determine home directory")?;
@@ -4267,8 +4267,6 @@ impl AppState {
     /// Timeout for Docker operations in seconds
     const DOCKER_TIMEOUT_SECS: u64 = 10;
 
-    /// Start loading workspaces in the background (non-blocking)
-    /// Returns a channel receiver that will receive the result
     /// Load the workspaces in the background and apply them on a later tick
     /// through [`Self::check_workspace_loading_complete`].
     ///
@@ -4319,13 +4317,14 @@ impl AppState {
         if !credentials_path.exists() || !Self::oauth_token_needs_refresh(&credentials_path) {
             return;
         }
+        let when = if notify { "periodic" } else { "on startup" };
         if !self.is_docker_available().await {
-            info!("Docker not available - skipping OAuth token refresh");
+            info!("Docker not available - skipping OAuth token refresh ({when})");
             return;
         }
         match self.refresh_oauth_tokens().await {
             Ok(()) => {
-                info!("OAuth tokens refreshed");
+                info!("OAuth tokens refreshed ({when})");
                 if notify {
                     self.add_notification(Notification {
                         message: "✅ OAuth tokens refreshed automatically".to_string(),
@@ -4336,7 +4335,7 @@ impl AppState {
                 }
             }
             Err(e) => {
-                warn!("Failed to refresh OAuth tokens: {}", e);
+                warn!("Failed to refresh OAuth tokens ({when}): {}", e);
                 if notify {
                     self.add_notification(Notification {
                         message: format!("⚠️ Token refresh failed: {}", e),
@@ -4349,9 +4348,9 @@ impl AppState {
         }
     }
 
-    pub fn start_background_workspace_loading(
-        &mut self,
-    ) -> mpsc::UnboundedSender<WorkspaceLoadResult> {
+    /// Mark a workspace load as started and hand back the sender its result
+    /// arrives on. Private: [`Self::start_workspace_load`] is the one way in.
+    fn start_background_workspace_loading(&mut self) -> mpsc::UnboundedSender<WorkspaceLoadResult> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.host.workspace_load_receiver = Some(rx);
         self.workspace_load.is_loading_workspaces = true;
