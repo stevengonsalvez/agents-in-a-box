@@ -144,6 +144,14 @@ impl<S: FrameSink> DesktopHost<S> {
         self.pump();
     }
 
+    /// Frame every subscribed section again, for a renderer that attached (or
+    /// reloaded) after the last batch and so holds none of them.
+    pub fn reframe(&mut self) {
+        let subscription = self.mirror.subscription();
+        self.mirror.resubscribe(Subscription::only(&[]));
+        self.resubscribe(subscription);
+    }
+
     fn pump(&mut self) {
         let batch = self.mirror.batch(&self.state);
         if !batch.is_empty() {
