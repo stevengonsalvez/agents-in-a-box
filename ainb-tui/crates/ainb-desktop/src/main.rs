@@ -59,7 +59,9 @@ impl TabEvents for WebviewTabs {
 struct Window {
     shell: Shell<ChannelSink>,
     frames: ChannelSink,
-    terminals: Terminals,
+    /// `None` when no tmux was found: every attach then fails with a report
+    /// naming why, and the tab commands have nothing to act on.
+    terminals: Option<Terminals>,
     sidecar: Sidecar,
     sidecar_config: SidecarConfig,
 }
@@ -67,7 +69,13 @@ struct Window {
 /// The tab strip, for the webview's first paint.
 #[tauri::command]
 fn terminal_tabs(window: tauri::State<'_, Window>) -> TabsView {
-    window.terminals.view()
+    window.terminals.as_ref().map_or(
+        TabsView {
+            tabs: Vec::new(),
+            focus: None,
+        },
+        Terminals::view,
+    )
 }
 
 /// Send the tab's output to `bytes` as raw buffers. `false` for an unknown tab.
@@ -77,32 +85,42 @@ fn terminal_output(
     key: String,
     bytes: Channel<InvokeResponseBody>,
 ) -> bool {
-    window.terminals.attach_output(
-        &key,
-        Box::new(move |chunk| bytes.send(InvokeResponseBody::Raw(chunk)).is_ok()),
-    )
+    window.terminals.as_ref().is_some_and(|terminals| {
+        terminals.attach_output(
+            &key,
+            Box::new(move |chunk| bytes.send(InvokeResponseBody::Raw(chunk)).is_ok()),
+        )
+    })
 }
 
 /// The webview painted `bytes` of the tab's output.
 #[tauri::command]
 fn terminal_ack(window: tauri::State<'_, Window>, key: String, bytes: usize) {
-    window.terminals.ack(&key, bytes);
+    if let Some(terminals) = &window.terminals {
+        terminals.ack(&key, bytes);
+    }
 }
 
 /// Typed or pasted text for the tab's pane.
 #[tauri::command]
 fn terminal_input(window: tauri::State<'_, Window>, key: String, data: String) {
-    window.terminals.input(&key, data.into_bytes());
+    if let Some(terminals) = &window.terminals {
+        terminals.input(&key, data.into_bytes());
+    }
 }
 
 #[tauri::command]
 fn terminal_resize(window: tauri::State<'_, Window>, key: String, cols: u16, rows: u16) {
-    window.terminals.resize(&key, cols, rows);
+    if let Some(terminals) = &window.terminals {
+        terminals.resize(&key, cols, rows);
+    }
 }
 
 #[tauri::command]
 fn terminal_close(window: tauri::State<'_, Window>, key: String) {
-    window.terminals.close(&key);
+    if let Some(terminals) = &window.terminals {
+        terminals.close(&key);
+    }
 }
 
 /// The most of the sidecar log "show log" returns.
@@ -253,16 +271,23 @@ fn main() {
             });
             let mut states = sidecar.state();
             let executor = DesktopExecutor::new(ainb_bin());
-            let tmux = ainb_desktop::terminal::find_tmux().unwrap_or_else(|| {
-                tracing::warn!("no tmux found; terminal tabs will fail to attach");
-                PathBuf::from("tmux")
+            // Only an absolute tmux: a bare "tmux" would re-admit the relative
+            // PATH entries `find_tmux` leaves out.
+            let terminals = ainb_desktop::terminal::find_tmux().map(|tmux| {
+                Terminals::new(
+                    tmux,
+                    WebviewTabs(app.handle().clone()),
+                    executor.report_sender(),
+                )
             });
-            let terminals = Terminals::new(
-                tmux,
-                WebviewTabs(app.handle().clone()),
-                executor.report_sender(),
-            );
-            let shell = Shell::new(host, executor.with_terminals(terminals.clone()));
+            if terminals.is_none() {
+                tracing::warn!("no tmux found; terminal tabs will report why they cannot open");
+            }
+            let executor = match &terminals {
+                Some(terminals) => executor.with_terminals(terminals.clone()),
+                None => executor,
+            };
+            let shell = Shell::new(host, executor);
             // The sidebar is the session list: a row click must be in context.
             shell.open_sessions();
             app.manage(Window {
