@@ -559,6 +559,13 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
         session.tmux_session_name = Some(format!("ainb-{name}"));
         session.display_name = Some(format!("{name} label"));
         session.model = Some("claude-sonnet-4-5".to_string());
+        session.live_attention = vec![
+            crate::fleet::attention::SessionAttention::local(
+                crate::fleet::attention::AttentionKind::Ask,
+                1_000,
+            )
+            .with_detail(seed.text("session.attention.detail", Captured)),
+        ];
         let mut target = crate::models::SshTarget::new("build.example.com".to_string());
         target.user = Some("deploy".to_string());
         target.identity_file = Some(PathBuf::from("/home/sample/.ssh/id_ed25519"));
