@@ -5314,7 +5314,7 @@ impl AppState {
                 // every renderer, and a local process could otherwise rename a
                 // session to a string of any size (#1096). Logged at debug:
                 // discovery runs on every poll, so the same session repeats.
-                if name.len() > crate::app::effect::TmuxSessionName::MAX_BYTES {
+                if !crate::app::effect::TmuxSessionName::within_cap(&name) {
                     debug!(
                         bytes = name.len(),
                         "skipping a tmux session whose name is past {} bytes",
