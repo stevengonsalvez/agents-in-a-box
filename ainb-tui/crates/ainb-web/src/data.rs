@@ -59,7 +59,7 @@ pub struct FleetSnapshot {
     /// Content fingerprint, used by the SSE layer to suppress duplicate pushes
     /// when nothing changed. Skipped from the API payload — it's internal.
     #[serde(skip)]
-    pub fingerprint: u64,
+    pub(crate) fingerprint: u64,
 }
 
 impl FleetSnapshot {
