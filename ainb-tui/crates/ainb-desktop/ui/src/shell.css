@@ -50,6 +50,23 @@ body {
   cursor: pointer;
 }
 
+.banner .actions {
+  display: flex;
+  gap: 8px;
+}
+
+.sidecar-log {
+  margin: 0;
+  max-height: 40vh;
+  overflow: auto;
+  padding: 8px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
 .sections {
   padding: 12px 16px;
   display: grid;
