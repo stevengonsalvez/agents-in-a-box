@@ -1,6 +1,10 @@
-//! Terminal tabs against a real tmux on a private socket directory: pane output
-//! reaches the tab's sink, typed input reaches the pane, the cap evicts the tab
-//! idle longest, and a session that ends closes its tab with a report.
+//! Terminal tabs against a real tmux on a private server: pane output reaches
+//! the tab's sink, typed input reaches the pane, the cap evicts the tab idle
+//! longest, and a session that ends closes its tab with a report.
+//!
+//! Each test runs its own tmux server on a socket in its own temporary
+//! directory, named with `-S` on every command, so no test touches the server
+//! anyone else is using and nothing mutates the process environment.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -9,31 +13,41 @@ use std::time::{Duration, Instant};
 
 use ainb_app::{CommandId, Intent};
 use ainb_desktop::terminal::{
-    MAX_ATTACHED_TABS, TabEvents, TabState, TabTarget, TabsView, Terminals,
+    MAX_ATTACHED_TABS, TabEvents, TabState, TabTarget, TabsView, Terminals, Tmux,
 };
 
-/// One private tmux socket directory for the test binary, so no test touches
-/// the tmux server anyone else is using.
-fn private_tmux() -> PathBuf {
-    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    let dir = DIR.get_or_init(|| {
-        // Under /tmp: a socket path must stay short.
-        let dir = tempfile::Builder::new().prefix("d1c").tempdir_in("/tmp").expect("tmux dir");
-        std::env::set_var("TMUX_TMPDIR", dir.path());
-        std::env::remove_var("TMUX");
-        dir
-    });
-    assert!(dir.path().exists());
-    PathBuf::from("tmux")
+/// One test's private tmux server.
+struct Server {
+    // Under /tmp: a socket path must stay short.
+    dir: tempfile::TempDir,
 }
 
-/// A detached tmux session running `command`, killed by exact name on drop.
-struct Session(String);
+impl Server {
+    fn new() -> Self {
+        Self {
+            dir: tempfile::Builder::new().prefix("d1c").tempdir_in("/tmp").expect("tmux dir"),
+        }
+    }
 
-impl Session {
-    fn start(name: &str, command: &str) -> Self {
-        let tmux = private_tmux();
-        let status = Command::new(&tmux)
+    fn socket(&self) -> PathBuf {
+        self.dir.path().join("tmux.sock")
+    }
+
+    fn tmux(&self) -> Tmux {
+        Tmux::new(PathBuf::from("tmux")).on_socket(self.socket())
+    }
+
+    /// A tmux command against this server.
+    fn command(&self) -> Command {
+        let mut command = Command::new("tmux");
+        command.arg("-S").arg(self.socket()).env_remove("TMUX");
+        command
+    }
+
+    /// A detached session running `command`, killed by exact name on drop.
+    fn start(&self, name: &str, command: &str) -> Session<'_> {
+        let status = self
+            .command()
             .args([
                 "-f",
                 "/dev/null",
@@ -48,34 +62,60 @@ impl Session {
             .status()
             .expect("tmux runs");
         assert!(status.success(), "tmux session {name} started");
-        Self(name.to_string())
+        Session {
+            server: self,
+            name: name.to_string(),
+        }
     }
+}
 
+struct Session<'a> {
+    server: &'a Server,
+    name: String,
+}
+
+impl Session<'_> {
     fn capture(&self) -> String {
-        let output = Command::new(private_tmux())
+        let output = self
+            .server
+            .command()
             // A pane target: the session's active pane, `=` for an exact name.
-            .args(["capture-pane", "-p", "-t", &format!("={}:", self.0)])
+            .args(["capture-pane", "-p", "-t", &format!("={}:", self.name)])
             .output()
             .expect("capture-pane runs");
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
     fn clients(&self) -> usize {
-        let output = Command::new(private_tmux())
-            .args(["list-clients", "-t", &format!("={}", self.0)])
+        let output = self
+            .server
+            .command()
+            .args(["list-clients", "-t", &format!("={}", self.name)])
             .output()
             .expect("list-clients runs");
         String::from_utf8_lossy(&output.stdout).lines().count()
     }
 
+    fn detach_clients(&self) {
+        let status = self
+            .server
+            .command()
+            .args(["detach-client", "-s", &format!("={}", self.name)])
+            .status()
+            .expect("detach-client runs");
+        assert!(status.success());
+    }
+
     fn kill(&self) {
-        let _ = Command::new(private_tmux())
-            .args(["kill-session", "-t", &format!("={}", self.0)])
+        let _ = self
+            .server
+            .command()
+            .args(["kill-session", "-t", &format!("={}", self.name)])
             .status();
     }
 }
 
-impl Drop for Session {
+impl Drop for Session<'_> {
     fn drop(&mut self) {
         self.kill();
     }
@@ -101,10 +141,10 @@ impl TabEvents for Events {
     }
 }
 
-fn terminals() -> (Terminals, Arc<Recorder>, mpsc::Receiver<Intent>) {
+fn terminals(server: &Server) -> (Terminals, Arc<Recorder>, mpsc::Receiver<Intent>) {
     let recorder = Arc::new(Recorder::default());
     let (reports_tx, reports) = mpsc::channel();
-    let terminals = Terminals::new(private_tmux(), Events(Arc::clone(&recorder)), reports_tx);
+    let terminals = Terminals::new(server.tmux(), Events(Arc::clone(&recorder)), reports_tx);
     (terminals, recorder, reports)
 }
 
@@ -140,8 +180,9 @@ fn state_of(terminals: &Terminals, key: &str) -> Option<TabState> {
 
 #[test]
 fn pane_output_reaches_the_sink_and_typed_input_reaches_the_pane() {
-    let session = Session::start("d1c-io", "sh -c 'echo seeded-pane-output; exec sh'");
-    let (terminals, recorder, _reports) = terminals();
+    let server = Server::new();
+    let session = server.start("d1c-io", "sh -c 'echo seeded-pane-output; exec sh'");
+    let (terminals, recorder, _reports) = terminals(&server);
 
     assert_eq!(terminals.open(tmux_tab("d1c-io")), None, "the tab opened");
     assert_eq!(
@@ -172,9 +213,10 @@ fn pane_output_reaches_the_sink_and_typed_input_reaches_the_pane() {
 #[test]
 fn the_ninth_tab_detaches_the_tab_idle_longest() {
     let names: Vec<String> = (0..=MAX_ATTACHED_TABS).map(|i| format!("d1c-cap{i}")).collect();
+    let server = Server::new();
     let _sessions: Vec<Session> =
-        names.iter().map(|name| Session::start(name, "sleep 600")).collect();
-    let (terminals, recorder, _reports) = terminals();
+        names.iter().map(|name| server.start(name, "sleep 600")).collect();
+    let (terminals, recorder, _reports) = terminals(&server);
 
     for name in &names {
         assert_eq!(terminals.open(tmux_tab(name)), None, "{name} opened");
@@ -198,16 +240,18 @@ fn the_ninth_tab_detaches_the_tab_idle_longest() {
         "a toast names the detached tab"
     );
 
-    // A click re-attaches it, and the tab idle longest now makes room.
-    terminals.reattach(&names[0]);
+    // Opening it again (a click reaches here through the reducer) re-attaches
+    // it, and the tab idle longest now makes room.
+    assert_eq!(terminals.open(tmux_tab(&names[0])), None);
     assert_eq!(state_of(&terminals, &names[0]), Some(TabState::Attached));
     assert_eq!(state_of(&terminals, &names[1]), Some(TabState::Detached));
 }
 
 #[test]
 fn a_session_that_ends_closes_its_tab_with_a_report() {
-    let session = Session::start("d1c-end", "sleep 600");
-    let (terminals, recorder, reports) = terminals();
+    let server = Server::new();
+    let session = server.start("d1c-end", "sleep 600");
+    let (terminals, recorder, reports) = terminals(&server);
     assert_eq!(terminals.open(tmux_tab("d1c-end")), None);
 
     session.kill();
@@ -224,17 +268,14 @@ fn a_session_that_ends_closes_its_tab_with_a_report() {
 
 #[test]
 fn a_dropped_client_on_a_live_session_redials() {
-    let session = Session::start("d1c-redial", "sleep 600");
-    let (terminals, _recorder, _reports) = terminals();
+    let server = Server::new();
+    let session = server.start("d1c-redial", "sleep 600");
+    let (terminals, _recorder, _reports) = terminals(&server);
     assert_eq!(terminals.open(tmux_tab("d1c-redial")), None);
     // The tab's client registers with the server a moment after it starts.
     wait_for("the tab's client to attach", || session.clients() > 0);
 
-    let status = Command::new(private_tmux())
-        .args(["detach-client", "-s", "=d1c-redial"])
-        .status()
-        .expect("detach-client runs");
-    assert!(status.success());
+    session.detach_clients();
 
     wait_for("the tab to start reconnecting", || {
         matches!(
@@ -250,8 +291,8 @@ fn a_dropped_client_on_a_live_session_redials() {
 
 #[test]
 fn opening_a_missing_session_reports_it_and_lists_nothing() {
-    private_tmux();
-    let (terminals, _recorder, _reports) = terminals();
+    let server = Server::new();
+    let (terminals, _recorder, _reports) = terminals(&server);
     let target = TabTarget::Session {
         id: uuid::Uuid::nil(),
         tmux: "d1c-missing".to_string(),
@@ -266,8 +307,9 @@ fn opening_a_missing_session_reports_it_and_lists_nothing() {
 
 #[test]
 fn closing_a_tab_reports_the_user_left_it() {
-    let _session = Session::start("d1c-close", "sleep 600");
-    let (terminals, _recorder, reports) = terminals();
+    let server = Server::new();
+    let _session = server.start("d1c-close", "sleep 600");
+    let (terminals, _recorder, reports) = terminals(&server);
     assert_eq!(terminals.open(tmux_tab("d1c-close")), None);
 
     terminals.close("d1c-close");
@@ -289,11 +331,12 @@ fn the_executor_opens_tabs_for_session_attaches_only() {
     use ainb_desktop::executor::DesktopExecutor;
     use ainb_desktop::host::Executor;
 
-    let _session = Session::start("d1c-exec", "sleep 600");
+    let server = Server::new();
+    let _session = server.start("d1c-exec", "sleep 600");
     let recorder = Arc::new(Recorder::default());
     let executor = DesktopExecutor::new(None);
     let terminals = Terminals::new(
-        private_tmux(),
+        server.tmux(),
         Events(Arc::clone(&recorder)),
         executor.report_sender(),
     );
