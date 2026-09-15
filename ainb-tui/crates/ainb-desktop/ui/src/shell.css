@@ -161,7 +161,8 @@ body {
 
 .session-row {
   display: grid;
-  grid-template-columns: 12px 12px 1fr auto;
+  /* Both labels shrink; the branch keeps at most 100px of the 260px sidebar. */
+  grid-template-columns: 12px 12px minmax(0, 1fr) minmax(0, max-content);
   align-items: center;
   gap: 6px;
   padding: 3px 12px;
@@ -176,7 +177,7 @@ body {
 }
 
 .session-row .branch {
-  max-width: 40%;
+  max-width: 100px;
   color: var(--muted);
   font-size: 12px;
 }
