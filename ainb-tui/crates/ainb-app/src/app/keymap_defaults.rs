@@ -1360,6 +1360,7 @@ pub fn defaults() -> Vec<Binding> {
             "watch_screen",
             AppEvent::WatchPluginScreen {
                 screen: String::new(),
+                host: crate::wire::frame::HostId::local(),
                 watching: false,
                 width: 0,
                 height: 0,
@@ -1466,6 +1467,14 @@ pub fn defaults() -> Vec<Binding> {
                 screen: String::new(),
             },
             "Leave a plugin screen whose plugin could not take the back key",
+        ),
+        unbound(
+            Context::Global,
+            "host_disconnected",
+            AppEvent::HostDisconnected {
+                host: crate::wire::frame::HostId::local(),
+            },
+            "Release what a host that went away was holding",
         ),
         unbound(
             Context::Global,
