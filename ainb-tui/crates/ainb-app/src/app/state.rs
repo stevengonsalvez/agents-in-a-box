@@ -11998,11 +11998,35 @@ impl AppState {
     /// nag and have their clear point advanced to "now", so re-marking only
     /// happens for activity that arrives after the user looks away.
     ///
-    /// Every host that draws attention calls this: the terminal host from its
-    /// preview refresh, the desktop from its tick. It writes a section only
-    /// where a value changed, so a refresh that finds nothing new bumps no
-    /// version and frames nothing.
+    /// How often attention is merged when the poller has published nothing
+    /// new. Each merge reads the notifications store, so it runs on the
+    /// terminal host's preview cadence rather than every 250 ms tick.
+    const ATTENTION_REFRESH: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Every host that draws attention calls this on its tick, unconditionally:
+    /// the merge runs when the attention poller has published since the last
+    /// one, and otherwise at most every [`ATTENTION_REFRESH`], because it reads
+    /// the notifications store. It writes a section only where a value changed,
+    /// so a merge that finds nothing new bumps no version and frames nothing.
     pub fn refresh_attention(&mut self, now_ms: i64) {
+        // Folded first: the poller's counter is what makes daemon news
+        // immediate, and it is a versioned field of its own.
+        let news = self.refresh_daemon_attention_generation();
+        let due = self
+            .host
+            .last_attention_refresh
+            .is_none_or(|last| last.elapsed() >= Self::ATTENTION_REFRESH);
+        if !news && !due {
+            return;
+        }
+        self.host.last_attention_refresh = Some(Instant::now());
+        self.merge_attention(now_ms);
+    }
+
+    /// The merge itself, at the caller's clock. See [`Self::refresh_attention`],
+    /// which paces it; the reducer tests drive this directly so the cadence
+    /// does not hide a merge from them.
+    pub(crate) fn merge_attention(&mut self, now_ms: i64) {
         // The local producer is the FLOOR, not an optimisation: with no
         // notifications store at all the daemon's rows must still land, so a
         // missing store is an empty read, not an early return.
@@ -12553,8 +12577,7 @@ impl AppState {
             &self.host.attention_poll_running,
             &self.host.daemon_attention_generation,
         );
-        self.refresh_daemon_attention_generation();
-        self.refresh_attention(chrono::Utc::now().timestamp_millis());
+        self.refresh_attention(crate::fleet::daemons::heartbeat::now_ms());
 
         // Update shell session preview (only the selected workspace's shell)
         let selected_workspace_idx = self.sessions.selected_workspace_index;
