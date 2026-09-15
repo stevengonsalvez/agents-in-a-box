@@ -11938,6 +11938,16 @@ impl AppState {
             .and_then(|session| self.fleet.fleet_metadata.get(&session.id))
     }
 
+    /// A session's attention clear point: hook events at or before it do not
+    /// mark. The later of the baseline folded into the Fleet section and the
+    /// last refresh that saw the session attached, which is held host-side
+    /// until it detaches.
+    fn attention_clear_point(&self, id: Uuid) -> i64 {
+        let folded = self.fleet.attention_baseline.get(&id).copied().unwrap_or(0);
+        let attached = self.host.attention_attached_at.get(&id).copied().unwrap_or(0);
+        folded.max(attached)
+    }
+
     /// Hold each LOCAL chip at the instant it was FIRST seen.
     ///
     /// `attention_for_session` returns the newest qualifying hook row, and an
@@ -11969,16 +11979,30 @@ impl AppState {
                 kind: chip.kind,
                 detail: chip.detail.clone(),
             };
-            let first_seen = *self.fleet.attention_local_since.entry(key).or_insert(chip.since_ms);
-            chip.since_ms = first_seen;
+            // Read first: only a first sighting writes, so a refresh that finds
+            // the same waits does not bump the Fleet section.
+            if let Some(first_seen) = self.fleet.attention_local_since.get(&key) {
+                chip.since_ms = *first_seen;
+            } else {
+                let since = chip.since_ms;
+                self.fleet.update(|fleet| {
+                    fleet.attention_local_since.insert(key, since);
+                    true
+                });
+            }
         }
     }
 
-    /// Recompute every session's attention marker (`[!]`/`[?]`/`[✓]`)
-    /// from recent ainb-hooks events. Attached sessions never nag and
-    /// have their baseline advanced to "now", so re-marking only happens
-    /// for activity that arrives after the user looks away.
-    fn refresh_attention_markers(&mut self, now_ms: i64) {
+    /// Recompute every session's merged attention (`[!]`/`[?]`/`[✓]`) from
+    /// recent ainb-hooks events and the daemon's rows. Attached sessions never
+    /// nag and have their clear point advanced to "now", so re-marking only
+    /// happens for activity that arrives after the user looks away.
+    ///
+    /// Every host that draws attention calls this: the terminal host from its
+    /// preview refresh, the desktop from its tick. It writes a section only
+    /// where a value changed, so a refresh that finds nothing new bumps no
+    /// version and frames nothing.
+    pub fn refresh_attention(&mut self, now_ms: i64) {
         // The local producer is the FLOOR, not an optimisation: with no
         // notifications store at all the daemon's rows must still land, so a
         // missing store is an empty read, not an early return.
@@ -12078,7 +12102,7 @@ impl AppState {
                     provider_session_id.as_deref(),
                     allow_unidentified_cwd,
                     true,
-                    self.fleet.attention_baseline.get(&s.id).copied().unwrap_or(0),
+                    self.attention_clear_point(s.id),
                     &recent,
                 );
                 let projected_status =
@@ -12126,7 +12150,7 @@ impl AppState {
                 // Default 0: with no per-session clear point yet, any event in
                 // the lookback window can mark — so pre-launch waiters show up.
                 // Attaching advances this to "now" (see below).
-                let baseline = self.fleet.attention_baseline.get(&s.id).copied().unwrap_or(0);
+                let baseline = self.attention_clear_point(s.id);
                 let mut chips = Vec::new();
                 // The exact tmux target is gone. A retained daemon snapshot
                 // can still describe an older ASK/WAIT, but it has no pane to
@@ -12192,8 +12216,13 @@ impl AppState {
         let live: HashSet<Uuid> = marks.iter().map(|(id, ..)| *id).collect();
         // A session that recovered (or vanished) must lose its ERR clock, or a
         // later failure would render with the age of the previous one.
-        self.fleet.attention_error_since.retain(|id, _| live.contains(id));
-        self.fleet.attention_local_since.retain(|key, _| live.contains(&key.session_id));
+        if self.fleet.attention_error_since.keys().any(|id| !live.contains(id)) {
+            self.fleet.update(|fleet| {
+                fleet.attention_error_since.retain(|id, _| live.contains(id));
+                true
+            });
+        }
+        self.host.attention_attached_at.retain(|id, _| live.contains(id));
         // Every (session, kind) a LOCAL chip still claims this pass. Anything
         // else loses its clock below, so a question that closed and a later one
         // of the same kind do not share an instant.
@@ -12210,24 +12239,44 @@ impl AppState {
                     })
             })
             .collect();
-        self.fleet.attention_local_since.retain(|key, _| still_open.contains(key));
+        // Sessions that vanished drop out here too: a key of a session no
+        // longer live is never still open.
+        if self.fleet.attention_local_since.keys().any(|key| !still_open.contains(key)) {
+            self.fleet.update(|fleet| {
+                fleet.attention_local_since.retain(|key, _| still_open.contains(key));
+                true
+            });
+        }
         for (id, mut chips, attached, failure, projected_status, provider_session_id) in marks {
             if attached {
-                self.fleet.attention_baseline.insert(id, now_ms);
+                self.host.attention_attached_at.insert(id, now_ms);
+            } else if let Some(seen) = self.host.attention_attached_at.remove(&id) {
+                // The session was detached since the last refresh: its clear
+                // point is the last instant it was seen attached.
+                if self.fleet.attention_baseline.get(&id) != Some(&seen) {
+                    self.fleet.update(|fleet| {
+                        fleet.attention_baseline.insert(id, seen);
+                        true
+                    });
+                }
             }
             self.stamp_local_since(id, &mut chips);
             if let Some(status) = projected_status {
-                if let Some(session) = self.find_session_mut(id) {
+                // Decided on a read; the Sessions section is written only when
+                // the status really moves.
+                let replace = self.find_session(id).is_some_and(|session| {
                     // A local error carries the only readable failure reason.
                     // Do not erase it with a Fleet lifecycle projection that
                     // has no recovery/error detail of its own.
-                    if !matches!(session.status, crate::models::SessionStatus::Error(_))
+                    !matches!(session.status, crate::models::SessionStatus::Error(_))
                         && Self::lifecycle_projection_may_replace_local_status(
                             &session.status,
                             &status,
                         )
                         && session.status != status
-                    {
+                });
+                if replace {
+                    if let Some(session) = self.find_session_mut(id) {
                         session.set_status(status);
                         changed = true;
                     }
@@ -12236,16 +12285,16 @@ impl AppState {
             // Stop is terminal for the pane, not for historical diagnostics.
             // Do not rebuild live chips from a retained daemon snapshot, and
             // do not overwrite the Err tab's history with an empty set.
-            if self.find_session(id).is_some_and(|session| {
-                matches!(session.status, crate::models::SessionStatus::Stopped)
-            }) {
-                if let Some(session) = self.find_session_mut(id) {
+            if let Some(session) = self.find_session(id) {
+                if matches!(session.status, crate::models::SessionStatus::Stopped) {
                     if !session.live_attention.is_empty() {
-                        session.live_attention.clear();
-                        changed = true;
+                        if let Some(session) = self.find_session_mut(id) {
+                            session.live_attention.clear();
+                            changed = true;
+                        }
                     }
+                    continue;
                 }
-                continue;
             }
             if let Some(reason) = failure {
                 // ERR is a SECOND, independent chip, not a competitor: a
@@ -12255,10 +12304,22 @@ impl AppState {
                 // so the first refresh that observes it stamps the clock and
                 // every later one reuses it — the age must not restart at 0s
                 // five times a minute.
-                let since = *self.fleet.attention_error_since.entry(id).or_insert(now_ms);
+                let since = match self.fleet.attention_error_since.get(&id) {
+                    Some(since) => *since,
+                    None => {
+                        self.fleet.update(|fleet| {
+                            fleet.attention_error_since.insert(id, now_ms);
+                            true
+                        });
+                        now_ms
+                    }
+                };
                 chips.push(SessionAttention::local(AttentionKind::Err, since).with_detail(reason));
-            } else {
-                self.fleet.attention_error_since.remove(&id);
+            } else if self.fleet.attention_error_since.contains_key(&id) {
+                self.fleet.update(|fleet| {
+                    fleet.attention_error_since.remove(&id);
+                    true
+                });
             }
             let mut chips = crate::fleet::attention::normalise(chips);
             // Split the errors off BEFORE the window is applied, and from the
@@ -12316,12 +12377,12 @@ impl AppState {
                     reachable,
                 );
             }
-            if let Some(s) = self.find_session_mut(id) {
-                if s.live_attention != chips {
+            let differs = self
+                .find_session(id)
+                .is_some_and(|s| s.live_attention != chips || s.errors != errors);
+            if differs {
+                if let Some(s) = self.find_session_mut(id) {
                     s.live_attention = chips;
-                    changed = true;
-                }
-                if s.errors != errors {
                     s.errors = errors;
                     changed = true;
                 }
@@ -12368,7 +12429,7 @@ impl AppState {
 
         // updates: (session_id, content, claude_running) for the selected session.
         // Attention markers are derived separately from hook events in
-        // `refresh_attention_markers`, not from live pane state.
+        // `refresh_attention`, not from live pane state.
         let mut updates = Vec::new();
         // status_updates: (session_id, claude_running) for non-selected sessions
         let mut status_updates = Vec::new();
@@ -12490,7 +12551,7 @@ impl AppState {
             &self.host.daemon_attention_generation,
         );
         self.refresh_daemon_attention_generation();
-        self.refresh_attention_markers(chrono::Utc::now().timestamp_millis());
+        self.refresh_attention(chrono::Utc::now().timestamp_millis());
 
         // Update shell session preview (only the selected workspace's shell)
         let selected_workspace_idx = self.sessions.selected_workspace_index;
