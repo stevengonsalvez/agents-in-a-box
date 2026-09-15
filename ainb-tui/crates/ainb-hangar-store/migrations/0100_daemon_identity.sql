@@ -29,8 +29,13 @@
 
 CREATE TABLE daemon_identity (
     singleton          INTEGER PRIMARY KEY CHECK (singleton = 1),
-    -- The ULID this daemon names itself on every row and in `auth/hello`.
-    host_id            TEXT NOT NULL CHECK (length(host_id) = 26),
+    -- The ULID this daemon names itself on every row and in `auth/hello`:
+    -- 26 characters, every one from the Crockford base32 alphabet. The
+    -- NOT GLOB form rejects a bad character anywhere; a plain
+    -- `GLOB '[0-9A-HJKMNP-TV-Z]*'` would check only the first.
+    host_id            TEXT NOT NULL CHECK (
+        length(host_id) = 26 AND host_id NOT GLOB '*[^0-9A-HJKMNP-TV-Z]*'
+    ),
     -- The Noise IK static public key. NULL until R1 generates one.
     host_static_pubkey BLOB,
     -- The operator-facing host label. NULL until R1 lets an operator set one.
