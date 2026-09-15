@@ -172,6 +172,15 @@ pub enum Command {
     /// part of the public API surface.
     #[doc(hidden)]
     InjectKill,
+    /// Test aid: run the idle-reap decision now, as if the idle window had
+    /// already passed, and reply whether the plugin was reaped. Does not count
+    /// as use. Lets a test drive the reap deterministically instead of waiting
+    /// on the 5 s idle tick. Hidden from rustdoc.
+    #[doc(hidden)]
+    ReapIfIdle {
+        /// `true` when the check reaped the plugin.
+        reply: oneshot::Sender<bool>,
+    },
     /// Best-effort wake: spawn the child if not already running. Used
     /// by `Runtime::register` to honour `manifest.lifecycle.spawn = "eager"`.
     /// No reply — failures are recorded on the task's failure ledger
@@ -649,7 +658,11 @@ impl PluginTask {
     }
 
     async fn handle_command(&mut self, cmd: Command) {
-        self.last_used = Instant::now();
+        // Every command is use, except the test aid that asks whether the
+        // plugin would be reaped as idle: that one must not reset the clock.
+        if !matches!(cmd, Command::ReapIfIdle { .. }) {
+            self.last_used = Instant::now();
+        }
         match cmd {
             Command::Render {
                 viewport,
@@ -764,6 +777,10 @@ impl PluginTask {
                 if let Some(cs) = &mut self.child {
                     let _ = cs.child.start_kill();
                 }
+            }
+            Command::ReapIfIdle { reply } => {
+                let reaped = self.idle_reap(true).await;
+                let _ = reply.send(reaped);
             }
             Command::EnsureSpawned => {
                 if let Err(e) = self.ensure_running().await {
@@ -1680,6 +1697,13 @@ impl PluginTask {
     }
 
     async fn maybe_idle_reap(&mut self) {
+        self.idle_reap(false).await;
+    }
+
+    /// Reap the plugin if it is running, past its idle window (or
+    /// `window_elapsed`, for [`Command::ReapIfIdle`]), and nothing keeps it
+    /// alive. Returns whether it was reaped.
+    async fn idle_reap(&mut self, window_elapsed: bool) -> bool {
         let elapsed = self.last_used.elapsed();
         let reap_threshold =
             Duration::from_secs(u64::from(self.plugin.manifest.lifecycle.idle_reap_secs))
@@ -1693,13 +1717,15 @@ impl PluginTask {
             // freeze after its idle window. The host marks it every tick.
             || self.cache.shown_within(SHOWN_GRACE);
         if matches!(*self.state.read(), LifecycleState::Running)
-            && elapsed >= reap_threshold
+            && (window_elapsed || elapsed >= reap_threshold)
             && !keeps_alive
         {
             info!(plugin = %self.plugin.id, "idle reap (idle for {elapsed:?})");
             self.shutdown().await;
             self.set_state(LifecycleState::Idle);
+            return true;
         }
+        false
     }
 
     /// Repaint a capped plugin at most once per idle tick (five seconds).

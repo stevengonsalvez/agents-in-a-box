@@ -888,6 +888,14 @@ pub enum ScrollAction {
     PreviewPageUp,
     PreviewPageDown,
     PreviewExitScroll,
+    /// The changelog viewer, a line or a page at a time or to either end.
+    /// Where it is scrolled is this renderer's alone (#1052).
+    ChangelogUp,
+    ChangelogDown,
+    ChangelogPageUp,
+    ChangelogPageDown,
+    ChangelogToTop,
+    ChangelogToBottom,
 }
 
 /// Work a keymap row hands to the renderer that dispatched it.

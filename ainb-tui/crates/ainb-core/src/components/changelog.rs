@@ -25,11 +25,14 @@ pub struct ChangelogComponent;
 
 impl ChangelogComponent {
     /// Render the changelog view
-    pub fn render(frame: &mut Frame, area: Rect, state: &ChangelogState) {
+    pub fn render(frame: &mut Frame, area: Rect, scroll_offset: usize) {
         // Calculate visible lines
+        let lines = changelog_lines();
         let content_height = area.height.saturating_sub(2) as usize; // Account for borders
-        let start_line = state.scroll_offset;
-        let end_line = (start_line + content_height).min(state.lines.len());
+        // The offset is the renderer's, kept without knowing this area's height,
+        // so clamp it here: never past the last line.
+        let start_line = scroll_offset.min(lines.len());
+        let end_line = (start_line + content_height).min(lines.len());
 
         // Colors
         let heading1_color = PROGRESS_CYAN;
@@ -38,7 +41,7 @@ impl ChangelogComponent {
         let code_bg = Color::Rgb(35, 35, 45);
         let code_fg = SELECTION_GREEN;
 
-        let visible_lines: Vec<Line> = state.lines[start_line..end_line]
+        let visible_lines: Vec<Line> = lines[start_line..end_line]
             .iter()
             .map(|md_line| {
                 let style = match &md_line.style {
@@ -70,11 +73,7 @@ impl ChangelogComponent {
             .collect();
 
         // Scroll indicator
-        let scroll_info = format!(
-            " [{}/{}] ",
-            state.scroll_offset + 1,
-            state.total_lines.max(1)
-        );
+        let scroll_info = format!(" [{}/{}] ", start_line + 1, lines.len().max(1));
 
         let changelog_paragraph = Paragraph::new(visible_lines)
             .block(

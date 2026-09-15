@@ -48,7 +48,7 @@ pub use action_card::{ActionCard, ActionCardGridState, ActionCardId};
 pub use attached_terminal::AttachedTerminalComponent;
 pub use auth_provider_popup::AuthProviderPopupComponent;
 pub use auth_setup::AuthSetupComponent;
-pub use changelog::{ChangelogComponent, ChangelogState};
+pub use changelog::ChangelogComponent;
 pub use claude_chat::ClaudeChatComponent;
 pub use config_popup::{ConfigPopupComponent, ConfigPopupState, ConfigPopupType, ConfigPopupValue};
 pub use config_screen::ConfigScreenComponent;

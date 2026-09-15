@@ -89,6 +89,10 @@ impl SessionInfo {
 pub async fn execute(args: ListArgs, format: OutputFormat) -> Result<()> {
     let sessions = list_sessions(&args).await?;
 
+    if args.frame {
+        return output_json(&web_rows(&sessions));
+    }
+
     match format {
         OutputFormat::Json => output_json(&sessions)?,
         OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => output_text(&sessions),
@@ -135,8 +139,61 @@ pub async fn list_sessions(args: &ListArgs) -> Result<Vec<SessionInfo>> {
     Ok(sessions)
 }
 
+/// The web dashboard's session rows for `sessions` (`ainb list --frame`).
+///
+/// The sessions are put into an app state's Sessions section, labels
+/// included, and the rows are projected from that section's redacted frame
+/// (`ainb_app::wire::web`). The label is withheld by the frame, so the browser
+/// gets what a mirror renderer gets, never the operator's own list as typed
+/// (#1056). The tmux session name and worktree path pass through as stored:
+/// the frame does not scrub them.
+fn web_rows(sessions: &[SessionInfo]) -> Vec<ainb_app::wire::web::WebSessionRow> {
+    use ainb_app::models::{Session, SessionStatus as ModelStatus, Workspace};
+    let mut workspaces: Vec<Workspace> = Vec::new();
+    for info in sessions {
+        // A row the browser cannot attach to is worse than no row: a bad id is
+        // skipped and logged, never replaced with a fresh one.
+        let Ok(id) = uuid::Uuid::parse_str(&info.session_id) else {
+            tracing::warn!(
+                session_id = %info.session_id,
+                "list --frame: skipping a session whose id is not a UUID"
+            );
+            continue;
+        };
+        let mut session = Session::new(info.workspace_name.clone(), info.worktree_path.clone());
+        session.id = id;
+        session.tmux_session_name = Some(info.tmux_session_name.clone());
+        session.display_name.clone_from(&info.display_name);
+        session.created_at = info.created_at;
+        session.status = match info.status() {
+            SessionStatus::ClaudeRunning => ModelStatus::Running,
+            SessionStatus::Idle => ModelStatus::Idle,
+            SessionStatus::Stopped => ModelStatus::Stopped,
+        };
+        if let Some(workspace) =
+            workspaces.iter_mut().find(|workspace| workspace.name == info.workspace_name)
+        {
+            workspace.add_session(session);
+        } else {
+            let mut workspace = Workspace::new(
+                info.workspace_name.clone(),
+                std::path::PathBuf::from(&info.worktree_path),
+            );
+            workspace.add_session(session);
+            workspaces.push(workspace);
+        }
+    }
+    let mut state = ainb_app::AppState::new();
+    state.sessions.get_mut().workspaces = workspaces;
+    // The frame groups sessions by workspace; the web list draws newest first,
+    // as `ainb list` does. RFC 3339 UTC stamps sort in time order as text.
+    let mut rows = ainb_app::wire::web::session_rows(&state);
+    rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    rows
+}
+
 /// Output sessions as JSON
-fn output_json(sessions: &[SessionInfo]) -> Result<()> {
+fn output_json<T: Serialize + ?Sized>(sessions: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(sessions)?;
     println!("{json}");
     Ok(())
@@ -184,6 +241,90 @@ mod tests {
     use crate::models::session::SessionAgentType;
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    #[test]
+    fn the_frame_rows_withhold_a_label_and_keep_each_sessions_health() {
+        let canary = "ghp_ProofCanary0123456789abcdefghijklmnopq";
+        // One instant for all three, so the newest-first sort keeps this order.
+        let created_at = chrono::Utc::now();
+        let info = |id: &str, running: bool, active: bool| SessionInfo {
+            session_id: id.to_string(),
+            tmux_session_name: format!("tmux_repo-{id}"),
+            workspace_name: "repo".to_string(),
+            display_name: Some(format!("deploy {canary}")),
+            worktree_path: format!("/w/repo-{id}"),
+            created_at,
+            is_running: running,
+            claude_active: active,
+        };
+        let sessions = [
+            info("5b1f2a8e-0000-4000-8000-000000000001", true, true),
+            info("5b1f2a8e-0000-4000-8000-000000000002", true, false),
+            info("5b1f2a8e-0000-4000-8000-000000000003", false, false),
+        ];
+
+        let rows = web_rows(&sessions);
+        let json = serde_json::to_string(&rows).expect("rows serialise");
+
+        assert!(!json.contains(canary), "{json}");
+        let health: Vec<_> = rows
+            .iter()
+            .map(|row| (row.session_id.as_str(), row.is_running, row.claude_active))
+            .collect();
+        assert_eq!(
+            health,
+            [
+                ("5b1f2a8e-0000-4000-8000-000000000001", true, true),
+                ("5b1f2a8e-0000-4000-8000-000000000002", true, false),
+                ("5b1f2a8e-0000-4000-8000-000000000003", false, false),
+            ]
+        );
+        assert_eq!(
+            rows[2].worktree_path,
+            "/w/repo-5b1f2a8e-0000-4000-8000-000000000003"
+        );
+    }
+
+    #[test]
+    fn frame_rows_are_newest_first_across_workspaces() {
+        let row = |id: &str, workspace: &str, minutes_ago: i64| SessionInfo {
+            session_id: id.to_string(),
+            tmux_session_name: format!("tmux_{workspace}-{id}"),
+            workspace_name: workspace.to_string(),
+            display_name: None,
+            worktree_path: format!("/w/{workspace}"),
+            created_at: chrono::Utc::now() - chrono::Duration::minutes(minutes_ago),
+            is_running: true,
+            claude_active: false,
+        };
+        let rows = web_rows(&[
+            row("5b1f2a8e-0000-4000-8000-000000000001", "alpha", 30),
+            row("5b1f2a8e-0000-4000-8000-000000000002", "beta", 10),
+            row("5b1f2a8e-0000-4000-8000-000000000003", "alpha", 20),
+        ]);
+        let ids: Vec<_> = rows.iter().map(|row| &row.session_id[33..]).collect();
+        assert_eq!(ids, ["002", "003", "001"]);
+    }
+
+    #[test]
+    fn a_session_with_an_unparseable_id_is_skipped_not_given_a_fresh_one() {
+        let row = |id: &str| SessionInfo {
+            session_id: id.to_string(),
+            tmux_session_name: format!("tmux_repo-{id}"),
+            workspace_name: "repo".to_string(),
+            display_name: None,
+            worktree_path: "/w/repo".to_string(),
+            created_at: chrono::Utc::now(),
+            is_running: true,
+            claude_active: true,
+        };
+        let rows = web_rows(&[
+            row("not-a-uuid"),
+            row("5b1f2a8e-0000-4000-8000-000000000001"),
+        ]);
+        let ids: Vec<_> = rows.iter().map(|row| row.session_id.as_str()).collect();
+        assert_eq!(ids, ["5b1f2a8e-0000-4000-8000-000000000001"]);
+    }
 
     #[test]
     fn test_session_status_icons() {
