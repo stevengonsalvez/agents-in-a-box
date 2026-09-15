@@ -9,6 +9,7 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use ainb_app::Intent;
+use ainb_app::wire::frame::Subscription;
 
 use crate::executor::DesktopExecutor;
 use crate::host::{DesktopHost, Executor, FrameSink};
@@ -75,8 +76,9 @@ impl<S: FrameSink> Shell<S> {
         }
     }
 
-    /// Frame every subscribed section again for a renderer that just attached.
-    pub fn reframe(&self) {
-        self.core().host.reframe();
+    /// Frame every section in `subscription`, and only those, for a renderer
+    /// that just attached.
+    pub fn subscribe(&self, subscription: Subscription) {
+        self.core().host.subscribe(subscription);
     }
 }
