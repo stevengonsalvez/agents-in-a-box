@@ -64,7 +64,7 @@ pub fn rows_from_frame(frame: &Frame) -> Vec<WebSessionRow> {
                     worktree_name: session["workspace_path"]
                         .as_str()
                         .and_then(|path| std::path::Path::new(path).file_name())
-                        .map(|name| name.to_string_lossy().into_owned())
+                        .map(|name| card_text(&name.to_string_lossy()))
                         .unwrap_or_default(),
                     created_at: text(&session["created_at"]).unwrap_or_default(),
                     is_running: matches!(status, Some("Running" | "Idle")),
@@ -327,6 +327,19 @@ mod tests {
         assert_eq!(rows[0].tmux_session_name.as_deref(), Some("tmux_repo-1"));
         assert_eq!(rows[0].worktree_name, "sample-repo");
         assert!(!json.contains("/work/"), "no absolute path: {json}");
+    }
+
+    #[test]
+    fn a_credential_shaped_worktree_directory_is_scrubbed_in_the_row() {
+        let mut state = sample_state(&mut PlainSeed);
+        state.sessions.get_mut().workspaces[0].sessions[0].workspace_path =
+            format!("/work/{CANARY}");
+        let rows = session_rows(&state);
+        assert!(
+            !rows[0].worktree_name.contains(CANARY),
+            "{:?}",
+            rows[0].worktree_name
+        );
     }
 
     #[test]
