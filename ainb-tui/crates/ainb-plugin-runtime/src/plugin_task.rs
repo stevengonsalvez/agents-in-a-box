@@ -2022,17 +2022,29 @@ async fn drain_stderr(plugin: PluginId, stderr: tokio::process::ChildStderr) {
 /// `sessions.refresh_request` is the one host-published topic deliberately
 /// left outside this list: burndown publishes it too, to ask session-reader
 /// for a rescan, so it stays writable under the blanket grant.
-const EXPLICIT_GRANT_TOPIC_PREFIXES: &[&str] = &["fleet."];
+pub(crate) const EXPLICIT_GRANT_TOPIC_PREFIXES: &[&str] = &["fleet."];
+
+/// Whether one topic allow-list entry covers `topic`. The single matcher
+/// behind the `event_bus` list grant and the `event_stream_subscribe`
+/// allow-list.
+///
+/// An entry ending in `*` covers every topic that starts with the text
+/// before it, except a topic under [`EXPLICIT_GRANT_TOPIC_PREFIXES`]: no
+/// wildcard names one, not a bare `*` and not `fleet.*` (#1101). Any other
+/// entry covers exactly that topic, which is the only way to reach a
+/// `fleet.` topic.
+pub(crate) fn grant_entry_covers(entry: &str, topic: &str) -> bool {
+    entry.strip_suffix('*').map_or(entry == topic, |prefix| {
+        topic.starts_with(prefix)
+            && !EXPLICIT_GRANT_TOPIC_PREFIXES.iter().any(|explicit| topic.starts_with(explicit))
+    })
+}
 
 /// Whether an `event_bus` grant covers `topic`.
 ///
 /// `true` covers every topic except those under
-/// [`EXPLICIT_GRANT_TOPIC_PREFIXES`]. The list form is a topic allow-list: an
-/// entry ending in `*` covers every topic that starts with the text before it,
-/// and any other entry covers exactly that topic. A wildcard reaches an
-/// [`EXPLICIT_GRANT_TOPIC_PREFIXES`] topic only when its own prefix is under
-/// that prefix (`fleet.*`), so a bare `*` or `f*` names no fleet topic (#1101).
-/// So a plugin granted
+/// [`EXPLICIT_GRANT_TOPIC_PREFIXES`]. The list form is a topic allow-list
+/// matched entry by entry with [`grant_entry_covers`]. So a plugin granted
 /// `["ui.state*"]`, or the blanket `true`, can publish its own view and can
 /// neither read nor subscribe to `fleet.agent_status` (#1038 review).
 fn event_bus_covers(grant: &ainb_plugin_protocol::manifest::CapabilityGrant, topic: &str) -> bool {
@@ -2042,14 +2054,7 @@ fn event_bus_covers(grant: &ainb_plugin_protocol::manifest::CapabilityGrant, top
                 && !EXPLICIT_GRANT_TOPIC_PREFIXES.iter().any(|prefix| topic.starts_with(prefix))
         }
         ainb_plugin_protocol::manifest::CapabilityGrant::List(entries) => {
-            entries.iter().any(|entry| {
-                entry.strip_suffix('*').map_or(entry == topic, |prefix| {
-                    topic.starts_with(prefix)
-                        && EXPLICIT_GRANT_TOPIC_PREFIXES.iter().all(|explicit| {
-                            !topic.starts_with(explicit) || prefix.starts_with(explicit)
-                        })
-                })
-            })
+            entries.iter().any(|entry| grant_entry_covers(entry, topic))
         }
     }
 }
@@ -2402,7 +2407,7 @@ mod tests {
         );
         assert!(!event_bus_covers(&CapabilityGrant::Bool(false), "ui.state"));
 
-        // #1101: a wildcard names a fleet topic only from under `fleet.`.
+        // #1101: no wildcard names a fleet topic; only the exact name does.
         let star = CapabilityGrant::List(vec!["*".into()]);
         assert!(event_bus_covers(&star, "ui.state"));
         assert!(
@@ -2413,8 +2418,13 @@ mod tests {
             &CapabilityGrant::List(vec!["fle*".into()]),
             "fleet.agent_status"
         ));
+        let fleet_star = CapabilityGrant::List(vec!["fleet.*".into()]);
+        assert!(
+            !event_bus_covers(&fleet_star, "fleet.agent_status.clock"),
+            "`fleet.*` is a wildcard too, so it names no fleet topic"
+        );
         assert!(event_bus_covers(
-            &CapabilityGrant::List(vec!["fleet.*".into()]),
+            &CapabilityGrant::List(vec!["fleet.agent_status.clock".into()]),
             "fleet.agent_status.clock"
         ));
         assert!(!event_bus_covers(
