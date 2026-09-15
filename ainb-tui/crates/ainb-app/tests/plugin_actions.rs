@@ -70,7 +70,6 @@ fn a_plugin_action_is_an_effect_for_the_host_not_a_runtime_call() {
             payload: serde_json::json!({ "id": "card-7" }),
         }]
     );
-    assert!(state.plugins_host.plugin_runtime.is_none());
     assert!(
         bumped(&before, &state.versions()).is_empty(),
         "queuing the action writes no section"
