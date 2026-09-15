@@ -577,9 +577,9 @@ impl Default for TmuxSection {
 pub struct FleetSection {
     /// Per-session "cleared up to" timestamp (epoch ms). A hook event
     /// only marks a session if its `ts` is newer than this. Defaults to
-    /// `0` (any event in the lookback window can mark); bumped to "now"
-    /// while the user is attached, so re-marking only happens for
-    /// activity that arrives after they look away.
+    /// `0` (any event in the lookback window can mark); folded from
+    /// `HostOnlyState::attention_attached_at` once, on the refresh that sees
+    /// the session detach; read through `AppState::attention_clear_point`.
     pub attention_baseline: HashMap<Uuid, i64>,
     /// The watcher's latest snapshot, copied in on the tick when it changes.
     /// Renderers draw the status bar's quota widget from this, so a host that
