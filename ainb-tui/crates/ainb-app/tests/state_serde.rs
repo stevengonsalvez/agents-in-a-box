@@ -1501,6 +1501,9 @@ fn no_credential_shaped_value_reaches_the_wire() {
     // seeded into a daemon card must be scrubbed out of the web card.
     let needs = serde_json::to_value(shape::sample_web_needs(&mut seed)).expect("needs");
     find_in_frame("web_snapshot.needs", &needs, &mut found);
+    // So is the cost panel (#1113).
+    let cost = serde_json::to_value(shape::sample_web_cost(&mut seed)).expect("cost");
+    find_in_frame("web_snapshot.cost", &cost, &mut found);
     assert!(
         found.is_empty(),
         "tripwire: {} credential-shaped value(s) in the frames:\n  {}",
