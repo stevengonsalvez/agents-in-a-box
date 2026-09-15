@@ -857,3 +857,48 @@ fn a_plugin_fed_only_latest_state_ticks_is_still_reaped() {
         Some(LifecycleState::Running)
     );
 }
+
+/// #1089: `fleet.` topics are host-publish-only. A plugin granted the card
+/// clock by name can subscribe to it, but its publish there is dropped, so no
+/// subscriber can be fed a spoofed tick; a publish on its other granted topic
+/// still lands.
+#[test]
+fn a_plugin_granted_a_fleet_topic_cannot_publish_on_it() {
+    const CLOCK: &str = "fleet.agent_status.clock";
+    let (rt, handle) = Runtime::new().expect("build runtime");
+    let mut manifest = fixture_manifest();
+    manifest.capabilities.event_bus = ainb_plugin_protocol::manifest::CapabilityGrant::List(vec![
+        CLOCK.into(),
+        "fixture.*".into(),
+    ]);
+    let plugin = RegisteredPlugin::new(
+        manifest,
+        fixture_path(),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    let id = plugin.id.clone();
+    rt.register(plugin);
+    start(&handle, &id);
+
+    // Both publishes go out on the plugin's one wire in this order, so once
+    // the second has landed the first has been judged.
+    for topic in [CLOCK, "fixture.after_clock"] {
+        let rx = handle.dispatch_cli(&id, "echo", vec!["publish".into(), topic.into()]);
+        assert!(matches!(
+            rt.tokio_handle().block_on(rx),
+            Ok(CliOutcome::Ok(_))
+        ));
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while handle.snapshot_get("fixture.after_clock").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the granted fixture publish never landed"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        handle.snapshot_get(CLOCK).is_none(),
+        "a plugin publish reached the host-publish-only card clock"
+    );
+}

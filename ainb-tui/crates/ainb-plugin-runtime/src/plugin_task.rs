@@ -1501,6 +1501,13 @@ impl PluginTask {
                     warn!(plugin = %self.plugin.id, topic = %p.topic, "snapshot publish denied: no event_bus grant for the topic");
                     return;
                 }
+                // `fleet.` topics are host-publish-only: a grant lets a plugin
+                // read one, never write it, so a subscriber can trust every
+                // delivery on it came from the host (#1089).
+                if is_host_publish_only(&p.topic) {
+                    warn!(plugin = %self.plugin.id, topic = %p.topic, "snapshot publish denied: the topic is host-publish-only");
+                    return;
+                }
                 // `ui.state` is one view per plugin: a bare publish is stored
                 // under the publisher's own `ui.state/<id>`, and a publish to
                 // another plugin's slot is refused, so two plugins can never
@@ -2019,6 +2026,14 @@ async fn drain_stderr(plugin: PluginId, stderr: tokio::process::ChildStderr) {
 /// host knows about every agent (`fleet.agent_status`: working directories,
 /// pending tool input), so a plugin must ask for one by name to read it.
 const EXPLICIT_GRANT_TOPIC_PREFIXES: &[&str] = &["fleet."];
+
+/// Whether only the host may publish on `topic`. Every
+/// [`EXPLICIT_GRANT_TOPIC_PREFIXES`] topic is host state (`fleet.agent_status`
+/// and its card clock), so a plugin publish there would spoof it for every
+/// subscriber; the grant covers subscribe and read only.
+fn is_host_publish_only(topic: &str) -> bool {
+    EXPLICIT_GRANT_TOPIC_PREFIXES.iter().any(|prefix| topic.starts_with(prefix))
+}
 
 /// Whether an `event_bus` grant covers `topic`.
 ///

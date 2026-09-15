@@ -9,7 +9,8 @@
 //! - `plugin/render` → reply with a 1×1 buffer carrying "X" at (0,0).
 //! - `plugin/cli_dispatch` → reply with stdout "ok\n", `exit_code` 0. With
 //!   argv `subscribe <topic>` it first sends `host/snapshot/subscribe` for the
-//!   topic (the reply is read and ignored). With argv `hang` it never replies,
+//!   topic (the reply is read and ignored). With argv `publish <topic>` it
+//!   first publishes `b"from-plugin"` on the topic. With argv `hang` it never replies,
 //!   leaving the request in flight.
 //! - `plugin/handle_event` → notification: recorded on stderr, and a delivery
 //!   for a subscribed (non-`socket:`) topic is re-published verbatim under
@@ -103,6 +104,9 @@ fn main() {
                     if let [verb, topic] = dispatch.argv.as_slice() {
                         if verb == "subscribe" {
                             subscribe(&mut writer, topic);
+                        }
+                        if verb == "publish" {
+                            publish_snapshot(&mut writer, topic, b"from-plugin");
                         }
                     }
                     // `hang`: never answer, so the request stays in flight.
