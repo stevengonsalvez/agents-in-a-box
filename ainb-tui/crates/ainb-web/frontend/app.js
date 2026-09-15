@@ -271,14 +271,12 @@
     }
   }
 
-  // Cost (`ainb fleet cost --format json`). The payload is the CLI's
-  // `CostReport` (crates/ainb-core/src/cli/fleet/cost.rs), serialized with
-  // serde's default snake_case field names. It is NOT a flat rollup — the
-  // numbers are nested:
+  // Cost (`ainb fleet cost --format json`), projected server-side to the web
+  // cost panel (`ainb_app::wire::web::WebCost`, #1113). The numbers are nested:
   //   cost.totals  : { cost_usd, session_count, model_count, bucket: TokenBucket }
   //   cost.models[]: { model, cost_usd, bucket }
   //   cost.groups[]: { group, cost_usd, session_count, bucket }
-  //   cost.sessions[], cost.daily[], cost.budget_breaches[]  (not surfaced here)
+  // The report's sessions[], daily[] and budget_breaches[] never reach here.
   // where a TokenBucket is { input_tokens, cache_creation_tokens,
   // cache_read_tokens, output_tokens, reasoning_tokens, call_count, cost_usd }.
   // `cost` is `null` when the `fleet cost` verb is absent from this build, when

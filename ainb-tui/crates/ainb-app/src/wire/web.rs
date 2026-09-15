@@ -227,6 +227,103 @@ fn need_payload(payload: &Value) -> WebNeedPayload {
     }
 }
 
+/// Token and cost counts of one cost row, as the dashboard sums them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct WebCostBucket {
+    pub input_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub call_count: u64,
+    pub cost_usd: Option<f64>,
+}
+
+/// Fleet-wide cost totals.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct WebCostTotals {
+    pub cost_usd: f64,
+    pub session_count: u64,
+    pub model_count: u64,
+    pub bucket: WebCostBucket,
+}
+
+/// Spend on one model.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WebModelCost {
+    pub model: String,
+    pub cost_usd: f64,
+    pub bucket: WebCostBucket,
+}
+
+/// Spend in one workspace group.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WebGroupCost {
+    pub group: String,
+    pub cost_usd: f64,
+    pub session_count: u64,
+    pub bucket: WebCostBucket,
+}
+
+/// The web dashboard's cost panel, allow-listed from `ainb fleet cost`'s
+/// report (#1113).
+///
+/// The dashboard draws `totals`, `models` and `groups` only. The report's
+/// `sessions[]` (with each session's absolute `cwd` and its path-derived
+/// `project`), `daily[]` and `budget_breaches[]` never reach the browser, and
+/// the two labels kept (`model`, `group`) are scrubbed and clamped.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct WebCost {
+    pub totals: WebCostTotals,
+    pub models: Vec<WebModelCost>,
+    pub groups: Vec<WebGroupCost>,
+}
+
+/// The web cost panel for a `fleet cost` report, or `None` when there is no
+/// report object (the verb is absent from this build, or it failed).
+#[must_use]
+pub fn cost_panel(report: &Value) -> Option<WebCost> {
+    let report = report.as_object()?;
+    let number = |value: &Value| value.as_f64().unwrap_or_default();
+    let count = |value: &Value| value.as_u64().unwrap_or_default();
+    let bucket = |value: &Value| WebCostBucket {
+        input_tokens: count(&value["input_tokens"]),
+        cache_creation_tokens: count(&value["cache_creation_tokens"]),
+        cache_read_tokens: count(&value["cache_read_tokens"]),
+        output_tokens: count(&value["output_tokens"]),
+        reasoning_tokens: count(&value["reasoning_tokens"]),
+        call_count: count(&value["call_count"]),
+        cost_usd: value["cost_usd"].as_f64(),
+    };
+    let rows = |key: &str| report.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+    let totals = report.get("totals").cloned().unwrap_or(Value::Null);
+    Some(WebCost {
+        totals: WebCostTotals {
+            cost_usd: number(&totals["cost_usd"]),
+            session_count: count(&totals["session_count"]),
+            model_count: count(&totals["model_count"]),
+            bucket: bucket(&totals["bucket"]),
+        },
+        models: rows("models")
+            .iter()
+            .map(|row| WebModelCost {
+                model: row["model"].as_str().map(card_text).unwrap_or_default(),
+                cost_usd: number(&row["cost_usd"]),
+                bucket: bucket(&row["bucket"]),
+            })
+            .collect(),
+        groups: rows("groups")
+            .iter()
+            .map(|row| WebGroupCost {
+                group: row["group"].as_str().map(card_text).unwrap_or_default(),
+                cost_usd: number(&row["cost_usd"]),
+                session_count: count(&row["session_count"]),
+                bucket: bucket(&row["bucket"]),
+            })
+            .collect(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +331,49 @@ mod tests {
     use crate::wire::shape::{PlainSeed, sample_state};
 
     const CANARY: &str = "ghp_ProofCanary0123456789abcdefghijklmnopq";
+
+    #[test]
+    fn the_cost_panel_keeps_totals_models_and_groups_and_drops_session_paths() {
+        let bucket = serde_json::json!({"input_tokens": 10, "output_tokens": 5, "call_count": 1, "cost_usd": 0.5});
+        let report = serde_json::json!({
+            "totals": {"cost_usd": 0.5, "session_count": 1, "model_count": 1, "bucket": bucket},
+            "sessions": [{
+                "session_id": "s1",
+                "provider": "claude",
+                "project": "-home-op-private-client-repo",
+                "cwd": "/home/op/private-client/repo",
+                "group": "repo",
+                "cost_usd": 0.5,
+                "bucket": bucket,
+            }],
+            "models": [{"model": "claude-sonnet", "cost_usd": 0.5, "bucket": bucket}],
+            "daily": [{"date": "2026-09-15", "cost_usd": 0.5, "bucket": bucket}],
+            "groups": [{"group": format!("repo {CANARY}"), "cost_usd": 0.5, "session_count": 1, "bucket": bucket}],
+            "budget_breaches": [],
+        });
+
+        let panel = cost_panel(&report).expect("a report object");
+        let json = serde_json::to_string(&panel).expect("serialises");
+
+        for gone in [
+            "/home/op",
+            "private-client",
+            "sessions",
+            "daily",
+            "budget_breaches",
+            CANARY,
+        ] {
+            assert!(
+                !json.contains(gone),
+                "{gone} reached the cost panel: {json}"
+            );
+        }
+        assert_eq!(panel.totals.session_count, 1);
+        assert_eq!(panel.totals.bucket.input_tokens, 10);
+        assert_eq!(panel.models[0].model, "claude-sonnet");
+        assert!(panel.groups[0].group.starts_with("repo "));
+        assert_eq!(cost_panel(&serde_json::Value::Null), None);
+    }
 
     #[test]
     fn a_need_card_keeps_the_rendered_fields_and_drops_cwd_and_the_raw_request() {
