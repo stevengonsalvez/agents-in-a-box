@@ -66,6 +66,9 @@ const SESSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// (status / teardown). Keeping one implementation means a name containing a
 /// space, `.`, `/`, or `:` resolves to the same session everywhere, instead of
 /// the spawner and the targeter disagreeing and operating on the wrong session.
+///
+/// Capped by [`cap_session_name`], so a long workspace or branch still mints a
+/// name the session list shows.
 #[must_use]
 pub fn sanitize_session_name(name: &str) -> String {
     let base_name = name.strip_prefix("tmux_").unwrap_or(name);
@@ -74,7 +77,41 @@ pub fn sanitize_session_name(name: &str) -> String {
         .replace('.', "_")
         .replace('/', "_")
         .replace(':', "_");
-    format!("tmux_{cleaned}")
+    cap_session_name(format!("tmux_{cleaned}"))
+}
+
+/// Fit a minted `tmux_...` name within
+/// [`TmuxSessionName::MAX_BYTES`](crate::app::effect::TmuxSessionName::MAX_BYTES).
+///
+/// Discovery skips any session past the cap (#1096), so an uncapped long
+/// workspace or branch name spawned a session the list then never showed
+/// (#1122). A name within the cap is returned unchanged. A longer one keeps
+/// its TAIL, which is where the part that tells sessions apart lives (the
+/// `-<id>` of `ainb run`, the branch of `tmux_<folder>_<branch>`), and replaces
+/// the head with a hash of the whole name, so two long names that share a tail
+/// but differ earlier still mint different sessions. Deterministic: the
+/// spawner and every later targeter compute the same name.
+#[must_use]
+pub fn cap_session_name(name: String) -> String {
+    use crate::app::effect::TmuxSessionName;
+    if TmuxSessionName::within_cap(&name) {
+        return name;
+    }
+    let head = format!("tmux_{:08x}_", fnv1a_32(name.as_bytes()));
+    let mut tail_start = name.len() - (TmuxSessionName::MAX_BYTES - head.len());
+    while !name.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!("{head}{}", &name[tail_start..])
+}
+
+/// FNV-1a, 32 bits. A fixed algorithm rather than the std hasher, whose output
+/// is not promised to stay the same across Rust releases: a session minted by
+/// one build must be found by the next.
+fn fnv1a_32(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
+    })
 }
 
 /// Known valid shells that we allow for reattach-to-user-namespace.
@@ -319,6 +356,52 @@ pub use session::{AttachState, TmuxSession};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1122: an `ainb run` session for a very long workspace name mints a name
+    /// the session list keeps, and it still ends in the id that makes it unique.
+    #[test]
+    fn an_over_long_workspace_name_mints_a_listed_session() {
+        use crate::app::effect::TmuxSessionName;
+        let workspace = "a-workspace-whose-folder-name-goes-on-".repeat(8);
+        let minted = sanitize_session_name(&format!("{workspace}-0a1b2c3d"));
+        assert!(
+            TmuxSessionName::within_cap(&minted),
+            "{} bytes is past the cap the list applies",
+            minted.len()
+        );
+        assert!(
+            TmuxSessionName::new(minted.clone()).is_some(),
+            "{minted:?} is a name the host can list and target"
+        );
+        assert!(minted.starts_with("tmux_"), "{minted}");
+        assert!(
+            minted.ends_with("-0a1b2c3d"),
+            "the unique suffix survives: {minted}"
+        );
+        assert_eq!(
+            minted,
+            sanitize_session_name(&format!("{workspace}-0a1b2c3d")),
+            "the spawner and a later targeter agree"
+        );
+        assert_ne!(
+            minted,
+            sanitize_session_name(&format!("b{workspace}-0a1b2c3d")),
+            "names that differ only in their head stay distinct"
+        );
+        assert_eq!(
+            sanitize_session_name("repo-0a1b2c3d"),
+            "tmux_repo-0a1b2c3d",
+            "a name within the cap is untouched"
+        );
+    }
+
+    /// A multi-byte tail is cut on a character boundary.
+    #[test]
+    fn a_capped_name_cuts_on_a_character_boundary() {
+        let minted = cap_session_name(format!("tmux_{}", "\u{8272}".repeat(60)));
+        assert!(minted.len() <= crate::app::effect::TmuxSessionName::MAX_BYTES);
+        assert!(minted.ends_with('\u{8272}'), "{minted}");
+    }
 
     #[test]
     fn test_valid_shells_are_absolute_paths() {
