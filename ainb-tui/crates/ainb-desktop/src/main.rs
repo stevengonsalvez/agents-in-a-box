@@ -80,23 +80,26 @@ fn retry_sidecar(window: tauri::State<'_, Window>) {
     window.sidecar.retry();
 }
 
-/// The bundled daemon: `AINB_DESKTOP_DAEMON_BIN`, else beside this executable,
-/// where the bundle installs `bundle.externalBin`.
-fn daemon_bin() -> PathBuf {
-    std::env::var_os("AINB_DESKTOP_DAEMON_BIN").map_or_else(
-        || {
-            let exe = if cfg!(windows) {
-                "ainb-hangar-daemon.exe"
-            } else {
-                "ainb-hangar-daemon"
-            };
-            std::env::current_exe()
-                .ok()
-                .and_then(|path| path.parent().map(|dir| dir.join(exe)))
-                .unwrap_or_else(|| PathBuf::from(exe))
-        },
-        PathBuf::from,
-    )
+/// The bundled daemon, beside this executable where the bundle installs
+/// `bundle.externalBin`. A debug build also honours `AINB_DESKTOP_DAEMON_BIN`;
+/// a release build never takes the binary it runs from the environment or from
+/// `PATH`, and fails closed when it cannot place itself.
+fn daemon_bin() -> Result<PathBuf, String> {
+    #[cfg(debug_assertions)]
+    if let Some(bin) = std::env::var_os("AINB_DESKTOP_DAEMON_BIN") {
+        return Ok(PathBuf::from(bin));
+    }
+    let name = if cfg!(windows) {
+        "ainb-hangar-daemon.exe"
+    } else {
+        "ainb-hangar-daemon"
+    };
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("cannot locate the desktop executable: {error}"))?;
+    let dir = exe
+        .parent()
+        .ok_or("the desktop executable has no directory to find its daemon in")?;
+    Ok(dir.join(name))
 }
 
 /// The `ainb` binary daemon lifecycle verbs run through, from `PATH`.
@@ -126,8 +129,9 @@ fn main() {
                 Subscription::only(SECTIONS),
                 frames.clone(),
             );
+            let daemon_bin = daemon_bin()?;
             let sidecar = tauri::async_runtime::block_on(async {
-                Sidecar::start(SidecarConfig::new(hangar_home, daemon_bin()))
+                Sidecar::start(SidecarConfig::new(hangar_home, daemon_bin))
             });
             let mut states = sidecar.state();
             app.manage(Window {
