@@ -2,7 +2,9 @@
 //! supervisor wired to the webview.
 //!
 //! Frames cross one in-process Tauri channel; the webview sends intents back as
-//! `invoke("dispatch")`. Nothing here listens on a port.
+//! `invoke("dispatch")`. A terminal tab's bytes cross a channel of their own,
+//! with input, resize and acknowledgements as commands. Nothing here listens on
+//! a port.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -18,7 +20,8 @@ use ainb_desktop::host::{DesktopHost, FrameSink};
 use ainb_desktop::intent::RendererIntent;
 use ainb_desktop::shell::Shell;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarView};
-use tauri::ipc::Channel;
+use ainb_desktop::terminal::{TabEvents, TabsView, Terminals};
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Emitter, Manager};
 
 /// The webview's frame channel, once it has subscribed.
@@ -36,11 +39,75 @@ impl FrameSink for ChannelSink {
     }
 }
 
+/// Tab strip changes and tab notices, as webview events.
+struct WebviewTabs(tauri::AppHandle);
+
+impl TabEvents for WebviewTabs {
+    fn tabs(&self, view: TabsView) {
+        if let Err(error) = self.0.emit("terminal_tabs", view) {
+            tracing::warn!(%error, "terminal tabs not delivered to the webview");
+        }
+    }
+
+    fn toast(&self, message: String) {
+        if let Err(error) = self.0.emit("toast", message) {
+            tracing::warn!(%error, "toast not delivered to the webview");
+        }
+    }
+}
+
 struct Window {
     shell: Shell<ChannelSink>,
     frames: ChannelSink,
+    terminals: Terminals,
     sidecar: Sidecar,
     sidecar_config: SidecarConfig,
+}
+
+/// The tab strip, for the webview's first paint.
+#[tauri::command]
+fn terminal_tabs(window: tauri::State<'_, Window>) -> TabsView {
+    window.terminals.view()
+}
+
+/// Send the tab's output to `bytes` as raw buffers. `false` for an unknown tab.
+#[tauri::command]
+fn terminal_output(
+    window: tauri::State<'_, Window>,
+    key: String,
+    bytes: Channel<InvokeResponseBody>,
+) -> bool {
+    window.terminals.attach_output(
+        &key,
+        Box::new(move |chunk| bytes.send(InvokeResponseBody::Raw(chunk)).is_ok()),
+    )
+}
+
+/// The webview painted `bytes` of the tab's output.
+#[tauri::command]
+fn terminal_ack(window: tauri::State<'_, Window>, key: String, bytes: usize) {
+    window.terminals.ack(&key, bytes);
+}
+
+/// Typed or pasted text for the tab's pane.
+#[tauri::command]
+fn terminal_input(window: tauri::State<'_, Window>, key: String, data: String) {
+    window.terminals.input(&key, data.into_bytes());
+}
+
+#[tauri::command]
+fn terminal_resize(window: tauri::State<'_, Window>, key: String, cols: u16, rows: u16) {
+    window.terminals.resize(&key, cols, rows);
+}
+
+#[tauri::command]
+fn terminal_reattach(window: tauri::State<'_, Window>, key: String) {
+    window.terminals.reattach(&key);
+}
+
+#[tauri::command]
+fn terminal_close(window: tauri::State<'_, Window>, key: String) {
+    window.terminals.close(&key);
 }
 
 /// The most of the sidecar log "show log" returns.
@@ -190,9 +257,23 @@ fn main() {
                 Sidecar::start(sidecar_config.clone())
             });
             let mut states = sidecar.state();
+            let executor = DesktopExecutor::new(ainb_bin());
+            let tmux = ainb_desktop::terminal::find_tmux().unwrap_or_else(|| {
+                tracing::warn!("no tmux found; terminal tabs will fail to attach");
+                PathBuf::from("tmux")
+            });
+            let terminals = Terminals::new(
+                tmux,
+                WebviewTabs(app.handle().clone()),
+                executor.report_sender(),
+            );
+            let shell = Shell::new(host, executor.with_terminals(terminals.clone()));
+            // The sidebar is the session list: a row click must be in context.
+            shell.open_sessions();
             app.manage(Window {
-                shell: Shell::new(host, DesktopExecutor::new(ainb_bin())),
+                shell,
                 frames,
+                terminals,
                 sidecar,
                 sidecar_config,
             });
@@ -225,7 +306,14 @@ fn main() {
             dispatch,
             sidecar_state,
             show_log,
-            retry_sidecar
+            retry_sidecar,
+            terminal_tabs,
+            terminal_output,
+            terminal_ack,
+            terminal_input,
+            terminal_resize,
+            terminal_reattach,
+            terminal_close
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
