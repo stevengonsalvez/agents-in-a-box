@@ -25,8 +25,9 @@ use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_proto::mutation::{REASON_EFFECTS_AMBIGUOUS, REASON_NOT_DELIVERED, ReceiptState};
 use ainb_hangar_store::repo::attention::AttentionRepo;
+use ainb_hangar_store::repo::daemon_identity::DaemonIdentityRepo;
 use ainb_hangar_store::repo::mutation_ledger::{
-    LOCAL_HOST_ID, LedgerRow, MutationLedgerRepo, STATUS_ACCEPTED, STATUS_REJECTED, TIER_RECEIPT,
+    LedgerRow, MutationLedgerRepo, STATUS_ACCEPTED, STATUS_REJECTED, TIER_RECEIPT,
 };
 use sqlx::SqlitePool;
 
@@ -55,7 +56,12 @@ pub struct SweepReport {
 /// Returns the store fault that stopped the sweep.
 pub async fn run(pool: &SqlitePool) -> Result<SweepReport, sqlx::Error> {
     let now_ms = SystemClock.now_ms();
-    let rows = MutationLedgerRepo::unresolved_at_boot(pool, LOCAL_HOST_ID).await?;
+    // Both hosts: claims a pre-#1066 daemon left under `local`, and claims made
+    // under this daemon's minted id.
+    let mut rows = Vec::new();
+    for host_id in DaemonIdentityRepo::known_host_ids(pool).await? {
+        rows.extend(MutationLedgerRepo::unresolved_at_boot(pool, &host_id).await?);
+    }
     let mut report = SweepReport::default();
 
     for row in rows {
