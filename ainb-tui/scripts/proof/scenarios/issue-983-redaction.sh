@@ -43,7 +43,11 @@ scenario() {
   local waited
   waited="$(web_sync_sessions 180)" || true
   observe "web snapshot caught up after ${waited}s"
-  wait_for 60 bash -c "curl -sS '$WEB_URL/api/snapshot' | jq -e '.needs[]? | select((.payload.question // \"\") | test(\"Proof 983\"))' >/dev/null"
+  # The card reaches the snapshot on a later poll than the session list does:
+  # the daemon ingests the hook line, then the web's next core poll reads it.
+  local card_wait=$SECONDS
+  wait_for 180 bash -c "curl -sS '$WEB_URL/api/snapshot' | jq -e '.needs[]? | select((.payload.question // \"\") | test(\"Proof 983\"))' >/dev/null"
+  observe "the ASK card reached the web snapshot after $((SECONDS - card_wait))s"
   curl -sS "$WEB_URL/api/snapshot" | redact_host >"$NODE_DIR/web-snapshot.json"
   CAPTURES+=("web-snapshot.json")
   observe "operator's own ainb list carries the label: $(grep -c "$PROOF_TOKEN" "$NODE_DIR/list-json.txt") line(s)"
