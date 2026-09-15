@@ -379,3 +379,77 @@ async fn a_request_without_an_op_id_is_untouched() {
         "an un-deduplicated call must behave as before"
     );
 }
+
+/// #1066: a claim made before the daemon minted its host stays under `local`,
+/// so a retry across the upgrade is still a replay; a claim made after the mint
+/// is keyed under the minted host.
+#[tokio::test]
+async fn an_op_id_claimed_before_the_mint_replays_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let broker = EventBroker::new();
+    let events = broker.sink();
+    let method = ainb_hangar_proto::methods::HANGAR_ISSUE_UPDATE;
+    let body = |op_id: &str| {
+        serde_json::json!({
+            "workspace_id": "ws-sample",
+            "issue_id": "iss-sample",
+            "state": "todo",
+            "op_id": op_id,
+        })
+    };
+    let host_of = |op_id: &'static str| {
+        let pool = store.pool().clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT host_id FROM mutation_ledger WHERE op_id = ?")
+                .bind(op_id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+
+    let before = dispatch(
+        &store,
+        &events,
+        &Caller::Operator,
+        method,
+        body("op-upgrade"),
+    )
+    .await;
+    assert_eq!(ack(&before)["outcome"], "created", "{before}");
+    assert_eq!(host_of("op-upgrade").await, vec!["local"]);
+
+    let host_id = ainb_hangar_store::repo::daemon_identity::DaemonIdentityRepo::mint_or_read(
+        store.pool(),
+        &ainb_hangar_core::idgen::SystemIdGen,
+        &ainb_hangar_core::clock::SystemClock,
+    )
+    .await
+    .unwrap()
+    .identity
+    .host_id;
+
+    let retry = dispatch(
+        &store,
+        &events,
+        &Caller::Operator,
+        method,
+        body("op-upgrade"),
+    )
+    .await;
+    assert_eq!(ack(&retry)["outcome"], "replayed", "{retry}");
+    assert_eq!(without_ack(retry), without_ack(before));
+    assert_eq!(host_of("op-upgrade").await, vec!["local"], "no second row");
+
+    let after = dispatch(
+        &store,
+        &events,
+        &Caller::Operator,
+        method,
+        body("op-minted"),
+    )
+    .await;
+    assert_eq!(ack(&after)["outcome"], "created", "{after}");
+    assert_eq!(host_of("op-minted").await, vec![host_id]);
+}
