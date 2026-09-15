@@ -595,7 +595,7 @@ async fn run_tui_loop(
         // it is published to the plugins, which fold it into the panel (#1031),
         // and its version is what a mirrored surface subscribes to.
         agent_status.drain_into(&mut app.state);
-        agent_status.publish(&app.state, app.state.plugins_host.plugin_runtime.as_ref());
+        agent_status.publish(&app.state, app.plugin_runtime());
 
         // Drive plugin-owned screens before every paint. Pushes any
         // host-side state into each plugin and drains its painted
@@ -789,7 +789,7 @@ async fn run_tui_loop(
                     // Don't let the palette steal `:` when the key belongs
                     // to someone else's text input. Two cases:
                     //  - A focused plugin screen owns every non-reserved key
-                    //    (the `forward_key_to_focused_plugin` contract);
+                    //    (the `route_key_to_focused_plugin` contract);
                     //    witr addresses targets as `port:5432` / `pid:4242`
                     //    / `file:/x` / `container:abc`, all needing a
                     //    literal `:`.
@@ -879,13 +879,26 @@ async fn run_tui_loop(
                     // interactive and slash-palette precedence above. Forward
                     // before host dispatch so navigation cannot consume plugin
                     // input such as Hangar's Ctrl+P palette shortcut.
-                    if let crate::app::screens::EventOutcome::Handled =
-                        crate::app::screens::builtin::forward_key_to_focused_plugin(
-                            &mut app.state,
-                            &key_event,
-                        )
                     {
-                        continue;
+                        use crate::app::screens::builtin::{
+                            PluginRoute, route_key_to_focused_plugin,
+                        };
+                        match route_key_to_focused_plugin(&app.state, &key_event) {
+                            PluginRoute::Forward(effect) => {
+                                run_effects(
+                                    vec![effect],
+                                    app,
+                                    &keymap,
+                                    &mut ui,
+                                    terminal,
+                                    &mut clients,
+                                )
+                                .await?;
+                                continue;
+                            }
+                            PluginRoute::Consumed => continue,
+                            PluginRoute::Host => {}
+                        }
                     }
 
                     let Some(chord) = chord else {
@@ -972,15 +985,26 @@ async fn run_tui_loop(
                     // A focused plugin screen owns the pointer (mirrors the
                     // key-forwarding contract). Forward + consume before the
                     // host's own mouse handling so the two never double-act.
-                    if matches!(
-                        crate::app::screens::builtin::forward_mouse_to_focused_plugin(
-                            &mut app.state,
-                            &ui,
-                            &mouse_event,
-                        ),
-                        crate::app::screens::EventOutcome::Handled
-                    ) {
-                        continue;
+                    {
+                        use crate::app::screens::builtin::{
+                            PluginRoute, route_mouse_to_focused_plugin,
+                        };
+                        match route_mouse_to_focused_plugin(&app.state, &ui, &mouse_event) {
+                            PluginRoute::Forward(effect) => {
+                                run_effects(
+                                    vec![effect],
+                                    app,
+                                    &keymap,
+                                    &mut ui,
+                                    terminal,
+                                    &mut clients,
+                                )
+                                .await?;
+                                continue;
+                            }
+                            PluginRoute::Consumed => continue,
+                            PluginRoute::Host => {}
+                        }
                     }
 
                     match mouse_event.kind {
@@ -1495,7 +1519,7 @@ async fn run_effects(
         // pane (a full-screen attach does). Close that client now, not on the
         // next loop, so it cannot outlive an effect that blocks this loop.
         clients.reconcile(&app.state);
-        let plugins = app.state.plugins_host.plugin_runtime.clone();
+        let plugins = app.plugin_runtime().cloned();
         for report in
             ainb::effect_host::execute(effect, terminal, ui, clients, plugins.as_ref()).await?
         {
