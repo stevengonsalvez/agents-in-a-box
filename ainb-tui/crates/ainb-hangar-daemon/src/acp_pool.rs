@@ -488,6 +488,52 @@ pub struct PoolConfig {
     /// sees its turn's transport error first and the exit notice second, which
     /// is the order a loaded runner produces by chance (#1091).
     pub exit_notice_delay: Duration,
+    /// Fault injection: awaited at each [`AdmissionPoint`] a session passes on
+    /// its way onto a provider process. `None` in production. A test uses it
+    /// to hold one arrival at a point while another passes a different one, so
+    /// a race on the session cap is forced rather than waited for (#958).
+    pub admission_hook: Option<AdmissionHook>,
+}
+
+/// Where an arriving session is on its way onto a provider process, for
+/// [`PoolConfig::admission_hook`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionPoint {
+    /// `make_room` has read the process's occupancy, before its store reads.
+    Counted,
+    /// `make_room` answered that the session may attach.
+    Admitted,
+    /// The session holds its route and no longer counts as attaching.
+    Attached,
+}
+
+/// The hook type behind [`PoolConfig::admission_hook`]: given the point and the
+/// arriving `session_key`, the future the pool awaits before going on.
+#[derive(Clone)]
+pub struct AdmissionHook(
+    pub  Arc<
+        dyn Fn(
+                AdmissionPoint,
+                &str,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            + Send
+            + Sync,
+    >,
+);
+
+impl std::fmt::Debug for AdmissionHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AdmissionHook")
+    }
+}
+
+impl AcpPool {
+    /// Await the admission hook, when a test installed one.
+    async fn admission(&self, point: AdmissionPoint, session_key: &str) {
+        if let Some(hook) = self.config.admission_hook.as_ref() {
+            (hook.0)(point, session_key).await;
+        }
+    }
 }
 
 impl Default for PoolConfig {
@@ -511,6 +557,7 @@ impl Default for PoolConfig {
             writer: WriterConfig::default(),
             circuit: CircuitConfig::default(),
             exit_notice_delay: Duration::ZERO,
+            admission_hook: None,
         }
     }
 }
@@ -2680,7 +2727,10 @@ impl SessionActor {
     ) -> Result<Arc<ProviderProcess>, &'static str> {
         for attempt in 0..2 {
             match self.ensure_session(message_id, attempt == 0).await {
-                Ok(process) => return Ok(process),
+                Ok(process) => {
+                    self.pool.admission(AdmissionPoint::Attached, &self.session_key).await;
+                    return Ok(process);
+                }
                 Err(EnsureFailure::BreakerOpen) => return Err(DELIVERY_BREAKER_OPEN),
                 Err(EnsureFailure::AtCapacity) => return Err(DELIVERY_PROVIDER_AT_CAPACITY),
                 // I13 is terminal: an adapter that will not hold the pinned mode
@@ -2769,6 +2819,7 @@ impl SessionActor {
         if !self.pool.make_room(&process, &self.session_key).await {
             return Err(EnsureFailure::AtCapacity);
         }
+        self.pool.admission(AdmissionPoint::Admitted, &self.session_key).await;
 
         // PROBED per spawn, never persisted (B-defect 5): `can_load` on disk
         // would outlive the adapter version that justified it.
@@ -3394,6 +3445,7 @@ impl AcpPool {
             .lock()
             .map(|routes| routes.values().map(|route| route.session_key.clone()).collect())
             .unwrap_or_default();
+        self.admission(AdmissionPoint::Counted, incoming).await;
 
         // LRU by the store's own `last_active_at`, so the choice survives a
         // daemon that has only just adopted these sessions.
