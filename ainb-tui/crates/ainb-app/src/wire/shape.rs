@@ -768,6 +768,13 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
             "plugin:sample".to_string(),
             seed.text("plugins.render_error", Captured),
         );
+        plugins.plugin_presence.insert(
+            "hangar-tui".to_string(),
+            crate::app::sections::PluginPresence {
+                registered: true,
+                wedged: false,
+            },
+        );
     }
 
     // ---- skills ------------------------------------------------------------------------------
