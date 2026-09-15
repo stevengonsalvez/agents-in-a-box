@@ -11,9 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
 use ainb_web::daemon::{Answerer, DaemonError};
-use ainb_web::data::{
-    CoreFuture, CoreSnapshot, CostFuture, DataError, DataSource, FleetSnapshot, SnapshotFuture,
-};
+use ainb_web::data::{CoreFuture, CoreSnapshot, CostFuture, DataError, DataSource};
 use ainb_web::{AppState, WebConfig, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -45,12 +43,6 @@ impl FakeSource {
 }
 
 impl DataSource for FakeSource {
-    fn snapshot(&self) -> SnapshotFuture<'_> {
-        Box::pin(async {
-            Ok::<_, DataError>(FleetSnapshot::from_parts(Self::fixed_core(), Value::Null))
-        })
-    }
-
     fn core(&self) -> CoreFuture<'_> {
         Box::pin(async { Ok::<_, DataError>(Self::fixed_core()) })
     }
