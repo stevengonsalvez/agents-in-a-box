@@ -23,6 +23,8 @@ use crate::terminal::{TabTarget, Terminals};
 /// sessions and named tmux sessions, and no other target yet.
 const NO_TERMINAL_TABS: &str =
     "this desktop build opens terminal tabs only on sessions and tmux sessions";
+/// Why this shell answers every attach with a failure: no tmux was found.
+const NO_TMUX: &str = "no tmux was found, so this desktop build cannot open terminal tabs";
 /// Why plugin work is refused: this shell runs no plugin runtime.
 const NO_PLUGIN_RUNTIME: &str = "this desktop build runs no plugin runtime";
 
@@ -78,7 +80,8 @@ impl Executor for DesktopExecutor {
         match effect {
             Effect::AttachTerminal(target) => match (&self.terminals, tab_target(&target)) {
                 (Some(terminals), Some(tab)) => terminals.open(tab).into_iter().collect(),
-                _ => vec![attach_unsupported(target)],
+                (Some(_), None) => vec![attach_unsupported(target, NO_TERMINAL_TABS)],
+                (None, _) => vec![attach_unsupported(target, NO_TMUX)],
             },
             // Desktop host: returns keyboard focus from the terminal tab to the
             // app, which the reducer hears as the user having left it.
@@ -149,15 +152,15 @@ fn tab_target(target: &TerminalTarget) -> Option<TabTarget> {
     }
 }
 
-/// The failure report an attach documents, for a target no tab holds.
-fn attach_unsupported(target: TerminalTarget) -> Intent {
-    let failed = AttachOutcome::Failed(NO_TERMINAL_TABS.to_string());
+/// The failure report an attach documents, naming `why` no tab opened.
+fn attach_unsupported(target: TerminalTarget, why: &str) -> Intent {
+    let failed = AttachOutcome::Failed(why.to_string());
     match target {
         TerminalTarget::InPlace { tmux_session, .. } => {
-            reports::in_place_failed(tmux_session.as_str(), NO_TERMINAL_TABS, true)
+            reports::in_place_failed(tmux_session.as_str(), why, true)
         }
         TerminalTarget::Observe { tmux_session, .. } => {
-            reports::observer_failed(tmux_session.as_str(), NO_TERMINAL_TABS, true)
+            reports::observer_failed(tmux_session.as_str(), why, true)
         }
         TerminalTarget::Session { id, .. } => {
             reports::attach_finished(&AttachedTo::Session(id), &failed)
@@ -171,10 +174,9 @@ fn attach_unsupported(target: TerminalTarget) -> Intent {
         TerminalTarget::Tool(ToolTerminal::Abtop | ToolTerminal::AbtopWithSetup) => {
             reports::attach_finished(&AttachedTo::Abtop, &failed)
         }
-        TerminalTarget::WorkspaceShell { workspace_path, .. } => reports::shell_prepared(
-            &workspace_path,
-            &ShellOutcome::Failed(NO_TERMINAL_TABS.to_string()),
-        ),
+        TerminalTarget::WorkspaceShell { workspace_path, .. } => {
+            reports::shell_prepared(&workspace_path, &ShellOutcome::Failed(why.to_string()))
+        }
         TerminalTarget::ClaudeLogin { auth_dir, .. } => reports::login_finished(&auth_dir, false),
     }
 }
