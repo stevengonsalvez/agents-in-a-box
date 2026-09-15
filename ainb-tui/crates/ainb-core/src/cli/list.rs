@@ -160,16 +160,17 @@ fn web_rows(sessions: &[SessionInfo]) -> Vec<ainb_app::wire::web::WebSessionRow>
             SessionStatus::Idle => ModelStatus::Idle,
             SessionStatus::Stopped => ModelStatus::Stopped,
         };
-        match workspaces.iter_mut().find(|workspace| workspace.name == info.workspace_name) {
-            Some(workspace) => workspace.add_session(session),
-            None => {
-                let mut workspace = Workspace::new(
-                    info.workspace_name.clone(),
-                    std::path::PathBuf::from(&info.worktree_path),
-                );
-                workspace.add_session(session);
-                workspaces.push(workspace);
-            }
+        if let Some(workspace) =
+            workspaces.iter_mut().find(|workspace| workspace.name == info.workspace_name)
+        {
+            workspace.add_session(session);
+        } else {
+            let mut workspace = Workspace::new(
+                info.workspace_name.clone(),
+                std::path::PathBuf::from(&info.worktree_path),
+            );
+            workspace.add_session(session);
+            workspaces.push(workspace);
         }
     }
     let mut state = ainb_app::AppState::new();
