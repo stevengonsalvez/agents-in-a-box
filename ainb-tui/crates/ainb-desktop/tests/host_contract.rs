@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use ainb_app::app::Effect;
 use ainb_app::config::AppConfig;
-use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
+use ainb_app::wire::frame::{FrameBatch, Subscription};
 use ainb_app::{Chord, Intent, Keymap, SectionId};
 use ainb_desktop::host::{DesktopHost, Executor};
 
@@ -30,7 +30,6 @@ fn host_on(
     DesktopHost::new(
         config,
         Keymap::defaults(),
-        HostId::local(),
         Subscription::only(sections),
         move |batch: FrameBatch| {
             for frame in batch.frames {
