@@ -96,13 +96,53 @@ fn web_snapshot_trace(state: &AppState) -> trace::Trace {
     struct WebSnapshotSessions {
         sessions: Vec<crate::wire::web::WebSessionRow>,
         needs: Vec<crate::wire::web::WebNeedCard>,
+        cost: Option<crate::wire::web::WebCost>,
     }
     let rows = WebSnapshotSessions {
         sessions: crate::wire::web::session_rows(state),
         needs: sample_web_needs(&mut PlainSeed),
+        cost: sample_web_cost(&mut PlainSeed),
     };
     trace::trace("web_snapshot", &rows)
         .unwrap_or_else(|error| panic!("web snapshot rows failed to serialise: {error}"))
+}
+
+/// The web cost panel projected from a full sample `ainb fleet cost` report:
+/// every section the report writes, including the per-session rows with their
+/// absolute `cwd` that the panel must drop (#1113).
+pub fn sample_web_cost(seed: &mut dyn Seed) -> Option<crate::wire::web::WebCost> {
+    use TextKind::Captured;
+    let bucket = serde_json::json!({
+        "input_tokens": 10,
+        "cache_creation_tokens": 1,
+        "cache_read_tokens": 2,
+        "output_tokens": 5,
+        "reasoning_tokens": 3,
+        "call_count": 1,
+        "cost_usd": 0.5,
+    });
+    let report = serde_json::json!({
+        "totals": {"cost_usd": 0.5, "session_count": 1, "model_count": 1, "bucket": bucket},
+        "sessions": [{
+            "session_id": "sample-session",
+            "provider": "claude",
+            "project": seed.text("cost.project", Captured),
+            "cwd": format!("/work/{}", seed.text("cost.cwd", Captured)),
+            "group": "sample-group",
+            "cost_usd": 0.5,
+            "bucket": bucket,
+        }],
+        "models": [{"model": seed.text("cost.model", Captured), "cost_usd": 0.5, "bucket": bucket}],
+        "daily": [{"date": "2026-09-15", "cost_usd": 0.5, "bucket": bucket}],
+        "groups": [{
+            "group": seed.text("cost.group", Captured),
+            "cost_usd": 0.5,
+            "session_count": 1,
+            "bucket": bucket,
+        }],
+        "budget_breaches": [],
+    });
+    crate::wire::web::cost_panel(&report)
 }
 
 /// The web needs cards projected from sample daemon cards: every key
