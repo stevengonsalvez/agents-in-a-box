@@ -30,9 +30,9 @@ pub trait Screen: Send {
     /// global key handler runs. Default: `NotHandled` (screen abstains —
     /// let the central dispatch in `app::events` do its thing).
     ///
-    /// Plugin-owned screens (see `PluginScreen`) override this to
-    /// translate the crossterm event into the portable wire shape and
-    /// forward it down `plugin/handle_key`.
+    /// Plugin-owned screens do not use this: the run loop routes their input
+    /// with `builtin::route_key_to_focused_plugin`, which returns an
+    /// `Effect::ForwardToPlugin` for the host.
     fn handle_key(
         &mut self,
         _state: &mut AppState,
