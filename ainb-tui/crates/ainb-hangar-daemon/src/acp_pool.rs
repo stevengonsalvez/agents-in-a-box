@@ -488,6 +488,7 @@ pub struct PoolConfig {
     /// sees its turn's transport error first and the exit notice second, which
     /// is the order a loaded runner produces by chance (#1091).
     pub exit_notice_delay: Duration,
+    #[doc(hidden)]
     /// Fault injection: awaited at each [`AdmissionPoint`] a session passes on
     /// its way onto a provider process. `None` in production. A test uses it
     /// to hold one arrival at a point while another passes a different one, so
@@ -497,6 +498,7 @@ pub struct PoolConfig {
 
 /// Where an arriving session is on its way onto a provider process, for
 /// [`PoolConfig::admission_hook`].
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionPoint {
     /// `make_room` has read the process's occupancy, before its store reads.
@@ -509,6 +511,7 @@ pub enum AdmissionPoint {
 
 /// The hook type behind [`PoolConfig::admission_hook`]: given the point and the
 /// arriving `session_key`, the future the pool awaits before going on.
+#[doc(hidden)]
 #[derive(Clone)]
 pub struct AdmissionHook(
     pub  Arc<
@@ -3444,11 +3447,22 @@ impl AcpPool {
         // order (#958). An arrival registers its route and only then stops
         // counting as attaching. Reading `attaching` first and the routes
         // second means that arrival is counted in at least one of the two
-        // whenever it moves between them; at worst it is counted in both,
-        // which evicts or refuses one arrival early and never overshoots. The routes used to be read
-        // first and `attaching` only after a store read per tenant, so an
-        // arrival that attached during those reads was counted in neither, and
-        // the process settled at cap+1.
+        // whenever it moves between them, so the cap is never overshot. The
+        // routes used to be read first and `attaching` only after a store read
+        // per tenant, so an arrival that attached during those reads was
+        // counted in neither, and the process settled at cap+1.
+        //
+        // The price is a double count, and its window is wider than the gap
+        // between the two reads: it runs from an arrival's route insert in
+        // `attach_channels` to its `AttachGuard` dropping at the end of
+        // `ensure_session`, i.e. the post-attach store writes
+        // (`set_acp_session_id`, `set_provider_version`,
+        // `record_context_rebuilt`), milliseconds. An arrival that counts that
+        // session twice evicts one idle tenant early, or under a tight cap is
+        // refused. Tracking attaching session keys instead of a count would
+        // close it; the guard must not simply drop at route insert, because
+        // `idle_window_expired` relies on `attaching > 0` across the load
+        // failure and retry gap.
         let attaching = process.attaching.load(Ordering::Relaxed) as usize;
         let hosted: Vec<String> = process
             .routes
