@@ -65,7 +65,7 @@ impl DaemonIdentityRepo {
         idgen: &dyn IdGen,
         clock: &dyn HangarClock,
     ) -> Result<MintOutcome, sqlx::Error> {
-        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = pool.begin_with(crate::repo::fleet::IMMEDIATE_TRANSACTION).await?;
         let inserted = sqlx::query(
             "INSERT OR IGNORE INTO daemon_identity (singleton, host_id, created_at) \
              VALUES (1, ?, ?)",
