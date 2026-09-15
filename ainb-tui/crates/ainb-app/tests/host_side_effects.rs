@@ -543,6 +543,8 @@ fn the_workspace_load_and_token_refresh_pieces_stay_private() {
         "pub fn oauth_token_needs_refresh(",
         "pub const DOCKER_TIMEOUT_SECS",
         "pub async fn is_docker_available(",
+        "pub async fn refresh_oauth_tokens(",
+        "pub fn start_background_workspace_loading(",
     ]
     .into_iter()
     .filter(|signature| state.contains(signature))
