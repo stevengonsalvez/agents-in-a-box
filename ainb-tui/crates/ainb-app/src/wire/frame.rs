@@ -310,6 +310,12 @@ impl Mirror {
         self.subscription
     }
 
+    /// Forget what was sent, so the next batch frames every subscribed section
+    /// in full: a renderer that attached, or reloaded, after earlier batches.
+    pub fn reframe(&mut self) {
+        self.sent = [None; SectionId::COUNT];
+    }
+
     /// Change what the renderer wants. A newly added section is framed in full
     /// on the next batch; a dropped one stops.
     pub fn resubscribe(&mut self, subscription: Subscription) {
@@ -391,6 +397,24 @@ mod tests {
             mirror.batch(&state).is_empty(),
             "not retried until the section changes"
         );
+    }
+
+    #[test]
+    fn reframe_sends_every_subscribed_section_again_and_nothing_else() {
+        let state = crate::wire::shape::sample_state(&mut crate::wire::shape::PlainSeed);
+        let mut mirror = Mirror::new(
+            HostId::local(),
+            Subscription::only(&[SectionId::Shell, SectionId::Tmux]),
+        );
+        assert_eq!(mirror.batch(&state).frames.len(), 2);
+        assert!(mirror.batch(&state).is_empty());
+
+        mirror.reframe();
+
+        let mut sections: Vec<_> =
+            mirror.batch(&state).frames.into_iter().map(|frame| frame.section).collect();
+        sections.sort();
+        assert_eq!(sections, vec!["shell", "tmux"]);
     }
 
     #[test]
