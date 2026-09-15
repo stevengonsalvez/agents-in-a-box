@@ -157,8 +157,6 @@ config.app_config.workspace_defaults.scan_cache_ttl_secs
 config.app_config.workspace_defaults.scan_max_depth
 config.app_config.workspace_defaults.workspace_scan_paths[]
 config.app_config.workspace_defaults.worktree_collision_behavior
-config.changelog_state.lines[].content
-config.changelog_state.lines[].style
 config.changelog_state.scroll_offset
 config.changelog_state.total_lines
 config.config_popup_state.description
