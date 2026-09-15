@@ -770,21 +770,13 @@ mod tests {
     /// script has exec'd the proxy. Returns rather than panics, so the caller's
     /// cleanup still runs when it never does.
     fn wait_for_exec(pid: u32, exe: &std::path::Path) -> bool {
-        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-
-        let wanted = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
-        let target = Pid::from_u32(pid);
-        let mut system = System::new();
+        let canonical = |path: &std::path::Path| {
+            std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        };
+        let wanted = canonical(exe);
         for _ in 0..500 {
-            system.refresh_processes_specifics(
-                ProcessesToUpdate::Some(&[target]),
-                true,
-                ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
-            );
-            let running =
-                system.process(target).and_then(|process| process.exe()).is_some_and(|path| {
-                    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()) == wanted
-                });
+            let running = crate::fleet::daemons::heartbeat::process_binary(pid)
+                .is_some_and(|path| canonical(&path) == wanted);
             if running {
                 return true;
             }
