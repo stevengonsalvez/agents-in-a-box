@@ -366,7 +366,7 @@ impl DataSource for WebServerSource {
     }
 
     fn cost(&self) -> CostFuture<'_> {
-        Box::pin(async { serde_json::Value::Null })
+        Box::pin(async { None })
     }
 }
 
