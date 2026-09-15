@@ -11,6 +11,7 @@ tripwire_new_session_agent_pills_visible::agent_row_renders_inline_pills_in_cust
 tripwire_new_session_branch_auto_derive::branch_line_is_random_hex_and_stable_across_prompt_edits                      #1023  test rot: picks presets by position, and b56efb7a2 reordered them
 tripwire_new_session_favorite_toggle::ctrl_f_toggles_favorite_on_and_off                                               #1023  test rot: the removal toast matches the star check
 tripwire_new_session_modified_badge::modified_badge_toggles_with_mode_toggle_alone                                     #1023  test rot: waits for the Boss mode fabdd92a2 removed
+tripwire_new_session_modified_badge::modified_badge_toggles_with_preset_cycle                                          #1023  test rot: expects no badge before Right, but the runner's default preset is already modified and #1050 made the badge visible
 tripwire_new_session_persists_half_typed_prompt::half_typed_prompt_persists_across_esc_back                            #1023  test rot: picks presets by position, and b56efb7a2 reordered them
 tripwire_new_session_yolo_toggle::yolo_toggle_key_flips_on_off_and_marks_modified                                      #1027  test rot: preset order and an always-true OFF check, plus #1050
 tripwire_sessions_answer_daemon_down::an_answer_reaches_the_agents_pane_with_the_hangar_daemon_stopped                 #1049  product bug: no provider_session_id for Claude sessions; also expects ASK for WAIT
