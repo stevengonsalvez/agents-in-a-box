@@ -588,12 +588,8 @@ impl AppState {
     }
 
     /// Record the tmux session the host runs in, or `None` outside tmux.
-    ///
-    /// A host calls this as often as it likes: an unchanged name is not a write.
     pub fn set_host_tmux_session(&mut self, session: Option<String>) {
-        if self.host.host_tmux_session != session {
-            self.host.host_tmux_session = session;
-        }
+        self.host.host_tmux_session = session;
     }
 
     /// True while an interactive embed is focused.
