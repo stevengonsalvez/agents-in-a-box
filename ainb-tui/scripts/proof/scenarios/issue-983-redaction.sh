@@ -3,7 +3,7 @@
 # committed fixture, and credential-shaped text never reaches a frame.
 
 # shellcheck disable=SC2034  # read by write_result in lib.sh
-EXPECT="ainb doctor --wire-shape reports no drift from the committed fixture, and a token-shaped string in a session label never appears in hangar connections list, the wire-shape frame output, or the web snapshot frame"
+EXPECT="ainb doctor --wire-shape reports no drift from the committed fixture, a token-shaped string in a session label never appears in hangar connections list, the wire-shape frame output, or the web snapshot frame, and an ASK whose question carries the token reaches the web snapshot as a card with no cwd and no token"
 
 # Shaped like a GitHub classic token so the redactor's table matches it. Built
 # from two halves so no token-shaped literal sits in the source, and replaced
@@ -36,15 +36,26 @@ scenario() {
     bash -c "! grep -qF '$PROOF_TOKEN' '$NODE_DIR/wire-shape.txt' '$NODE_DIR/wire-shape-json.txt'"
 
   # The live frame a remote surface receives today is the web snapshot.
+  # An ASK whose question carries the canary, raised through the real hook
+  # path, so needs[] has a card built from a request that holds the token (#1081).
+  raise_ask "Proof 983: deploy with $PROOF_TOKEN?" proof-983-ask >/dev/null
   start_web || { check "ainb web answers" false; return; }
   local waited
   waited="$(web_sync_sessions 180)" || true
   observe "web snapshot caught up after ${waited}s"
+  wait_for 60 bash -c "curl -sS '$WEB_URL/api/snapshot' | jq -e '.needs[]? | select((.payload.question // \"\") | test(\"Proof 983\"))' >/dev/null"
   curl -sS "$WEB_URL/api/snapshot" | redact_host >"$NODE_DIR/web-snapshot.json"
   CAPTURES+=("web-snapshot.json")
   observe "operator's own ainb list carries the label: $(grep -c "$PROOF_TOKEN" "$NODE_DIR/list-json.txt") line(s)"
   check "the token never appears in the web snapshot frame" \
     bash -c "! grep -qF '$PROOF_TOKEN' '$NODE_DIR/web-snapshot.json'"
+  jq '.needs' "$NODE_DIR/web-snapshot.json" >"$NODE_DIR/web-needs.json"
+  observe "web snapshot needs cards: $(jq 'length' "$NODE_DIR/web-needs.json")"
+  check "the canary-bearing ASK reaches the web snapshot as a card" \
+    jq -e 'any(.[]; (.payload.question // "") | test("Proof 983"))' "$NODE_DIR/web-needs.json"
+  check "no web needs card carries a cwd" jq -e 'all(.[]; has("cwd") | not)' "$NODE_DIR/web-needs.json"
+  check "the fixture session's directory never appears in the web needs cards" \
+    bash -c "! grep -qF '$FIXTURE_CWD' '$NODE_DIR/web-needs.json'"
 
   # Checks are done; keep the canary out of what gets published.
   local file
