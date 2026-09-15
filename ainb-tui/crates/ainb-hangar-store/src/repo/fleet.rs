@@ -42,7 +42,7 @@ pub(crate) const IMMEDIATE_TRANSACTION: &str = "BEGIN IMMEDIATE";
 /// Belt and braces to [`IMMEDIATE_TRANSACTION`]: taking the lock up front makes
 /// the busy handler apply, and this covers the residue where even a 10s
 /// `busy_timeout` expires. Five attempts spend under 100ms of backoff.
-const WRITE_LOCK_ATTEMPTS: u32 = 5;
+pub const WRITE_LOCK_ATTEMPTS: u32 = 5;
 
 /// Run one write transaction, replaying it while `SQLite` reports lock
 /// contention.
