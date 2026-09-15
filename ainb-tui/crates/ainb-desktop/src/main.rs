@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ainb_app::config::AppConfig;
-use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
+use ainb_app::wire::frame::{FrameBatch, Subscription};
 use ainb_app::{Intent, Keymap};
 use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::{DesktopHost, FrameSink};
@@ -269,7 +269,6 @@ fn main() {
             let mut host = DesktopHost::new(
                 config,
                 Keymap::defaults(),
-                HostId::local(),
                 // Nothing is framed until the webview subscribes.
                 Subscription::none(),
                 frames.clone(),
