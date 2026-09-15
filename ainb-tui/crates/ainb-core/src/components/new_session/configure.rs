@@ -262,19 +262,47 @@ fn render_preset_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     let mut options: Vec<String> = state.available_presets.clone();
     options.push(CUSTOM_PRESET_LABEL.to_string());
 
-    let line = build_pills_line("Preset:  ", &options, &current, focused, &[], area.width);
-
-    // Tack on the modified badge to the same line (after the pills).
-    let line = if modified {
-        let mut spans: Vec<Span<'static>> = line.spans;
+    // Width-fit gate (as render_agent_row and render_model_row do), counting
+    // the modified badge too: it is the one thing on this row that must stay
+    // visible. Drop the `←/→ to change` hint first; if the pills still do not
+    // fit, show the single `◀ value ▶` cycle display.
+    const MODIFIED_BADGE: &str = "  \u{2022} modified";
+    let badge_width = if modified {
+        MODIFIED_BADGE.chars().count()
+    } else {
+        0
+    };
+    let width = area.width as usize;
+    let mut spans: Vec<Span<'static>> =
+        if estimate_pill_width("Preset:  ", &options, &[], focused) + badge_width <= width {
+            build_pills_line("Preset:  ", &options, &current, focused, &[], area.width).spans
+        } else if estimate_pill_width("Preset:  ", &options, &[], false) + badge_width <= width {
+            let mut spans =
+                build_pills_line("Preset:  ", &options, &current, focused, &[], area.width).spans;
+            if focused {
+                // The hint is the last span `build_pills_line` adds when focused.
+                spans.pop();
+            }
+            spans
+        } else {
+            vec![
+                focus_indicator(focused),
+                label_span("Preset:  "),
+                cyclable_arrow_left(focused),
+                Span::styled(
+                    current.clone(),
+                    Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+                ),
+                cyclable_arrow_right(focused),
+            ]
+        };
+    if modified {
         spans.push(Span::styled(
-            "  \u{2022} modified",
+            MODIFIED_BADGE,
             Style::default().fg(SELECTION_GREEN),
         ));
-        Line::from(spans)
-    } else {
-        line
-    };
+    }
+    let line = Line::from(spans);
 
     // Two-line block: name line + a contextual sub-line.
     //
@@ -1596,6 +1624,49 @@ mod tests {
         assert!(
             !AGENTS.contains(&"gemini"),
             "gemini stays out of the cycle ring (greyed-out)"
+        );
+    }
+
+    /// The focused Preset row keeps its `• modified` badge visible at any
+    /// width: the hint goes first, then the pills fold to the cycle display
+    /// (#1050).
+    #[test]
+    fn render_preset_row_keeps_the_modified_badge_when_the_row_is_tight() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut state = mk_state();
+        state.preset_selection = PresetSelection::Named(1);
+        assert!(
+            state.is_modified(),
+            "precondition: b differs from the loaded a"
+        );
+
+        let draw = |width: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(width, 2)).unwrap();
+            terminal.draw(|f| render_preset_row(f, &state, f.size(), true)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        };
+
+        let wide = draw(120);
+        assert!(
+            wide.contains("modified") && wide.contains("to change"),
+            "{wide:?}"
+        );
+        let tight = draw(60);
+        assert!(
+            tight.contains("modified"),
+            "the badge outranks the hint: {tight:?}"
+        );
+        assert!(!tight.contains("to change"), "{tight:?}");
+        let narrow = draw(40);
+        assert!(
+            narrow.contains("modified"),
+            "the cycle display keeps the badge: {narrow:?}"
         );
     }
 
