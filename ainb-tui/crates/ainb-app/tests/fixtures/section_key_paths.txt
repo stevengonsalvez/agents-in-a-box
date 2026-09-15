@@ -813,10 +813,8 @@ web_snapshot.needs[].evidenceObservedAt
 web_snapshot.needs[].hostId
 web_snapshot.needs[].kind
 web_snapshot.needs[].paneUnbound
-web_snapshot.needs[].payload.header
 web_snapshot.needs[].payload.marker
 web_snapshot.needs[].payload.message
-web_snapshot.needs[].payload.multiSelect
 web_snapshot.needs[].payload.options[]
 web_snapshot.needs[].payload.pattern
 web_snapshot.needs[].payload.question
