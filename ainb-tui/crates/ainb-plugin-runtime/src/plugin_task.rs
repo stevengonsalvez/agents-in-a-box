@@ -40,6 +40,7 @@ use tracing::{debug, error, info, warn};
 use crate::error::RuntimeError;
 use crate::event_stream::{EventStreamRegistry, topic_allowed};
 use crate::framing::{read_frame, write_frame};
+use crate::inbox::{DropOldestReceiver, DropOldestSender, INPUT_INBOX_CAPACITY, drop_oldest};
 use crate::managed_subprocess::ManagedSubprocessRegistry;
 use crate::process::{SIGTERM, signal_pgrp, spawn_plugin};
 use crate::registry::RegisteredPlugin;
@@ -203,14 +204,19 @@ pub type Inbox = mpsc::UnboundedSender<Command>;
 /// and reads from the key receiver first, so any pending keystroke is
 /// dispatched before another `HandleEvent` is pulled — restores Esc
 /// responsiveness even during a multi-second chunk drain.
-pub type KeyInbox = mpsc::UnboundedSender<HandleKeyParams>;
+///
+/// Bounded at [`INPUT_INBOX_CAPACITY`], dropping the oldest key when full
+/// (#1087): a plugin that stops reading its stdin stalls the task's frame
+/// write, and an unbounded channel then kept every later keystroke in memory.
+pub type KeyInbox = DropOldestSender<HandleKeyParams>;
 
 /// Priority side-channel reserved for `plugin/handle_mouse` notifications.
 ///
 /// Mirrors [`KeyInbox`]: a dedicated channel drained ahead of the main
 /// [`Inbox`] in the task's `biased;` select, so a click or scroll on a
-/// plugin screen can't queue behind a backlog of `HandleEvent` chunks.
-pub type MouseInbox = mpsc::UnboundedSender<HandleMouseParams>;
+/// plugin screen can't queue behind a backlog of `HandleEvent` chunks. Bounded
+/// the same way.
+pub type MouseInbox = DropOldestSender<HandleMouseParams>;
 
 /// Map of `plugin_id → inbox` for snapshot fan-out.
 ///
@@ -370,8 +376,8 @@ pub fn spawn(
     Arc<std::sync::atomic::AtomicBool>,
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let (key_tx, key_rx) = mpsc::unbounded_channel();
-    let (mouse_tx, mouse_rx) = mpsc::unbounded_channel();
+    let (key_tx, key_rx) = drop_oldest(INPUT_INBOX_CAPACITY);
+    let (mouse_tx, mouse_rx) = drop_oldest(INPUT_INBOX_CAPACITY);
     let cache = RenderCache::new();
     let state = Arc::new(parking_lot::RwLock::new(LifecycleState::Idle));
     let render_wedged = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -501,12 +507,12 @@ struct PluginTask {
     /// before the main `rx` on every loop iteration so keystrokes
     /// (including Esc) are dispatched ahead of any backlog of
     /// `HandleEvent` chunks.
-    key_rx: mpsc::UnboundedReceiver<HandleKeyParams>,
+    key_rx: DropOldestReceiver<HandleKeyParams>,
     /// Priority receiver for `plugin/handle_mouse` notifications. Drained
     /// alongside `key_rx` (both ahead of the main `rx`) so mouse clicks
     /// and scrolls on a plugin screen aren't starved by a `HandleEvent`
     /// backlog.
-    mouse_rx: mpsc::UnboundedReceiver<HandleMouseParams>,
+    mouse_rx: DropOldestReceiver<HandleMouseParams>,
     ledger: HashMap<u64, Pending>,
     ids: IdCounter,
     failures: VecDeque<Instant>,
@@ -2211,7 +2217,8 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async move {
             let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<&'static str>();
-            let (key_tx, mut key_rx) = mpsc::unbounded_channel::<HandleKeyParams>();
+            let (key_tx, mut key_rx) =
+                crate::inbox::drop_oldest::<HandleKeyParams>(crate::inbox::INPUT_INBOX_CAPACITY);
 
             // Fill the main command channel with 100 entries first.
             // Then enqueue a single key. Under the production select!
