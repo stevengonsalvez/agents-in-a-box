@@ -147,6 +147,13 @@ pub struct HelloResult {
     /// that is what the version integer and the catalogue are for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_version: Option<String>,
+    /// The daemon's minted `HostId`, a ULID (spec D11, #1066): the host every
+    /// row this daemon serves names in its `host_id`.
+    ///
+    /// `None` from a daemon that predates the mint, or one that could not mint;
+    /// its rows name `local`, and a client reads the host as `local` too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
 }
 
 impl HelloResult {
@@ -275,6 +282,7 @@ mod tests {
         assert_eq!(result.selected_or_legacy(), 1);
         assert!(result.capabilities.is_empty());
         assert!(!result.advertises(crate::protocol::CAP_MUTATION_OP_ID));
+        assert_eq!(result.host_id, None, "an N-1 daemon names no host");
     }
 
     /// A current daemon's reply survives an N-1 client's decoder: the extra
@@ -286,6 +294,7 @@ mod tests {
             selected: Some(1),
             capabilities: crate::protocol::catalogue_strings(),
             daemon_version: Some("0.1.0".to_string()),
+            host_id: Some("01K5A0000000000000000FIRST".to_string()),
         })
         .unwrap();
         // The pre-W0-wire client deserialized the ack as an empty struct.
