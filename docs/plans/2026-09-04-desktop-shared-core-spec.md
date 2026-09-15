@@ -192,7 +192,7 @@ plugin/handle_action    NEW { action_id: String, payload: Value }   (clicks, pal
 | Surface | Trigger | Shape |
 |---------|---------|-------|
 | sidebar sessions | tick, `sessions` section change | tree grouped by workspace, ring per row |
-| terminal tab | `Effect::AttachTerminal` | xterm.js on `ws://127.0.0.1:<port>/ws/session/<id>` (local) or tunnelled |
+| terminal tab | `Effect::AttachTerminal` | xterm.js fed over a Tauri `Channel<Vec<u8>>` from a Rust-owned PTY (local); `ainb-web` WS on the box behind the tunnel (remote) |
 | board | `board` section change | columns, cards with status line, stat strip, LAST REPLY, timeline |
 | answer box | `Command(board.answer)` | reply → daemon answer RPC → card refresh |
 | review tab | `Command(review.open)` | CodeMirror 6 merge view, hunks from `ainb-diff`, Shiki highlight |
@@ -202,6 +202,8 @@ plugin/handle_action    NEW { action_id: String, payload: Value }   (clicks, pal
 | settings | `Command(config.open)` | core `config` section as a form + desktop-only: theme, fonts, layout |
 | host switcher | header click or `cmd+shift+h` | swaps active `HostApp` |
 | new session | `Command(sessions.new)` | core wizard state (`configure.rs`) as one form page, same `LaunchSpec` |
+
+**Amendment (2026-09-15, D1): the local terminal has no WS listener.** The desktop's Rust side owns the `tmux attach-session` PTY and streams its bytes to xterm.js on a Tauri `Channel<Vec<u8>>`, with input and resize as `invoke` commands: no loopback TCP port, no token in a URL, nothing a visited web page can reach. The `ws://.../ws/session/<id>` URL is the remote leg only, served by `ainb-web` on the box behind the tunnel. Both legs sit behind one frontend `TerminalTransport` (`send`, `resize`, `onBytes`), so "WS terminal" elsewhere in this spec (the component table, the drop error, the throughput test) reads as that transport. A later lane that binds a local WS binds `127.0.0.1` on port 0, requires the token, and rejects any `Origin` outside the app's own.
 
 ## Screen inventory
 
