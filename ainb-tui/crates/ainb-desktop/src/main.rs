@@ -14,7 +14,8 @@ use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
 use ainb_app::{Intent, Keymap, SectionId};
 use ainb_desktop::executor::DesktopExecutor;
-use ainb_desktop::host::{DesktopHost, Executor, FrameSink};
+use ainb_desktop::host::{DesktopHost, FrameSink};
+use ainb_desktop::shell::Shell;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarState};
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
@@ -48,62 +49,35 @@ impl FrameSink for ChannelSink {
     }
 }
 
-struct Shell {
-    host: Mutex<DesktopHost<ChannelSink>>,
-    executor: Mutex<DesktopExecutor>,
+struct Window {
+    shell: Shell<ChannelSink>,
     frames: ChannelSink,
     sidecar: Sidecar,
 }
 
-impl Shell {
-    fn host(&self) -> std::sync::MutexGuard<'_, DesktopHost<ChannelSink>> {
-        self.host.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn executor(&self) -> std::sync::MutexGuard<'_, DesktopExecutor> {
-        self.executor.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Frame what moved since the last tick, and run the effects and deferred
-    /// reports that work produced.
-    fn tick(&self) {
-        let mut host = self.host();
-        let mut executor = self.executor();
-        let mut reports: Vec<Intent> = Vec::new();
-        for effect in host.tick() {
-            reports.extend(executor.execute(effect));
-        }
-        reports.extend(executor.take_deferred());
-        for report in reports {
-            host.run(report, &mut *executor);
-        }
-    }
-}
-
 /// Attach the webview's frame channel and send it every section it draws.
 #[tauri::command]
-fn subscribe(shell: tauri::State<'_, Shell>, frames: Channel<FrameBatch>) {
-    *shell.frames.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frames);
-    shell.host().reframe();
+fn subscribe(window: tauri::State<'_, Window>, frames: Channel<FrameBatch>) {
+    *window.frames.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frames);
+    window.shell.reframe();
 }
 
 /// Apply an intent from the webview: a key, a command, pasted text.
 #[tauri::command]
-fn dispatch(shell: tauri::State<'_, Shell>, intent: Intent) {
-    let mut executor = shell.executor();
-    shell.host().run(intent, &mut *executor);
+fn dispatch(window: tauri::State<'_, Window>, intent: Intent) {
+    window.shell.dispatch(intent);
 }
 
 /// Where the daemon connection stands, for the banner on first paint.
 #[tauri::command]
-fn sidecar_state(shell: tauri::State<'_, Shell>) -> SidecarState {
-    shell.sidecar.state().borrow().clone()
+fn sidecar_state(window: tauri::State<'_, Window>) -> SidecarState {
+    window.sidecar.state().borrow().clone()
 }
 
 /// Leave the degraded state and look for a daemon again.
 #[tauri::command]
-fn retry_sidecar(shell: tauri::State<'_, Shell>) {
-    shell.sidecar.retry();
+fn retry_sidecar(window: tauri::State<'_, Window>) {
+    window.sidecar.retry();
 }
 
 /// The bundled daemon: `AINB_DESKTOP_DAEMON_BIN`, else beside this executable,
@@ -156,9 +130,8 @@ fn main() {
                 Sidecar::start(SidecarConfig::new(hangar_home, daemon_bin()))
             });
             let mut states = sidecar.state();
-            app.manage(Shell {
-                host: Mutex::new(host),
-                executor: Mutex::new(DesktopExecutor::new(ainb_bin())),
+            app.manage(Window {
+                shell: Shell::new(host, DesktopExecutor::new(ainb_bin())),
                 frames,
                 sidecar,
             });
@@ -181,7 +154,7 @@ fn main() {
                 let mut interval = tokio::time::interval(TICK);
                 loop {
                     interval.tick().await;
-                    handle.state::<Shell>().tick();
+                    handle.state::<Window>().shell.tick();
                 }
             });
             Ok(())
