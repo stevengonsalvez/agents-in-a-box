@@ -333,7 +333,9 @@ impl RuntimeHandle {
         // A plugin that keeps painting while ignoring Esc would otherwise hold
         // its screen with Ctrl+C as the only exit (#1087). Refusing the key
         // reads to the host as an undelivered back key, which leaves the
-        // screen, the same way out a dead or wedged plugin already gets.
+        // screen, the same way out a dead or render-wedged plugin gets. A
+        // plugin that stops reading its stdin paints nothing, so this cannot
+        // judge it; that case is #1118.
         if !handle.cache.admit_key(&key, generation) {
             tracing::warn!(
                 plugin = %plugin_id,
