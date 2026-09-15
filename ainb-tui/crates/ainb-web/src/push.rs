@@ -355,41 +355,30 @@ fn attention_by_key(needs: &Value) -> std::collections::HashMap<String, (String,
 
 /// Build the push payload the service worker renders into a notification.
 fn build_payload(key: &str, kind: &str, snap: &crate::data::FleetSnapshot) -> Value {
-    // Try to resolve a friendly title + a deep link from the session list.
+    // A needs card keys on its session id (it carries no `cwd`, #1081), so the
+    // session list is matched on `session_id`: its row names the workspace and
+    // gives the deep link. The card's own `workspaceName` (the last component
+    // of its cwd, which need not be the list's name) is the fallback title.
     let mut title_name = key.to_string();
     let mut session_id = String::new();
-    if let Some(sessions) = snap.sessions.as_array() {
-        for s in sessions {
-            // `attention_by_key` builds the key from the needs row's `session.cwd`.
-            // For ainb-managed sessions cwd == workspace_path != worktree_path, so
-            // match on the same field that built the key (cwd) and fall back to
-            // worktree_path for sessions keyed that way.
-            let cwd = s.get("cwd").and_then(Value::as_str).unwrap_or("");
-            let worktree = s.get("worktree_path").and_then(Value::as_str).unwrap_or("");
-            if cwd == key || worktree == key {
-                if let Some(name) = s.get("workspace_name").and_then(Value::as_str) {
-                    title_name = name.to_string();
-                }
-                if let Some(id) = s.get("session_id").and_then(Value::as_str) {
-                    session_id = id.to_string();
-                }
-                break;
-            }
-        }
-    }
-    // The web needs card has no `cwd` (#1081), so a card keys on its session id
-    // and the session list above does not match it. Title the push with the
-    // workspace name the card carries instead of the bare id.
-    if title_name == key {
-        let card_name = snap.needs.as_array().into_iter().flatten().find_map(|card| {
-            (card.get("sessionId").and_then(Value::as_str) == Some(key))
-                .then(|| card.get("workspaceName").and_then(Value::as_str))
-                .flatten()
-                .filter(|name| !name.is_empty())
-        });
-        if let Some(name) = card_name {
+    let row = snap
+        .sessions
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|row| row.get("session_id").and_then(Value::as_str) == Some(key));
+    if let Some(row) = row {
+        if let Some(name) = row.get("workspace_name").and_then(Value::as_str) {
             title_name = name.to_string();
         }
+        session_id = key.to_string();
+    } else if let Some(name) = snap.needs.as_array().into_iter().flatten().find_map(|card| {
+        (card.get("sessionId").and_then(Value::as_str) == Some(key))
+            .then(|| card.get("workspaceName").and_then(Value::as_str))
+            .flatten()
+            .filter(|name| !name.is_empty())
+    }) {
+        title_name = name.to_string();
     }
     let label = match kind {
         "ASK" => "needs an answer",
@@ -917,7 +906,7 @@ mod tests {
             },
             Value::Null,
         );
-        let p = build_payload("/a", "ASK", &snap);
+        let p = build_payload("id-1", "ASK", &snap);
         assert_eq!(p["kind"], "ASK");
         assert_eq!(p["sessionId"], "id-1");
         assert!(p["title"].as_str().unwrap().contains("demo"));
@@ -925,30 +914,23 @@ mod tests {
     }
 
     #[test]
-    fn payload_resolves_ainb_managed_session_by_cwd() {
-        // For ainb-managed sessions the needs key is the session `cwd`
-        // (== workspace_path), which differs from `worktree_path`. Resolution
-        // must match on cwd so the title/deep-link don't mis-resolve.
+    fn the_session_row_matching_the_card_names_and_links_the_push() {
+        // The row's workspace name wins over the card's cwd basename, which for
+        // an ainb worktree is the long `repo--ainb-session-…` directory name.
         let snap = crate::data::FleetSnapshot::from_parts(
             crate::data::CoreSnapshot {
                 sessions: json!([
-                    {
-                        "session_id": "id-9",
-                        "workspace_name": "managed",
-                        "cwd": "/ws/managed",
-                        "worktree_path": "/repo/.worktrees/managed"
-                    }
+                    { "session_id": "id-9", "workspace_name": "managed", "worktree_path": "/w/x" }
                 ]),
-                needs: json!([]),
+                needs: json!([
+                    { "kind": "ASK", "sessionId": "id-9", "workspaceName": "managed--ainb-session-9", "channels": ["web"] }
+                ]),
             },
             Value::Null,
         );
-        let p = build_payload("/ws/managed", "ASK", &snap);
-        assert_eq!(
-            p["sessionId"], "id-9",
-            "must resolve via cwd, not worktree_path"
-        );
-        assert!(p["title"].as_str().unwrap().contains("managed"));
+        let p = build_payload("id-9", "ASK", &snap);
+        assert_eq!(p["sessionId"], "id-9");
+        assert_eq!(p["title"], "ainb · managed");
     }
 
     #[test]
