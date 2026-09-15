@@ -26,7 +26,7 @@
 
 use std::time::Duration;
 
-use ainb_hangar_store::repo::daemon_identity::{DaemonIdentityRepo, UNMINTED_HOST_ID};
+use ainb_hangar_store::repo::daemon_identity::UNMINTED_HOST_ID;
 use ainb_hangar_store::repo::mutation_ledger::{MutationLedgerRepo, RetentionPolicy};
 use sqlx::SqlitePool;
 
@@ -55,12 +55,17 @@ pub fn spawn_mutation_retention_sweeper(pool: SqlitePool) -> tokio::task::JoinHa
         let clock = SystemClock;
         tokio::time::sleep(FIRST_PASS_DELAY).await;
         loop {
-            // Rows a pre-#1066 daemon wrote under `local` age out on the same
-            // policy as rows under the minted id (#1066).
-            let hosts = DaemonIdentityRepo::known_host_ids(&pool).await.unwrap_or_else(|error| {
-                tracing::warn!(error = %error, "daemon identity unreadable; sweeping local only");
-                vec![UNMINTED_HOST_ID.to_string()]
-            });
+            // Every host the ledger holds rows under ages out on one policy:
+            // `local` from a pre-#1066 daemon, the minted id, and any id a
+            // restored database carried in (#1066).
+            let hosts =
+                sqlx::query_scalar::<_, String>("SELECT DISTINCT host_id FROM mutation_ledger")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(%error, "ledger hosts unreadable; sweeping local only");
+                        vec![UNMINTED_HOST_ID.to_string()]
+                    });
             for host_id in hosts {
                 match MutationLedgerRepo::retain(
                     &pool,
