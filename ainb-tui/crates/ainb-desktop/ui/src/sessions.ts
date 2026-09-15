@@ -54,6 +54,20 @@ export function ringFor(session: Session_Serialize, fleet: FleetView_Serialize |
   return ring;
 }
 
+/** The most characters a sidebar label draws. */
+export const LABEL_CHARS = 80;
+
+/**
+ * A name as the sidebar may draw it: control and format characters removed
+ * (a bidi override or an escape in a branch name cannot restyle the row) and
+ * cut to `LABEL_CHARS` characters.
+ */
+export function label(text: string): string {
+  return Array.from(text.replace(/[\p{Cc}\p{Cf}]/gu, ""))
+    .slice(0, LABEL_CHARS)
+    .join("");
+}
+
 /** Every session row the Sessions frame lists, across its workspaces. */
 export function allSessions(view: SessionsView_Serialize | undefined): Session_Serialize[] {
   return view?.workspaces.flatMap((workspace) => workspace.sessions) ?? [];
