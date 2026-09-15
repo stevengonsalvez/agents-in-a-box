@@ -50,6 +50,9 @@ const CHUNK_BYTES: usize = 64 * 1024;
 /// lost and the window reopens.
 const ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long typed input waits for a full pane queue before it is dropped.
+const INPUT_WAIT: Duration = Duration::from_millis(500);
+
 /// The largest grid a tab may ask its PTY for.
 const MAX_ROWS: u16 = 500;
 const MAX_COLS: u16 = 1000;
@@ -523,14 +526,31 @@ impl Terminals {
             )
         };
         flow.touch();
-        if let Some(input) = input {
-            if input.try_send(bytes).is_err() {
-                tracing::warn!(
-                    tab = key,
-                    "terminal input queue full or closed; input dropped"
-                );
+        let Some(input) = input else {
+            tracing::warn!(tab = key, "input for a tab with no client; not sent");
+            self.inner.events.toast(format!(
+                "{key} is not attached; what you typed was not sent"
+            ));
+            return;
+        };
+        // A pane that stopped reading fills the queue: wait a little, then
+        // say the input was lost rather than drop it silently.
+        let deadline = Instant::now() + INPUT_WAIT;
+        let mut pending = bytes;
+        loop {
+            match input.try_send(pending) {
+                Ok(()) => return,
+                Err(mpsc::TrySendError::Full(back)) if Instant::now() < deadline => {
+                    pending = back;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
             }
         }
+        tracing::warn!(tab = key, "terminal input not taken within 500 ms; dropped");
+        self.inner.events.toast(format!(
+            "{key} is not reading input; what you typed was dropped"
+        ));
     }
 
     /// Size the tab's client to the webview's grid.
