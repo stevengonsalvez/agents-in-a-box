@@ -84,10 +84,11 @@ impl SidecarConfig {
     }
 }
 
-/// Where the connection to the daemon stands. Serialised for the webview's
-/// banner as `{"state": "connected", ...}`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+/// Where the connection to the daemon stands.
+///
+/// Carries what the process needs (the daemon pid, the log path). The webview
+/// gets [`SidecarState::view`] instead, which carries neither.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidecarState {
     /// Probing for a daemon, or starting one.
     Starting,
@@ -104,6 +105,68 @@ pub enum SidecarState {
     Reconnecting { error: String },
     /// No daemon could be found or started. "Retry" runs the probe again.
     Degraded { error: String, log: PathBuf },
+}
+
+/// What the webview's banner is told: no pid, no filesystem path, and a flag
+/// for whether "show log" has anything to show. Serialised as
+/// `{"state": "degraded", "error": ..., "has_log": true}`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SidecarView {
+    Starting,
+    Connected { spawned: bool },
+    Reconnecting { error: String },
+    Degraded { error: String, has_log: bool },
+}
+
+impl SidecarState {
+    /// The banner's view of this state.
+    #[must_use]
+    pub fn view(&self) -> SidecarView {
+        match self {
+            Self::Starting => SidecarView::Starting,
+            Self::Connected { spawned, .. } => SidecarView::Connected { spawned: *spawned },
+            Self::Reconnecting { error } => SidecarView::Reconnecting {
+                error: scrub_paths(error),
+            },
+            Self::Degraded { error, log } => SidecarView::Degraded {
+                error: scrub_paths(error),
+                has_log: log.is_file(),
+            },
+        }
+    }
+}
+
+/// `text` with every whitespace-separated token that names a filesystem path
+/// replaced by `<path>`. Errors keep their paths for the log file; the
+/// webview is told what went wrong, not where this user's files live.
+#[must_use]
+pub fn scrub_paths(text: &str) -> String {
+    text.split(' ')
+        .map(|token| {
+            let bare =
+                token.trim_matches(|c: char| matches!(c, ',' | ';' | ':' | '(' | ')' | '\'' | '"'));
+            if bare.contains('/') || bare.contains(":\\") || bare.starts_with('~') {
+                token.replace(bare, "<path>")
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The last `max_bytes` of the sidecar log, for "show log". `None` when there
+/// is no log yet.
+#[must_use]
+pub fn log_tail(config: &SidecarConfig, max_bytes: u64) -> Option<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(config.log_path()).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(max_bytes))).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// The running supervisor. Dropping it stops supervising; the daemon stays.
