@@ -16,6 +16,12 @@ on:
       - ".github/workflows/desktop.yml"
   pull_request:
     branches: [main, v2]
+    paths:
+      - "ainb-tui/crates/ainb-desktop/**"
+      - "ainb-tui/crates/ainb-app/**"
+      - "ainb-tui/crates/ainb-hangar-*/**"
+      - "ainb-tui/xtask/**"
+      - ".github/workflows/desktop.yml"
   workflow_dispatch:
 
 concurrency:
