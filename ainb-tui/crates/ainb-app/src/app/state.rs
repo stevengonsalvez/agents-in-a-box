@@ -12837,15 +12837,15 @@ impl AppState {
         }
     }
 
-    /// Record what the host's runtime knows about `plugin`. Bumps the
-    /// plugins-host section only when that changed.
+    /// Record what the host's runtime knows about the plugin behind
+    /// `screen`. Bumps the plugins-host section only when that changed.
     pub fn record_plugin_presence(
         &mut self,
-        plugin: &str,
+        screen: &str,
         presence: crate::app::sections::PluginPresence,
     ) {
-        if self.plugins_host.plugin_presence.get(plugin) != Some(&presence) {
-            self.plugins_host.plugin_presence.insert(plugin.to_string(), presence);
+        if self.plugins_host.plugin_presence.get(screen) != Some(&presence) {
+            self.plugins_host.plugin_presence.insert(screen.to_string(), presence);
         }
     }
 
@@ -13338,12 +13338,17 @@ impl App {
             // its global single-char shortcuts while a plugin input is focused
             // (8hx). Done before the lifecycle skip so an unregistered plugin's
             // stale flag is cleared to false rather than lingering true.
-            self.state
-                .plugins_host
-                .plugin_captures_text
-                .insert((*screen_id).to_string(), handle.captures_text(&pid));
+            // Compare first: an unconditional write bumps the section every
+            // tick, and a mirrored host would be sent a frame for nothing.
+            let captures = handle.captures_text(&pid);
+            if self.state.plugins_host.plugin_captures_text.get(*screen_id) != Some(&captures) {
+                self.state
+                    .plugins_host
+                    .plugin_captures_text
+                    .insert((*screen_id).to_string(), captures);
+            }
             self.state.record_plugin_presence(
-                plugin_id,
+                screen_id,
                 crate::app::sections::PluginPresence {
                     registered: handle.lifecycle_state(&pid).is_some(),
                     wedged: handle.render_wedged(&pid),
