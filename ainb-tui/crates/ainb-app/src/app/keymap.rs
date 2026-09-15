@@ -627,9 +627,18 @@ fn classified_contexts(state: &AppState) -> Vec<(KeyContext, bool)> {
                 screen_ids::SESSION_LIST,
                 SubContext::Named("ask"),
             )),
-            SessionTab::Thread | SessionTab::Pal if state.session_tab_owns_keys() => contexts.push(
-                KeyContext::Screen(screen_ids::SESSION_LIST, SubContext::Named("composer")),
-            ),
+            SessionTab::Thread | SessionTab::Pal if state.session_tab_owns_keys() => {
+                contexts.push(KeyContext::Screen(
+                    screen_ids::SESSION_LIST,
+                    SubContext::Named("composer"),
+                ));
+                // A printable key is the conversation's whether its focus is
+                // the composer (typed) or a confirm card (`y`, `n`, `j`, `k`),
+                // so text ownership follows the composer at once, ahead of the
+                // focused pane's rows: the logs pane binds space.
+                contexts.push(KeyContext::TextInput);
+                text_context_pushed = true;
+            }
             _ => {}
         }
     }
