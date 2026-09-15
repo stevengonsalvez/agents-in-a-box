@@ -11,8 +11,8 @@ use ainb_hangar_store::repo::fleet::{
 };
 use sqlx::SqlitePool;
 
-const FIRST: &str = "01K5A0000000000000000FIRST";
-const SECOND: &str = "01K5A000000000000000SECOND";
+const FIRST: &str = "01K5A0000000000000000AAAAA";
+const SECOND: &str = "01K5A0000000000000000BBBBB";
 const NOW: i64 = 1_700_000_000_000;
 
 fn event(event_id: &str, session_key: &str) -> NewFleetEvent {
@@ -164,4 +164,22 @@ async fn event_adoption_moves_at_most_one_batch_per_call() {
         0
     );
     assert!(hosts_of_events(pool).await.iter().all(|host| host == FIRST));
+}
+
+#[tokio::test]
+async fn a_host_id_outside_the_ulid_alphabet_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    // 26 characters, but `I`, `L`, `O` and `U` are not Crockford base32, and
+    // the bad character sits past the first position.
+    for bad in ["01K5A0000000000000000AAAAI", "01K5A0000000000000000AAAAL", "local"] {
+        let refused = DaemonIdentityRepo::mint_or_read(
+            store.pool(),
+            &FixedIdGen::new(vec![bad.to_string()]),
+            &FixedClock(NOW),
+        )
+        .await;
+        assert!(refused.is_err(), "{bad} must be refused");
+    }
+    assert_eq!(DaemonIdentityRepo::read(store.pool()).await.unwrap(), None);
 }
