@@ -804,5 +804,12 @@ tmux.other_tmux_sessions[].name
 tmux.other_tmux_sessions[].windows
 tmux.selected_other_tmux_index
 tmux.selected_other_tmux_sessions[]
+web_snapshot.sessions[].claude_active
+web_snapshot.sessions[].created_at
+web_snapshot.sessions[].is_running
+web_snapshot.sessions[].session_id
+web_snapshot.sessions[].tmux_session_name
+web_snapshot.sessions[].workspace_name
+web_snapshot.sessions[].worktree_path
 workspace_load.is_loading_workspaces
 workspace_load.workspace_load_error

@@ -45,9 +45,6 @@ scenario() {
   observe "operator's own ainb list carries the label: $(grep -c "$PROOF_TOKEN" "$NODE_DIR/list-json.txt") line(s)"
   check "the token never appears in the web snapshot frame" \
     bash -c "! grep -qF '$PROOF_TOKEN' '$NODE_DIR/web-snapshot.json'"
-  if [[ ${#FAILED_CHECKS[@]} -gt 0 ]] && grep -qF "$PROOF_TOKEN" "$NODE_DIR/web-snapshot.json"; then
-    known_issue 1056
-  fi
 
   # Checks are done; keep the canary out of what gets published.
   local file

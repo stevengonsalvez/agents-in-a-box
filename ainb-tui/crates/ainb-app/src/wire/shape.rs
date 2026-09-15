@@ -73,8 +73,29 @@ pub fn trace_states(states: &[AppState]) -> trace::Trace {
             all.leaf_paths.extend(one.leaf_paths);
             frame_envelope_paths(state, id, &mut all.leaf_paths);
         }
+        let web = web_snapshot_trace(state);
+        all.fields.extend(web.fields);
+        all.strings.extend(web.strings);
+        all.leaf_paths.extend(web.leaf_paths);
     }
     all
+}
+
+/// The web dashboard's session rows (`/api/snapshot`'s `sessions[]`), projected
+/// from the Sessions frame by [`crate::wire::web::session_rows`]. Traced like a
+/// frame, so the key-path fixture, the name and type deny-lists, the canary and
+/// the tripwire all see the row keys and values: a field the frame withholds
+/// cannot come back on the web through a new row key (#1056).
+fn web_snapshot_trace(state: &AppState) -> trace::Trace {
+    #[derive(serde::Serialize)]
+    struct WebSnapshotSessions {
+        sessions: Vec<crate::wire::web::WebSessionRow>,
+    }
+    let rows = WebSnapshotSessions {
+        sessions: crate::wire::web::session_rows(state),
+    };
+    trace::trace("web_snapshot", &rows)
+        .unwrap_or_else(|error| panic!("web snapshot rows failed to serialise: {error}"))
 }
 
 /// The frame around a section body, as it is serialised: `frame.section`,
