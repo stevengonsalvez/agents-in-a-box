@@ -7,6 +7,7 @@ use ainb_app::app::{KEY_ONLY_COMMANDS, RendererHost};
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
 use ainb_app::{AppState, Chord, CommandId, Effect, Intent, Keymap};
+use serde::Serialize;
 
 /// Where framed state goes: the Tauri channel in the app, a recorder in tests.
 pub trait FrameSink {
@@ -56,6 +57,22 @@ impl RendererHost for DesktopLayout {
 /// another effect that reported again is legitimate; one that loops is a bug,
 /// and a bounded chain keeps it from wedging the shell.
 const MAX_REPORT_ROUNDS: usize = 32;
+
+/// One row the palette offers: a command the webview may send by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PaletteEntry {
+    pub id: CommandId,
+    /// What the row does, as the keymap documents it.
+    pub doc: &'static str,
+    /// The context the row belongs to, for the palette to group by.
+    pub context: String,
+    /// The key that runs it, when it has one.
+    pub chord: Option<String>,
+    /// Whether the reducer would run it in the state as it stands. A row that
+    /// is not active is still offered, greyed, rather than vanishing as the
+    /// user moves around.
+    pub active: bool,
+}
 
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
@@ -163,6 +180,29 @@ impl<S: FrameSink> DesktopHost<S> {
         for _ in 0..2 {
             self.run(click_home_sidebar_item(SidebarItem::Sessions), executor);
         }
+    }
+
+    /// Every command the palette may offer, in the keymap's own order.
+    ///
+    /// Built from [`crate::intent::refused_from_webview`], the list the
+    /// dispatch seam refuses by, plus the pointer rows: those carry a payload
+    /// only a hit test can supply, so a palette that named them would offer a
+    /// row that cannot run. Each entry says whether it is active now.
+    #[must_use]
+    pub fn palette(&self) -> Vec<PaletteEntry> {
+        let contexts = ainb_app::app::keymap::command_contexts(&self.state);
+        self.keymap
+            .commands()
+            .filter(|(id, _)| !crate::intent::refused_from_webview(id))
+            .filter(|(id, _)| !ainb_app::app::pointer::ids::ALL.contains(&id.as_str()))
+            .map(|(id, row)| PaletteEntry {
+                id,
+                doc: row.doc,
+                context: row.ctx.name(),
+                chord: row.chord.as_ref().map(|chord| chord.as_str().to_string()),
+                active: contexts.contains(&row.ctx),
+            })
+            .collect()
     }
 
     /// The key-only row `chord` runs in the current state, if it runs one.
