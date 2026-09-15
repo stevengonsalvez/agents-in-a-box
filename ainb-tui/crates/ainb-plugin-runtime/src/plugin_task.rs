@@ -70,12 +70,21 @@ const ABI_VERSION: u32 = 2;
 /// changes its frame on every press and never starts a streak.
 pub const ESC_UNANSWERED_LIMIT: u32 = 3;
 
+/// Esc presses in a row, with no other key between them, after which the next
+/// Esc goes to the host whatever the frames showed (#1087 review).
+///
+/// The frame check cannot judge a plugin that repaints on its own (a spinner,
+/// a clock): every frame differs, so every Esc looks answered. No honest
+/// screen needs this many Esc presses in a row to back out of its nesting.
+pub const ESC_PRESS_CEILING: u32 = 8;
+
 /// What to do with an Esc the host is about to send a plugin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscVerdict {
     /// Send it to the plugin.
     Deliver,
-    /// The plugin has ignored [`ESC_UNANSWERED_LIMIT`] Esc presses in a row:
+    /// The plugin has ignored [`ESC_UNANSWERED_LIMIT`] Esc presses in a row, or
+    /// the user has pressed Esc [`ESC_PRESS_CEILING`] times with no other key:
     /// give this one to the host, which leaves the screen.
     ReturnToHost,
 }
@@ -96,6 +105,8 @@ pub struct BackWatch {
     last_frame: Option<u64>,
     pending: Option<PendingEsc>,
     unanswered: u32,
+    /// Esc presses since the last other key, answered or not.
+    presses: u32,
 }
 
 #[derive(Debug)]
@@ -131,10 +142,12 @@ impl BackWatch {
             Some(false) => self.unanswered += 1,
             None => {}
         }
-        if self.unanswered >= ESC_UNANSWERED_LIMIT {
+        if self.unanswered >= ESC_UNANSWERED_LIMIT || self.presses >= ESC_PRESS_CEILING {
             self.unanswered = 0;
+            self.presses = 0;
             return EscVerdict::ReturnToHost;
         }
+        self.presses += 1;
         self.pending = Some(PendingEsc {
             generation,
             frame_before: self.last_frame,
@@ -148,19 +161,18 @@ impl BackWatch {
     pub fn other_key(&mut self) {
         self.pending = None;
         self.unanswered = 0;
+        self.presses = 0;
     }
 }
 
-/// Hash a painted frame for [`BackWatch`]. Equal buffers hash equal; the
-/// buffer has no `Hash` of its own, so its serialised form is hashed. `None`
-/// when it will not serialise, so a failure is never mistaken for an unchanged
-/// frame.
-fn frame_hash(buffer: &WireBuffer) -> Option<u64> {
+/// Hash a painted frame for [`BackWatch`]. Equal buffers hash equal. Hashes
+/// the decoded buffer in place: serialising every render response a second
+/// time just to compare it would cost the task on each frame.
+fn frame_hash(buffer: &WireBuffer) -> u64 {
     use std::hash::{Hash, Hasher};
-    let bytes = serde_json::to_vec(buffer).ok()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    Some(hasher.finish())
+    buffer.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Cached render output kept alive between async response and the
@@ -1183,10 +1195,8 @@ impl PluginTask {
                             // single-char shortcuts while the plugin's input is
                             // focused (8hx). Persistent — survives try_take.
                             self.cache.set_captures_text(rr.captures_text);
-                            if let (Some(keys_through), Some(frame)) =
-                                (self.render_key_stamps.remove(&id), frame_hash(&rr.buffer))
-                            {
-                                self.cache.observe_frame(frame, keys_through);
+                            if let Some(keys_through) = self.render_key_stamps.remove(&id) {
+                                self.cache.observe_frame(frame_hash(&rr.buffer), keys_through);
                             }
                             self.cache.put(rr.buffer.clone());
                             RenderOutcome::Ok(rr.buffer)
@@ -2594,7 +2604,7 @@ mod tests {
         use super::{BackWatch, EscVerdict};
         let mut watch = BackWatch::default();
         watch.frame(0, None);
-        for n in 1..=10 {
+        for n in 1..=u64::from(super::ESC_PRESS_CEILING) {
             assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
             watch.frame(n, Some(n));
         }
@@ -2607,7 +2617,7 @@ mod tests {
         use super::{BackWatch, EscVerdict};
         let mut watch = BackWatch::default();
         watch.frame(7, None);
-        for n in 1..=10 {
+        for n in 1..=u64::from(super::ESC_PRESS_CEILING) {
             assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
             watch.frame(7, Some(n - 1));
         }
@@ -2654,12 +2664,53 @@ mod tests {
     fn back_watch_judges_the_esc_against_a_frame_still_in_flight() {
         use super::{BackWatch, EscVerdict};
         let mut watch = BackWatch::default();
-        for n in 1..=10 {
+        for n in 1..=u64::from(super::ESC_PRESS_CEILING) {
             // A click opened a drawer (frame 2); the Esc closes it (frame 1).
             watch.frame(1, Some(n * 10));
             assert_eq!(watch.esc(n * 10 + 1), EscVerdict::Deliver, "esc {n}");
             watch.frame(2, Some(n * 10));
             watch.frame(1, Some(n * 10 + 1));
+        }
+    }
+
+    /// #1087 review: a plugin that repaints every frame (a spinner) makes every
+    /// Esc look answered, so the press ceiling ejects it regardless.
+    #[test]
+    fn back_watch_ejects_an_always_repainting_plugin_at_the_press_ceiling() {
+        use super::{BackWatch, ESC_PRESS_CEILING, EscVerdict};
+        let mut watch = BackWatch::default();
+        let mut spinner = 0;
+        watch.frame(spinner, None);
+        for n in 1..=u64::from(ESC_PRESS_CEILING) {
+            assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
+            spinner += 1;
+            watch.frame(spinner, Some(n));
+        }
+        assert_eq!(watch.esc(99), EscVerdict::ReturnToHost);
+        watch.frame(spinner + 1, Some(99));
+        assert_eq!(
+            watch.esc(100),
+            EscVerdict::Deliver,
+            "an eject starts afresh"
+        );
+    }
+
+    /// Another key between Esc presses restarts the ceiling count.
+    #[test]
+    fn back_watch_press_ceiling_restarts_on_another_key() {
+        use super::{BackWatch, ESC_PRESS_CEILING, EscVerdict};
+        let mut watch = BackWatch::default();
+        for round in 0..3 {
+            for n in 1..=u64::from(ESC_PRESS_CEILING) {
+                let generation = round * 100 + n;
+                assert_eq!(
+                    watch.esc(generation),
+                    EscVerdict::Deliver,
+                    "round {round} esc {n}"
+                );
+                watch.frame(generation, Some(generation));
+            }
+            watch.other_key();
         }
     }
 }
