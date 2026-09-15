@@ -3974,7 +3974,8 @@ export type Session_Serialize = {
 	 *  Transient: never persisted; set in `AppState::refresh_attention`. A
 	 *  mirror frame carries it as `attention`, each chip's kind and scrubbed
 	 *  detail, so a renderer draws the merged picture instead of re-deriving a
-	 *  weaker one.
+	 *  weaker one. Empty on `ssh.ssh_sessions[]`, which `refresh_attention`
+	 *  does not walk; a surface must not ring off an SSH row's `attention`.
 	 */
 	attention?: AttentionMark_Serialize[],
 };
