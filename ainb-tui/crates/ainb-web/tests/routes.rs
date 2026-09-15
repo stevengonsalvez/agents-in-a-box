@@ -48,7 +48,7 @@ impl DataSource for FakeSource {
     }
 
     fn cost(&self) -> CostFuture<'_> {
-        Box::pin(async { Value::Null })
+        Box::pin(async { None })
     }
 }
 
