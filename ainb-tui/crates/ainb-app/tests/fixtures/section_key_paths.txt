@@ -27,6 +27,8 @@ agent_status.view.health.stale_since_ms
 agent_status.view.host_id
 agent_status.view.read_revision
 agent_status.view.received_at_ms
+changelog.changelog_state.scroll_offset
+changelog.changelog_state.total_lines
 claude_chat.claude_chat_state.associated_session_id
 claude_chat.claude_chat_state.current_streaming_response
 claude_chat.claude_chat_state.input_len
@@ -157,8 +159,6 @@ config.app_config.workspace_defaults.scan_cache_ttl_secs
 config.app_config.workspace_defaults.scan_max_depth
 config.app_config.workspace_defaults.workspace_scan_paths[]
 config.app_config.workspace_defaults.worktree_collision_behavior
-config.changelog_state.scroll_offset
-config.changelog_state.total_lines
 config.config_popup_state.description
 config.config_popup_state.popup_type.SecretInput.cursor_position
 config.config_popup_state.popup_type.SecretInput.value_len
