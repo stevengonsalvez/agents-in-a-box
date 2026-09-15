@@ -185,6 +185,14 @@ impl<S: FrameSink> DesktopHost<S> {
         self.pump();
     }
 
+    /// Take a renderer that just attached (or reloaded) wanting
+    /// `subscription`: every section in it is framed in full, in one batch.
+    pub fn subscribe(&mut self, subscription: Subscription) {
+        self.mirror.resubscribe(subscription);
+        self.mirror.reframe();
+        self.pump();
+    }
+
     fn pump(&mut self) {
         let batch = self.mirror.batch(&self.state);
         if !batch.is_empty() {
