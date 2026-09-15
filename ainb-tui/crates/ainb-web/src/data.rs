@@ -12,12 +12,6 @@ use std::pin::Pin;
 use ainb_app::wire::web::WebNeedCard;
 use serde_json::Value;
 
-/// A `'static` boxed future, the return shape of [`DataSource::snapshot`].
-/// Keeping the trait boxed-future (rather than `async fn`) makes it
-/// object-safe so the router can hold a `dyn DataSource`.
-pub type SnapshotFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<FleetSnapshot, DataError>> + Send + 'a>>;
-
 /// The sessions + needs pair fetched on the fast poll cadence (cost excluded).
 /// Returned by [`DataSource::core`].
 #[derive(Debug, Clone)]
@@ -29,7 +23,9 @@ pub struct CoreSnapshot {
     pub needs: Vec<WebNeedCard>,
 }
 
-/// A `'static` boxed future, the return shape of [`DataSource::core`].
+/// A `'static` boxed future, the return shape of [`DataSource::core`]. Keeping
+/// the trait boxed-future (rather than `async fn`) makes it object-safe so the
+/// router can hold a `dyn DataSource`.
 pub type CoreFuture<'a> =
     Pin<Box<dyn Future<Output = Result<CoreSnapshot, DataError>> + Send + 'a>>;
 
@@ -166,13 +162,8 @@ pub enum DataError {
 /// The poller fetches [`core`](DataSource::core) (sessions + needs) on the fast
 /// cadence and [`cost`](DataSource::cost) on a slower one, because
 /// `ainb fleet cost` cold-boots the burndown plugin runtime per call and cost
-/// data rolls up slowly. [`snapshot`](DataSource::snapshot) composes both for
-/// the cold-cache fallback path.
+/// data rolls up slowly. A cold-cache request reads `core` only (#1055).
 pub trait DataSource: Send + Sync + 'static {
-    /// Build a fresh full snapshot of the current fleet state (sessions, needs,
-    /// and cost). Used only on a cold cache before the poller's first tick.
-    fn snapshot(&self) -> SnapshotFuture<'_>;
-
     /// Fetch only the fast-cadence surfaces (sessions + needs). These are cheap
     /// relative to cost and need ~2s freshness, so the poller refreshes them on
     /// every tick.
@@ -180,7 +171,7 @@ pub trait DataSource: Send + Sync + 'static {
 
     /// Fetch the slow-cadence cost rollup, best-effort: any failure or absent
     /// verb resolves to [`Value::Null`] so the dashboard degrades gracefully.
-    /// The poller calls this only every Nth tick.
+    /// The cost task calls this on its own cadence, under a timeout.
     fn cost(&self) -> CostFuture<'_>;
 }
 
@@ -339,15 +330,6 @@ async fn daemon_needs() -> Vec<WebNeedCard> {
 }
 
 impl DataSource for AinbCliSource {
-    fn snapshot(&self) -> SnapshotFuture<'_> {
-        Box::pin(async move {
-            // Required surfaces fail loudly; cost is best-effort.
-            let core = self.core().await?;
-            let cost = self.cost().await;
-            Ok(FleetSnapshot::from_parts(core, cost))
-        })
-    }
-
     fn core(&self) -> CoreFuture<'_> {
         Box::pin(async move {
             // Sessions come from `ainb list --frame` (the daemon exposes no
