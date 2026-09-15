@@ -110,8 +110,9 @@ impl Viewport {
 pub struct RenderParams {
     /// Viewport the host wants painted.
     pub viewport: Viewport,
-    /// Plugin-defined render generation. Plugins free to use this as
-    /// a redraw token; host doesn't interpret the value.
+    /// Host-assigned render token. A plugin may use it as a redraw token; the
+    /// host reads nothing back. Unrelated to [`HandleKeyParams::generation`],
+    /// which the host orders against renders on its own side.
     #[serde(default)]
     pub generation: u64,
 }
