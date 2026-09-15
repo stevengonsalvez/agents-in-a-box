@@ -116,25 +116,11 @@ pub async fn discover() -> Vec<TargetSession> {
 #[must_use]
 fn run_name_from_tmux(tmux: &str, workspace: &str) -> String {
     match tmux.strip_prefix("tmux_") {
-        Some(stripped) if !stripped.is_empty() && !is_capped_tmux_name(tmux) => {
+        Some(stripped) if !stripped.is_empty() && !crate::tmux::is_capped_name(tmux) => {
             stripped.to_string()
         }
         _ => workspace.to_string(),
     }
-}
-
-/// Whether `tmux` is a name `tmux::cap_session_name` shortened: `tmux_`, eight
-/// hex digits and `_`, at the cap. The cap cuts the tail on a character
-/// boundary, so a capped name can fall up to three bytes short of it.
-fn is_capped_tmux_name(tmux: &str) -> bool {
-    use crate::app::effect::TmuxSessionName;
-    let at_cap =
-        (TmuxSessionName::MAX_BYTES - 3..=TmuxSessionName::MAX_BYTES).contains(&tmux.len());
-    let hashed_head = tmux.strip_prefix("tmux_").is_some_and(|stripped| {
-        let bytes = stripped.as_bytes();
-        bytes.len() > 8 && bytes[..8].iter().all(u8::is_ascii_hexdigit) && bytes[8] == b'_'
-    });
-    at_cap && hashed_head
 }
 
 /// Build the minimal fleet [`Session`] the verified send needs from a bridge
