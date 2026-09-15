@@ -11999,9 +11999,11 @@ impl AppState {
     /// happens for activity that arrives after the user looks away.
     ///
     /// How often attention is merged when the poller has published nothing
-    /// new. Each merge reads the notifications store, so it runs on the
-    /// terminal host's preview cadence rather than every 250 ms tick.
-    const ATTENTION_REFRESH: std::time::Duration = std::time::Duration::from_secs(5);
+    /// new. Each merge reads the notifications store, so it runs near the
+    /// terminal host's preview cadence rather than every 250 ms tick, and
+    /// strictly under it: the terminal host's merge sits behind its own
+    /// preview latch as well, and two equal latches would push it to 10 s.
+    const ATTENTION_REFRESH: std::time::Duration = std::time::Duration::from_secs(4);
 
     /// Every host that draws attention calls this on its tick, unconditionally:
     /// the merge runs when the attention poller has published since the last
