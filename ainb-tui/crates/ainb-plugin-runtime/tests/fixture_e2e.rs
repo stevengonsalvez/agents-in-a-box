@@ -920,8 +920,17 @@ fn a_wedged_plugin_keeps_a_bounded_key_inbox_and_counts_drops() {
     rt.register(plugin);
     start(&handle, &id);
 
-    // Never answered: the fixture parks instead of reading on.
+    // Never answered: the fixture parks instead of reading on. Flood only once
+    // it has said so, so the keys really do meet a plugin that is not reading.
     drop(handle.dispatch_cli(&id, "echo", vec!["wedge".into()]));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while handle.snapshot_get("fixture.wedged").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fixture never wedged"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let key = ainb_plugin_protocol::params::KeyEvent {
         code: ainb_plugin_protocol::params::KeyCode::Char { ch: 'j' },
         mods: 0,
@@ -935,9 +944,10 @@ fn a_wedged_plugin_keeps_a_bounded_key_inbox_and_counts_drops() {
     }
 
     let stats = handle.input_inbox_stats(&id).expect("registered");
-    assert!(
-        stats.keys_queued <= ainb_plugin_runtime::inbox::INPUT_INBOX_CAPACITY,
-        "the key inbox grew past its capacity: {stats:?}"
+    assert_eq!(
+        stats.keys_queued,
+        ainb_plugin_runtime::inbox::INPUT_INBOX_CAPACITY,
+        "a plugin that is not reading leaves the inbox full, and no fuller: {stats:?}"
     );
     assert!(
         stats.keys_dropped > 0,
