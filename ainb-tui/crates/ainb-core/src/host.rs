@@ -6,11 +6,8 @@
 
 use crate::app::AppState;
 use crate::app::screens::ids as screen_ids;
-use crate::app::state::{
-    Notification, NotificationType, WorkspaceLoadResult, load_workspaces_async,
-};
 use crate::docker::LogStreamingCoordinator;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -413,33 +410,9 @@ impl App {
         self.state.host.log_streaming_coordinator = Some(coordinator);
         self.state.host.log_sender = Some(log_sender);
 
-        // Try to refresh OAuth tokens if they're expired (before checking first-time setup)
-        let home_dir = dirs::home_dir();
-        if let Some(home) = home_dir {
-            let credentials_path =
-                home.join(".agents-in-a-box").join("auth").join(".credentials.json");
-
-            // Only attempt refresh if we have OAuth credentials that need refreshing
-            // AND Docker is available (token refresh requires Docker for Boss mode)
-            // DISPLAY CLASS: cached, and deliberately the same answer the log
-            // streaming check above just took - two 3s probes in the startup
-            // path is the stall the cache exists to remove. A stale "no" defers
-            // the refresh to the periodic check.
-            if credentials_path.exists() && AppState::oauth_token_needs_refresh(&credentials_path) {
-                if AppState::is_docker_available_sync() {
-                    info!("Docker available - attempting OAuth token refresh on startup");
-                    match self.state.refresh_oauth_tokens().await {
-                        Ok(()) => info!("OAuth tokens refreshed successfully on startup"),
-                        Err(e) => warn!("Failed to refresh OAuth tokens: {}", e),
-                    }
-                } else {
-                    info!(
-                        "Docker not available - skipping OAuth token refresh (Boss mode will require Docker)"
-                    );
-                    // Don't show error - user might only use Interactive mode which doesn't need Docker
-                }
-            }
-        }
+        // Refresh OAuth tokens that are close to expiry before first-time
+        // setup is checked; quiet, because nothing is on screen yet.
+        self.state.refresh_oauth_tokens_if_due(false).await;
 
         // REMOVED: Auth check moved to Boss mode selection only
         // Interactive mode should work without Docker authentication
@@ -455,42 +428,10 @@ impl App {
 
         self.state.check_current_directory_status();
 
-        // Start loading workspaces in the background (non-blocking)
-        // This prevents the app from hanging if Docker is slow
+        // Load workspaces in the background so a slow Docker cannot hang
+        // startup; the load policy is the state's own.
         info!("Starting background workspace loading");
-        let result_sender = self.state.start_background_workspace_loading();
-
-        // Spawn the background loading task with timeout
-        tokio::spawn(async move {
-            let timeout_duration = Duration::from_secs(AppState::DOCKER_TIMEOUT_SECS);
-
-            // Load workspaces with timeout
-            let load_result = tokio::time::timeout(timeout_duration, load_workspaces_async()).await;
-
-            let result = match load_result {
-                Ok(Ok(workspaces)) => {
-                    info!(
-                        "Background workspace loading succeeded: {} workspaces",
-                        workspaces.len()
-                    );
-                    WorkspaceLoadResult::Success(workspaces)
-                }
-                Ok(Err(e)) => {
-                    warn!("Background workspace loading failed: {}", e);
-                    WorkspaceLoadResult::Error(e.to_string())
-                }
-                Err(_) => {
-                    warn!(
-                        "Background workspace loading timed out after {}s",
-                        AppState::DOCKER_TIMEOUT_SECS
-                    );
-                    WorkspaceLoadResult::Timeout
-                }
-            };
-
-            // Send result (ignore error if receiver dropped)
-            let _ = result_sender.send(result);
-        });
+        self.state.start_workspace_load();
 
         // Note: Log streaming will be initialized after workspaces are loaded
         // This happens in tick() when check_workspace_loading_complete() returns true
@@ -613,52 +554,7 @@ impl App {
 
         if should_check_token {
             self.state.host.last_token_refresh_check = Some(now);
-
-            // Check if we need to refresh OAuth tokens
-            let home_dir = dirs::home_dir();
-            if let Some(home) = home_dir {
-                let credentials_path =
-                    home.join(".agents-in-a-box").join("auth").join(".credentials.json");
-
-                if credentials_path.exists()
-                    && AppState::oauth_token_needs_refresh(&credentials_path)
-                {
-                    info!("OAuth token needs refresh (periodic check)");
-
-                    // Only attempt refresh if Docker is available.
-                    //
-                    // DISPLAY CLASS: cached. This check itself repeats every 5
-                    // minutes, which is ten times the cache TTL, so a stale
-                    // "no" can only ever cost one cycle.
-                    if self.state.is_docker_available().await {
-                        // Refresh tokens inline (this is quick enough not to block UI)
-                        match self.state.refresh_oauth_tokens().await {
-                            Ok(()) => {
-                                info!("OAuth tokens refreshed successfully (periodic)");
-                                // Add a notification to inform the user
-                                self.state.add_notification(Notification {
-                                    message: "✅ OAuth tokens refreshed automatically".to_string(),
-                                    notification_type: NotificationType::Success,
-                                    created_at: Instant::now(),
-                                    duration: Duration::from_secs(5),
-                                });
-                            }
-                            Err(e) => {
-                                warn!("Failed to refresh OAuth tokens (periodic): {}", e);
-                                // Add a warning notification
-                                self.state.add_notification(Notification {
-                                    message: format!("⚠️ Token refresh failed: {}", e),
-                                    notification_type: NotificationType::Warning,
-                                    created_at: Instant::now(),
-                                    duration: Duration::from_secs(10),
-                                });
-                            }
-                        }
-                    } else {
-                        info!("Docker not available - skipping periodic OAuth token refresh");
-                    }
-                }
-            }
+            self.state.refresh_oauth_tokens_if_due(true).await;
         }
 
         // Periodic session snapshot (every 30 minutes)
