@@ -1,0 +1,81 @@
+name: Desktop
+
+# The desktop shell (ainb-tui/crates/ainb-desktop) is its own cargo workspace,
+# excluded from ainb-tui's members, so no job in ci.yml builds Tauri or needs
+# the platform webview. This workflow is its gate: fmt, clippy on the window
+# build, the headless host contract, and the sidecar supervisor against the real
+# hangar daemon, on both runners.
+on:
+  push:
+    branches: [main, v2]
+    paths:
+      - "ainb-tui/crates/ainb-desktop/**"
+      - "ainb-tui/crates/ainb-app/**"
+      - "ainb-tui/crates/ainb-hangar-*/**"
+      - "ainb-tui/xtask/**"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    branches: [main, v2]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  desktop:
+    name: Desktop shell (${{ matrix.os }})
+    timeout-minutes: 90
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ainb-tui -> target
+            ainb-tui/crates/ainb-desktop -> target
+      - name: Install the Tauri system packages (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ainb-tui/crates/ainb-desktop/ui/package-lock.json
+      # The window build embeds `ui/dist`, and `tsc --noEmit` runs strict first.
+      - name: Build the shell frontend
+        run: npm ci --no-audit --no-fund && npm run build
+        working-directory: ainb-tui/crates/ainb-desktop/ui
+      # Builds the daemon the sidecar tests run and stages it for
+      # `bundle.externalBin`, which the window build checks for.
+      - name: Stage the hangar daemon sidecar
+        run: cargo xtask stage-desktop-sidecar
+        working-directory: ainb-tui
+      - name: Format
+        run: cargo fmt -- --check
+        working-directory: ainb-tui/crates/ainb-desktop
+      - name: Clippy (library, tests and the window build)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+        working-directory: ainb-tui/crates/ainb-desktop
+      - name: Host contract and sidecar tests
+        run: cargo test
+        working-directory: ainb-tui/crates/ainb-desktop
+        env:
+          AINB_CODEX_MANAGED: "0"
