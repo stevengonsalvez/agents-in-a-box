@@ -163,11 +163,13 @@ pub const CAP_CONNECTIONS_REGISTRY: &str = "hangar.connections.registry";
 /// not see this string is talking to a daemon that ignores the member and
 /// lists every connection.
 pub const CAP_CONNECTIONS_TRANSIENT: &str = "hangar.connections.transient";
-/// Capability: an authenticated `auth/hello` reply names the daemon's minted
-/// `host_id`, a ULID, and the rows it serves carry that id (spec D11, #1066).
+/// Capability: this build can mint a `HostId`, a ULID, and name it in an
+/// authenticated `auth/hello` reply (spec D11, #1066).
 ///
-/// A client that does not see this string is talking to a daemon whose rows
-/// name `local`.
+/// It ships from the static catalogue, so it says what the build CAN do, not
+/// that this daemon has an id: a daemon whose mint failed still advertises it,
+/// omits `host_id` and serves rows named `local`. The `host_id` member's
+/// presence in the hello reply is the only signal that the daemon has one.
 pub const CAP_HOST_IDENTITY: &str = "hangar.host_identity";
 /// Capability: the converged attention inbox, list, subscribe, answer.
 pub const CAP_ATTENTION_INBOX: &str = "hangar.attention.inbox";
