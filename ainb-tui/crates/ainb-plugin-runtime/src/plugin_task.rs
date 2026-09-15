@@ -40,6 +40,7 @@ use tracing::{debug, error, info, warn};
 use crate::error::RuntimeError;
 use crate::event_stream::{EventStreamRegistry, topic_allowed};
 use crate::framing::{read_frame, write_frame};
+use crate::inbox::{DropOldestReceiver, DropOldestSender, INPUT_INBOX_CAPACITY, drop_oldest};
 use crate::managed_subprocess::ManagedSubprocessRegistry;
 use crate::process::{SIGTERM, signal_pgrp, spawn_plugin};
 use crate::registry::RegisteredPlugin;
@@ -62,6 +63,118 @@ use crate::workspace_store::{
 /// Wire-protocol ABI version the runtime advertises.
 const ABI_VERSION: u32 = 2;
 
+/// Esc presses a plugin may leave unanswered in a row before the next one goes
+/// to the host (#1087).
+///
+/// Three is past any honest miss: a plugin that pops one nested level per Esc
+/// changes its frame on every press and never starts a streak.
+pub const ESC_UNANSWERED_LIMIT: u32 = 3;
+
+/// Esc presses in a row, with no other key between them, after which the next
+/// Esc goes to the host whatever the frames showed (#1087 review).
+///
+/// The frame check cannot judge a plugin that repaints on its own (a spinner,
+/// a clock): every frame differs, so every Esc looks answered. No honest
+/// screen needs this many Esc presses in a row to back out of its nesting.
+pub const ESC_PRESS_CEILING: u32 = 8;
+
+/// What to do with an Esc the host is about to send a plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscVerdict {
+    /// Send it to the plugin.
+    Deliver,
+    /// The plugin has ignored [`ESC_UNANSWERED_LIMIT`] Esc presses in a row, or
+    /// the user has pressed Esc [`ESC_PRESS_CEILING`] times with no other key:
+    /// give this one to the host, which leaves the screen.
+    ReturnToHost,
+}
+
+/// Tracks whether a plugin answers Esc, judged only on painted frames.
+///
+/// A plugin that keeps rendering while ignoring Esc used to hold its screen
+/// with Ctrl+C as the only way out (#1087). An Esc counts as UNANSWERED once a
+/// frame rendered after it reached the plugin looks exactly like the frame
+/// before it, and as ANSWERED when it differs. Only the FIRST such frame is
+/// judged, the one the render kicked right after the key produces: a later
+/// repaint (a ticking clock, an animation) says nothing about the Esc, and
+/// counting it would let any plugin that repaints hold the screen. With no frame yet,
+/// there is no evidence and the streak is left alone, so pressing Esc faster
+/// than the plugin paints never ejects it. Any other key ends the streak.
+#[derive(Debug, Default)]
+pub struct BackWatch {
+    last_frame: Option<u64>,
+    pending: Option<PendingEsc>,
+    unanswered: u32,
+    /// Esc presses since the last other key, answered or not.
+    presses: u32,
+}
+
+#[derive(Debug)]
+struct PendingEsc {
+    generation: u64,
+    frame_before: Option<u64>,
+    /// Whether the first frame after the Esc differed from the one before it;
+    /// `None` until that frame arrives.
+    changed: Option<bool>,
+}
+
+impl BackWatch {
+    /// A painted frame, reflecting every key up to generation `keys_through`
+    /// (`None` when no key had been written when it was requested).
+    pub fn frame(&mut self, frame: u64, keys_through: Option<u64>) {
+        if let Some(pending) = self.pending.as_mut().filter(|pending| pending.changed.is_none()) {
+            if keys_through.is_some_and(|keys| keys >= pending.generation) {
+                pending.changed = Some(pending.frame_before != Some(frame));
+            } else {
+                // Requested before the Esc reached the plugin but painted after
+                // it was sent: this, not the older frame, is what the Esc
+                // started from.
+                pending.frame_before = Some(frame);
+            }
+        }
+        self.last_frame = Some(frame);
+    }
+
+    /// An Esc with key generation `generation` is about to be sent.
+    pub fn esc(&mut self, generation: u64) -> EscVerdict {
+        match self.pending.take().and_then(|pending| pending.changed) {
+            Some(true) => self.unanswered = 0,
+            Some(false) => self.unanswered += 1,
+            None => {}
+        }
+        if self.unanswered >= ESC_UNANSWERED_LIMIT || self.presses >= ESC_PRESS_CEILING {
+            self.unanswered = 0;
+            self.presses = 0;
+            return EscVerdict::ReturnToHost;
+        }
+        self.presses += 1;
+        self.pending = Some(PendingEsc {
+            generation,
+            frame_before: self.last_frame,
+            changed: None,
+        });
+        EscVerdict::Deliver
+    }
+
+    /// A key other than Esc: whatever the plugin did with the last Esc, the
+    /// user has moved on.
+    pub fn other_key(&mut self) {
+        self.pending = None;
+        self.unanswered = 0;
+        self.presses = 0;
+    }
+}
+
+/// Hash a painted frame for [`BackWatch`]. Equal buffers hash equal. Hashes
+/// the decoded buffer in place: serialising every render response a second
+/// time just to compare it would cost the task on each frame.
+fn frame_hash(buffer: &WireBuffer) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    buffer.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Cached render output kept alive between async response and the
 /// next `try_recv_render` poll on the TUI thread.
 ///
@@ -77,6 +190,8 @@ pub struct RenderCache {
     captures_text: Arc<std::sync::atomic::AtomicBool>,
     /// When the host last found this plugin's screen on display (#1053).
     shown_at: Arc<parking_lot::Mutex<Option<Instant>>>,
+    /// Whether the plugin is answering Esc (#1087).
+    back_watch: Arc<parking_lot::Mutex<BackWatch>>,
 }
 
 impl RenderCache {
@@ -100,6 +215,33 @@ impl RenderCache {
     /// Replace the cached buffer.
     pub fn put(&self, buf: WireBuffer) {
         *self.inner.lock() = Some(buf);
+    }
+
+    /// Fold one painted frame into the Esc watch: `frame` hashes the buffer and
+    /// `keys_through` is the last key generation written to the plugin before
+    /// the render was requested (`None` before any key), so the frame reflects
+    /// every key up to it.
+    pub fn observe_frame(&self, frame: u64, keys_through: Option<u64>) {
+        self.back_watch.lock().frame(frame, keys_through);
+    }
+
+    /// Record a key the host is about to send and answer whether to send it.
+    ///
+    /// `false` means the plugin has left [`ESC_UNANSWERED_LIMIT`] Esc presses in
+    /// a row unanswered, so this Esc should go to the host instead.
+    #[must_use]
+    pub fn admit_key(&self, key: &ainb_plugin_protocol::params::KeyEvent, generation: u64) -> bool {
+        use ainb_plugin_protocol::params::{KeyCode, KeyKind};
+        let mut watch = self.back_watch.lock();
+        if key.code != KeyCode::Esc {
+            watch.other_key();
+            return true;
+        }
+        // An auto-repeat or a release is not a fresh request to go back.
+        if key.kind != KeyKind::Press {
+            return true;
+        }
+        watch.esc(generation) == EscVerdict::Deliver
     }
 
     /// Pop the cached buffer (returns `None` if nothing cached).
@@ -203,14 +345,19 @@ pub type Inbox = mpsc::UnboundedSender<Command>;
 /// and reads from the key receiver first, so any pending keystroke is
 /// dispatched before another `HandleEvent` is pulled — restores Esc
 /// responsiveness even during a multi-second chunk drain.
-pub type KeyInbox = mpsc::UnboundedSender<HandleKeyParams>;
+///
+/// Bounded at [`INPUT_INBOX_CAPACITY`], dropping the oldest key when full
+/// (#1087): a plugin that stops reading its stdin stalls the task's frame
+/// write, and an unbounded channel then kept every later keystroke in memory.
+pub type KeyInbox = DropOldestSender<HandleKeyParams>;
 
 /// Priority side-channel reserved for `plugin/handle_mouse` notifications.
 ///
 /// Mirrors [`KeyInbox`]: a dedicated channel drained ahead of the main
 /// [`Inbox`] in the task's `biased;` select, so a click or scroll on a
-/// plugin screen can't queue behind a backlog of `HandleEvent` chunks.
-pub type MouseInbox = mpsc::UnboundedSender<HandleMouseParams>;
+/// plugin screen can't queue behind a backlog of `HandleEvent` chunks. Bounded
+/// the same way.
+pub type MouseInbox = DropOldestSender<HandleMouseParams>;
 
 /// Map of `plugin_id → inbox` for snapshot fan-out.
 ///
@@ -370,8 +517,8 @@ pub fn spawn(
     Arc<std::sync::atomic::AtomicBool>,
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let (key_tx, key_rx) = mpsc::unbounded_channel();
-    let (mouse_tx, mouse_rx) = mpsc::unbounded_channel();
+    let (key_tx, key_rx) = drop_oldest(INPUT_INBOX_CAPACITY);
+    let (mouse_tx, mouse_rx) = drop_oldest(INPUT_INBOX_CAPACITY);
     let cache = RenderCache::new();
     let state = Arc::new(parking_lot::RwLock::new(LifecycleState::Idle));
     let render_wedged = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -403,6 +550,8 @@ pub fn spawn(
         child: None,
         redraw_governor: RedrawGovernor::default(),
         render_deadlines: HashMap::new(),
+        render_key_stamps: HashMap::new(),
+        last_key_written: None,
         render_wedged: render_wedged.clone(),
     };
     handle.spawn(task.run());
@@ -501,12 +650,12 @@ struct PluginTask {
     /// before the main `rx` on every loop iteration so keystrokes
     /// (including Esc) are dispatched ahead of any backlog of
     /// `HandleEvent` chunks.
-    key_rx: mpsc::UnboundedReceiver<HandleKeyParams>,
+    key_rx: DropOldestReceiver<HandleKeyParams>,
     /// Priority receiver for `plugin/handle_mouse` notifications. Drained
     /// alongside `key_rx` (both ahead of the main `rx`) so mouse clicks
     /// and scrolls on a plugin screen aren't starved by a `HandleEvent`
     /// backlog.
-    mouse_rx: mpsc::UnboundedReceiver<HandleMouseParams>,
+    mouse_rx: DropOldestReceiver<HandleMouseParams>,
     ledger: HashMap<u64, Pending>,
     ids: IdCounter,
     failures: VecDeque<Instant>,
@@ -529,6 +678,12 @@ struct PluginTask {
     /// it kicks one per dirty tick — so a plugin slower than the tick genuinely
     /// has several in flight, and each needs its own deadline.
     render_deadlines: HashMap<u64, Instant>,
+    /// Per outstanding `plugin/render`, the last key generation written to the
+    /// plugin before it was requested, so its frame can be judged against the
+    /// Esc presses it reflects ([`BackWatch`]).
+    render_key_stamps: HashMap<u64, Option<u64>>,
+    /// The generation of the last key written to the plugin, `None` before any.
+    last_key_written: Option<u64>,
     /// Set when a render blew its deadline, cleared when one completes.
     ///
     /// The host reads this (`RuntimeHandle::render_wedged`) to stop forwarding
@@ -605,8 +760,11 @@ impl PluginTask {
             debug!(plugin = %self.plugin.id, "handle_key dropped (idle)");
             return;
         }
+        let generation = params.generation;
         let json = serde_json::to_value(params).expect("HandleKeyParams is serializable");
-        let _ = self.send_notification(methods::PLUGIN_HANDLE_KEY, json).await;
+        if self.send_notification(methods::PLUGIN_HANDLE_KEY, json).await.is_ok() {
+            self.last_key_written = Some(generation);
+        }
     }
 
     /// Dispatch a `plugin/handle_mouse` notification. Mirrors
@@ -644,6 +802,7 @@ impl PluginTask {
     /// plugin that cannot service them.
     fn expire_render(&mut self, id: u64) {
         self.render_deadlines.remove(&id);
+        self.render_key_stamps.remove(&id);
         let Some(Pending::Render(reply)) = self.ledger.remove(&id) else {
             return;
         };
@@ -705,6 +864,7 @@ impl PluginTask {
                 } else {
                     self.render_deadlines
                         .insert(id, Instant::now() + self.config.default_render_timeout);
+                    self.render_key_stamps.insert(id, self.last_key_written);
                 }
             }
             Command::Cli {
@@ -1035,6 +1195,9 @@ impl PluginTask {
                             // single-char shortcuts while the plugin's input is
                             // focused (8hx). Persistent — survives try_take.
                             self.cache.set_captures_text(rr.captures_text);
+                            if let Some(keys_through) = self.render_key_stamps.remove(&id) {
+                                self.cache.observe_frame(frame_hash(&rr.buffer), keys_through);
+                            }
                             self.cache.put(rr.buffer.clone());
                             RenderOutcome::Ok(rr.buffer)
                         }
@@ -1055,6 +1218,7 @@ impl PluginTask {
                 // one must not disarm a request still in flight. The wedge is
                 // lifted for every response, in `handle_response`.
                 self.render_deadlines.remove(&id);
+                self.render_key_stamps.remove(&id);
                 let _ = reply.send(outcome);
             }
             Pending::Cli(reply) => {
@@ -1617,6 +1781,7 @@ impl PluginTask {
     /// Answer every request still waiting on the plugin with `why`, so a
     /// caller sees a runtime error instead of a dropped channel.
     fn fail_pending(&mut self, why: &str) {
+        self.render_key_stamps.clear();
         let pending: Vec<(u64, Pending)> = self.ledger.drain().collect();
         for (_, p) in pending {
             match p {
@@ -2226,7 +2391,8 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async move {
             let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<&'static str>();
-            let (key_tx, mut key_rx) = mpsc::unbounded_channel::<HandleKeyParams>();
+            let (key_tx, mut key_rx) =
+                crate::inbox::drop_oldest::<HandleKeyParams>(crate::inbox::INPUT_INBOX_CAPACITY);
 
             // Fill the main command channel with 100 entries first.
             // Then enqueue a single key. Under the production select!
@@ -2446,5 +2612,141 @@ mod tests {
             &CapabilityGrant::List(Vec::new()),
             "ui.state"
         ));
+    }
+
+    /// #1087: an Esc the plugin paints no change for is unanswered; after
+    /// `ESC_UNANSWERED_LIMIT` of them in a row the next Esc goes to the host.
+    #[test]
+    fn back_watch_returns_to_host_after_unanswered_esc_presses() {
+        use super::{BackWatch, ESC_UNANSWERED_LIMIT, EscVerdict};
+        let mut watch = BackWatch::default();
+        watch.frame(7, None);
+        for n in 1..=u64::from(ESC_UNANSWERED_LIMIT) {
+            assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
+            watch.frame(7, Some(n));
+        }
+        assert_eq!(watch.esc(99), EscVerdict::ReturnToHost);
+        assert_eq!(
+            watch.esc(100),
+            EscVerdict::Deliver,
+            "an eject starts afresh"
+        );
+    }
+
+    /// A plugin that pops one level per Esc changes its frame every time and is
+    /// never ejected, however many levels it has.
+    #[test]
+    fn back_watch_keeps_a_plugin_that_answers_each_esc() {
+        use super::{BackWatch, EscVerdict};
+        let mut watch = BackWatch::default();
+        watch.frame(0, None);
+        for n in 1..=u64::from(super::ESC_PRESS_CEILING) {
+            assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
+            watch.frame(n, Some(n));
+        }
+    }
+
+    /// Esc presses faster than the plugin paints carry no evidence, and a frame
+    /// requested before the Esc reached the plugin says nothing about it.
+    #[test]
+    fn back_watch_needs_a_frame_after_the_esc() {
+        use super::{BackWatch, EscVerdict};
+        let mut watch = BackWatch::default();
+        watch.frame(7, None);
+        for n in 1..=u64::from(super::ESC_PRESS_CEILING) {
+            assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
+            watch.frame(7, Some(n - 1));
+        }
+    }
+
+    /// Any other key ends the streak.
+    #[test]
+    fn back_watch_resets_on_another_key() {
+        use super::{BackWatch, EscVerdict};
+        let mut watch = BackWatch::default();
+        watch.frame(7, None);
+        for n in 1..=2 {
+            assert_eq!(watch.esc(n), EscVerdict::Deliver);
+            watch.frame(7, Some(n));
+        }
+        watch.other_key();
+        for n in 3..=5 {
+            assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
+            watch.frame(7, Some(n));
+        }
+    }
+
+    /// #1087 review: a plugin that repaints on its own (a ticking clock) while
+    /// ignoring Esc is still ejected. Only the first frame after each Esc is
+    /// judged, so the tick that follows it proves nothing.
+    #[test]
+    fn back_watch_ejects_a_repainting_plugin_that_ignores_esc() {
+        use super::{BackWatch, ESC_UNANSWERED_LIMIT, EscVerdict};
+        let mut watch = BackWatch::default();
+        let mut clock = 100;
+        watch.frame(clock, None);
+        for n in 1..=u64::from(ESC_UNANSWERED_LIMIT) {
+            assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
+            watch.frame(clock, Some(n));
+            clock += 1;
+            watch.frame(clock, Some(n));
+        }
+        assert_eq!(watch.esc(99), EscVerdict::ReturnToHost);
+    }
+
+    /// A frame requested before the Esc but painted after it was sent is what
+    /// the Esc starts from, so an Esc that undoes that frame counts as answered.
+    #[test]
+    fn back_watch_judges_the_esc_against_a_frame_still_in_flight() {
+        use super::{BackWatch, EscVerdict};
+        let mut watch = BackWatch::default();
+        for n in 1..=u64::from(super::ESC_PRESS_CEILING) {
+            // A click opened a drawer (frame 2); the Esc closes it (frame 1).
+            watch.frame(1, Some(n * 10));
+            assert_eq!(watch.esc(n * 10 + 1), EscVerdict::Deliver, "esc {n}");
+            watch.frame(2, Some(n * 10));
+            watch.frame(1, Some(n * 10 + 1));
+        }
+    }
+
+    /// #1087 review: a plugin that repaints every frame (a spinner) makes every
+    /// Esc look answered, so the press ceiling ejects it regardless.
+    #[test]
+    fn back_watch_ejects_an_always_repainting_plugin_at_the_press_ceiling() {
+        use super::{BackWatch, ESC_PRESS_CEILING, EscVerdict};
+        let mut watch = BackWatch::default();
+        let mut spinner = 0;
+        watch.frame(spinner, None);
+        for n in 1..=u64::from(ESC_PRESS_CEILING) {
+            assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
+            spinner += 1;
+            watch.frame(spinner, Some(n));
+        }
+        assert_eq!(watch.esc(99), EscVerdict::ReturnToHost);
+        watch.frame(spinner + 1, Some(99));
+        assert_eq!(
+            watch.esc(100),
+            EscVerdict::Deliver,
+            "an eject starts afresh"
+        );
+    }
+
+    /// Another key between Esc presses restarts the ceiling count.
+    #[test]
+    fn back_watch_press_ceiling_restarts_on_another_key() {
+        use super::{BackWatch, ESC_PRESS_CEILING, EscVerdict};
+        let mut watch = BackWatch::default();
+        for round in 0..3 {
+            for n in 1..=u64::from(ESC_PRESS_CEILING) {
+                let generation = round * 100 + n;
+                assert_eq!(
+                    watch.esc(generation),
+                    EscVerdict::Deliver,
+                    "round {round} esc {n}"
+                );
+                watch.frame(generation, Some(generation));
+            }
+            watch.other_key();
+        }
     }
 }

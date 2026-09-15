@@ -6,12 +6,15 @@
 //! depend on). Behaviour:
 //!
 //! - `plugin/init` → reply with name/version echo.
-//! - `plugin/render` → reply with a 1×1 buffer carrying "X" at (0,0).
+//! - `plugin/render` → reply with a 1×1 buffer carrying "X" at (0,0), or the
+//!   number of levels popped so far once an Esc has popped one.
 //! - `plugin/cli_dispatch` → reply with stdout "ok\n", `exit_code` 0. With
 //!   argv `subscribe <topic>` it first sends `host/snapshot/subscribe` for the
 //!   topic (the reply is read and ignored). With argv `publish <topic>` it
 //!   first publishes `b"from-plugin"` on the topic. With argv `hang` it never replies,
-//!   leaving the request in flight.
+//!   leaving the request in flight. With argv `levels <n>` it
+//!   gives Esc `n` nested levels to pop. With argv `wedge` it publishes
+//!   `fixture.wedged`, then stops reading stdin altogether and never replies.
 //! - `plugin/handle_event` → notification: recorded on stderr, and a delivery
 //!   for a subscribed (non-`socket:`) topic is re-published verbatim under
 //!   `fixture.received`, so a host test can read back exactly what arrived.
@@ -48,6 +51,10 @@ fn main() {
 
     // Publish a starting snapshot so the runtime can assert it shows up.
     publish_snapshot(&mut writer, "fixture.greeting", b"hello");
+    // Nested levels an Esc pops, one per press (`levels <n>`), and how many
+    // have been popped: each pop changes the painted cell.
+    let mut levels: u32 = 0;
+    let mut popped: u32 = 0;
 
     loop {
         let body = match read_frame_sync(&mut reader) {
@@ -89,7 +96,12 @@ fn main() {
             methods::PLUGIN_RENDER => {
                 if let Some(id) = id {
                     let mut buf = WireBuffer::new(1, 1);
-                    buf.push(Coord::new(0, 0), Cell::new("X"));
+                    let cell = if popped == 0 {
+                        "X".to_string()
+                    } else {
+                        popped.to_string()
+                    };
+                    buf.push(Coord::new(0, 0), Cell::new(cell));
                     let result = serde_json::to_value(RenderResult {
                         buffer: buf,
                         redraw: false,
@@ -105,9 +117,21 @@ fn main() {
                         if verb == "subscribe" {
                             subscribe(&mut writer, topic);
                         }
+                        if verb == "levels" {
+                            levels = topic.parse().unwrap_or(0);
+                            popped = 0;
+                        }
                         if verb == "publish" {
                             publish_snapshot(&mut writer, topic, b"from-plugin");
                         }
+                    }
+                    // `wedge`: stop reading stdin for good, so the host's
+                    // writes back up once the pipe is full.
+                    if dispatch.argv.first().map(String::as_str) == Some("wedge") {
+                        // Say so first, so a host test floods only once the
+                        // fixture has really stopped reading.
+                        publish_snapshot(&mut writer, "fixture.wedged", b"1");
+                        std::thread::park();
                     }
                     // `hang`: never answer, so the request stays in flight.
                     if dispatch.argv.first().map(String::as_str) == Some("hang") {
@@ -142,6 +166,10 @@ fn main() {
                 eprintln!("fixture: handle_key {params}");
                 let bytes = serde_json::to_vec(&params).expect("params re-serialise");
                 publish_snapshot(&mut writer, "fixture.last_key", &bytes);
+                let esc = params.pointer("/key/code/type").and_then(Value::as_str) == Some("esc");
+                if esc && popped < levels {
+                    popped += 1;
+                }
             }
             methods::HOST_ACTION_INVOKE => {
                 // Echo the payload back as the action result. `payload`

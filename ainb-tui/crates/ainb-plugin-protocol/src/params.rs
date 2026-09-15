@@ -110,8 +110,9 @@ impl Viewport {
 pub struct RenderParams {
     /// Viewport the host wants painted.
     pub viewport: Viewport,
-    /// Plugin-defined render generation. Plugins free to use this as
-    /// a redraw token; host doesn't interpret the value.
+    /// Host-assigned render token. A plugin may use it as a redraw token; the
+    /// host reads nothing back. Unrelated to [`HandleKeyParams::generation`],
+    /// which the host orders against renders on its own side.
     #[serde(default)]
     pub generation: u64,
 }
@@ -267,10 +268,11 @@ pub struct HandleKeyParams {
     pub screen_id: String,
     /// The key event itself.
     pub key: KeyEvent,
-    /// Monotonic counter the host increments per forwarded key. The plugin
-    /// is expected to echo the value back via [`RenderParams::generation`]
-    /// on the next render, giving the host a freshness witness that the
-    /// key has been observed.
+    /// Monotonic counter the host increments per forwarded key. A plugin
+    /// need not echo it: [`RenderParams::generation`] is the host's own token
+    /// and the host reads nothing back. The host orders keys against renders
+    /// itself, stamping each `plugin/render` with the last key it wrote to the
+    /// plugin, which is how it tells whether a frame reflects a key (#1087).
     pub generation: u64,
 }
 

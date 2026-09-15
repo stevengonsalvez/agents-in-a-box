@@ -902,3 +902,155 @@ fn a_plugin_granted_a_fleet_topic_cannot_publish_on_it() {
         "a plugin publish reached the host-publish-only card clock"
     );
 }
+
+/// #1087: a plugin that stops reading its stdin costs bounded memory however
+/// long the user keeps typing at it. Once the pipe is full the task cannot
+/// write, so keys pile up in the inbox, which holds at most its capacity and
+/// counts every event it pushes out.
+#[test]
+fn a_wedged_plugin_keeps_a_bounded_key_inbox_and_counts_drops() {
+    const KEYS: usize = 20_000;
+    let (rt, handle) = Runtime::new().expect("build runtime");
+    let plugin = RegisteredPlugin::new(
+        fixture_manifest(),
+        fixture_path(),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    let id = plugin.id.clone();
+    rt.register(plugin);
+    start(&handle, &id);
+
+    // Never answered: the fixture parks instead of reading on. Flood only once
+    // it has said so, so the keys really do meet a plugin that is not reading.
+    drop(handle.dispatch_cli(&id, "echo", vec!["wedge".into()]));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while handle.snapshot_get("fixture.wedged").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fixture never wedged"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let key = ainb_plugin_protocol::params::KeyEvent {
+        code: ainb_plugin_protocol::params::KeyCode::Char { ch: 'j' },
+        mods: 0,
+        kind: ainb_plugin_protocol::params::KeyKind::Press,
+    };
+    for _ in 0..KEYS {
+        assert!(
+            handle.send_key(&id, "fixture", key.clone()),
+            "the task is alive"
+        );
+    }
+
+    let stats = handle.input_inbox_stats(&id).expect("registered");
+    // Full, and no fuller. One short of full is the same verdict: the task
+    // may have taken one key off the queue and be blocked writing it.
+    let capacity = ainb_plugin_runtime::inbox::INPUT_INBOX_CAPACITY;
+    assert!(
+        (capacity - 1..=capacity).contains(&stats.keys_queued),
+        "a plugin that is not reading leaves the inbox full, and no fuller: {stats:?}"
+    );
+    assert!(
+        stats.keys_dropped > 0,
+        "{KEYS} keys into a wedged plugin dropped none: {stats:?}"
+    );
+}
+
+/// A fixture plugin on the render loop, for the #1087 Esc watch.
+fn esc_plugin(name: &str) -> (Runtime, ainb_plugin_runtime::RuntimeHandle, PluginId) {
+    let (rt, handle) = Runtime::new().expect("build runtime");
+    let mut manifest = fixture_manifest();
+    manifest.plugin.name = name.into();
+    let plugin = RegisteredPlugin::new(
+        manifest,
+        fixture_path(),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    let id = plugin.id.clone();
+    rt.register(plugin);
+    start(&handle, &id);
+    (rt, handle, id)
+}
+
+fn esc() -> ainb_plugin_protocol::params::KeyEvent {
+    ainb_plugin_protocol::params::KeyEvent {
+        code: ainb_plugin_protocol::params::KeyCode::Esc,
+        mods: 0,
+        kind: ainb_plugin_protocol::params::KeyKind::Press,
+    }
+}
+
+/// Paint one frame and wait for it, as the host's render tick does after a key.
+fn paint(
+    rt: &Runtime,
+    handle: &ainb_plugin_runtime::RuntimeHandle,
+    id: &PluginId,
+    generation: u64,
+) {
+    let rx = handle.render(id, Viewport::new(1, 1), generation);
+    assert!(matches!(
+        rt.tokio_handle().block_on(rx),
+        Ok(RenderOutcome::Ok(_))
+    ));
+}
+
+/// #1087: a plugin that keeps painting the same frame while ignoring Esc no
+/// longer holds its screen. After `ESC_UNANSWERED_LIMIT` unanswered presses the
+/// next Esc is refused, which the host reads as a back key it must take.
+#[test]
+fn a_plugin_ignoring_esc_gives_the_next_one_to_the_host() {
+    let limit = ainb_plugin_runtime::plugin_task::ESC_UNANSWERED_LIMIT;
+    let (rt, handle, id) = esc_plugin("ignores-esc");
+    for n in 1..=u64::from(limit) {
+        assert!(
+            handle.send_key(&id, "fixture", esc()),
+            "esc {n} is delivered"
+        );
+        paint(&rt, &handle, &id, n);
+    }
+    assert!(
+        !handle.send_key(&id, "fixture", esc()),
+        "after {limit} ignored Esc presses the next one returns to the host"
+    );
+}
+
+/// A plugin that pops one nested level per Esc answers every press with a new
+/// frame, so it is never ejected, however deep it goes.
+#[test]
+fn a_plugin_popping_a_level_per_esc_keeps_every_esc() {
+    const LEVELS: u64 = 6;
+    let (rt, handle, id) = esc_plugin("pops-levels");
+    let set = handle.dispatch_cli(&id, "echo", vec!["levels".into(), LEVELS.to_string()]);
+    assert!(matches!(
+        rt.tokio_handle().block_on(set),
+        Ok(CliOutcome::Ok(_))
+    ));
+    for n in 1..=LEVELS {
+        assert!(
+            handle.send_key(&id, "fixture", esc()),
+            "esc {n} is delivered"
+        );
+        paint(&rt, &handle, &id, n);
+    }
+}
+
+/// Esc presses with no frame painted in between carry no evidence, so a burst
+/// faster than the render tick is not ejected on the frame check. It still
+/// meets the press ceiling (#1087 review): past `ESC_PRESS_CEILING` presses
+/// with no other key, the next Esc goes to the host.
+#[test]
+fn an_esc_burst_is_delivered_up_to_the_press_ceiling() {
+    let ceiling = ainb_plugin_runtime::plugin_task::ESC_PRESS_CEILING;
+    let (_rt, handle, id) = esc_plugin("esc-burst");
+    for n in 1..=ceiling {
+        assert!(
+            handle.send_key(&id, "fixture", esc()),
+            "esc {n} is delivered"
+        );
+    }
+    assert!(
+        !handle.send_key(&id, "fixture", esc()),
+        "past {ceiling} Esc presses in a row the next one returns to the host"
+    );
+}
