@@ -623,8 +623,7 @@ async fn run_tui_loop(
         // looking it up is the host's job. The lookup caches a hit and paces a
         // miss, so asking every pass is cheap.
         app.state.set_host_tmux_session(
-            ainb_app::tmux::process_detection::host_tmux_session_name()
-                .and_then(crate::app::effect::TmuxSessionName::new),
+            crate::tmux::process_detection::host_tmux_session_name().map(str::to_string),
         );
 
         // Read-only preview is a real tmux client feeding the same vt100
