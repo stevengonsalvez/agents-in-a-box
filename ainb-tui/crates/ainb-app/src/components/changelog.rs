@@ -4,8 +4,16 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag};
 
-/// Embed the changelog at compile time
-const CHANGELOG_CONTENT: &str = include_str!("../../../../CHANGELOG.md");
+/// The bundled changelog, embedded at compile time. A remote renderer (the
+/// desktop host, the web client) draws the changelog from this same text,
+/// never from a frame: it is static content, not state (#1052).
+pub const CHANGELOG_MARKDOWN: &str = include_str!("../../../../CHANGELOG.md");
+
+/// The changelog parsed into rendered lines, once per process.
+fn parsed_lines() -> &'static [ChangelogLine] {
+    static LINES: std::sync::OnceLock<Vec<ChangelogLine>> = std::sync::OnceLock::new();
+    LINES.get_or_init(|| ChangelogState::parse_markdown(CHANGELOG_MARKDOWN))
+}
 
 /// A line of rendered markdown content
 #[derive(serde::Serialize, Debug, Clone)]
@@ -30,12 +38,12 @@ pub enum ChangelogStyle {
     BlockQuote,
 }
 
-/// State for the changelog viewer
+/// State for the changelog viewer: where it is scrolled to. The lines
+/// themselves are static content behind [`ChangelogState::lines`], so a frame
+/// of this state carries two numbers, not the whole changelog (#1052).
 #[derive(serde::Serialize, Debug, Clone)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ChangelogState {
-    /// Parsed markdown lines
-    pub lines: Vec<ChangelogLine>,
     /// Current scroll offset
     pub scroll_offset: usize,
     /// Total number of lines
@@ -51,14 +59,16 @@ impl Default for ChangelogState {
 impl ChangelogState {
     /// Create a new changelog state with embedded content
     pub fn new() -> Self {
-        let lines = Self::parse_markdown(CHANGELOG_CONTENT);
-        let total_lines = lines.len();
-
         Self {
-            lines,
             scroll_offset: 0,
-            total_lines,
+            total_lines: parsed_lines().len(),
         }
+    }
+
+    /// The rendered changelog lines, parsed once from [`CHANGELOG_MARKDOWN`].
+    #[must_use]
+    pub fn lines(&self) -> &'static [ChangelogLine] {
+        parsed_lines()
     }
 
     /// Scroll up by one line
@@ -258,5 +268,22 @@ impl ChangelogState {
         }
 
         lines
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_changelog_state_serialises_its_scroll_not_its_lines() {
+        let state = ChangelogState::new();
+        assert!(state.total_lines > 100, "the bundled changelog parses");
+        assert_eq!(state.lines().len(), state.total_lines);
+        let json = serde_json::to_value(&state).expect("serialises");
+        assert_eq!(
+            json,
+            serde_json::json!({"scroll_offset": 0, "total_lines": state.total_lines})
+        );
     }
 }
