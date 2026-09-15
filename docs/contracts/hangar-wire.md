@@ -48,6 +48,18 @@ authenticated reply carries it: a refused hello, including `-32007`, never
 names the host. A daemon that predates the mint omits the member and its rows
 name `local`, which is how a client reads the missing member too.
 
+The capability says what the build can do, not that the daemon has an id: it
+ships from the static catalogue, so a daemon whose mint failed still advertises
+it, omits `host_id` and serves rows named `local`. The member's presence in the
+hello reply is the only signal that the daemon has one.
+
+Until #1066 part 2, a mirror frame's own `host_id` and its `fleet[].host_id`
+still say `local`, while `cards[].host_id` carries the ULID. No surface may join
+a card to a fleet row by host.
+
+The id is bound to nothing: a copied home gives two daemons that assert one id.
+R1 pairing must authenticate the host's static public key, never the id alone.
+
 At the mint, in the same transaction, every `fleet_session` row still named
 `local` is adopted by the minted id. `fleet_event` rows are adopted after boot
 in batches of 5,000, because that table can be gigabytes. New sessions and
