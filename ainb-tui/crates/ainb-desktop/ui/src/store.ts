@@ -40,10 +40,13 @@ export interface HostFrames {
   sections: HeldSections;
 }
 
+/** Sections a host withheld as oversize and has not framed since. */
+export type StaleSections = { [S in SectionName]?: true };
+
 export interface FrameState {
   hosts: Record<HostId, HostFrames>;
-  /** Sections the host withheld as oversize and has not framed since. */
-  stale: SectionName[];
+  /** Keyed like `hosts`: one host's oversize notice never marks another's copy. */
+  stale: Record<HostId, StaleSections>;
 }
 
 export interface FrameStore {
@@ -69,7 +72,7 @@ interface Plan {
 
 export function createFrameStore(subscribed: readonly SectionName[]): FrameStore {
   const wanted = new Set<string>(subscribed);
-  const [state, setState] = createStore<FrameState>({ hosts: {}, stale: [] });
+  const [state, setState] = createStore<FrameState>({ hosts: {}, stale: {} });
 
   function applyDrain(peer: HostId, batches: readonly FrameBatch_Serialize[]) {
     // Decide in plain objects first, so the store is written once per
@@ -97,6 +100,8 @@ export function createFrameStore(subscribed: readonly SectionName[]): FrameStore
         plan.frames.set(name, frame);
         withheld.delete(name);
       }
+      // An oversize notice names no host: it came over this channel, so it is
+      // the peer's.
       for (const section of oversize ?? []) {
         if (wanted.has(section.section)) withheld.add(section.section as SectionName);
       }
@@ -119,10 +124,16 @@ export function createFrameStore(subscribed: readonly SectionName[]): FrameStore
           }
         }
       }
-      const framed = new Set([...plans.values()].flatMap((plan) => [...plan.frames.keys()]));
-      const stale = [...new Set([...state.stale.filter((name) => !framed.has(name)), ...withheld])];
-      if (stale.length !== state.stale.length || stale.some((name, i) => name !== state.stale[i])) {
-        setState("stale", stale);
+      // Only the peer's own frames clear the peer's stale entries; a restart
+      // clears them all, since the new process frames every section again.
+      const plan = plans.get(peer);
+      if (plan?.reset && state.stale[peer]) setState("stale", { [peer]: {} });
+      if (withheld.size > 0 && !state.stale[peer]) setState("stale", { [peer]: {} });
+      for (const name of plan?.frames.keys() ?? []) {
+        if (state.stale[peer]?.[name]) setState("stale", peer, name, undefined);
+      }
+      for (const name of withheld) {
+        if (!state.stale[peer]?.[name]) setState("stale", peer, name, true);
       }
     });
   }
