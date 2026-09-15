@@ -63,6 +63,13 @@ export interface FrameStore {
   hostCount: Accessor<number>;
 }
 
+/**
+ * The most distinct hosts one store holds, as `wire::store::MAX_HOSTS`. A drain
+ * from a host beyond it applies nothing, so a misbehaving peer set cannot grow
+ * the store without bound. Making room (`evictHost`) arrives with D2.
+ */
+export const MAX_HOSTS = 64;
+
 interface Plan {
   epoch: number;
   /** The drain saw a larger epoch: the host's held sections go first. */
@@ -75,6 +82,8 @@ export function createFrameStore(subscribed: readonly SectionName[]): FrameStore
   const [state, setState] = createStore<FrameState>({ hosts: {}, stale: {} });
 
   function applyDrain(peer: HostId, batches: readonly FrameBatch_Serialize[]) {
+    const held = new Set([...Object.keys(state.hosts), ...Object.keys(state.stale)]);
+    if (!held.has(peer) && held.size >= MAX_HOSTS) return;
     // Decide in plain objects first, so the store is written once per
     // (host, section) however many frames the drain carried for it.
     const plans = new Map<HostId, Plan>();
