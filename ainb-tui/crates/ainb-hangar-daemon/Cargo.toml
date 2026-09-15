@@ -189,8 +189,9 @@ tracing-opentelemetry = { version = "0.31", optional = true }
 
 [dev-dependencies]
 # Real web-owned presence coverage drives the production web connection loop
-# against this test's daemon socket. The web crate depends on wire/core only,
-# so this remains an acyclic, test-only dependency.
+# against this test's daemon socket. Test-only: the web crate now depends on
+# ainb-app (#1081), which does not depend on this daemon, so the graph stays
+# acyclic, but a daemon test build compiles ainb-app too.
 ainb-web = { path = "../ainb-web" }
 # multica-gap #10 acceptance (`rpc_issue_facets_sqlite`): the facet reducer is
 # run over the rows the REAL daemon put on the wire, so the screen-side numbers
