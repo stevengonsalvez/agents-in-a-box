@@ -367,7 +367,9 @@ pub struct HangarPlugin {
     snapshot_response_ids: BTreeMap<i64, i64>,
     /// The latest agent-status envelope read at init, until it is folded
     /// (#1031), or why the subscription was refused.
-    agent_status_seed: Option<tokio::sync::oneshot::Receiver<std::result::Result<Vec<u8>, String>>>,
+    agent_status_seed: Option<
+        tokio::sync::oneshot::Receiver<std::result::Result<Vec<(&'static str, Vec<u8>)>, String>>,
+    >,
     /// The surface hosting this plugin, from `plugin/init` (#1040).
     host: Option<ainb_plugin_sdk::PluginHost>,
     /// The daemon refused the `plugin` hello as undecodable (a build that
@@ -2509,9 +2511,15 @@ impl HangarPlugin {
             return;
         };
         match seed.try_recv() {
-            Ok(Ok(payload)) => {
+            Ok(Ok(latest)) => {
                 self.agent_status_seed = None;
-                self.apply_agent_status(&payload);
+                for (topic, payload) in latest {
+                    if topic == AGENT_STATUS_CLOCK_TOPIC {
+                        self.apply_agent_status_clock(&payload);
+                    } else {
+                        self.apply_agent_status(&payload);
+                    }
+                }
             }
             Ok(Err(reason)) => {
                 self.agent_status_seed = None;
@@ -5745,8 +5753,6 @@ impl Plugin for HangarPlugin {
                 let _ = seed_tx.send(Err(format!("agent status subscription refused: {error}")));
                 return;
             }
-            // The card clock (#1054) needs no seed: the host ticks every
-            // second while it holds cards.
             if let Err(error) = seeder.snapshot_subscribe(AGENT_STATUS_CLOCK_TOPIC).await {
                 let _ = seeder
                     .log_info(format!(
@@ -5754,10 +5760,19 @@ impl Plugin for HangarPlugin {
                     ))
                     .await;
             }
-            if let Ok(latest) = seeder.snapshot_get(AGENT_STATUS_TOPIC).await {
-                if let Some(payload) = latest.payload {
-                    let _ = seed_tx.send(Ok(payload.to_vec()));
+            // Seed the latest envelope and the latest card clock (#1063 review):
+            // without the clock a freshly spawned panel renders `?` ages until
+            // the host's next tick, up to a second later.
+            let mut latest = Vec::new();
+            for topic in [AGENT_STATUS_TOPIC, AGENT_STATUS_CLOCK_TOPIC] {
+                if let Ok(got) = seeder.snapshot_get(topic).await {
+                    if let Some(payload) = got.payload {
+                        latest.push((topic, payload.to_vec()));
+                    }
                 }
+            }
+            if !latest.is_empty() {
+                let _ = seed_tx.send(Ok(latest));
             }
         });
         self.connect(host).await;
@@ -9800,6 +9815,32 @@ mod tests {
         let logs = plugin.pending_logs.len();
         plugin.apply_agent_status_clock(b"not json");
         assert_eq!(plugin.pending_logs.len(), logs + 1);
+        assert_eq!(plugin.screens.fleet.now_ms(), 1_789_409_605_000);
+    }
+
+    /// #1063 review item 3: the init seed carries the latest card clock beside
+    /// the envelope, so a freshly spawned panel ages its cards at once.
+    #[test]
+    fn the_init_seed_folds_the_latest_clock_beside_the_envelope() {
+        use ainb_hangar_proto::agent_status::AgentState;
+        let mut plugin = connected_plugin_with_issue();
+        let (seed_tx, seed_rx) = tokio::sync::oneshot::channel();
+        plugin.agent_status_seed = Some(seed_rx);
+        let clock = serde_json::to_vec(&AgentStatusClock {
+            clock_ms: 1_789_409_605_000,
+        })
+        .unwrap();
+        seed_tx
+            .send(Ok(vec![
+                (
+                    AGENT_STATUS_TOPIC,
+                    envelope_bytes(1, 8, AgentState::Waiting),
+                ),
+                (AGENT_STATUS_CLOCK_TOPIC, clock),
+            ]))
+            .unwrap();
+        plugin.drain_agent_status_seed();
+        assert!(plugin.screens.fleet.status_for("codex:thread-1").is_some());
         assert_eq!(plugin.screens.fleet.now_ms(), 1_789_409_605_000);
     }
 
