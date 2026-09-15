@@ -35,7 +35,7 @@ use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 /// `BEGIN IMMEDIATE` takes the write lock at BEGIN, so there is no snapshot to
 /// invalidate and ordinary contention IS covered by the pool's 10s
 /// `busy_timeout`.
-const IMMEDIATE_TRANSACTION: &str = "BEGIN IMMEDIATE";
+pub(crate) const IMMEDIATE_TRANSACTION: &str = "BEGIN IMMEDIATE";
 
 /// How many times a write transaction is replayed before its error escapes.
 ///
