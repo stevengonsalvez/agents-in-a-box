@@ -309,7 +309,8 @@ pub struct FleetSessionRow {
     pub version: i64,
     /// Revision that last changed this row.
     pub updated_revision: i64,
-    /// Owning host. `local` until R1 mints a real `HostId`.
+    /// Owning host: the daemon's minted `HostId` (#1066), or `local` on a row
+    /// written before this home's daemon minted one.
     pub host_id: String,
     /// The evidence tier that last wrote this row's state (D14).
     ///
@@ -899,7 +900,8 @@ impl FleetRepo {
                     // live row backwards. The event is still RECORDED, with
                     // `applied = 0`: "we saw this and refused it" is exactly
                     // what an operator needs when a session looks stuck.
-                    let revision = insert_fleet_event(tx, event, row.version, false).await?;
+                    let revision =
+                        insert_fleet_event(tx, event, &row.host_id, row.version, false).await?;
                     let session = row.clone();
                     return Ok(ApplyFleetEventResult {
                         revision,
@@ -971,14 +973,20 @@ impl FleetRepo {
                 }
                 (row, changed)
             }
-            None => (new_session(event), true),
+            None => {
+                let mut row = new_session(event);
+                // The daemon's minted id, read in this transaction (#1066).
+                row.host_id = crate::repo::daemon_identity::host_id_on(&mut **tx).await?;
+                (row, true)
+            }
         };
 
         if is_new {
             insert_session(tx, &session).await?;
         }
 
-        let revision = insert_fleet_event(tx, event, session.version, changed).await?;
+        let revision =
+            insert_fleet_event(tx, event, &session.host_id, session.version, changed).await?;
 
         if changed {
             session.updated_revision = revision;
@@ -1078,14 +1086,16 @@ impl FleetRepo {
         let revision = sqlx::query(
             "INSERT INTO fleet_event \
              (event_id, session_key, observed_at, authority, event_type, payload, \
-              session_version, applied) VALUES (?, ?, ?, 'authoritative', \
-              'session_superseded', ?, ?, 1)",
+              session_version, applied, host_id) VALUES (?, ?, ?, 'authoritative', \
+              'session_superseded', ?, ?, 1, \
+              (SELECT host_id FROM fleet_session WHERE session_key = ?))",
         )
         .bind(&event_id)
         .bind(legacy_key)
         .bind(observed_at)
         .bind(payload)
         .bind(next_version)
+        .bind(legacy_key)
         .execute(&mut **tx)
         .await?
         .last_insert_rowid();
@@ -1171,13 +1181,15 @@ impl FleetRepo {
         let revision = sqlx::query(
             "INSERT INTO fleet_event \
              (event_id, session_key, observed_at, authority, event_type, payload, \
-              session_version, applied) VALUES (?, ?, ?, 'authoritative', \
-              'session_archived', '{}', ?, 1)",
+              session_version, applied, host_id) VALUES (?, ?, ?, 'authoritative', \
+              'session_archived', '{}', ?, 1, \
+              (SELECT host_id FROM fleet_session WHERE session_key = ?))",
         )
         .bind(format!("fleet-archive:{session_key}:{next_version}"))
         .bind(session_key)
         .bind(observed_at)
         .bind(next_version)
+        .bind(session_key)
         .execute(&mut *tx)
         .await?
         .last_insert_rowid();
@@ -1831,9 +1843,9 @@ fn new_session(event: &NewFleetEvent) -> FleetSessionRow {
         },
         version: 1,
         updated_revision: 0,
-        // `local` until R1 mints a real `HostId`; the column exists now so the
-        // idempotency key can be written without a second event-table rebuild.
-        host_id: "local".to_string(),
+        // Placeholder: `apply_event_in_tx` stamps the minted id before the
+        // insert, in the same transaction (#1066).
+        host_id: crate::repo::daemon_identity::UNMINTED_HOST_ID.to_string(),
         // A first event that names its tier gets it. One that does not leaves
         // the row `unknown`, which is the honest answer and what `tier_of`
         // falls back on.
@@ -2053,10 +2065,12 @@ fn apply_patch(row: &mut FleetSessionRow, event: &NewFleetEvent) -> bool {
 ///
 /// `host_id` and `tier` complete the spec's
 /// `(host_id, session_key, tier, event_id)` identity, which migration 0099
-/// indexes.
+/// indexes. `host_id` is the session row's, so an event and its session always
+/// name the same host (#1066).
 async fn insert_fleet_event(
     tx: &mut Transaction<'_, Sqlite>,
     event: &NewFleetEvent,
+    host_id: &str,
     session_version: i64,
     applied: bool,
 ) -> Result<i64, sqlx::Error> {
@@ -2075,7 +2089,7 @@ async fn insert_fleet_event(
     .bind(event.patch.current_request_fingerprint.as_ref().and_then(Clone::clone))
     .bind(session_version)
     .bind(i64::from(applied))
-    .bind("local")
+    .bind(host_id)
     .bind(event.patch.tier.as_deref().unwrap_or("unknown"))
     .execute(&mut **tx)
     .await?
