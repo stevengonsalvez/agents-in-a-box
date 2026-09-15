@@ -80,8 +80,10 @@ impl SidecarConfig {
     }
 }
 
-/// Where the connection to the daemon stands.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Where the connection to the daemon stands. Serialised for the webview's
+/// banner as `{"state": "connected", ...}`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum SidecarState {
     /// Probing for a daemon, or starting one.
     Starting,
