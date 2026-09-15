@@ -143,6 +143,16 @@ body {
   font-size: 12px;
 }
 
+/* A long name ends in an ellipsis inside the row instead of widening it. */
+.workspace-name,
+.session-row .name,
+.session-row .branch {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .workspace ul {
   margin: 0;
   padding: 0;
@@ -166,6 +176,7 @@ body {
 }
 
 .session-row .branch {
+  max-width: 40%;
   color: var(--muted);
   font-size: 12px;
 }
