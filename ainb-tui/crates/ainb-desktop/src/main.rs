@@ -102,12 +102,33 @@ fn daemon_bin() -> Result<PathBuf, String> {
     Ok(dir.join(name))
 }
 
-/// The `ainb` binary daemon lifecycle verbs run through, from `PATH`.
+/// The `ainb` binary daemon lifecycle verbs run through, resolved once at
+/// startup from the absolute `PATH` entries only (a relative or empty entry
+/// would resolve against whatever directory the app was started in), and only
+/// a file this user may execute.
 fn ainb_bin() -> Option<PathBuf> {
     let name = if cfg!(windows) { "ainb.exe" } else { "ainb" };
-    std::env::split_paths(&std::env::var_os("PATH")?)
+    let found = std::env::split_paths(&std::env::var_os("PATH")?)
+        .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(name))
-        .find(|path| path.is_file())
+        .find(|path| is_executable(path));
+    match &found {
+        Some(path) => tracing::info!(path = %path.display(), "daemon verbs run through ainb"),
+        None => tracing::warn!("no ainb on PATH; daemon verbs will report failed"),
+    }
+    found
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 
 /// Send the shell's tracing to `<hangar home>/desktop.log`, so its warnings
