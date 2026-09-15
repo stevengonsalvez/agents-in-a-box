@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::future::Future;
 use std::pin::Pin;
 
-use ainb_app::wire::web::WebNeedCard;
+use ainb_app::wire::web::{WebCost, WebNeedCard};
 use serde_json::Value;
 
 /// The sessions + needs pair fetched on the fast poll cadence (cost excluded).
@@ -30,13 +30,14 @@ pub type CoreFuture<'a> =
     Pin<Box<dyn Future<Output = Result<CoreSnapshot, DataError>> + Send + 'a>>;
 
 /// A `'static` boxed future, the return shape of [`DataSource::cost`].
-pub type CostFuture<'a> = Pin<Box<dyn Future<Output = Value> + Send + 'a>>;
+pub type CostFuture<'a> = Pin<Box<dyn Future<Output = Option<WebCost>> + Send + 'a>>;
 
 /// A snapshot of everything the dashboard renders, as JSON values. `sessions`
 /// and `needs` are projections through `ainb_app::wire::web` allow-lists, so a
 /// field the CLI or the daemon adds does NOT reach the browser until the
 /// projection names it and the key-path fixture locks it (#1056, #1081).
-/// `cost` is projected the same way (#1113).
+/// `cost` is projected the same way (#1113), and typed so nothing can bypass
+/// the projection (#1119).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FleetSnapshot {
     /// `ainb --format json list --frame`: the live session list, as rows
@@ -52,23 +53,25 @@ pub struct FleetSnapshot {
     /// `ainb_app::wire::web::cost_panel` to the totals, models and groups the
     /// dashboard draws: no per-session rows, no cwd (#1113). `null` when the
     /// verb is absent from this build or fails, so the dashboard degrades
-    /// gracefully instead of failing.
-    pub cost: Value,
+    /// gracefully instead of failing. Typed, like `needs`, so nothing can put a
+    /// raw report here without going through the projection (#1119).
+    pub cost: Option<WebCost>,
     /// Content fingerprint, used by the SSE layer to suppress duplicate pushes
     /// when nothing changed. Skipped from the API payload — it's internal.
     #[serde(skip)]
-    pub fingerprint: u64,
+    pub(crate) fingerprint: u64,
 }
 
 impl FleetSnapshot {
     /// Assemble a full snapshot from a fast-cadence [`CoreSnapshot`] and a
-    /// (possibly stale) cost value, recomputing the fingerprint. Used by the
+    /// (possibly stale) cost panel, recomputing the fingerprint. Used by the
     /// poller to stitch fresh sessions/needs onto the last-known cost on ticks
     /// that skip the slow cost fetch.
     #[must_use]
-    pub fn from_parts(core: CoreSnapshot, cost: Value) -> Self {
+    pub fn from_parts(core: CoreSnapshot, cost: Option<WebCost>) -> Self {
         let needs = serde_json::to_value(&core.needs).unwrap_or(Value::Null);
-        let fingerprint = Self::compute_fingerprint(&core.sessions, &needs, &cost);
+        let cost_value = serde_json::to_value(&cost).unwrap_or(Value::Null);
+        let fingerprint = Self::compute_fingerprint(&core.sessions, &needs, &cost_value);
         Self {
             sessions: core.sessions,
             needs: core.needs,
@@ -171,8 +174,8 @@ pub trait DataSource: Send + Sync + 'static {
     /// every tick.
     fn core(&self) -> CoreFuture<'_>;
 
-    /// Fetch the slow-cadence cost rollup, best-effort: any failure or absent
-    /// verb resolves to [`Value::Null`] so the dashboard degrades gracefully.
+    /// Fetch the slow-cadence cost panel, best-effort: any failure or absent
+    /// verb resolves to `None` so the dashboard degrades gracefully.
     /// The cost task calls this on its own cadence, under a timeout.
     fn cost(&self) -> CostFuture<'_>;
 }
@@ -350,13 +353,11 @@ impl DataSource for AinbCliSource {
         Box::pin(async move {
             // Cost is best-effort: `run_json(.., allow_absent=true)` already
             // resolves spawn errors / non-zero exits to `Value::Null`, so any
-            // residual error here also degrades to `Null` rather than failing.
+            // residual error here also degrades to `None` rather than failing.
             let report = self.run_json(&["fleet", "cost"], true).await.unwrap_or(Value::Null);
             // The report's per-session rows carry absolute cwds; the browser gets
             // only the totals, models and groups the dashboard draws (#1113).
             ainb_app::wire::web::cost_panel(&report)
-                .and_then(|panel| serde_json::to_value(panel).ok())
-                .unwrap_or(Value::Null)
         })
     }
 }
@@ -386,6 +387,48 @@ mod tests {
         let shown = error.to_string();
         assert!(!shown.contains("secret-repo"), "{shown}");
         assert!(shown.contains("exit status: 3"), "{shown}");
+    }
+
+    fn panel_snapshot(cost: Option<WebCost>) -> FleetSnapshot {
+        let core = CoreSnapshot {
+            sessions: json!([]),
+            needs: Vec::new(),
+        };
+        FleetSnapshot::from_parts(core, cost)
+    }
+
+    #[test]
+    fn a_present_cost_panel_serialises_to_the_bytes_the_value_path_served() {
+        let report = json!({
+            "totals": {"cost_usd": 0.5, "session_count": 1, "model_count": 1,
+                "bucket": {"input_tokens": 10, "output_tokens": 5, "call_count": 1, "cost_usd": 0.5}},
+            "models": [{"model": "claude-sonnet", "cost_usd": 0.5, "bucket": {"call_count": 1}}],
+            "groups": [{"group": "repo", "cost_usd": 0.5, "session_count": 1, "bucket": {}}],
+        });
+        let panel = ainb_app::wire::web::cost_panel(&report).expect("a report object");
+        // Before #1119 the snapshot held the panel as a `Value`; the typed field
+        // must put the same bytes on the wire and hash the same.
+        let served = serde_json::to_value(&panel).expect("panel serialises");
+
+        let snapshot = panel_snapshot(Some(panel));
+        let body = serde_json::to_string(&snapshot).expect("snapshot serialises");
+
+        let expected = format!(
+            "{{\"sessions\":[],\"needs\":[],\"cost\":{}}}",
+            serde_json::to_string(&served).expect("value serialises")
+        );
+        assert_eq!(body, expected);
+        assert_eq!(
+            snapshot.fingerprint,
+            FleetSnapshot::compute_fingerprint(&json!([]), &json!([]), &served)
+        );
+    }
+
+    #[test]
+    fn an_absent_cost_panel_serialises_as_null() {
+        let snapshot = panel_snapshot(None);
+        let body = serde_json::to_string(&snapshot).expect("snapshot serialises");
+        assert_eq!(body, r#"{"sessions":[],"needs":[],"cost":null}"#);
     }
 
     #[test]

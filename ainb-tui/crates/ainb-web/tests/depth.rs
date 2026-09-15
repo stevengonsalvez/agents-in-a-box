@@ -46,7 +46,7 @@ impl DataSource for FakeSource {
         Box::pin(async { Ok::<_, DataError>(Self::fixed_core()) })
     }
     fn cost(&self) -> CostFuture<'_> {
-        Box::pin(async { Value::Null })
+        Box::pin(async { None })
     }
 }
 

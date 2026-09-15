@@ -295,8 +295,10 @@ pub fn cost_panel(report: &Value) -> Option<WebCost> {
         call_count: count(&value["call_count"]),
         cost_usd: value["cost_usd"].as_f64(),
     };
-    let rows = |key: &str| report.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
-    let totals = report.get("totals").cloned().unwrap_or(Value::Null);
+    let rows = |key: &str| {
+        report.get(key).and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default()
+    };
+    let totals = report.get("totals").unwrap_or(&Value::Null);
     Some(WebCost {
         totals: WebCostTotals {
             cost_usd: number(&totals["cost_usd"]),

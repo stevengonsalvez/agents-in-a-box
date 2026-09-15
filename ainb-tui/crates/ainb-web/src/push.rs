@@ -794,7 +794,7 @@ mod tests {
                     { "kind": "ERR",  "sessionId": "err",  "channels": ["os"] },
                 ])),
             },
-            Value::Null,
+            None,
         );
 
         // deliver = true, empty `last` → each card is a fresh transition.
@@ -829,7 +829,7 @@ mod tests {
                     { "kind": "ASK", "sessionId": "ask", "channels": ["web", "os"] },
                 ])),
             },
-            Value::Null,
+            None,
         );
         let last =
             deliver_web_transitions(&push, &snap, &std::collections::HashMap::new(), false).await;
@@ -880,7 +880,7 @@ mod tests {
                 ]),
                 needs: Vec::new(),
             },
-            Value::Null,
+            None,
         );
         let p = build_payload("id-1", "ASK", &snap);
         assert_eq!(p["kind"], "ASK");
@@ -902,7 +902,7 @@ mod tests {
                     { "kind": "ASK", "sessionId": "id-9", "cwd": "/w/managed--ainb-session-9", "channels": ["web"] }
                 ])),
             },
-            Value::Null,
+            None,
         );
         let p = build_payload("id-9", "ASK", &snap);
         assert_eq!(p["sessionId"], "id-9");
@@ -918,7 +918,7 @@ mod tests {
                     { "kind": "ASK", "sessionId": "s1", "cwd": "/w/repo", "channels": ["web"] }
                 ])),
             },
-            Value::Null,
+            None,
         );
         let key = attention_by_key(&snap.needs).into_keys().next().expect("one key");
         assert_eq!(key, "s1", "a card with no cwd keys on its session id");
