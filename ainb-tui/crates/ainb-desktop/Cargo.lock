@@ -208,6 +208,7 @@ version = "0.1.0"
 dependencies = [
  "ainb-app",
  "ainb-hangar-client",
+ "ainb-hangar-core",
  "ainb-hangar-proto",
  "arboard",
  "nix 0.29.0",
