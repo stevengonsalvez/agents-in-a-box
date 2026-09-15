@@ -172,14 +172,22 @@ async fn a_host_id_outside_the_ulid_alphabet_is_refused() {
     let store = Store::open_in(dir.path()).await.unwrap();
     // 26 characters, but `I`, `L`, `O` and `U` are not Crockford base32, and
     // the bad character sits past the first position.
-    for bad in ["01K5A0000000000000000AAAAI", "01K5A0000000000000000AAAAL", "local"] {
+    for bad in [
+        "01K5A0000000000000000AAAAI",
+        "01K5A0000000000000000AAAAL",
+        "local",
+    ] {
         let refused = DaemonIdentityRepo::mint_or_read(
             store.pool(),
             &FixedIdGen::new(vec![bad.to_string()]),
             &FixedClock(NOW),
         )
         .await;
-        assert!(refused.is_err(), "{bad} must be refused");
+        let error = refused.expect_err("a malformed id must be refused");
+        assert!(
+            error.to_string().contains("failed the 0100 CHECK"),
+            "{bad}: {error}"
+        );
     }
     assert_eq!(DaemonIdentityRepo::read(store.pool()).await.unwrap(), None);
 }
