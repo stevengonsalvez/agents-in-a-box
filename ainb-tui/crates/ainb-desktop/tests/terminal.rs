@@ -488,3 +488,42 @@ fn redials_do_not_take_the_attached_tabs_past_the_cap() {
     );
     assert_eq!(attached(&terminals.view()), MAX_ATTACHED_TABS);
 }
+
+/// The tab the webview shows (it sizes a tab as it shows it) is never the one
+/// the cap evicts, however quiet.
+#[test]
+fn the_tab_in_view_is_not_evicted_for_being_quiet() {
+    let server = Server::new();
+    let names: Vec<String> = (0..=MAX_ATTACHED_TABS).map(|i| format!("d1c-view{i}")).collect();
+    let _sessions: Vec<Session> =
+        names.iter().map(|name| server.start(name, "sleep 600")).collect();
+    let (terminals, _recorder, _reports) = terminals(&server);
+
+    for name in &names[..MAX_ATTACHED_TABS] {
+        assert_eq!(terminals.open(tmux_tab(name)), None);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The oldest tab is shown, then every other tab has input: the tab in view
+    // is now the one idle longest.
+    terminals.resize(&names[0], 80, 24);
+    std::thread::sleep(Duration::from_millis(20));
+    for name in &names[1..MAX_ATTACHED_TABS] {
+        terminals.input(name, Vec::new());
+    }
+
+    assert_eq!(terminals.open(tmux_tab(&names[MAX_ATTACHED_TABS])), None);
+    assert_eq!(
+        state_of(&terminals, &names[0]),
+        Some(TabState::Attached),
+        "the tab in view stays"
+    );
+    assert_eq!(
+        terminals
+            .view()
+            .tabs
+            .iter()
+            .filter(|tab| tab.state == TabState::Detached)
+            .count(),
+        1
+    );
+}
