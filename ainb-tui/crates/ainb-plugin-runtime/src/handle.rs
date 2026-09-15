@@ -626,4 +626,28 @@ impl RuntimeHandle {
         h.inbox.send(Command::InjectKill).map_err(|_| RuntimeError::ShuttingDown)?;
         Ok(())
     }
+
+    /// Test aid: run the plugin's idle-reap decision now, as if its idle
+    /// window had passed, and resolve to whether it was reaped. The check is
+    /// not itself use, so a test drives the reap deterministically instead of
+    /// waiting on the idle tick. Hidden from rustdoc; not part of the stable
+    /// surface.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError::UnknownPlugin`] for an unregistered id, or
+    /// [`RuntimeError::ShuttingDown`] once the runtime is going away.
+    #[doc(hidden)]
+    pub fn reap_if_idle(
+        &self,
+        plugin_id: &PluginId,
+    ) -> Result<tokio::sync::oneshot::Receiver<bool>, RuntimeError> {
+        let h = self
+            .lookup(plugin_id)
+            .ok_or_else(|| RuntimeError::UnknownPlugin(plugin_id.clone()))?;
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        h.inbox
+            .send(Command::ReapIfIdle { reply })
+            .map_err(|_| RuntimeError::ShuttingDown)?;
+        Ok(rx)
+    }
 }

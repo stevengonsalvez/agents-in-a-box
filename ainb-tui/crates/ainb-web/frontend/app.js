@@ -39,9 +39,10 @@
     return e;
   };
 
-  // The CLI session list (`ainb list --format json`) is an array of
-  // SessionInfo: { session_id, tmux_session_name, workspace_name,
-  // worktree_path, created_at, is_running, claude_active }.
+  // The session list (`ainb list --frame --format json`) is an array of rows
+  // projected from the redacted Sessions frame (#1056): { session_id,
+  // tmux_session_name, workspace_name, worktree_path, created_at, is_running,
+  // claude_active }. No label: the frame withholds it.
   function sessionStatus(s) {
     if (!s.is_running) return { label: "stopped", cls: "status-stopped" };
     if (s.claude_active) return { label: "running", cls: "status-running" };
