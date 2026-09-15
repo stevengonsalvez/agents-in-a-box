@@ -12,9 +12,10 @@ use std::time::Duration;
 
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
-use ainb_app::{Intent, Keymap, SectionId};
+use ainb_app::{Keymap, SectionId};
 use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::{DesktopHost, FrameSink};
+use ainb_desktop::intent::RendererIntent;
 use ainb_desktop::shell::Shell;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarView};
 use tauri::ipc::Channel;
@@ -30,9 +31,6 @@ const SECTIONS: &[SectionId] = &[
     SectionId::Config,
     SectionId::AgentStatus,
 ];
-
-/// How often the host frames work that happened outside a dispatch.
-const TICK: Duration = Duration::from_millis(250);
 
 /// The webview's frame channel, once it has subscribed.
 #[derive(Clone, Default)]
@@ -68,8 +66,8 @@ fn subscribe(window: tauri::State<'_, Window>, frames: Channel<FrameBatch>) {
 
 /// Apply an intent from the webview: a key, a command, pasted text.
 #[tauri::command]
-fn dispatch(window: tauri::State<'_, Window>, intent: Intent) {
-    window.shell.dispatch(intent);
+fn dispatch(window: tauri::State<'_, Window>, intent: RendererIntent) {
+    window.shell.dispatch(intent.into());
 }
 
 /// Where the daemon connection stands, for the banner on first paint.
@@ -173,6 +171,9 @@ fn main() {
                 tracing::warn!(%error, "config did not load; using defaults");
                 AppConfig::default()
             });
+            // How often the host frames work that happened outside a
+            // dispatch: the same `ui.app_tick_ms` the terminal host paces by.
+            let tick = Duration::from_millis(config.ui.app_tick_ms.max(1));
             let frames = ChannelSink::default();
             let host = DesktopHost::new(
                 config,
@@ -208,7 +209,7 @@ fn main() {
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let mut interval = tokio::time::interval(TICK);
+                let mut interval = tokio::time::interval(tick);
                 loop {
                     interval.tick().await;
                     handle.state::<Window>().shell.tick();
