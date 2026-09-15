@@ -5302,9 +5302,10 @@ impl AppState {
 
                 // A name past the cap is not listed: every row is mirrored to
                 // every renderer, and a local process could otherwise rename a
-                // session to a string of any size (#1096).
+                // session to a string of any size (#1096). Logged at debug:
+                // discovery runs on every poll, so the same session repeats.
                 if name.len() > crate::app::effect::TmuxSessionName::MAX_BYTES {
-                    warn!(
+                    debug!(
                         bytes = name.len(),
                         "skipping a tmux session whose name is past {} bytes",
                         crate::app::effect::TmuxSessionName::MAX_BYTES
