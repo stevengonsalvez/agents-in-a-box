@@ -151,8 +151,17 @@ fn web_rows(sessions: &[SessionInfo]) -> Vec<ainb_app::wire::web::WebSessionRow>
     use ainb_app::models::{Session, SessionStatus as ModelStatus, Workspace};
     let mut workspaces: Vec<Workspace> = Vec::new();
     for info in sessions {
+        // A row the browser cannot attach to is worse than no row: a bad id is
+        // skipped and logged, never replaced with a fresh one.
+        let Ok(id) = uuid::Uuid::parse_str(&info.session_id) else {
+            tracing::warn!(
+                session_id = %info.session_id,
+                "list --frame: skipping a session whose id is not a UUID"
+            );
+            continue;
+        };
         let mut session = Session::new(info.workspace_name.clone(), info.worktree_path.clone());
-        session.id = uuid::Uuid::parse_str(&info.session_id).unwrap_or(session.id);
+        session.id = id;
         session.tmux_session_name = Some(info.tmux_session_name.clone());
         session.display_name.clone_from(&info.display_name);
         session.created_at = info.created_at;
@@ -268,6 +277,26 @@ mod tests {
             rows[2].worktree_path,
             "/w/repo-5b1f2a8e-0000-4000-8000-000000000003"
         );
+    }
+
+    #[test]
+    fn a_session_with_an_unparseable_id_is_skipped_not_given_a_fresh_one() {
+        let row = |id: &str| SessionInfo {
+            session_id: id.to_string(),
+            tmux_session_name: format!("tmux_repo-{id}"),
+            workspace_name: "repo".to_string(),
+            display_name: None,
+            worktree_path: "/w/repo".to_string(),
+            created_at: chrono::Utc::now(),
+            is_running: true,
+            claude_active: true,
+        };
+        let rows = web_rows(&[
+            row("not-a-uuid"),
+            row("5b1f2a8e-0000-4000-8000-000000000001"),
+        ]);
+        let ids: Vec<_> = rows.iter().map(|row| row.session_id.as_str()).collect();
+        assert_eq!(ids, ["5b1f2a8e-0000-4000-8000-000000000001"]);
     }
 
     #[test]
