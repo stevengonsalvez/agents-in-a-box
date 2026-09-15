@@ -2525,7 +2525,9 @@ impl InteractiveSessionManager {
     /// Generate a tmux session name from worktree folder and branch name
     ///
     /// Format: tmux_{folder}_{branch}
-    /// Sanitizes both folder and branch to be tmux-compatible
+    /// Sanitizes both folder and branch to be tmux-compatible, and caps the
+    /// result so a long folder and branch still mint a session the list shows
+    /// (#1122).
     fn generate_tmux_name(worktree_folder: &str, branch_name: &str) -> String {
         let sanitized_folder = worktree_folder
             .replace(' ', "_")
@@ -2537,7 +2539,7 @@ impl InteractiveSessionManager {
             .replace('.', "_")
             .replace('/', "_")
             .replace(':', "_");
-        format!("tmux_{}_{}", sanitized_folder, sanitized_branch)
+        crate::tmux::cap_session_name(format!("tmux_{}_{}", sanitized_folder, sanitized_branch))
     }
 
     /// Generate legacy tmux session name (branch only) for backwards compatibility
