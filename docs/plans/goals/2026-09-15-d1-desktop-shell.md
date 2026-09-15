@@ -249,3 +249,27 @@ File each as an issue with its evidence. Do not fix it in this node.
 Confirmation each criterion is satisfied. Every file created or modified. How to run, test and deploy. Proof (screenshot, test output, URL). Decisions made and anything to know. Known limitations and follow-ups.
 
 Begin by outputting your plan. Then execute end-to-end without checking in until done or genuinely blocked.
+
+─ PROGRESS LOG ─
+
+Plan, staged as the four PRs:
+1. The spec amendment for `:195` (the local terminal has no listener), as its own docs PR: #1111.
+2. D1a: the excluded crate, `AppState::with_config`, the embedded host with its frame pump, the desktop executor, the sidecar supervisor with presence, the xtask staging step, the Tauri window and a first frontend tree, the desktop CI job.
+3. D1b: the Solid store with the D15 invariants and the sessions sidebar.
+4. D1c: the Rust-owned PTY on a byte channel and the terminal tab.
+5. D1d: the palette, the `d1-shell` proof scenario, the wdio job, the programme row.
+
+D1a, on `stevengonsalvez/d1a-desktop-host`:
+- `ainb-tui/crates/ainb-desktop/` is its own workspace with its own `Cargo.lock`, in the parent's `exclude`. The library (`host`, `executor`, `sidecar`) builds and tests without Tauri; the window is a `[[bin]]` behind the `app` feature, and `build.rs` runs `tauri-build` only for it. So `cargo test` needs no webview, and `cargo clippy --all-features` still covers the window.
+- `AppState::with_config(AppConfig)` builds the state on a given config; `Default` loads from disk and calls it. The desktop loads the config itself in `main.rs` and hands it over, so the injecting constructor exists and no divergence is inherited.
+- `DesktopHost` owns the `AppState`, the `Keymap`, a `Mirror` and a `FrameSink`. `dispatch` applies an intent and frames what moved before returning its effects; `tick` drains the outbox and frames; `run` executes each effect after the write and applies the reports the same way, cut after 32 rounds; `reframe` sends every subscribed section again to a renderer that attaches late. `DesktopLayout` is its `RendererHost`: layout work is queued for the webview, and `pointer` finds nothing because the webview hit-tests its own DOM and sends the command.
+- `DesktopExecutor` runs `Detach` (the `detached` report), `OpenEditor` (the terminal host's resolution), `PasteClipboard` (arboard, else `clipboard_failed`), `Persist` (the shared writer, else `persist_failed`) and `RunDaemonAction` (`ainb daemon` from `PATH` on a worker, reported through `take_deferred`). Every `AttachTerminal` target is answered with its documented failure until D1c: `in_place_failed` and `observer_failed` with `unsupported`, `attach_finished` failed, `shell_prepared` failed, `login_finished` not ok. `ForwardToPlugin` with `back` reports `plugin_input_undelivered`, `RunPluginAction` reports `plugin_action_undelivered`.
+- The sidecar supervisor probes with hello, spawns the bundled daemon in its own session (`setsid`, stdout and stderr to `<home>/hangar/desktop-sidecar.log`), attaches to the winner when the child exits 0 inside the grace window, gives up as `Degraded` after three failed spawns, and holds a `PresenceLease` as `SurfaceKind::Desktop` once connected. A lost presence connection moves to `Reconnecting` and runs the probe again, which respawns a killed daemon. Dropping the supervisor closes the lease and never signals the daemon.
+- `cargo xtask stage-desktop-sidecar [--release]` builds the daemon and copies it to `crates/ainb-desktop/binaries/ainb-hangar-daemon-<host triple>` for `bundle.externalBin`.
+- The window (`main.rs`) subscribes Sessions, Shell, Tmux, Fleet, Config and AgentStatus, sends frames on one Tauri `Channel<FrameBatch>` after `invoke("subscribe")`, takes intents through `invoke("dispatch")`, ticks every 250 ms, and emits the sidecar state as the `sidecar` event. `ui/` is vite with Solid 1.9.15 and TypeScript 5.6.3 under strict `tsc`, and draws the connection banner, a retry on degraded, and the sections this window holds.
+- Evidence: `tests/host_contract.rs` (5: first batch frames exactly the subscription, an unmoved section frames nothing, the config write is framed before its persistence effect runs, reframe, an injected config writes nothing under `HOME`); `tests/sidecar.rs` (4, the real daemon in a private home: cold start spawns and lists one desktop row that goes when the app closes while the daemon lives on; two hosts on a cold home end on one daemon with exactly one spawner; a SIGKILLed daemon leaves the app reconnecting and then connected to a fresh pid; a binary that always fails leaves it degraded naming the log). The window ran headless under `xvfb-run` against a private home: it spawned the daemon, and the daemon outlived the app.
+- CI: `.github/workflows/desktop.yml`, one job per runner: the Tauri packages on Linux, `npm ci` and the frontend build, the staging step, `cargo fmt --check`, `cargo clippy --all-targets --all-features -D warnings` and `cargo test` in the excluded workspace.
+
+Decisions:
+- "Reconnecting" is the banner a lost daemon shows while the supervisor finds one again; "Degraded" is only the state after the spawn retries are spent, which is when "show log" and "retry" apply.
+- The crate layout is `ainb-desktop/` with the Tauri config at the crate root and the frontend under `ui/`; the Tauri CLI did not need the `src-tauri` nesting.
