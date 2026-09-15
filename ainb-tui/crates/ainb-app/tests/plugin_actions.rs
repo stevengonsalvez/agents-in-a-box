@@ -575,4 +575,60 @@ fn a_watch_is_clamped_to_the_viewport_ceiling_and_a_hostless_stop_is_refused() {
     assert!(effects.is_empty());
     assert!(state.plugin_screen_wanted(screen_ids::HANGAR));
     assert_eq!(state.versions(), before);
+
+    let hostless_watch = Intent::Command(
+        CommandId::new(ids::WATCH_SCREEN),
+        serde_json::json!({
+            "screen": screen_ids::LEARNINGS,
+            "watching": true,
+            "width": 120,
+            "height": 40,
+        }),
+    );
+    let effects = dispatch(&mut state, &keymap, &mut NoRenderer, hostless_watch);
+    assert!(effects.is_empty());
+    assert!(!state.plugin_screen_wanted(screen_ids::LEARNINGS));
+    assert_eq!(state.versions(), before);
+}
+
+/// A renewal with no viewport is that host's stop, and a renewal that moves
+/// the render size moves the section.
+#[test]
+fn a_zero_size_renewal_stops_and_a_resize_moves_the_section() {
+    use ainb_app::app::screens::ids as screen_ids;
+
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    let mut watch = |state: &mut AppState, host: HostId, width, height| {
+        let _ = dispatch(
+            state,
+            &keymap,
+            &mut NoRenderer,
+            plugin_action::watch_screen(screen_ids::HANGAR, &host, true, width, height),
+        );
+    };
+
+    watch(&mut state, desktop(), 120, 40);
+    watch(&mut state, phone(), 90, 30);
+    let before = state.versions();
+    watch(&mut state, desktop(), 120, 40);
+    assert!(
+        bumped(&before, &state.versions()).is_empty(),
+        "a renewal at the same size moves nothing a frame carries"
+    );
+    watch(&mut state, desktop(), 160, 50);
+    assert_eq!(
+        bumped(&before, &state.versions()),
+        vec![SectionId::PluginsHost],
+        "a renewal that moves the render size moves the section"
+    );
+
+    watch(&mut state, desktop(), 0, 50);
+    assert_eq!(
+        state.watched_viewport(screen_ids::HANGAR),
+        Some((90, 30)),
+        "the desktop's zero-width renewal is its stop; the phone's watch stays"
+    );
 }
