@@ -493,6 +493,23 @@ export type AttentionKind =
 /**  The session finished. Informational. */
 "Done";
 
+/**
+ *  One chip of a session row's merged attention, as a mirror frame carries it:
+ *  the kind the row paints and the detail it can show, scrubbed. How the chip
+ *  is answered stays on the host.
+ */
+export type AttentionMark = AttentionMark_Serialize;
+
+/**
+ *  One chip of a session row's merged attention, as a mirror frame carries it:
+ *  the kind the row paints and the detail it can show, scrubbed. How the chip
+ *  is answered stays on the host.
+ */
+export type AttentionMark_Serialize = {
+	kind: AttentionKind,
+	detail: string | null,
+};
+
 /**  One structured option an ASK offers. */
 export type AttentionOption = AttentionOption_Serialize;
 
@@ -3945,6 +3962,21 @@ export type Session_Serialize = {
 	tmux_session_name: string | null,
 	preview_content: string | null,
 	is_attached: boolean,
+	/**
+	 *  Live "needs you" chips, recomputed every preview refresh and rendered
+	 *  in precedence order (ASK, APPROVE, ERR, DONE) on the session's row.
+	 * 
+	 *  A row can carry MORE THAN ONE: an ASK arriving while an ERR is still
+	 *  open shows both, and only the ASK is counted in the header badge (see
+	 *  [`crate::fleet::attention::needs_you_count`]). Empty while the agent is
+	 *  actively generating, when nothing is waiting on a human.
+	 * 
+	 *  Transient: never persisted; set in `AppState::refresh_attention`. A
+	 *  mirror frame carries it as `attention`, each chip's kind and scrubbed
+	 *  detail, so a renderer draws the merged picture instead of re-deriving a
+	 *  weaker one.
+	 */
+	attention?: AttentionMark_Serialize[],
 };
 
 export type SessionsView = SessionsView_Serialize;
