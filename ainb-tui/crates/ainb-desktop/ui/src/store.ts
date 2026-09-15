@@ -3,8 +3,11 @@
 //
 //   Channel ──FrameBatch──▶ drain queue ──one batch()──▶ store ──▶ effects, memos
 //
-// The four D15 invariants live here and nowhere else:
-//   1. A frame is held under its own host. Two hosts' sections never merge.
+// The four D15 invariants live here and nowhere else, as
+// `ainb_app::wire::store::MirrorStore` specifies them:
+//   1. A frame is held under the host at the other end of the channel it came
+//      over. Two hosts' sections never merge, and a frame's own `host_id`
+//      never picks the key.
 //   2. A larger epoch from a host drops everything held from that host first;
 //      a smaller one is a frame from a dead process and applies nothing.
 //   3. One drain is one `batch()`: readers see the whole drain or none of it,
@@ -45,8 +48,12 @@ export interface FrameState {
 
 export interface FrameStore {
   readonly state: FrameState;
-  /** Apply every batch received since the last drain, as one transaction. */
-  applyDrain(batches: readonly FrameBatch_Serialize[]): void;
+  /**
+   * Apply every batch received from `peer` since the last drain, as one
+   * transaction. `peer` is the host the channel is connected to; a frame
+   * naming any other host applies nothing.
+   */
+  applyDrain(peer: HostId, batches: readonly FrameBatch_Serialize[]): void;
   /** One host's section body, or `undefined` when none is held. */
   section<S extends SectionName>(host: HostId, name: S): SectionBodies_Serialize[S] | undefined;
   /** How many hosts the store holds any section from. */
@@ -64,14 +71,14 @@ export function createFrameStore(subscribed: readonly SectionName[]): FrameStore
   const wanted = new Set<string>(subscribed);
   const [state, setState] = createStore<FrameState>({ hosts: {}, stale: [] });
 
-  function applyDrain(batches: readonly FrameBatch_Serialize[]) {
+  function applyDrain(peer: HostId, batches: readonly FrameBatch_Serialize[]) {
     // Decide in plain objects first, so the store is written once per
     // (host, section) however many frames the drain carried for it.
     const plans = new Map<HostId, Plan>();
     const withheld = new Set<SectionName>();
     for (const { frames, oversize } of batches) {
       for (const frame of frames) {
-        if (!wanted.has(frame.section)) continue;
+        if (!wanted.has(frame.section) || frame.host_id !== peer) continue;
         const name = frame.section as SectionName;
         const held = state.hosts[frame.host_id];
         let plan = plans.get(frame.host_id);
