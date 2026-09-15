@@ -138,6 +138,22 @@ async fn harness_with_broker(
     (dir, store, pool, broker)
 }
 
+/// [`harness`] with the supervisor's exit notice held back, so an actor whose
+/// turn dies always sees the transport error BEFORE `ProcessExited` (#1091).
+/// That is the ordering a loaded runner produced by chance: with the notice
+/// late, the actor used to read the next queued prompt, respawn the adapter
+/// and deliver it. Forcing it makes the crash tests prove the actor converges
+/// on the error itself, every run.
+async fn harness_with_late_exit_notice(
+    script: &[(&str, &str)],
+) -> (tempfile::TempDir, Store, Arc<AcpPool>) {
+    let (dir, store, pool, _broker) = harness_with_broker(script, |config| {
+        config.exit_notice_delay = Duration::from_millis(500);
+    })
+    .await;
+    (dir, store, pool)
+}
+
 /// Create one ACP session pair exactly as `fleet/acp_session_create` does.
 async fn seed_session(store: &Store, session_key: &str) -> FleetAcpSessionRow {
     seed_session_for(store, session_key, ainb_acp::config::CLAUDE_ADAPTER).await
@@ -496,7 +512,7 @@ async fn two_sessions_on_one_process_never_cross_attribute() {
 /// prompts normally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_shared_process_crash_converges_every_session_it_hosted() {
-    let (_dir, store, pool) = harness(&[
+    let (_dir, store, pool) = harness_with_late_exit_notice(&[
         ("FAKE_ACP_HANG_PROMPTS", "one,two"),
         ("FAKE_ACP_CHUNKS", "1"),
         ("FAKE_ACP_ECHO_PROMPT", "1"),
@@ -646,7 +662,8 @@ async fn a_full_per_scope_queue_rejects_rather_than_growing() {
 /// already UNKNOWN and could never be corrected (the claim was taken).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_prompt_queued_behind_a_killed_turn_is_resolved_and_never_executed() {
-    let (_dir, store, pool) = harness(&[("FAKE_ACP_HANG_SESSIONS", "*")]).await;
+    let (_dir, store, pool) =
+        harness_with_late_exit_notice(&[("FAKE_ACP_HANG_SESSIONS", "*")]).await;
     let session = seed_session(&store, "acp:queued").await;
     let in_flight = seed_message(&store, &session.session_key, "a").await;
     let queued = seed_message(&store, &session.session_key, "bb").await;
@@ -1929,10 +1946,10 @@ async fn a_runtime_registered_adapter_gets_its_own_process_and_removal_reaps_it(
     // shared tenant is untouched.
     let after = seed_message(&store, &task.session_key, "ccc").await;
     pool.submit_prompt(&task.session_key, &after, "ccc").await;
-    let (state, _) = await_terminal(&store, &after, &task.session_key).await;
+    let (state, detail) = await_terminal(&store, &after, &task.session_key).await;
     assert_eq!(
         state, "FAILED",
-        "a prompt on an unregistered key cannot deliver"
+        "a prompt on an unregistered key cannot deliver: {detail:?}"
     );
     assert_eq!(
         rpc_log(&task_log).iter().filter(|line| *line == "spawn").count(),
