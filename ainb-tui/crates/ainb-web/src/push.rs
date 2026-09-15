@@ -25,6 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ainb_app::wire::web::WebNeedCard;
 use ainb_hangar_proto::{Channel, ChannelSet};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
@@ -299,50 +300,39 @@ fn is_attention(kind: &str) -> bool {
     matches!(kind, "ASK" | "ERR" | "WAIT")
 }
 
-/// Reduce the `needs` JSON array to a map of session key → the highest-priority
+/// Reduce the web `needs` cards to a map of session key to the highest-priority
 /// attention's `(kind, channels)`. `channels` is the push routing resolved at
-/// raise time (tcp T5), carried per card — the delivery loop filters on the `web`
-/// channel. A card that omits `channels` (a legacy row) reads as board-only and
-/// never buzzes.
+/// raise time (tcp T5), carried per card: the delivery loop filters on the `web`
+/// channel. A card with no channels reads as board-only and never buzzes.
 ///
-/// The key is the raising session's cwd (stable across renders). The daemon's
-/// `attention_to_needs` cards carry `cwd` / `sessionId` at the TOP LEVEL, so those
-/// are read first; a nested `session.{cwd,workspace_name,tmux_session}` is the
-/// fallback for the legacy `ainb fleet needs` shape. Reading only the nested form
-/// (the pre-fix bug) collapsed every daemon-backed card onto one `"session"` key,
-/// which would fan a single push out per host instead of per session.
-fn attention_by_key(needs: &Value) -> std::collections::HashMap<String, (String, ChannelSet)> {
+/// The key is the card's own session id, so a push routes per session. The web
+/// card carries no `cwd` (#1081), and the legacy nested `session` shape of
+/// `ainb fleet needs` can no longer reach this typed list.
+fn attention_by_key(
+    needs: &[WebNeedCard],
+) -> std::collections::HashMap<String, (String, ChannelSet)> {
     let mut out: std::collections::HashMap<String, (String, ChannelSet)> =
         std::collections::HashMap::new();
-    let Some(rows) = needs.as_array() else {
-        return out;
-    };
     let rank = |k: &str| match k {
         "ASK" => 0,
         "ERR" => 1,
         "WAIT" => 2,
         _ => 3,
     };
-    // A nested `fn` (not a closure) so the borrow lifetime ties input to output.
-    fn non_empty(v: Option<&str>) -> Option<&str> {
-        v.filter(|s| !s.is_empty())
-    }
-    for row in rows {
-        let kind = row.get("kind").and_then(Value::as_str).unwrap_or("IDLE").to_uppercase();
-        let channels = row
-            .get("channels")
-            .and_then(|c| serde_json::from_value::<ChannelSet>(c.clone()).ok())
-            .unwrap_or(ChannelSet::NONE);
-        let session = row.get("session").cloned().unwrap_or(Value::Null);
-        // Top-level card fields first (the real daemon `attention/list` shape),
-        // then the legacy nested `session` fallback.
-        let key = non_empty(row.get("cwd").and_then(Value::as_str))
-            .or_else(|| non_empty(row.get("sessionId").and_then(Value::as_str)))
-            .or_else(|| non_empty(session.get("cwd").and_then(Value::as_str)))
-            .or_else(|| non_empty(session.get("workspace_name").and_then(Value::as_str)))
-            .or_else(|| non_empty(session.get("tmux_session").and_then(Value::as_str)))
-            .unwrap_or("session")
-            .to_string();
+    for card in needs {
+        let kind = if card.kind.is_empty() {
+            "IDLE".to_string()
+        } else {
+            card.kind.to_uppercase()
+        };
+        let channels =
+            serde_json::from_value::<ChannelSet>(json!(card.channels)).unwrap_or(ChannelSet::NONE);
+        // The web card carries no cwd (#1081): each keys on its own session id.
+        let key = if card.session_id.is_empty() {
+            "session".to_string()
+        } else {
+            card.session_id.clone()
+        };
         match out.get(&key) {
             Some((existing, _)) if rank(existing) <= rank(&kind) => {}
             _ => {
@@ -372,13 +362,12 @@ fn build_payload(key: &str, kind: &str, snap: &crate::data::FleetSnapshot) -> Va
             title_name = name.to_string();
         }
         session_id = key.to_string();
-    } else if let Some(name) = snap.needs.as_array().into_iter().flatten().find_map(|card| {
-        (card.get("sessionId").and_then(Value::as_str) == Some(key))
-            .then(|| card.get("workspaceName").and_then(Value::as_str))
-            .flatten()
-            .filter(|name| !name.is_empty())
-    }) {
-        title_name = name.to_string();
+    } else if let Some(card) = snap
+        .needs
+        .iter()
+        .find(|card| card.session_id == key && !card.workspace_name.is_empty())
+    {
+        title_name.clone_from(&card.workspace_name);
     }
     let label = match kind {
         "ASK" => "needs an answer",
@@ -582,6 +571,7 @@ fn load_store(path: &Path) -> Option<SubscriptionStore> {
 mod tests {
     use super::*;
     use crate::sender::{PushSender, SendOutcome};
+    use ainb_app::wire::web::need_cards;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A sender that counts deliveries and can be told to report specific
@@ -727,45 +717,31 @@ mod tests {
 
     #[test]
     fn attention_dedupes_to_highest_priority_per_key() {
-        let needs = json!([
-            { "kind": "WAIT", "session": { "cwd": "/a" } },
-            { "kind": "ASK",  "session": { "cwd": "/a" } },
-            { "kind": "ERR",  "session": { "cwd": "/b" } },
-            { "kind": "IDLE", "session": { "cwd": "/c" } },
-        ]);
+        let needs = need_cards(&json!([
+            { "kind": "WAIT", "sessionId": "a" },
+            { "kind": "ASK",  "sessionId": "a" },
+            { "kind": "ERR",  "sessionId": "b" },
+            { "kind": "IDLE", "sessionId": "c" },
+        ]));
         let map = attention_by_key(&needs);
-        assert_eq!(map.get("/a").map(|(k, _)| k.as_str()), Some("ASK"));
-        assert_eq!(map.get("/b").map(|(k, _)| k.as_str()), Some("ERR"));
-        assert_eq!(map.get("/c").map(|(k, _)| k.as_str()), Some("IDLE"));
+        assert_eq!(map.get("a").map(|(k, _)| k.as_str()), Some("ASK"));
+        assert_eq!(map.get("b").map(|(k, _)| k.as_str()), Some("ERR"));
+        assert_eq!(map.get("c").map(|(k, _)| k.as_str()), Some("IDLE"));
     }
 
-    /// Regression: the daemon's `attention_to_needs` cards carry `cwd` at the TOP
-    /// LEVEL (not nested under `session`). Each card must key on its OWN cwd so a
-    /// per-session push routes per session — the pre-fix nested-only read collapsed
-    /// every daemon card onto one `"session"` key.
+    /// Each card keys on its own session id, so a per-session push routes per
+    /// session and no two cards collapse onto the fallback key.
     #[test]
-    fn attention_by_key_reads_top_level_daemon_card_cwd() {
-        // The real card shape from the daemon `attention/list` mapping.
-        let needs = json!([
+    fn attention_by_key_keys_each_card_on_its_session_id() {
+        let needs = need_cards(&json!([
             { "kind": "ASK", "cwd": "/work/one", "sessionId": "s1", "channels": ["web"] },
             { "kind": "ERR", "cwd": "/work/two", "sessionId": "s2", "channels": ["os"] },
-        ]);
+        ]));
         let map = attention_by_key(&needs);
-        assert_eq!(
-            map.len(),
-            2,
-            "each card keys on its own cwd, not one shared key"
-        );
-        assert_eq!(map.get("/work/one").map(|(k, _)| k.as_str()), Some("ASK"));
-        assert_eq!(map.get("/work/two").map(|(k, _)| k.as_str()), Some("ERR"));
-        assert!(
-            !map.contains_key("session"),
-            "cards must not collapse onto the fallback key"
-        );
-
-        // A card with an empty top-level cwd falls back to sessionId, still distinct.
-        let by_id = json!([{ "kind": "ASK", "cwd": "", "sessionId": "s9", "channels": ["web"] }]);
-        assert!(attention_by_key(&by_id).contains_key("s9"));
+        assert_eq!(map.len(), 2, "each card keys on its own session id");
+        assert_eq!(map.get("s1").map(|(k, _)| k.as_str()), Some("ASK"));
+        assert_eq!(map.get("s2").map(|(k, _)| k.as_str()), Some("ERR"));
+        assert!(!map.contains_key("session"));
     }
 
     /// The web-push channel filter (tcp T5): a card carries its raise-time
@@ -774,30 +750,30 @@ mod tests {
     /// is an actionable kind.
     #[test]
     fn attention_by_key_carries_web_routing_channels() {
-        let needs = json!([
+        let needs = need_cards(&json!([
             // ASK routed to web+os → web-eligible.
-            { "kind": "ASK",  "session": { "cwd": "/ask" },  "channels": ["web", "os"] },
+            { "kind": "ASK",  "sessionId": "ask",  "channels": ["web", "os"] },
             // WAIT board-only (no channels) → not web-eligible.
-            { "kind": "WAIT", "session": { "cwd": "/wait" }, "channels": [] },
+            { "kind": "WAIT", "sessionId": "wait", "channels": [] },
             // ERR routed os-only → not web-eligible.
-            { "kind": "ERR",  "session": { "cwd": "/err" },  "channels": ["os"] },
-        ]);
+            { "kind": "ERR",  "sessionId": "err",  "channels": ["os"] },
+        ]));
         let map = attention_by_key(&needs);
         assert!(
-            map.get("/ask").unwrap().1.contains(Channel::Web),
+            map.get("ask").unwrap().1.contains(Channel::Web),
             "ASK is web-routed"
         );
         assert!(
-            !map.get("/wait").unwrap().1.contains(Channel::Web),
+            !map.get("wait").unwrap().1.contains(Channel::Web),
             "board-only WAIT is not"
         );
         assert!(
-            !map.get("/err").unwrap().1.contains(Channel::Web),
+            !map.get("err").unwrap().1.contains(Channel::Web),
             "os-only ERR is not"
         );
         // A card that omits `channels` reads as board-only (no web buzz).
-        let legacy = json!([{ "kind": "ASK", "session": { "cwd": "/x" } }]);
-        assert!(!attention_by_key(&legacy).get("/x").unwrap().1.contains(Channel::Web));
+        let unrouted = need_cards(&json!([{ "kind": "ASK", "sessionId": "x" }]));
+        assert!(!attention_by_key(&unrouted).get("x").unwrap().1.contains(Channel::Web));
     }
 
     /// End-to-end web filter (tcp T5) through the stub [`PushSender`]: a tick with
@@ -812,11 +788,11 @@ mod tests {
         let snap = crate::data::FleetSnapshot::from_parts(
             crate::data::CoreSnapshot {
                 sessions: json!([]),
-                needs: json!([
-                    { "kind": "ASK",  "session": { "cwd": "/ask" },  "channels": ["web", "os"] },
-                    { "kind": "WAIT", "session": { "cwd": "/wait" }, "channels": [] },
-                    { "kind": "ERR",  "session": { "cwd": "/err" },  "channels": ["os"] },
-                ]),
+                needs: need_cards(&json!([
+                    { "kind": "ASK",  "sessionId": "ask",  "channels": ["web", "os"] },
+                    { "kind": "WAIT", "sessionId": "wait", "channels": [] },
+                    { "kind": "ERR",  "sessionId": "err",  "channels": ["os"] },
+                ])),
             },
             Value::Null,
         );
@@ -834,8 +810,8 @@ mod tests {
         );
         // Every key's kind is tracked for the next tick's transition detection,
         // even the suppressed ones.
-        assert_eq!(last.get("/ask").map(String::as_str), Some("ASK"));
-        assert_eq!(last.get("/wait").map(String::as_str), Some("WAIT"));
+        assert_eq!(last.get("ask").map(String::as_str), Some("ASK"));
+        assert_eq!(last.get("wait").map(String::as_str), Some("WAIT"));
     }
 
     /// The baseline tick (`deliver = false`) records state but never buzzes — no
@@ -849,9 +825,9 @@ mod tests {
         let snap = crate::data::FleetSnapshot::from_parts(
             crate::data::CoreSnapshot {
                 sessions: json!([]),
-                needs: json!([
-                    { "kind": "ASK", "session": { "cwd": "/ask" }, "channels": ["web", "os"] },
-                ]),
+                needs: need_cards(&json!([
+                    { "kind": "ASK", "sessionId": "ask", "channels": ["web", "os"] },
+                ])),
             },
             Value::Null,
         );
@@ -863,7 +839,7 @@ mod tests {
             "baseline never buzzes"
         );
         assert_eq!(
-            last.get("/ask").map(String::as_str),
+            last.get("ask").map(String::as_str),
             Some("ASK"),
             "but records state"
         );
@@ -902,7 +878,7 @@ mod tests {
                 sessions: json!([
                     { "session_id": "id-1", "workspace_name": "demo", "worktree_path": "/a" }
                 ]),
-                needs: json!([]),
+                needs: Vec::new(),
             },
             Value::Null,
         );
@@ -922,9 +898,9 @@ mod tests {
                 sessions: json!([
                     { "session_id": "id-9", "workspace_name": "managed", "worktree_path": "/w/x" }
                 ]),
-                needs: json!([
-                    { "kind": "ASK", "sessionId": "id-9", "workspaceName": "managed--ainb-session-9", "channels": ["web"] }
-                ]),
+                needs: need_cards(&json!([
+                    { "kind": "ASK", "sessionId": "id-9", "cwd": "/w/managed--ainb-session-9", "channels": ["web"] }
+                ])),
             },
             Value::Null,
         );
@@ -938,9 +914,9 @@ mod tests {
         let snap = crate::data::FleetSnapshot::from_parts(
             crate::data::CoreSnapshot {
                 sessions: json!([]),
-                needs: json!([
-                    { "kind": "ASK", "sessionId": "s1", "workspaceName": "repo", "channels": ["web"] }
-                ]),
+                needs: need_cards(&json!([
+                    { "kind": "ASK", "sessionId": "s1", "cwd": "/w/repo", "channels": ["web"] }
+                ])),
             },
             Value::Null,
         );
