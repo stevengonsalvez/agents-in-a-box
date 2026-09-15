@@ -68,6 +68,144 @@ pub fn rows_from_frame(frame: &Frame) -> Vec<WebSessionRow> {
         .collect()
 }
 
+/// One card of the web dashboard's `needs[]`, allow-listed from the card the
+/// daemon inbox and status read produce (#1081).
+///
+/// Section 20's frame withholds a session's `cwd` and its raw request; this
+/// card does the same for the browser. `cwd` is replaced by its last path
+/// component, `workspaceName`, the name the session list already shows. The
+/// payload keeps only the fields the dashboard draws, every string scrubbed.
+/// Keys are camelCase, as `frontend/app.js` reads them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebNeedCard {
+    /// The attention id to answer, or `None` for a card with no inbox row.
+    pub attention_id: Option<String>,
+    pub kind: String,
+    pub wire_kind: String,
+    pub session_id: String,
+    pub workspace_name: String,
+    pub workspace_id: Option<String>,
+    pub degraded: bool,
+    pub created_at: i64,
+    /// Push channels resolved at raise time, as channel tokens (`web`, `os`).
+    pub channels: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_observed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pane_unbound: Option<bool>,
+    pub payload: WebNeedPayload,
+}
+
+/// The rendered detail of a need: what the card says and the options an ASK
+/// offers. Every string passes `redact::scrub`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebNeedPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multi_select: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// The web cards for a `needs` array of daemon cards. Anything that is not an
+/// object is dropped; a key the allow-list does not name never reaches a card.
+#[must_use]
+pub fn need_cards(needs: &Value) -> Vec<WebNeedCard> {
+    use crate::fleet::bridge::redact::scrub;
+    let text = |value: &Value| value.as_str().map(scrub);
+    needs
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|card| card.is_object())
+        .map(|card| {
+            let workspace_name = card["cwd"]
+                .as_str()
+                .and_then(|cwd| std::path::Path::new(cwd).file_name())
+                .map(|name| scrub(&name.to_string_lossy()))
+                .unwrap_or_default();
+            WebNeedCard {
+                attention_id: text(&card["attentionId"]),
+                kind: text(&card["kind"]).unwrap_or_default(),
+                wire_kind: text(&card["wireKind"]).unwrap_or_default(),
+                session_id: text(&card["sessionId"]).unwrap_or_default(),
+                workspace_name,
+                workspace_id: text(&card["workspaceId"]),
+                degraded: card["degraded"].as_bool().unwrap_or(false),
+                created_at: card["createdAt"].as_i64().unwrap_or_default(),
+                channels: card["channels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|channel| text(channel))
+                    .collect(),
+                session_key: text(&card["sessionKey"]),
+                state: text(&card["state"]),
+                provenance: text(&card["provenance"]),
+                tier: card["tier"].as_u64().and_then(|tier| u8::try_from(tier).ok()),
+                evidence_observed_at: card["evidenceObservedAt"].as_i64(),
+                host_id: text(&card["hostId"]),
+                pane_unbound: card["paneUnbound"].as_bool(),
+                payload: need_payload(&card["payload"]),
+            }
+        })
+        .collect()
+}
+
+fn need_payload(payload: &Value) -> WebNeedPayload {
+    use crate::fleet::bridge::redact::scrub;
+    let text = |key: &str| payload[key].as_str().map(scrub);
+    match payload {
+        // A payload that did not parse is shown as its (scrubbed) text.
+        Value::String(raw) => WebNeedPayload {
+            text: Some(scrub(raw)),
+            ..WebNeedPayload::default()
+        },
+        Value::Object(_) => WebNeedPayload {
+            question: text("question"),
+            header: text("header"),
+            options: payload["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|option| option.as_str().map(scrub))
+                .collect(),
+            multi_select: payload["multiSelect"].as_bool(),
+            text: text("text"),
+            marker: text("marker"),
+            snippet: text("snippet"),
+            pattern: text("pattern"),
+            message: text("message"),
+        },
+        _ => WebNeedPayload::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +213,55 @@ mod tests {
     use crate::wire::shape::{PlainSeed, sample_state};
 
     const CANARY: &str = "ghp_ProofCanary0123456789abcdefghijklmnopq";
+
+    #[test]
+    fn a_need_card_keeps_the_rendered_fields_and_drops_cwd_and_the_raw_request() {
+        let needs = serde_json::json!([{
+            "attentionId": "01J0ATTENTION",
+            "kind": "ASK",
+            "wireKind": "ask_user_question",
+            "sessionId": "s1",
+            "cwd": "/home/op/private-client/repo",
+            "workspaceId": null,
+            "degraded": false,
+            "createdAt": 1_700_000_000_000_i64,
+            "channels": ["web"],
+            "sessionKey": "claude:s1",
+            "state": "waiting",
+            "tier": 0,
+            "payload": {
+                "question": format!("deploy with {CANARY}?"),
+                "options": ["yes", format!("use {CANARY}")],
+                "tool_input": {"secret": CANARY, "questions": []},
+                "transcript_path": "/home/op/.claude/projects/x.jsonl",
+            },
+        }]);
+
+        let cards = need_cards(&needs);
+        let json = serde_json::to_string(&cards).expect("cards serialise");
+
+        assert_eq!(cards.len(), 1);
+        assert!(!json.contains(CANARY), "{json}");
+        assert!(!json.contains("/home/op"), "{json}");
+        for gone in ["cwd", "tool_input", "transcript_path"] {
+            assert!(!json.contains(gone), "{gone} reached the card: {json}");
+        }
+        let card = &cards[0];
+        assert_eq!(card.workspace_name, "repo");
+        assert_eq!(card.attention_id.as_deref(), Some("01J0ATTENTION"));
+        assert_eq!(card.channels, ["web"]);
+        assert_eq!(card.payload.options.len(), 2);
+        assert!(card.payload.question.as_deref().is_some_and(|q| q.starts_with("deploy with")));
+    }
+
+    #[test]
+    fn an_unparsed_payload_is_shown_as_scrubbed_text() {
+        let needs = serde_json::json!([{"kind": "ERR", "payload": format!("token {CANARY}")}]);
+        let cards = need_cards(&needs);
+        let text = cards[0].payload.text.as_deref().unwrap_or_default();
+        assert!(text.starts_with("token "), "{text}");
+        assert!(!text.contains(CANARY), "{text}");
+    }
 
     #[test]
     fn a_credential_shaped_label_never_reaches_the_web_rows() {
