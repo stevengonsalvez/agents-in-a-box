@@ -1458,6 +1458,15 @@ pub fn defaults() -> Vec<Binding> {
         ),
         unbound(
             Context::Global,
+            "plugin_input_undelivered",
+            AppEvent::PluginInputUndelivered {
+                plugin: String::new(),
+                screen: String::new(),
+            },
+            "Leave a plugin screen whose plugin could not take the back key",
+        ),
+        unbound(
+            Context::Global,
             "detached",
             AppEvent::Detached,
             "Release the in-place terminal the user left",
