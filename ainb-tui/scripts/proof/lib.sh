@@ -453,16 +453,19 @@ web_answer() {
     -d "$(jq -nc --arg id "$1" --arg a "$2" '{attentionId: $id, answer: $a}')"
 }
 
-# web_card_id <question regex> <capture name>: the attentionId the web snapshot
-# lists for a card, waited on up to 180 s. The web's poller can sit behind
-# `ainb fleet cost` runs (#1055); past 15 s it records which cost runs the
-# world has, so a slow card is explained by evidence, not assumed. Sets
-# WEB_CARD_ID; the observed line keeps the measured lag visible against #1055.
+# web_card_id <question regex> <capture name> <timeout_s>: wait until the web
+# snapshot lists a card whose payload matches, and set WEB_CARD_ID to its
+# attentionId. Returns 1 on timeout with WEB_CARD_ID empty, so a caller stops
+# before posting an answer with no id. Called directly, not in $(...): its
+# observed lines and captures must reach the result. The web's poller can sit
+# behind `ainb fleet cost` runs (#1055); past 15 s it records which cost runs
+# the world has, and the observed line keeps the measured lag visible.
 WEB_CARD_ID=""
 web_card_id() {
-  local question="$1" name="$2" start=$SECONDS noted=0 p cmd
+  local question="$1" name="$2" timeout="${3:?web_card_id needs a timeout in seconds}"
+  local start=$SECONDS noted=0 p cmd
   WEB_CARD_ID=""
-  while (( SECONDS - start < 180 )); do
+  while (( SECONDS - start < timeout )); do
     WEB_CARD_ID="$(web_attention_id "$question")"
     [[ -n "$WEB_CARD_ID" ]] && break
     if (( !noted && SECONDS - start >= 15 )); then
@@ -476,7 +479,13 @@ web_card_id() {
     fi
     sleep 1
   done
-  observe "web snapshot card for '$question' after $((SECONDS - start))s (#1055 web lag): ${WEB_CARD_ID:-none}"
+  if [[ -z "$WEB_CARD_ID" ]]; then
+    curl -sS "$WEB_URL/api/snapshot" 2>/dev/null | redact_host >"$NODE_DIR/$name-snapshot-at-timeout.json"
+    CAPTURES+=("$name-snapshot-at-timeout.json")
+    observe "web snapshot listed no card for '$question' within ${timeout}s (#1055 web lag)"
+    return 1
+  fi
+  observe "web snapshot card for '$question' after $((SECONDS - start))s (#1055 web lag): $WEB_CARD_ID"
 }
 
 # connections_json: the daemon's connection registry as JSON.
