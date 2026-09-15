@@ -180,6 +180,9 @@ pub enum Command {
     ReapIfIdle {
         /// `true` when the check reaped the plugin.
         reply: oneshot::Sender<bool>,
+        /// Judge the real time since the last use against the idle window,
+        /// instead of treating the window as passed.
+        honour_window: bool,
     },
     /// Best-effort wake: spawn the child if not already running. Used
     /// by `Runtime::register` to honour `manifest.lifecycle.spawn = "eager"`.
@@ -659,8 +662,23 @@ impl PluginTask {
 
     async fn handle_command(&mut self, cmd: Command) {
         // Every command is use, except the test aid that asks whether the
-        // plugin would be reaped as idle: that one must not reset the clock.
-        if !matches!(cmd, Command::ReapIfIdle { .. }) {
+        // plugin would be reaped as idle, and a delivery on a latest-state
+        // topic (#1063 review): the host's once-a-second card clock is such a
+        // topic, and counting it as use would keep a plugin that nobody looks
+        // at alive forever, undoing the #1040 reap. A plugin on screen stays
+        // alive through `shown_within`, not through its deliveries.
+        let is_use = match &cmd {
+            Command::ReapIfIdle { .. } => false,
+            Command::HandleEvent { topic, .. } => !self
+                .plugin
+                .manifest
+                .subscribes
+                .latest_state
+                .iter()
+                .any(|latest| latest == topic.as_str()),
+            _ => true,
+        };
+        if is_use {
             self.last_used = Instant::now();
         }
         match cmd {
@@ -778,8 +796,11 @@ impl PluginTask {
                     let _ = cs.child.start_kill();
                 }
             }
-            Command::ReapIfIdle { reply } => {
-                let reaped = self.idle_reap(true).await;
+            Command::ReapIfIdle {
+                reply,
+                honour_window,
+            } => {
+                let reaped = self.idle_reap(!honour_window).await;
                 let _ = reply.send(reaped);
             }
             Command::EnsureSpawned => {
