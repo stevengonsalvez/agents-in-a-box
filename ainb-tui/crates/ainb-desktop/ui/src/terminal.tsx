@@ -4,7 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
-import { accelerator, escEsc, REDIALS, type Accelerator, type Tab } from "./tabs.ts";
+import { accelerator, escEsc, openRowIntent, REDIALS, rowOf, type Accelerator, type Tab } from "./tabs.ts";
 import { tauriTransport } from "./transport.ts";
 
 interface Props {
@@ -99,7 +99,10 @@ export function TerminalView(props: Props) {
             fallback={
               <>
                 <span>{props.title} is detached</span>
-                <button type="button" onClick={() => void invoke("terminal_reattach", { key: props.tab.key })}>
+                <button
+                  type="button"
+                  onClick={() => void invoke("dispatch", { intent: openRowIntent(rowOf(props.tab.target)) })}
+                >
                   Reattach
                 </button>
               </>
