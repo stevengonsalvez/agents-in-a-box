@@ -43,6 +43,7 @@ ainb-app/src/otel/mod.rs | serde_json::to_string_pretty(&root)
 ainb-app/src/plugins.rs | serde_json::to_value(table)
 ainb-app/src/widgets/result_parser.rs | serde_json::to_string_pretty(result)
 ainb-app/src/widgets/unified_message.rs | serde_json::to_value(servers)
+ainb-core/src/agent_status_host.rs | serde_json::to_vec(&AgentStatusClock {
 ainb-core/src/agent_status_host.rs | serde_json::to_vec(&AgentStatusEnvelope::absent(
 ainb-core/src/agent_status_host.rs | serde_json::to_vec(&envelope)
 ainb-core/src/cli/config_cmd.rs | serde_json::to_string_pretty(&entries)

@@ -164,11 +164,7 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
         );
         let mut from_section = ainb_plugin_hangar::screen::fleet::FleetPaneState::default();
         from_section.apply_view(section_view);
-        let from_section = ainb_plugin_hangar::screen::fleet::reduce_fleet(
-            &from_section,
-            ainb_plugin_hangar::screen::fleet::FleetEvent::Tick(expected.4 + 42_000),
-        )
-        .state;
+        from_section.set_clock_ms(host_clock(&app, expected.4 + 42_000));
         assert_eq!(
             render_panel(&from_section).1,
             cells,
@@ -278,19 +274,32 @@ fn wire_round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(value: &T)
 
 /// The Fleet panel as a running TUI builds it from one joined read (#1031):
 /// the host folds the read into section 20 and encodes the envelope it
-/// publishes, and the plugin decodes it and folds it, ticked to `now_ms`.
+/// publishes, the plugin decodes it and folds it, and the host's card-clock
+/// tick at `now_ms` sets the panel clock (#1054), the same seam production
+/// uses, so the rendered age cannot rest on a clock only the test sets.
 fn panel_from(
     read: ainb_hangar_proto::agent_status::RosterStatusResult,
     now_ms: i64,
 ) -> ainb_plugin_hangar::screen::fleet::FleetPaneState {
-    use ainb_plugin_hangar::screen::fleet::{FleetEvent, FleetPaneState, reduce_fleet};
+    use ainb_plugin_hangar::screen::fleet::FleetPaneState;
     let mut app = ainb::app::state::AppState::default();
     app.apply_agent_status_read(read, now_ms);
     let payload =
         ainb::agent_status_host::encode(&app.agent_status, 1).expect("section 20 publishes");
     let mut pane = FleetPaneState::default();
     assert!(pane.apply_envelope(serde_json::from_slice(&payload).expect("the envelope decodes")));
-    reduce_fleet(&pane, FleetEvent::Tick(now_ms)).state
+    pane.set_clock_ms(host_clock(&app, now_ms));
+    pane
+}
+
+/// The clock the host's tick carries for section 20 at `local_now_ms`, decoded
+/// as the plugin decodes it.
+fn host_clock(app: &ainb::app::state::AppState, local_now_ms: i64) -> i64 {
+    let tick = ainb::agent_status_host::encode_clock(&app.agent_status, local_now_ms)
+        .expect("section 20 holds cards, so the host ticks");
+    serde_json::from_slice::<ainb_hangar_proto::status_topic::AgentStatusClock>(&tick)
+        .expect("the tick decodes")
+        .clock_ms
 }
 
 const PANEL_WIDTH: u16 = 140;

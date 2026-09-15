@@ -21,7 +21,9 @@
 //! daemon) and `secret_store_get` land in later phases.
 
 use ainb_hangar_proto::events::HangarEvent;
-use ainb_hangar_proto::status_topic::{AGENT_STATUS_TOPIC, AgentStatusEnvelope};
+use ainb_hangar_proto::status_topic::{
+    AGENT_STATUS_CLOCK_TOPIC, AGENT_STATUS_TOPIC, AgentStatusClock, AgentStatusEnvelope,
+};
 use ainb_hangar_proto::{RpcId, RpcResponse, methods as daemon_methods};
 use ainb_plugin_sdk::{
     CliOutput, HandleEventParams, HandleKeyParams, HostClient, InitContext, KeyCode,
@@ -365,7 +367,11 @@ pub struct HangarPlugin {
     snapshot_response_ids: BTreeMap<i64, i64>,
     /// The latest agent-status envelope read at init, until it is folded
     /// (#1031), or why the subscription was refused.
-    agent_status_seed: Option<tokio::sync::oneshot::Receiver<std::result::Result<Vec<u8>, String>>>,
+    agent_status_seed: Option<
+        tokio::sync::oneshot::Receiver<std::result::Result<Vec<(&'static str, Vec<u8>)>, String>>,
+    >,
+    /// The init-time agent-status seeder, aborted on shutdown or drop.
+    agent_status_seeder: Option<AbortOnDrop>,
     /// The surface hosting this plugin, from `plugin/init` (#1040).
     host: Option<ainb_plugin_sdk::PluginHost>,
     /// The daemon refused the `plugin` hello as undecodable (a build that
@@ -586,6 +592,17 @@ struct WizardDispatch {
     target_branch: Option<String>,
 }
 
+/// A spawned task that is aborted when this handle drops, so a background task
+/// holding a `HostClient` cannot outlive the plugin and hold its process open.
+#[derive(Debug)]
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// The `auth/hello` params for this plugin's daemon connection (#1040).
 ///
 /// The plugin announces itself as a `plugin` surface under its own pid, and
@@ -713,6 +730,7 @@ impl Default for HangarPlugin {
             snapshot_generation: 1,
             snapshot_response_ids: BTreeMap::new(),
             agent_status_seed: None,
+            agent_status_seeder: None,
             host: None,
             legacy_hello: false,
             first_run: FirstRunModal::default(),
@@ -2507,9 +2525,15 @@ impl HangarPlugin {
             return;
         };
         match seed.try_recv() {
-            Ok(Ok(payload)) => {
+            Ok(Ok(latest)) => {
                 self.agent_status_seed = None;
-                self.apply_agent_status(&payload);
+                for (topic, payload) in latest {
+                    if topic == AGENT_STATUS_CLOCK_TOPIC {
+                        self.apply_agent_status_clock(&payload);
+                    } else {
+                        self.apply_agent_status(&payload);
+                    }
+                }
             }
             Ok(Err(reason)) => {
                 self.agent_status_seed = None;
@@ -2517,6 +2541,19 @@ impl HangarPlugin {
             }
             Err(tokio::sync::oneshot::error::TryRecvError::Closed) => self.agent_status_seed = None,
             Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Fold the host's card-clock tick into the Fleet panel (#1054). The publish
+    /// that delivered it also marked this plugin for a repaint, so the next
+    /// frame shows the advanced ages.
+    fn apply_agent_status_clock(&mut self, payload: &[u8]) {
+        match serde_json::from_slice::<AgentStatusClock>(payload) {
+            Ok(tick) => self.screens.fleet.set_clock_ms(tick.clock_ms),
+            Err(error) => {
+                self.pending_logs
+                    .push(format!("hangar: card clock tick did not decode: {error}"));
+            }
         }
     }
 
@@ -5703,6 +5740,15 @@ impl Plugin for HangarPlugin {
         MANIFEST_TOML
     }
 
+    async fn on_shutdown(&mut self, _host: &HostClient) -> Result<()> {
+        // The seeder holds a `HostClient` clone, which keeps the SDK's writer,
+        // and so the process, alive until it finishes. A request it sends after
+        // the host has closed stdin is never answered, so it would never finish:
+        // stop it here (CTS A11, #1063 review).
+        self.agent_status_seeder = None;
+        Ok(())
+    }
+
     async fn on_init(&mut self, host: &HostClient, ctx: InitContext<'_>) -> Result<()> {
         self.host = ctx.host.cloned();
         // P5.6: decide whether to show the first-run danger-full-access modal
@@ -5720,7 +5766,7 @@ impl Plugin for HangarPlugin {
         let (seed_tx, seed_rx) = tokio::sync::oneshot::channel();
         self.agent_status_seed = Some(seed_rx);
         let seeder = host.clone();
-        tokio::spawn(async move {
+        let seeder_task = tokio::spawn(async move {
             if let Err(error) = seeder.snapshot_subscribe(AGENT_STATUS_TOPIC).await {
                 let _ = seeder
                     .log_info(format!(
@@ -5730,12 +5776,29 @@ impl Plugin for HangarPlugin {
                 let _ = seed_tx.send(Err(format!("agent status subscription refused: {error}")));
                 return;
             }
-            if let Ok(latest) = seeder.snapshot_get(AGENT_STATUS_TOPIC).await {
-                if let Some(payload) = latest.payload {
-                    let _ = seed_tx.send(Ok(payload.to_vec()));
+            if let Err(error) = seeder.snapshot_subscribe(AGENT_STATUS_CLOCK_TOPIC).await {
+                let _ = seeder
+                    .log_info(format!(
+                        "hangar: card clock subscription refused, card ages render ?: {error}"
+                    ))
+                    .await;
+            }
+            // Seed the latest envelope and the latest card clock (#1063 review):
+            // without the clock a freshly spawned panel renders `?` ages until
+            // the host's next tick, up to a second later.
+            let mut latest = Vec::new();
+            for topic in [AGENT_STATUS_TOPIC, AGENT_STATUS_CLOCK_TOPIC] {
+                if let Ok(got) = seeder.snapshot_get(topic).await {
+                    if let Some(payload) = got.payload {
+                        latest.push((topic, payload.to_vec()));
+                    }
                 }
             }
+            if !latest.is_empty() {
+                let _ = seed_tx.send(Ok(latest));
+            }
         });
+        self.agent_status_seeder = Some(AbortOnDrop(seeder_task));
         self.connect(host).await;
         Ok(())
     }
@@ -5744,6 +5807,10 @@ impl Plugin for HangarPlugin {
         if params.topic == AGENT_STATUS_TOPIC {
             self.drain_agent_status_seed();
             self.apply_agent_status(&params.payload);
+            return Ok(());
+        }
+        if params.topic == AGENT_STATUS_CLOCK_TOPIC {
+            self.apply_agent_status_clock(&params.payload);
             return Ok(());
         }
         // Only socket:<stream_id> deliveries for our current stream concern us.
@@ -6404,6 +6471,7 @@ mod tests {
             Some(
                 &[
                     AGENT_STATUS_TOPIC.to_string(),
+                    AGENT_STATUS_CLOCK_TOPIC.to_string(),
                     format!("{}*", ainb_plugin_sdk::topics::UI_STATE),
                     ainb_plugin_sdk::topics::UI_CLOSE_REQUEST.to_string(),
                 ][..]
@@ -9674,6 +9742,50 @@ mod tests {
         serde_json::to_vec(&AgentStatusEnvelope::from_view(sequence, &view)).unwrap()
     }
 
+    /// #1058: with the daemon gone, the Fleet panel shows the section 20
+    /// failure story in the lens body (`states unverifiable`, the host and the
+    /// reason) beside the offline banner, and the card keeps its frozen row and
+    /// its age on the host clock.
+    #[test]
+    fn a_stopped_daemon_renders_the_unreachable_story_beside_the_offline_banner() {
+        use ainb_hangar_proto::agent_status::AgentState;
+        let mut plugin = connected_plugin_with_issue();
+        go_to(&mut plugin, "fleet");
+        plugin.apply_agent_status(&envelope_bytes(1, 8, AgentState::Waiting));
+
+        // The host's reader lost the daemon: it publishes the frozen rows as
+        // unreachable, and the plugin's own socket is down too.
+        let read: ainb_hangar_proto::agent_status::RosterStatusResult =
+            serde_json::from_value(roster_status_json(8, AgentState::Waiting)).unwrap();
+        let mut view = ainb_hangar_proto::status_view::StatusView::from_read(read, 1);
+        let evidence = view.cards().next().unwrap().status.evidence_observed_at;
+        view.mark_unreachable("daemon not reachable", evidence + 60_000);
+        plugin.apply_agent_status(
+            &serde_json::to_vec(&AgentStatusEnvelope::from_view(2, &view)).unwrap(),
+        );
+        plugin.apply_agent_status_clock(
+            &serde_json::to_vec(&AgentStatusClock {
+                clock_ms: evidence + 65_000,
+            })
+            .unwrap(),
+        );
+        plugin.conn.on_error("daemon socket closed");
+        assert!(HangarPlugin::is_offline(plugin.conn.state()));
+
+        let buf = plugin.compose_frame(160, 30);
+        let text = buf_text(&buf, 160, 30);
+        assert!(text.contains("Fleet daemon offline"), "{text}");
+        assert!(text.contains("states unverifiable"), "{text}");
+        assert!(
+            text.contains("host local unreachable since 5s: daemon not reachable"),
+            "{text}"
+        );
+        assert!(
+            text.contains("waiting · hook · tier 0 · 1m"),
+            "the frozen card ages: {text}"
+        );
+    }
+
     /// #1031: the panel renders the envelope the host published, through the
     /// one reducer, complete with the pending request; a stale publish is
     /// dropped and a garbled one is logged, never rendered.
@@ -9712,6 +9824,69 @@ mod tests {
             plugin.screens.fleet.status_for("codex:thread-1").map(|status| status.state),
             Some(AgentState::Waiting)
         );
+    }
+
+    /// #1054: a clock tick from the host becomes the Fleet panel's clock.
+    #[test]
+    fn a_host_clock_tick_sets_the_panel_clock() {
+        let mut plugin = connected_plugin_with_issue();
+        let tick = serde_json::to_vec(&AgentStatusClock {
+            clock_ms: 1_789_409_605_000,
+        })
+        .unwrap();
+        plugin.apply_agent_status_clock(&tick);
+        assert_eq!(plugin.screens.fleet.now_ms(), 1_789_409_605_000);
+        let logs = plugin.pending_logs.len();
+        plugin.apply_agent_status_clock(b"not json");
+        assert_eq!(plugin.pending_logs.len(), logs + 1);
+        assert_eq!(plugin.screens.fleet.now_ms(), 1_789_409_605_000);
+    }
+
+    /// #1063 review (CTS A11): shutdown stops the init seeder, whose
+    /// `HostClient` clone would otherwise hold the process open after the host
+    /// closes stdin with a request still unanswered.
+    #[tokio::test]
+    async fn shutdown_aborts_the_agent_status_seeder() {
+        let mut plugin = HangarPlugin::new();
+        let task = tokio::spawn(std::future::pending::<()>());
+        plugin.agent_status_seeder = Some(AbortOnDrop(task));
+        let handle = plugin
+            .agent_status_seeder
+            .as_ref()
+            .map(|seeder| seeder.0.abort_handle())
+            .unwrap();
+        plugin.agent_status_seeder = None;
+        tokio::task::yield_now().await;
+        assert!(
+            handle.is_finished(),
+            "the seeder is aborted once its handle drops"
+        );
+    }
+
+    /// #1063 review item 3: the init seed carries the latest card clock beside
+    /// the envelope, so a freshly spawned panel ages its cards at once.
+    #[test]
+    fn the_init_seed_folds_the_latest_clock_beside_the_envelope() {
+        use ainb_hangar_proto::agent_status::AgentState;
+        let mut plugin = connected_plugin_with_issue();
+        let (seed_tx, seed_rx) = tokio::sync::oneshot::channel();
+        plugin.agent_status_seed = Some(seed_rx);
+        let clock = serde_json::to_vec(&AgentStatusClock {
+            clock_ms: 1_789_409_605_000,
+        })
+        .unwrap();
+        seed_tx
+            .send(Ok(vec![
+                (
+                    AGENT_STATUS_TOPIC,
+                    envelope_bytes(1, 8, AgentState::Waiting),
+                ),
+                (AGENT_STATUS_CLOCK_TOPIC, clock),
+            ]))
+            .unwrap();
+        plugin.drain_agent_status_seed();
+        assert!(plugin.screens.fleet.status_for("codex:thread-1").is_some());
+        assert_eq!(plugin.screens.fleet.now_ms(), 1_789_409_605_000);
     }
 
     /// #1038 review item 8: a refused `snapshot_subscribe` names its cause

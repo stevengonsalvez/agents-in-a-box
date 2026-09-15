@@ -646,7 +646,35 @@ impl RuntimeHandle {
             .ok_or_else(|| RuntimeError::UnknownPlugin(plugin_id.clone()))?;
         let (reply, rx) = tokio::sync::oneshot::channel();
         h.inbox
-            .send(Command::ReapIfIdle { reply })
+            .send(Command::ReapIfIdle {
+                reply,
+                honour_window: false,
+            })
+            .map_err(|_| RuntimeError::ShuttingDown)?;
+        Ok(rx)
+    }
+
+    /// Test aid: [`Self::reap_if_idle`], but judged on the real time since the
+    /// plugin was last used, against its idle window. Lets a test prove what
+    /// does and does not count as use. Hidden from rustdoc; not part of the
+    /// stable surface.
+    ///
+    /// # Errors
+    /// As [`Self::reap_if_idle`].
+    #[doc(hidden)]
+    pub fn reap_if_past_window(
+        &self,
+        plugin_id: &PluginId,
+    ) -> Result<tokio::sync::oneshot::Receiver<bool>, RuntimeError> {
+        let h = self
+            .lookup(plugin_id)
+            .ok_or_else(|| RuntimeError::UnknownPlugin(plugin_id.clone()))?;
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        h.inbox
+            .send(Command::ReapIfIdle {
+                reply,
+                honour_window: true,
+            })
             .map_err(|_| RuntimeError::ShuttingDown)?;
         Ok(rx)
     }

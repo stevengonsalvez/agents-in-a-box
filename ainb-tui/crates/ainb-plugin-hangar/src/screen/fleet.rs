@@ -853,6 +853,24 @@ impl Default for FleetPaneState {
 }
 
 impl FleetPaneState {
+    /// Set the clock cards age against from the host's card-clock tick (#1054).
+    ///
+    /// Only the clock: unlike [`FleetEvent::Tick`] it drives no other timer
+    /// (the chat surface's poll), so a host tick cannot start work of its own.
+    /// A non-positive clock is ignored, since the panel then renders `?`
+    /// rather than an age measured from zero.
+    pub fn set_clock_ms(&mut self, clock_ms: i64) {
+        if clock_ms > 0 {
+            self.now_ms = clock_ms;
+        }
+    }
+
+    /// The clock cards currently age against, epoch ms; `0` before any tick.
+    #[must_use]
+    pub const fn now_ms(&self) -> i64 {
+        self.now_ms
+    }
+
     /// The clock a card's age is measured on: the daemon's, estimated from its
     /// last read (W0-mirror). Evidence stamps are daemon time, so subtracting
     /// them from this surface's own now renders a skewed host's cards as `?` or
@@ -4439,6 +4457,42 @@ mod tests {
             "a live view claims nothing extra: {text}"
         );
         assert!(text.contains("working · hook · tier 0 · 42s"), "{text}");
+    }
+
+    /// #1054: the host's clock tick is what a card's age is measured on, and
+    /// it ages as ticks arrive.
+    #[test]
+    fn a_card_ages_on_the_host_clock_tick() {
+        use ainb_hangar_proto::fleet::{AttentionState, LifecycleState};
+        let session = wire_session("claude:age", LifecycleState::Idle, AttentionState::Ask);
+        let status = AgentStatusRow {
+            evidence_observed_at: 1_789_409_600_000,
+            ..test_status("claude:age", AgentState::Waiting)
+        };
+        let mut state = FleetPaneState::default();
+        state.apply_view(StatusView::from_read(joined(1, vec![(session, status)]), 1));
+        let mut detail = |state: &FleetPaneState| {
+            let mut buffer = WireBuffer::new(140, 24);
+            render_fleet(&mut buffer, 140, 0, 20, state);
+            screen_text(&buffer, 140, 20)
+        };
+        assert!(
+            detail(&state).contains("waiting · hook · tier 0 · ?"),
+            "no clock yet"
+        );
+        state.set_clock_ms(1_789_409_605_000);
+        assert!(
+            detail(&state).contains("waiting · hook · tier 0 · 5s"),
+            "{}",
+            detail(&state)
+        );
+        state.set_clock_ms(1_789_409_606_000);
+        assert!(detail(&state).contains("waiting · hook · tier 0 · 6s"));
+        state.set_clock_ms(0);
+        assert!(
+            detail(&state).contains("tier 0 · 6s"),
+            "a zero tick is ignored"
+        );
     }
 
     /// W0-mirror: a daemon whose clock runs 90 s ahead of this surface. Its

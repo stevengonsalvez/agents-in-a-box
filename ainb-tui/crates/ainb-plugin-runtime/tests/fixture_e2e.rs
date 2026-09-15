@@ -775,3 +775,85 @@ fn a_reap_answers_an_in_flight_request_with_a_runtime_error() {
         other => panic!("expected a runtime error from the reap, got {other:?}"),
     }
 }
+
+/// #1063 review item 1: deliveries on a latest-state topic are not use. A
+/// plugin fed only the host's card-clock ticks for longer than its idle window,
+/// with no render, key or action, is still reaped; the same plugin rendering
+/// through that window is kept.
+#[test]
+fn a_plugin_fed_only_latest_state_ticks_is_still_reaped() {
+    const CLOCK: &str = "fleet.agent_status.clock";
+    const WINDOW: Duration = Duration::from_millis(300);
+    let (rt, handle) = Runtime::with_config(RuntimeConfig {
+        idle_reap: WINDOW,
+        ..RuntimeConfig::default()
+    })
+    .expect("build runtime");
+    let register = |name: &str| {
+        let mut manifest = fixture_manifest();
+        manifest.plugin.name = name.into();
+        manifest.lifecycle.idle_reap_secs = 0;
+        manifest.capabilities.event_bus =
+            ainb_plugin_protocol::manifest::CapabilityGrant::List(vec![
+                CLOCK.into(),
+                "fixture.*".into(),
+            ]);
+        manifest.subscribes = Subscribes {
+            snapshots: vec![CLOCK.into()],
+            latest_state: vec![CLOCK.into()],
+        };
+        let plugin = RegisteredPlugin::new(
+            manifest,
+            fixture_path(),
+            PathBuf::from("/dev/null/manifest.toml"),
+        );
+        let id = plugin.id.clone();
+        rt.register(plugin);
+        id
+    };
+    let ticked = register("ticked");
+    let rendered = register("rendered");
+    for id in [&ticked, &rendered] {
+        start(&handle, id);
+        let subscribed = handle.dispatch_cli(id, "echo", vec!["subscribe".into(), CLOCK.into()]);
+        assert!(matches!(
+            rt.tokio_handle().block_on(subscribed),
+            Ok(CliOutcome::Ok(_))
+        ));
+    }
+
+    // Tick through more than the idle window. Only `rendered` is used.
+    let started = std::time::Instant::now();
+    let mut ticks = 0;
+    while started.elapsed() < WINDOW + Duration::from_millis(200) {
+        handle.publish_snapshot(
+            CLOCK,
+            bytes::Bytes::from(format!("{{\"clock_ms\":{ticks}}}")),
+        );
+        drop(handle.render(&rendered, Viewport::new(1, 1), ticks));
+        ticks += 1;
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        handle.snapshot_get("fixture.received").is_some(),
+        "the ticks reached the subscribers"
+    );
+
+    let past_window = |id: &PluginId| -> bool {
+        let rx = handle.reap_if_past_window(id).expect("registered");
+        rt.tokio_handle().block_on(rx).expect("the task answers the check")
+    };
+    // `ticked` last used at its subscribe, more than the window ago; the idle
+    // tick may have reaped it already, which is the same verdict.
+    assert!(
+        past_window(&ticked) || handle.lifecycle_state(&ticked) == Some(LifecycleState::Idle),
+        "ticks alone kept the plugin alive: {:?}",
+        handle.lifecycle_state(&ticked)
+    );
+    assert_eq!(handle.lifecycle_state(&ticked), Some(LifecycleState::Idle));
+    assert!(!past_window(&rendered), "a rendering plugin is in use");
+    assert_eq!(
+        handle.lifecycle_state(&rendered),
+        Some(LifecycleState::Running)
+    );
+}

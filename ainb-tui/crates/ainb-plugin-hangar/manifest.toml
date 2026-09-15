@@ -44,7 +44,12 @@ unix_socket_dial = ["~/.agents-in-a-box/hangar.sock", "${AINB_HANGAR_HOME}/hanga
 # pending tool input, so no plugin gets it by a blanket grant), its own
 # `ui.state` view, and the panel close request. An entry ending in `*` is a
 # prefix; any other entry is one exact topic.
-event_bus = ["fleet.agent_status", "ui.state*", "ui.close_request"]
+event_bus = [
+    "fleet.agent_status",
+    "fleet.agent_status.clock",
+    "ui.state*",
+    "ui.close_request",
+]
 # Plugin-local data dir.
 write_plugin_data = true
 
@@ -56,15 +61,16 @@ snapshots = []
 
 [subscribes]
 # The agent-status envelope the TUI host publishes; the Fleet panel renders
-# from it and reads no Fleet status of its own (#1031).
-snapshots = ["fleet.agent_status"]
+# from it and reads no Fleet status of its own (#1031). The card clock is the
+# host's once-a-second tick that ages the cards (#1054).
+snapshots = ["fleet.agent_status", "fleet.agent_status.clock"]
 # It is latest-state, not a stream (#1040): the runtime idle-reaps this plugin
 # like any other when unused, and on its next use the respawned plugin
 # resubscribes and reads the latest envelope with `snapshot_get`, so nothing a
 # reap skipped is lost. Without this line the subscription would keep the
 # plugin, its daemon socket and its `secrets:read` grant alive for the whole
 # TUI session.
-latest_state = ["fleet.agent_status"]
+latest_state = ["fleet.agent_status", "fleet.agent_status.clock"]
 
 [lifecycle]
 spawn = "lazy"
