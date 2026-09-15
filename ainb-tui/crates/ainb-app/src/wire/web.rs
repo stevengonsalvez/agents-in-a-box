@@ -73,7 +73,9 @@ pub fn rows_from_frame(frame: &Frame) -> Vec<WebSessionRow> {
 ///
 /// Section 20's frame withholds a session's `cwd` and its raw request; this
 /// card does the same for the browser. `cwd` is replaced by its last path
-/// component, `workspaceName`, the name the session list already shows. The
+/// component, `workspaceName`. For an ainb worktree that is the worktree
+/// directory (`repo--ainb-session-…`), not the session list's workspace name,
+/// so a surface that has the session row prefers the row's name. The
 /// payload keeps only the fields the dashboard draws, every string scrubbed.
 /// Keys are camelCase, as `frontend/app.js` reads them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
