@@ -244,3 +244,42 @@ async fn a_daemon_that_keeps_crashing_leaves_the_app_degraded() {
     assert_eq!(log, config.log_path());
     assert!(log.is_file(), "the log a user is sent to exists");
 }
+
+/// A daemon lost more times in a row than the backoff has steps leaves the app
+/// degraded, and Retry from there connects again.
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_losses_past_the_backoff_leave_the_app_degraded_until_retry() {
+    let world = World::new();
+    let mut config = world.config();
+    config.reconnect_backoff = vec![Duration::from_millis(50); 2];
+    let sidecar = Sidecar::start(config);
+    let mut state = sidecar.state();
+
+    for loss in 1..=3 {
+        let SidecarState::Connected {
+            daemon_pid: Some(pid),
+            ..
+        } = wait_for(&mut state, "connected", connected).await
+        else {
+            panic!("connected without a daemon pid before loss {loss}");
+        };
+        kill(pid, nix::sys::signal::Signal::SIGKILL);
+        if loss < 3 {
+            wait_for(&mut state, "reconnecting", |state| {
+                matches!(state, SidecarState::Reconnecting { .. })
+            })
+            .await;
+        }
+    }
+    let SidecarState::Degraded { error, .. } = wait_for(&mut state, "degraded", |state| {
+        matches!(state, SidecarState::Degraded { .. })
+    })
+    .await
+    else {
+        unreachable!("matched degraded");
+    };
+    assert!(error.contains("lost 3 times"), "{error}");
+
+    sidecar.retry();
+    wait_for(&mut state, "connected after retry", connected).await;
+}
