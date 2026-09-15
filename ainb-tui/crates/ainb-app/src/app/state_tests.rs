@@ -121,6 +121,31 @@ mod tests {
         })
     }
 
+    /// The own-session rule follows the session the host reported, not a
+    /// lookup from the process the reducer runs in (#1077).
+    #[test]
+    fn the_session_the_host_reported_gets_no_observer() {
+        let own = "ainb-host-session";
+        let mut state = state_with_other_tmux_sessions(&[own]);
+        state.shell.current_screen = "session_list".to_string();
+        assert!(!state.is_host_tmux_session_selected());
+
+        state.set_host_tmux_session(crate::app::effect::TmuxSessionName::new(own));
+        let reported = state.versions();
+        state.set_host_tmux_session(crate::app::effect::TmuxSessionName::new(own));
+        assert_eq!(
+            state.versions(),
+            reported,
+            "an unchanged name is not a write"
+        );
+        assert!(state.is_host_tmux_session_selected());
+        assert!(settled_observer_request(&mut state).is_none());
+
+        state.set_host_tmux_session(None);
+        assert!(!state.is_host_tmux_session_selected());
+        assert_eq!(settled_observer_request(&mut state), Some(observe(own)));
+    }
+
     #[test]
     fn dead_observer_stays_suppressed_for_the_retry_window() {
         let missing = "ainb-missing-observer";
