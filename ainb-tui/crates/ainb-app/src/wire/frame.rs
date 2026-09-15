@@ -34,6 +34,17 @@ impl HostId {
         Self(Self::LOCAL.to_string())
     }
 
+    /// The host every frame this process sends names: the `host_id` the daemon
+    /// gave in `auth/hello` (#1066), or [`Self::local`] until one names one.
+    ///
+    /// Read fresh at each use, because the first hello can land after a
+    /// [`Mirror`] is built. Taken from the daemon's answer only, never from a
+    /// hello's params, so nothing a caller asserts can name this host.
+    #[must_use]
+    pub fn daemon() -> Self {
+        ainb_hangar_client::daemon_host_id().map_or_else(Self::local, Self)
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -97,7 +108,7 @@ pub struct Frame {
 
 impl Frame {
     /// The frame for one section of `state`: its wire name, version, daemon
-    /// read and redacted body, from this host process ([`HostId::local`],
+    /// read and redacted body, from this host process ([`HostId::daemon`],
     /// [`host_epoch`]).
     #[must_use]
     pub fn new(state: &AppState, id: SectionId) -> Self {
@@ -105,7 +116,7 @@ impl Frame {
             section: section_name(id).to_string(),
             version: state.versions()[id.index()],
             epoch: host_epoch(),
-            host_id: HostId::local(),
+            host_id: HostId::daemon(),
             daemon_read: crate::wire::daemon_read(state, id),
             body: section_json(state, id),
         }
