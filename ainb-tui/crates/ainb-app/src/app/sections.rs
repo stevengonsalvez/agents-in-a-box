@@ -539,11 +539,6 @@ pub struct TmuxSection {
     // the new target instead of silently refocusing the stale one (see
     // `AppState::in_place_target`).
     pub embed_session: Option<crate::app::effect::TmuxSessionName>,
-    /// The tmux session the host itself runs in, as the host reported it, or
-    /// `None` for a host outside tmux. The own-session rule reads this: that
-    /// row's preview would mirror the host into itself, and attaching it would
-    /// nest it. The reducer never looks it up.
-    pub host_session: Option<crate::app::effect::TmuxSessionName>,
     // Other tmux sessions (not managed by agents-in-a-box)
     pub other_tmux_sessions: Vec<crate::models::OtherTmuxSession>,
     pub other_tmux_expanded: bool,
@@ -559,7 +554,6 @@ impl Default for TmuxSection {
     fn default() -> Self {
         Self {
             embed_session: None,
-            host_session: None,
             other_tmux_sessions: Vec::new(),
             other_tmux_expanded: true, // Default to expanded
             selected_other_tmux_index: None,
@@ -1019,6 +1013,12 @@ pub struct HostOnlyState {
     // The host answered an in-place attach with `unsupported`: it has no
     // writable terminal, so the key stops asking it for one.
     pub(crate) in_place_unsupported: bool,
+    // The tmux session this host runs in, as the host reported it, or `None`
+    // outside tmux. The own-session rule reads it: that row's preview would
+    // mirror the host into itself, and attaching it would nest it. The reducer
+    // never looks it up. A raw name, only ever compared: a session tmux accepts
+    // but `TmuxSessionName` refuses must still match its own row.
+    pub(crate) host_tmux_session: Option<String>,
     pub workspace_load_started: Option<Instant>,
     /// Channel receiver for background workspace loading results
     pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
@@ -1121,6 +1121,7 @@ impl Default for HostOnlyState {
             observer_failed_target: None,
             observer_started_at: None,
             in_place_unsupported: false,
+            host_tmux_session: None,
             workspace_load_started: None,
             workspace_load_receiver: None,
             last_snapshot_time: None,
