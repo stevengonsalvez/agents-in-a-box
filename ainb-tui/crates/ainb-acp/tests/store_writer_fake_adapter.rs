@@ -365,41 +365,46 @@ async fn a_replayed_history_writes_no_rows() {
 /// The cadence's timer leg is caller-driven: `tick` commits a chunk that no
 /// second push would ever flush (a slow turn's first thought, then a long
 /// tool call). Without it, `flush_interval` never fires at all.
+///
+/// The writer runs on a hand-driven clock. On the wall clock a loaded runner
+/// let the 50ms interval elapse before the push, so the push committed and the
+/// "nothing committed yet" assertion failed (#1088).
 #[tokio::test]
 async fn a_buffered_chunk_commits_on_the_interval_without_a_second_push() {
+    const INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("store");
+    let now = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let clock = {
+        let now = std::sync::Arc::clone(&now);
+        std::sync::Arc::new(move || *now.lock().expect("clock lock"))
+    };
     let mut writer = writer(
         &store,
         WriterConfig {
             flush_bytes: 4 * 1024,
-            flush_interval: std::time::Duration::from_millis(50),
+            flush_interval: INTERVAL,
         },
-    );
+    )
+    .with_clock(clock);
+    let advance = |by: std::time::Duration| *now.lock().expect("clock lock") += by;
 
     let chunk = TranscriptReducer::new("fake-session-1")
         .permission_chunk(serde_json::json!({"options": ["allow"]}));
-    writer.push(&chunk).await.expect("push");
+    assert!(writer.push(&chunk).await.expect("push").is_none());
+    advance(INTERVAL - std::time::Duration::from_millis(1));
     assert!(
         writer.tick().await.expect("early tick").is_none(),
         "the interval has not elapsed yet"
     );
     assert_eq!(rows(&store).await.len(), 0);
 
-    // Poll rather than sleeping a fixed 80ms: on a loaded CI runner the
-    // commit interval had not elapsed by the time the assertion ran, and the
-    // test failed claiming the chunk never committed.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let high_water = loop {
-        if let Some(hw) = writer.tick().await.expect("tick") {
-            break hw;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the buffered chunk never committed within 10s"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    };
+    advance(std::time::Duration::from_millis(1));
+    let high_water = writer
+        .tick()
+        .await
+        .expect("tick")
+        .expect("the interval elapsed, so the buffered chunk commits");
 
     assert_eq!(high_water.session_key, SESSION_KEY);
     assert_eq!(rows(&store).await.len(), 1);
