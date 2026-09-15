@@ -696,7 +696,10 @@ mod tests {
         // nothing and left `wait` below blocked. Children are listed only once
         // the script has exec'd the proxy, which is the process under test.
         wait_for_spawn_record(&spawn_log, fake_proxy_pid);
-        wait_for_exec(fake_proxy_pid, &test_exe);
+        // Not asserted yet: a proxy that never exec'd is exactly the regression
+        // this test guards, and its children must still be listed and cleaned
+        // up before the test reports it.
+        let exec_seen = wait_for_exec(fake_proxy_pid, &test_exe);
         let child_pids = direct_child_pids(fake_proxy_pid);
         let child_cleanup = ExactPidCleanup(child_pids.clone());
 
@@ -708,6 +711,11 @@ mod tests {
         // reaped PID can be handed to an unrelated process.
         let exited = wait_for_exit(&mut fake_proxy);
 
+        assert!(
+            exec_seen,
+            "fake proxy {fake_proxy_pid} never exec'd {}; children: {child_pids:?}",
+            test_exe.display()
+        );
         assert!(
             child_pids.is_empty(),
             "fake proxy created children before exec: {child_pids:?}"
@@ -758,8 +766,10 @@ mod tests {
         );
     }
 
-    /// Wait until `pid` runs `exe`, i.e. the fake script has exec'd the proxy.
-    fn wait_for_exec(pid: u32, exe: &std::path::Path) {
+    /// Whether `pid` comes to run `exe` within five seconds, i.e. the fake
+    /// script has exec'd the proxy. Returns rather than panics, so the caller's
+    /// cleanup still runs when it never does.
+    fn wait_for_exec(pid: u32, exe: &std::path::Path) -> bool {
         use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
         let wanted = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
@@ -776,11 +786,11 @@ mod tests {
                     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()) == wanted
                 });
             if running {
-                return;
+                return true;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("fake proxy {pid} never exec'd {}", exe.display());
+        false
     }
 
     /// Whether `child` exits within five seconds; reaps it when it does.
