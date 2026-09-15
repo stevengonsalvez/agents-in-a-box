@@ -27,8 +27,8 @@ scripts/proof/run.sh --only s-c-answered      # one node (repeatable); other res
 scripts/proof/run.sh --out /tmp/proof-out     # results somewhere else
 ```
 
-Needs `tmux`, `jq`, `git`, `curl` and `python3`. A full run of the 17 nodes
-took 6 min 42 s on claude-gcp, plus the build when `--build` is given. Exit
+Needs `tmux`, `jq`, `git`, `curl` and `python3`. A full run of the first 17
+nodes took 6 min 42 s on claude-gcp, plus the build when `--build` is given. Exit
 status is 0 only when every node passes; a node whose failure is a filed
 defect still fails, and its row names the issue.
 
@@ -69,6 +69,8 @@ Decisions that are easy to get wrong:
   reaches the daemon.
 - **The TUI and `ainb web` run with `TMUX` and `TMUX_PANE` unset.** Inside a
   `-L proof` pane they would otherwise treat the harness server as their tmux.
+  The one exception is `issue-1094-own-session`, which keeps `TMUX` on purpose
+  so the TUI lists the tmux session it runs in.
 - **The fixture agent** is a bash loop named `claude` that prints
   `agent tick N` every second and prints `AGENT GOT SIGINT` instead of dying.
 - **ASK cards** go through the real hook path,
