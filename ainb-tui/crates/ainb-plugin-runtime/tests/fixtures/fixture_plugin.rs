@@ -11,7 +11,8 @@
 //!   argv `subscribe <topic>` it first sends `host/snapshot/subscribe` for the
 //!   topic (the reply is read and ignored). With argv `publish <topic>` it
 //!   first publishes `b"from-plugin"` on the topic. With argv `hang` it never replies,
-//!   leaving the request in flight.
+//!   leaving the request in flight. With argv `wedge` it stops reading stdin
+//!   altogether and never replies.
 //! - `plugin/handle_event` → notification: recorded on stderr, and a delivery
 //!   for a subscribed (non-`socket:`) topic is re-published verbatim under
 //!   `fixture.received`, so a host test can read back exactly what arrived.
@@ -108,6 +109,11 @@ fn main() {
                         if verb == "publish" {
                             publish_snapshot(&mut writer, topic, b"from-plugin");
                         }
+                    }
+                    // `wedge`: stop reading stdin for good, so the host's
+                    // writes back up once the pipe is full.
+                    if dispatch.argv.first().map(String::as_str) == Some("wedge") {
+                        std::thread::park();
                     }
                     // `hang`: never answer, so the request stays in flight.
                     if dispatch.argv.first().map(String::as_str) == Some("hang") {
