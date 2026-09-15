@@ -395,12 +395,18 @@ mod tests {
         );
     }
 
-    /// A multi-byte tail is cut on a character boundary.
+    /// A multi-byte tail is cut on a character boundary. Four-byte characters
+    /// put the first tail byte mid-character, so the boundary walk has to run:
+    /// without it the slice panics.
     #[test]
     fn a_capped_name_cuts_on_a_character_boundary() {
-        let minted = cap_session_name(format!("tmux_{}", "\u{8272}".repeat(60)));
+        let name = format!("tmux_{}", "\u{1F600}".repeat(40));
+        let head = "tmux_00000000_".len();
+        let first_cut = name.len() - (crate::app::effect::TmuxSessionName::MAX_BYTES - head);
+        assert!(!name.is_char_boundary(first_cut), "the walk is exercised");
+        let minted = cap_session_name(name);
         assert!(minted.len() <= crate::app::effect::TmuxSessionName::MAX_BYTES);
-        assert!(minted.ends_with('\u{8272}'), "{minted}");
+        assert!(minted.ends_with('\u{1F600}'), "{minted}");
     }
 
     #[test]
