@@ -122,7 +122,10 @@ impl<S: FrameSink> DesktopHost<S> {
             &self.state.host.attention_poll_running,
             &self.state.host.daemon_attention_generation,
         );
-        self.state.refresh_daemon_attention_generation();
+        // The merged attention each session row carries on its frame. The
+        // reducer paces it: at once on daemon news, otherwise on its own
+        // cadence, and a merge that finds nothing new bumps nothing.
+        self.state.refresh_attention(ainb_app::fleet::daemons::heartbeat::now_ms());
         let effects = self.state.take_effects();
         self.pump();
         effects

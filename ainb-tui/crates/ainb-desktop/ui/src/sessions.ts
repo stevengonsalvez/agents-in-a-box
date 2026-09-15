@@ -1,11 +1,10 @@
-// What the sessions sidebar and the header draw from the Sessions and Fleet
-// frames. Projections only, in the manner of `wire::web::rows_from_frame`:
+// What the sessions sidebar and the header draw from the Sessions frame.
+// Projections only, in the manner of `wire::web::rows_from_frame`:
 // every function reads the frame bodies it is handed and keeps nothing, so a
 // caller passing store proxies stays fine-grained.
 
 import type {
   AttentionKind,
-  FleetView_Serialize,
   SessionStatus,
   Session_Serialize,
   SessionsView_Serialize,
@@ -35,21 +34,16 @@ export function rowStatus(status: SessionStatus): RowStatus {
 }
 
 /**
- * The attention ring a row paints, or `null` for none.
- *
- * The daemon rows correlate by the provider session id Fleet recorded for this
- * session, never by cwd or tmux name: a parent and its subagent share a cwd.
- * An attached row never rings, because the operator is looking at it. With no
- * daemon row, a session whose own status is an error rings `Err`.
+ * The attention ring a row paints, or `null` for none: the tightest kind of the
+ * merged attention its frame row carries. The host merged it (daemon rows by
+ * exact provider id, local hook events, the session's own error, an attached
+ * row left silent), so the renderer only picks the kind to paint.
  */
-export function ringFor(session: Session_Serialize, fleet: FleetView_Serialize | undefined): AttentionKind | null {
-  if (session.is_attached) return null;
-  // Optional at every level: a host at another version may omit any of it.
-  const provider = fleet?.fleet_metadata?.[session.id]?.provider_session_id;
-  const rows = provider ? (fleet?.daemon_attention?.by_session_id?.[provider] ?? []) : [];
-  let ring: AttentionKind | null = typeof session.status === "object" ? "Err" : null;
-  for (const row of rows) {
-    if (ring === null || ATTENTION_ORDER.indexOf(row.kind) < ATTENTION_ORDER.indexOf(ring)) ring = row.kind;
+export function ringFor(session: Session_Serialize): AttentionKind | null {
+  let ring: AttentionKind | null = null;
+  // Optional: a host at another version may not send it.
+  for (const mark of session.attention ?? []) {
+    if (ring === null || ATTENTION_ORDER.indexOf(mark.kind) < ATTENTION_ORDER.indexOf(ring)) ring = mark.kind;
   }
   return ring;
 }
@@ -74,12 +68,8 @@ export function allSessions(view: SessionsView_Serialize | undefined): Session_S
 }
 
 /** How many rows ring with `kind`: one header count. */
-export function ringCount(
-  view: SessionsView_Serialize | undefined,
-  fleet: FleetView_Serialize | undefined,
-  kind: AttentionKind,
-): number {
-  return allSessions(view).filter((session) => ringFor(session, fleet) === kind).length;
+export function ringCount(view: SessionsView_Serialize | undefined, kind: AttentionKind): number {
+  return allSessions(view).filter((session) => ringFor(session) === kind).length;
 }
 
 /** How many rows are idle, the header's last count. */
