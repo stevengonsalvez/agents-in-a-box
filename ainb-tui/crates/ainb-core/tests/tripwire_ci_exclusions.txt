@@ -22,6 +22,4 @@ tripwire_sessions_approve_unblocks_hook::approving_from_the_ask_pane_unblocks_a_
 tripwire_sessions_broadcast::checking_rows_turns_the_thread_tab_into_a_broadcast_and_shows_every_leg                   #1049  product bug: no provider_session_id for Claude sessions
 tripwire_sessions_daemon_attention::a_daemon_raised_approval_reaches_its_session_row_and_an_orphan_is_counted_elsewhere #1049  product bug: no provider_session_id for Claude sessions
 tripwire_sessions_err_pane::a_stale_err_leaves_the_row_and_the_err_pane_says_why                                       #1049  product bug: no provider_session_id for Claude sessions
-tripwire_fleet_chat_screen::the_composer_puts_the_operators_message_in_the_conversation                                #1051  product bug: the logs pane takes space before the composer
-tripwire_fleet_chat_screen::the_pal_chat_opens_attributes_and_answers_a_confirm_card                                   #1051  product bug: y on a focused card resolves to no row
 tripwire_fleet_session_thread::a_session_thread_opens_orders_its_replies_and_takes_a_message                           #1049  product bug: thread tab disabled without provider_session_id
