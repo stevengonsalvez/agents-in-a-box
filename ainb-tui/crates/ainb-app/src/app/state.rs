@@ -12393,7 +12393,9 @@ impl AppState {
             self.fleet.attention_elsewhere = elsewhere;
             changed = true;
         }
-        if changed {
+        // Only a flag not yet set is written: the desktop host never clears it,
+        // and an unconditional write would bump Shell on every later change.
+        if changed && !self.shell.ui_needs_refresh {
             self.shell.ui_needs_refresh = true;
         }
     }
