@@ -50,8 +50,11 @@ pub const AGENT_STATUS_CLOCK_TOPIC: &str = "fleet.agent_status.clock";
 /// for a repaint, which is what makes an idle card's age advance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStatusClock {
-    /// The host's estimate of the daemon's clock, epoch ms: the clock evidence
-    /// stamps are on.
+    /// The publisher's LOCAL clock, epoch ms, at the tick. Not the daemon's:
+    /// a subscriber maps it onto the daemon clock the evidence stamps are on
+    /// with `StatusView::daemon_now_ms` (the daemon's `read_at_ms` plus the
+    /// local time held since), and never subtracts `evidence_observed_at`
+    /// from it directly, which would render a skewed host's ages wrong.
     pub clock_ms: i64,
 }
 
