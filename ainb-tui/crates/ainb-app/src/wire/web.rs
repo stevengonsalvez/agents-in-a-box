@@ -162,7 +162,7 @@ pub fn need_cards(needs: &Value) -> Vec<WebNeedCard> {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter_map(|channel| text(channel))
+                    .filter_map(text)
                     .collect(),
                 session_key: text(&card["sessionKey"]),
                 state: text(&card["state"]),
