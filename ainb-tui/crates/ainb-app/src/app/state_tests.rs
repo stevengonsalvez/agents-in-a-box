@@ -2755,10 +2755,16 @@ mod tests {
         state.stamp_local_since(id, &mut first);
         assert_eq!(first[0].since_ms, 1_000);
         let key = request_id(&first[0]);
+        let fleet_version = state.versions()[crate::app::versioned::SectionId::Fleet.index()];
 
         // The same question, re-reported four minutes later.
         let mut again = [SessionAttention::local(AttentionKind::Ask, 241_000)];
         state.stamp_local_since(id, &mut again);
+        assert_eq!(
+            state.versions()[crate::app::versioned::SectionId::Fleet.index()],
+            fleet_version,
+            "a clock already stamped is read, not written: Fleet does not bump"
+        );
         assert_eq!(
             again[0].since_ms, 1_000,
             "a re-raise must not reset the clock the operator is reading"
