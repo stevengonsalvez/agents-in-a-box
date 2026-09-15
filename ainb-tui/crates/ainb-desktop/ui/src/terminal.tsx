@@ -59,7 +59,18 @@ export function TerminalView(props: Props) {
       if (shell) {
         // Marked handled, so the window's own listener does not act twice.
         event.preventDefault();
-        props.onAccelerator(shell);
+        // Copy and paste act on this pane, so they are answered here; the rest
+        // is the shell's.
+        if (shell.kind === "copy") {
+          const selection = term.getSelection();
+          if (selection) void invoke("clipboard_write", { text: selection });
+        } else if (shell.kind === "paste") {
+          void invoke<string>("clipboard_read").then((text) => {
+            if (text) transport.send(text);
+          });
+        } else {
+          props.onAccelerator(shell);
+        }
         return false;
       }
       if (event.key === "Escape" && leave(event.timeStamp)) {
