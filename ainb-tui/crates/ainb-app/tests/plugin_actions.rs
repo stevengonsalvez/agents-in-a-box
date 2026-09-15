@@ -4,6 +4,7 @@
 
 use ainb_app::app::NoRenderer;
 use ainb_app::app::plugin_action::{self, ids};
+use ainb_app::wire::frame::HostId;
 use ainb_app::{AppState, CommandId, Intent, Keymap, SectionId, dispatch};
 use ainb_plugin_runtime::types::PluginId;
 
@@ -12,6 +13,14 @@ fn bumped(before: &[u64], after: &[u64]) -> Vec<SectionId> {
         .into_iter()
         .filter(|id| before[id.index()] != after[id.index()])
         .collect()
+}
+
+fn desktop() -> HostId {
+    HostId::new("desktop")
+}
+
+fn phone() -> HostId {
+    HostId::new("phone")
 }
 
 fn isolated_home() {
@@ -228,7 +237,7 @@ fn a_watched_plugin_screen_stays_wanted_while_the_terminal_shows_another() {
         &mut state,
         &keymap,
         &mut NoRenderer,
-        plugin_action::watch_screen(screen_ids::HANGAR, true, 120, 40),
+        plugin_action::watch_screen(screen_ids::HANGAR, &desktop(), true, 120, 40),
     );
     assert!(
         state.plugin_screen_wanted(screen_ids::HANGAR),
@@ -239,20 +248,12 @@ fn a_watched_plugin_screen_stays_wanted_while_the_terminal_shows_another() {
         "nobody wants learnings"
     );
 
-    // A stop names no watcher, so it ends nothing at once; the request
-    // lapses with its lease.
+    // The only watcher stopping ends the watch at once.
     let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
-        plugin_action::watch_screen(screen_ids::HANGAR, false, 0, 0),
-    );
-    assert!(state.plugin_screen_wanted(screen_ids::HANGAR));
-    state.release_plugin_screen_watches(
-        std::time::Instant::now()
-            + AppState::PLUGIN_SCREEN_WATCH_LEASE
-            + std::time::Duration::from_secs(1),
-        |_| false,
+        plugin_action::watch_screen(screen_ids::HANGAR, &desktop(), false, 0, 0),
     );
     assert!(!state.plugin_screen_wanted(screen_ids::HANGAR));
 
@@ -261,7 +262,7 @@ fn a_watched_plugin_screen_stays_wanted_while_the_terminal_shows_another() {
         &mut state,
         &keymap,
         &mut NoRenderer,
-        plugin_action::watch_screen(screen_ids::CONFIG, true, 120, 40),
+        plugin_action::watch_screen(screen_ids::CONFIG, &desktop(), true, 120, 40),
     );
     assert!(state.plugins_host.watched_plugin_screens.is_empty());
 }
@@ -355,7 +356,7 @@ fn a_screen_watch_lapses_unless_renewed_and_goes_with_its_plugin() {
             state,
             &keymap,
             &mut NoRenderer,
-            plugin_action::watch_screen(screen_ids::HANGAR, true, 120, 40),
+            plugin_action::watch_screen(screen_ids::HANGAR, &desktop(), true, 120, 40),
         );
     };
     let lease = AppState::PLUGIN_SCREEN_WATCH_LEASE;
@@ -392,26 +393,26 @@ fn a_watched_screen_renders_at_the_largest_size_a_live_watch_asked_for() {
     let keymap = Keymap::defaults();
     let mut state = AppState::new();
     state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
-    let mut watch = |state: &mut AppState, width, height| {
+    let mut watch = |state: &mut AppState, host: HostId, width, height| {
         let _ = dispatch(
             state,
             &keymap,
             &mut NoRenderer,
-            plugin_action::watch_screen(screen_ids::HANGAR, true, width, height),
+            plugin_action::watch_screen(screen_ids::HANGAR, &host, true, width, height),
         );
     };
 
-    watch(&mut state, 0, 24);
+    watch(&mut state, desktop(), 0, 24);
     assert!(
         !state.plugin_screen_wanted(screen_ids::HANGAR),
         "no viewport"
     );
     assert_eq!(state.watched_viewport(screen_ids::HANGAR), None);
 
-    watch(&mut state, 200, 30);
+    watch(&mut state, desktop(), 200, 30);
     let wide_at = Instant::now();
     std::thread::sleep(Duration::from_millis(20));
-    watch(&mut state, 90, 60);
+    watch(&mut state, phone(), 90, 60);
     assert_eq!(state.watched_viewport(screen_ids::HANGAR), Some((200, 60)));
 
     // The wide request lapses first; the tall one alone sets the size.
@@ -421,47 +422,131 @@ fn a_watched_screen_renders_at_the_largest_size_a_live_watch_asked_for() {
 }
 
 /// Two hosts watch one screen at different sizes. One stopping, or one
-/// renewing far more often than the other, leaves the other's request live.
+/// renewing far more often than the other, leaves the other's request live,
+/// and a host's smaller size replaces its larger one at once (#1046).
 #[test]
-fn one_watcher_stopping_or_renewing_fast_leaves_another_watcher_live() {
+fn one_host_stopping_or_resizing_leaves_another_hosts_watch_alone() {
     use ainb_app::app::screens::ids as screen_ids;
 
     isolated_home();
     let keymap = Keymap::defaults();
     let mut state = AppState::new();
     state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
-    let mut send = |state: &mut AppState, watching, width, height| {
+    let mut send = |state: &mut AppState, host: HostId, watching, width, height| {
         let _ = dispatch(
             state,
             &keymap,
             &mut NoRenderer,
-            plugin_action::watch_screen(screen_ids::HANGAR, watching, width, height),
+            plugin_action::watch_screen(screen_ids::HANGAR, &host, watching, width, height),
         );
     };
 
-    send(&mut state, true, 200, 60);
+    send(&mut state, desktop(), true, 200, 60);
     for _ in 0..17 {
-        send(&mut state, true, 90, 30);
+        send(&mut state, phone(), true, 90, 30);
     }
     assert_eq!(
         state.plugins_host.watched_plugin_screens[screen_ids::HANGAR].requests.len(),
         2,
-        "a renewal of one size holds one entry"
+        "one request per host"
     );
     assert_eq!(state.watched_viewport(screen_ids::HANGAR), Some((200, 60)));
 
-    send(&mut state, false, 0, 0);
+    send(&mut state, phone(), false, 0, 0);
     assert_eq!(
         state.watched_viewport(screen_ids::HANGAR),
         Some((200, 60)),
-        "a stop from one host does not end the other's watch"
+        "the phone stopping leaves the desktop's watch"
+    );
+    send(&mut state, desktop(), true, 120, 40);
+    assert_eq!(
+        state.watched_viewport(screen_ids::HANGAR),
+        Some((120, 40)),
+        "the desktop's smaller size replaces its larger one at once"
+    );
+    send(&mut state, phone(), true, 90, 30);
+    send(&mut state, desktop(), false, 0, 0);
+    assert_eq!(state.watched_viewport(screen_ids::HANGAR), Some((90, 30)));
+    send(&mut state, phone(), false, 0, 0);
+    assert!(!state.plugin_screen_wanted(screen_ids::HANGAR));
+}
+
+/// A host that disconnects drops its requests on every screen at once, and
+/// another host's watch on the same screen stays (#1046).
+#[test]
+fn a_disconnected_host_drops_its_watches_without_waiting_for_the_lease() {
+    use ainb_app::app::screens::ids as screen_ids;
+
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    for (screen, host) in [
+        (screen_ids::HANGAR, desktop()),
+        (screen_ids::LEARNINGS, desktop()),
+        (screen_ids::HANGAR, phone()),
+    ] {
+        let _ = dispatch(
+            &mut state,
+            &keymap,
+            &mut NoRenderer,
+            plugin_action::watch_screen(screen, &host, true, 120, 40),
+        );
+    }
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        ainb_app::app::reports::host_disconnected(&desktop()),
+    );
+
+    assert!(!state.plugin_screen_wanted(screen_ids::LEARNINGS));
+    assert!(
+        state.plugin_screen_wanted(screen_ids::HANGAR),
+        "the phone still watches"
+    );
+    assert_eq!(
+        state.plugins_host.watched_plugin_screens[screen_ids::HANGAR]
+            .requests
+            .keys()
+            .collect::<Vec<_>>(),
+        vec![&phone()]
     );
 }
 
-/// A watch cannot ask a plugin to render past the viewport ceiling, and a stop
-/// in the older two-field shape still parses.
+/// Past the host cap, the least recently renewed host's request goes.
 #[test]
-fn a_watch_is_clamped_to_the_viewport_ceiling_and_the_old_stop_shape_parses() {
+fn the_host_cap_drops_the_stalest_request() {
+    use ainb_app::app::screens::ids as screen_ids;
+
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    for n in 0..17 {
+        let _ = dispatch(
+            &mut state,
+            &keymap,
+            &mut NoRenderer,
+            plugin_action::watch_screen(
+                screen_ids::HANGAR,
+                &HostId::new(format!("host-{n}")),
+                true,
+                120,
+                40,
+            ),
+        );
+    }
+    let requests = &state.plugins_host.watched_plugin_screens[screen_ids::HANGAR].requests;
+    assert_eq!(requests.len(), 16);
+    assert!(!requests.contains_key(&HostId::new("host-0")));
+    assert!(requests.contains_key(&HostId::new("host-16")));
+}
+
+/// A watch cannot ask a plugin to render past the viewport ceiling, and a
+/// watch or stop that names no host is refused.
+#[test]
+fn a_watch_is_clamped_to_the_viewport_ceiling_and_a_hostless_stop_is_refused() {
     use ainb_app::app::screens::ids as screen_ids;
     use ainb_app::app::sections::ScreenWatch;
 
@@ -474,19 +559,19 @@ fn a_watch_is_clamped_to_the_viewport_ceiling_and_the_old_stop_shape_parses() {
         &mut state,
         &keymap,
         &mut NoRenderer,
-        plugin_action::watch_screen(screen_ids::HANGAR, true, u16::MAX, u16::MAX),
+        plugin_action::watch_screen(screen_ids::HANGAR, &desktop(), true, u16::MAX, u16::MAX),
     );
     assert_eq!(
         state.watched_viewport(screen_ids::HANGAR),
         Some(ScreenWatch::MAX_VIEWPORT)
     );
 
-    let old_stop = Intent::Command(
+    let hostless_stop = Intent::Command(
         CommandId::new(ids::WATCH_SCREEN),
         serde_json::json!({ "screen": screen_ids::HANGAR, "watching": false }),
     );
     let before = state.versions();
-    let effects = dispatch(&mut state, &keymap, &mut NoRenderer, old_stop);
+    let effects = dispatch(&mut state, &keymap, &mut NoRenderer, hostless_stop);
     assert!(effects.is_empty());
     assert!(state.plugin_screen_wanted(screen_ids::HANGAR));
     assert_eq!(state.versions(), before);
