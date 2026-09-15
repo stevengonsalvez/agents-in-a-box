@@ -2830,6 +2830,9 @@ mod tests {
         let home = tempfile::tempdir().expect("scratch home");
         let previous = std::env::var_os("AINB_HANGAR_HOME");
         std::env::set_var("AINB_HANGAR_HOME", home.path());
+        // The lookback window decides whether the row is still recent, so it
+        // comes from the shipped defaults, not from this machine's config.
+        crate::config::tunables::install_snapshot(crate::config::AppConfig::default());
 
         let cwd = "/work/ended";
         let now_ms = 1_800_000_000_000;
