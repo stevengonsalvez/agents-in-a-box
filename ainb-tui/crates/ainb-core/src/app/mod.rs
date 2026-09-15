@@ -6,7 +6,6 @@
 pub use ainb_app::app::*;
 
 pub mod attach_handler;
-pub mod host;
 pub mod mouse;
 pub mod registry;
 pub mod screens;
@@ -14,6 +13,5 @@ pub mod terminal_keys;
 pub mod ui_state;
 
 pub use attach_handler::AttachHandler;
-pub use host::App;
 pub use registry::ScreenRegistry;
 pub use screens::{Screen, ScreenId};
