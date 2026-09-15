@@ -73,7 +73,14 @@ impl DaemonIdentityRepo {
         .execute(&mut *tx)
         .await?
         .rows_affected();
-        let identity = read_on(&mut tx).await?.ok_or(sqlx::Error::RowNotFound)?;
+        // SQLite applies IGNORE to CHECK violations too, so a malformed id inserts
+        // nothing and leaves no row: name that, not a bare `RowNotFound`.
+        let identity = read_on(&mut tx).await?.ok_or_else(|| {
+            sqlx::Error::Protocol(
+                "daemon_identity mint inserted nothing; the minted host_id failed the 0100 CHECK"
+                    .into(),
+            )
+        })?;
         let adopted_sessions =
             sqlx::query("UPDATE fleet_session SET host_id = ? WHERE host_id = ?")
                 .bind(&identity.host_id)
