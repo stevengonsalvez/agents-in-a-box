@@ -413,13 +413,6 @@ impl Default for ConfigSection {
     }
 }
 
-/// Section 21: the changelog viewer's scroll position (#1052). The lines are
-/// static content ([`crate::components::ChangelogState::lines`]).
-#[derive(Debug, Default)]
-pub struct ChangelogSection {
-    pub changelog_state: crate::components::ChangelogState,
-}
-
 #[derive(Debug)]
 pub struct WorkspaceLoadSection {
     // Background workspace loading state
