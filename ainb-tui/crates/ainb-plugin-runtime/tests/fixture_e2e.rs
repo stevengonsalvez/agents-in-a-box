@@ -902,3 +902,45 @@ fn a_plugin_granted_a_fleet_topic_cannot_publish_on_it() {
         "a plugin publish reached the host-publish-only card clock"
     );
 }
+
+/// #1087: a plugin that stops reading its stdin costs bounded memory however
+/// long the user keeps typing at it. Once the pipe is full the task cannot
+/// write, so keys pile up in the inbox, which holds at most its capacity and
+/// counts every event it pushes out.
+#[test]
+fn a_wedged_plugin_keeps_a_bounded_key_inbox_and_counts_drops() {
+    const KEYS: usize = 20_000;
+    let (rt, handle) = Runtime::new().expect("build runtime");
+    let plugin = RegisteredPlugin::new(
+        fixture_manifest(),
+        fixture_path(),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    let id = plugin.id.clone();
+    rt.register(plugin);
+    start(&handle, &id);
+
+    // Never answered: the fixture parks instead of reading on.
+    drop(handle.dispatch_cli(&id, "echo", vec!["wedge".into()]));
+    let key = ainb_plugin_protocol::params::KeyEvent {
+        code: ainb_plugin_protocol::params::KeyCode::Char { ch: 'j' },
+        mods: 0,
+        kind: ainb_plugin_protocol::params::KeyKind::Press,
+    };
+    for _ in 0..KEYS {
+        assert!(
+            handle.send_key(&id, "fixture", key.clone()),
+            "the task is alive"
+        );
+    }
+
+    let stats = handle.input_inbox_stats(&id).expect("registered");
+    assert!(
+        stats.keys_queued <= ainb_plugin_runtime::inbox::INPUT_INBOX_CAPACITY,
+        "the key inbox grew past its capacity: {stats:?}"
+    );
+    assert!(
+        stats.keys_dropped > 0,
+        "{KEYS} keys into a wedged plugin dropped none: {stats:?}"
+    );
+}
