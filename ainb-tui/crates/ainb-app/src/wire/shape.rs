@@ -99,22 +99,27 @@ fn web_snapshot_trace(state: &AppState) -> trace::Trace {
     }
     let rows = WebSnapshotSessions {
         sessions: crate::wire::web::session_rows(state),
-        needs: crate::wire::web::need_cards(&sample_need_cards()),
+        needs: sample_web_needs(&mut PlainSeed),
     };
     trace::trace("web_snapshot", &rows)
         .unwrap_or_else(|error| panic!("web snapshot rows failed to serialise: {error}"))
 }
 
-/// Daemon needs cards with every key `ainb-web`'s inbox mapping writes and a
-/// fully populated ASK payload, plus one unparsed payload.
-fn sample_need_cards() -> serde_json::Value {
-    serde_json::json!([
+/// The web needs cards projected from sample daemon cards: every key
+/// `ainb-web`'s inbox mapping writes, a fully populated ASK payload with its
+/// text drawn from `seed`, and one unparsed payload.
+///
+/// Public so the canary and the tripwire in `tests/state_serde.rs` run their
+/// seeds through the needs projection as they do through the frames (#1081).
+pub fn sample_web_needs(seed: &mut dyn Seed) -> Vec<crate::wire::web::WebNeedCard> {
+    use TextKind::Captured;
+    let cards = serde_json::json!([
         {
             "attentionId": "01J0SAMPLEATTENTION",
             "kind": "ASK",
             "wireKind": "ask_user_question",
             "sessionId": "sample-session",
-            "cwd": "/work/sample-repo",
+            "cwd": format!("/work/{}", seed.text("needs.cwd", Captured)),
             "workspaceId": "sample-workspace",
             "degraded": false,
             "createdAt": 1_700_000_000_000_i64,
@@ -127,18 +132,19 @@ fn sample_need_cards() -> serde_json::Value {
             "hostId": "local",
             "paneUnbound": false,
             "payload": {
-                "question": "sample question",
-                "options": ["sample option"],
-                "text": "sample text",
-                "marker": "sample marker",
-                "snippet": "sample snippet",
-                "pattern": "sample pattern",
-                "message": "sample message",
-                "tool_input": {"questions": []},
+                "question": seed.text("needs.question", Captured),
+                "options": [seed.text("needs.option", Captured)],
+                "text": seed.text("needs.text", Captured),
+                "marker": seed.text("needs.marker", Captured),
+                "snippet": seed.text("needs.snippet", Captured),
+                "pattern": seed.text("needs.pattern", Captured),
+                "message": seed.text("needs.message", Captured),
+                "tool_input": {"questions": [seed.text("needs.tool_input", Captured)]},
             },
         },
-        {"kind": "ERR", "payload": "sample unparsed payload"},
-    ])
+        {"kind": "ERR", "payload": seed.text("needs.unparsed_payload", Captured)},
+    ]);
+    crate::wire::web::need_cards(&cards)
 }
 
 /// The frame around a section body, as it is serialised: `frame.section`,
