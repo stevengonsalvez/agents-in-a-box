@@ -68,6 +68,12 @@ struct Window {
     sidecar_config: SidecarConfig,
 }
 
+/// Every command the palette may offer, with whether each is active now.
+#[tauri::command]
+fn palette(window: tauri::State<'_, Window>) -> Vec<ainb_desktop::host::PaletteEntry> {
+    window.shell.palette()
+}
+
 /// The tab strip, for the webview's first paint.
 #[tauri::command]
 fn terminal_tabs(window: tauri::State<'_, Window>) -> TabsView {
@@ -343,6 +349,7 @@ fn main() {
             sidecar_state,
             show_log,
             retry_sidecar,
+            palette,
             terminal_tabs,
             terminal_output,
             terminal_ack,
