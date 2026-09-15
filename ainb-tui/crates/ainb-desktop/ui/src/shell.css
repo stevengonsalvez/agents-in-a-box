@@ -1,0 +1,71 @@
+:root {
+  --bg: rgb(25, 25, 35);
+  --panel: rgb(30, 30, 40);
+  --border: rgb(100, 149, 237);
+  --gold: rgb(255, 215, 0);
+  --green: rgb(100, 200, 100);
+  --text: rgb(220, 220, 230);
+  --muted: rgb(120, 120, 140);
+  color-scheme: dark;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.banner.connected {
+  color: var(--green);
+}
+
+.banner.degraded,
+.banner.reconnecting {
+  color: var(--gold);
+}
+
+.banner button {
+  background: transparent;
+  border: 1px solid var(--gold);
+  border-radius: 6px;
+  color: var(--gold);
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.sections {
+  padding: 12px 16px;
+  display: grid;
+  gap: 4px;
+}
+
+.section-row {
+  display: flex;
+  gap: 12px;
+  font-family: ui-monospace, monospace;
+}
+
+.section-row .version {
+  color: var(--muted);
+}
+
+.section-row .stale {
+  color: var(--gold);
+}
