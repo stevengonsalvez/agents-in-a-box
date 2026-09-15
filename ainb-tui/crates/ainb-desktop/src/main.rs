@@ -101,11 +101,6 @@ fn terminal_resize(window: tauri::State<'_, Window>, key: String, cols: u16, row
 }
 
 #[tauri::command]
-fn terminal_reattach(window: tauri::State<'_, Window>, key: String) {
-    window.terminals.reattach(&key);
-}
-
-#[tauri::command]
 fn terminal_close(window: tauri::State<'_, Window>, key: String) {
     window.terminals.close(&key);
 }
@@ -312,7 +307,6 @@ fn main() {
             terminal_ack,
             terminal_input,
             terminal_resize,
-            terminal_reattach,
             terminal_close
         ])
         .run(tauri::generate_context!())
