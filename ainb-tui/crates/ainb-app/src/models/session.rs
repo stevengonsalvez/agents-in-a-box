@@ -598,7 +598,13 @@ pub enum SessionStatus {
     Running,
     Stopped,
     Idle, // Tmux exists but Claude stopped
-    Error(String),
+    /// Why the session failed: a Docker or tmux error, captured text, scrubbed
+    /// in a mirror frame and kept verbatim in the session store.
+    Error(
+        #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        String,
+    ),
 }
 
 impl SessionStatus {
