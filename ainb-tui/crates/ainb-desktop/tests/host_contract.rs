@@ -119,6 +119,21 @@ fn effects_come_back_from_dispatch_and_run_after_the_state_write() {
     );
 }
 
+/// A renderer that attaches late gets every subscribed section again.
+#[test]
+fn reframe_sends_every_subscribed_section_again() {
+    let log = Log::default();
+    let mut host = host(&[SectionId::Sessions, SectionId::Shell], &log);
+    let _ = host.tick();
+    log.borrow_mut().clear();
+
+    host.reframe();
+
+    let mut framed = log.borrow().clone();
+    framed.sort();
+    assert_eq!(framed, vec!["frame sessions", "frame shell"]);
+}
+
 #[test]
 fn a_host_built_on_an_injected_config_touches_no_file_under_home() {
     let home = scratch_home();
