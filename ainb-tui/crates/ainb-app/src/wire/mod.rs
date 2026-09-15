@@ -22,6 +22,7 @@ pub mod frame;
 pub mod shape;
 pub mod store;
 pub mod trace;
+pub mod web;
 
 use crate::app::AppState;
 use crate::app::sections::{
@@ -579,7 +580,6 @@ view!(ConfigView<'a> for ConfigSection {
     app_config: crate::config::AppConfig,
     config_screen_state: crate::app::state::ConfigScreenState,
     config_popup_state: crate::components::config_popup::ConfigPopupState,
-    changelog_state: crate::components::ChangelogState,
     statusline_status: Option<crate::cli::statusline_install::StatuslineStatus>,
 });
 
@@ -636,6 +636,24 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
         out
+    }
+
+    /// #1052: the changelog is static content and its scroll is renderer-local,
+    /// so the Config frame names no changelog state and carries none of its text.
+    #[test]
+    fn the_config_frame_carries_no_changelog_state_or_text() {
+        let body = with_scratch_home(|| section_json(&AppState::new(), SectionId::Config));
+        let keys: Vec<&String> = body.as_object().expect("an object body").keys().collect();
+        assert!(
+            !keys.iter().any(|key| key.as_str() == "changelog_state"),
+            "{keys:?}"
+        );
+        let text = serde_json::to_string(&body).expect("serialises");
+        let opening = &crate::components::changelog::CHANGELOG_MARKDOWN[..64];
+        assert!(
+            !text.contains(opening),
+            "the Config frame carries changelog text"
+        );
     }
 
     #[test]

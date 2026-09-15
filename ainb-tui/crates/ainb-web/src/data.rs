@@ -21,7 +21,8 @@ pub type SnapshotFuture<'a> =
 /// Returned by [`DataSource::core`].
 #[derive(Debug, Clone)]
 pub struct CoreSnapshot {
-    /// `ainb --format json list` — the live session list.
+    /// `ainb --format json list --frame`: the live session list, as rows
+    /// projected from the redacted Sessions frame (#1056).
     pub sessions: Value,
     /// The daemon `attention/list` inbox mapped to ASK/ERR/WAIT cards (D18).
     pub needs: Value,
@@ -40,7 +41,8 @@ pub type CostFuture<'a> = Pin<Box<dyn Future<Output = Value> + Send + 'a>>;
 /// CLI adds flow through to the frontend with no code change here.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FleetSnapshot {
-    /// `ainb --format json list` — the live session list.
+    /// `ainb --format json list --frame`: the live session list, as rows
+    /// projected from the redacted Sessions frame (#1056).
     pub sessions: Value,
     /// The daemon `attention/list` inbox mapped to ASK/ERR/WAIT cards (D18).
     /// Each card carries `attentionId` so an ASK can be answered via
@@ -234,13 +236,12 @@ impl AinbCliSource {
                 tracing::debug!(verb, %stderr, "optional ainb subcommand returned non-zero");
                 return Ok(Value::Null);
             }
+            // stderr is logged, never returned: it reaches the HTTP error body,
+            // and a failing verb can print a session's paths or its own input.
+            tracing::warn!(verb, %stderr, status = %output.status, "ainb subcommand failed");
             return Err(DataError::CommandFailed {
                 verb,
-                detail: if stderr.is_empty() {
-                    format!("exited with {}", output.status)
-                } else {
-                    stderr
-                },
+                detail: format!("exited with {}", output.status),
             });
         }
 
@@ -337,10 +338,13 @@ impl DataSource for AinbCliSource {
 
     fn core(&self) -> CoreFuture<'_> {
         Box::pin(async move {
-            // Sessions still come from `ainb list` (the daemon exposes no
-            // host-session snapshot RPC). Needs now read the daemon's attention
-            // inbox instead of the old `ainb fleet needs` capture-pane poll (D18).
-            let sessions = self.run_json(&["list"], false).await?;
+            // Sessions come from `ainb list --frame` (the daemon exposes no
+            // host-session snapshot RPC): the same sessions as `ainb list`, but
+            // as rows projected from the redacted Sessions section frame, so a
+            // label or any text the frame withholds or scrubs never reaches the
+            // browser (#1056). Needs read the daemon's attention inbox instead
+            // of the old `ainb fleet needs` capture-pane poll (D18).
+            let sessions = self.run_json(&["list", "--frame"], false).await?;
             let needs = daemon_needs().await;
             Ok(CoreSnapshot { sessions, needs })
         })
@@ -360,6 +364,28 @@ impl DataSource for AinbCliSource {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn a_failing_verb_reports_its_status_and_keeps_its_stderr_out_of_the_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let bin = dir.path().join("ainb");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho 'session at /home/op/secret-repo failed' >&2\nexit 3\n",
+        )
+        .expect("write the stub");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let source = AinbCliSource {
+            bin: bin.into_os_string(),
+        };
+
+        let error = source.run_json(&["list", "--frame"], false).await.expect_err("the verb fails");
+
+        let shown = error.to_string();
+        assert!(!shown.contains("secret-repo"), "{shown}");
+        assert!(shown.contains("exit status: 3"), "{shown}");
+    }
 
     #[test]
     fn fingerprint_is_stable_and_change_sensitive() {

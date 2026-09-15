@@ -157,10 +157,6 @@ config.app_config.workspace_defaults.scan_cache_ttl_secs
 config.app_config.workspace_defaults.scan_max_depth
 config.app_config.workspace_defaults.workspace_scan_paths[]
 config.app_config.workspace_defaults.worktree_collision_behavior
-config.changelog_state.lines[].content
-config.changelog_state.lines[].style
-config.changelog_state.scroll_offset
-config.changelog_state.total_lines
 config.config_popup_state.description
 config.config_popup_state.popup_type.SecretInput.cursor_position
 config.config_popup_state.popup_type.SecretInput.value_len
@@ -806,5 +802,12 @@ tmux.other_tmux_sessions[].name
 tmux.other_tmux_sessions[].windows
 tmux.selected_other_tmux_index
 tmux.selected_other_tmux_sessions[]
+web_snapshot.sessions[].claude_active
+web_snapshot.sessions[].created_at
+web_snapshot.sessions[].is_running
+web_snapshot.sessions[].session_id
+web_snapshot.sessions[].tmux_session_name
+web_snapshot.sessions[].workspace_name
+web_snapshot.sessions[].worktree_path
 workspace_load.is_loading_workspaces
 workspace_load.workspace_load_error

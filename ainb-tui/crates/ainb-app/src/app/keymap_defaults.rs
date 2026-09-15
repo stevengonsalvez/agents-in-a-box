@@ -836,14 +836,16 @@ pub fn defaults() -> Vec<Binding> {
 
     append_app_rows!(rows, Context::screen("changelog"),
         back: "esc" => AppEvent::ChangelogBack,
-        up: "up" => AppEvent::ChangelogScrollUp,
-        up_k: "k" => AppEvent::ChangelogScrollUp,
-        down: "down" => AppEvent::ChangelogScrollDown,
-        down_j: "j" => AppEvent::ChangelogScrollDown,
-        page_up: "pageup" => AppEvent::ChangelogPageUp,
-        page_down: "pagedown" => AppEvent::ChangelogPageDown,
-        top: "g" => AppEvent::ChangelogToTop,
-        bottom: "G" => AppEvent::ChangelogToBottom,
+    );
+    append_action_rows!(rows, Context::screen("changelog"),
+        up: "up" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ChangelogUp)),
+        up_k: "k" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ChangelogUp)),
+        down: "down" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ChangelogDown)),
+        down_j: "j" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ChangelogDown)),
+        page_up: "pageup" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ChangelogPageUp)),
+        page_down: "pagedown" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ChangelogPageDown)),
+        top: "g" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ChangelogToTop)),
+        bottom: "G" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ChangelogToBottom)),
     );
 
     append_app_rows!(rows, Context::screen("session_recovery"),

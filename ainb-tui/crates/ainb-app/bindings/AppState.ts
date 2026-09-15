@@ -833,25 +833,6 @@ export type ChangedFile = {
 	deletions: number,
 };
 
-/**  A line of rendered markdown content */
-export type ChangelogLine = {
-	content: string,
-	style: ChangelogStyle,
-};
-
-/**  State for the changelog viewer */
-export type ChangelogState = {
-	/**  Parsed markdown lines */
-	lines: ChangelogLine[],
-	/**  Current scroll offset */
-	scroll_offset: number,
-	/**  Total number of lines */
-	total_lines: number,
-};
-
-/**  Styling categories for markdown content */
-export type ChangelogStyle = "Heading1" | "Heading2" | "Heading3" | "Paragraph" | "CodeBlock" | { CodeBlockHeader: string } | "ListItem" | "Bold" | "BlockQuote";
-
 /**  Authentication provider for Claude API */
 export type ClaudeAuthProvider = 
 /**  System authentication (Claude Pro/Max subscription) */
@@ -1203,7 +1184,6 @@ export type ConfigView_Serialize = {
 	app_config: AppConfig_Serialize,
 	config_screen_state: ConfigScreenState_Serialize,
 	config_popup_state: ConfigPopupState_Serialize,
-	changelog_state: ChangelogState,
 	statusline_status: StatuslineStatus_Serialize | null,
 };
 

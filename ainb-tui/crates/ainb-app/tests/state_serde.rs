@@ -501,6 +501,10 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "session working directory, drawn in the session list",
     ),
     (
+        "WebSessionRow.worktree_path",
+        "the web session list's worktree path, Session.workspace_path from the Sessions frame",
+    ),
+    (
         "SessionAttention.detail",
         "agent question text, scrubbed through redact::scrub",
     ),

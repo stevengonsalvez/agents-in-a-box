@@ -29,6 +29,37 @@ fn apply_all(ui: &mut UiState, layout: &mut LayoutComponent, actions: &[ScrollAc
     }
 }
 
+/// #1052: the changelog offset is renderer-local. The actions walk it on this
+/// `UiState`, stop at both ends, and never touch app state: a second renderer
+/// on the same state keeps its own offset.
+#[test]
+fn changelog_scroll_is_this_renderers_and_stops_at_both_ends() {
+    let mut ui = UiState::default();
+    let other = UiState::default();
+    let mut layout = LayoutComponent::new();
+    let last = ainb::components::changelog::changelog_lines().len().saturating_sub(30);
+
+    apply_all(&mut ui, &mut layout, &[ScrollAction::ChangelogUp]);
+    assert_eq!(ui.changelog_scroll, 0, "the top holds");
+    apply_all(
+        &mut ui,
+        &mut layout,
+        &[ScrollAction::ChangelogDown, ScrollAction::ChangelogPageDown],
+    );
+    assert_eq!(ui.changelog_scroll, 31);
+    apply_all(&mut ui, &mut layout, &[ScrollAction::ChangelogPageUp]);
+    assert_eq!(ui.changelog_scroll, 1);
+    apply_all(
+        &mut ui,
+        &mut layout,
+        &[ScrollAction::ChangelogToBottom, ScrollAction::ChangelogDown],
+    );
+    assert_eq!(ui.changelog_scroll, last, "the bottom holds");
+    apply_all(&mut ui, &mut layout, &[ScrollAction::ChangelogToTop]);
+    assert_eq!(ui.changelog_scroll, 0);
+    assert_eq!(other.changelog_scroll, 0, "another renderer is unmoved");
+}
+
 #[test]
 fn logs_scroll_actions_walk_the_offset_and_flip_auto_scroll() {
     let mut ui = UiState::default();

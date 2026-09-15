@@ -673,14 +673,9 @@ pub enum AppEvent {
     StartOnboarding, // Start onboarding wizard (from setup menu)
     FactoryReset,    // Factory reset AINB
     // Changelog viewer events
-    ShowChangelog,       // Navigate to changelog view (v key)
-    ChangelogBack,       // Return to home screen (Esc)
-    ChangelogScrollUp,   // Scroll up one line
-    ChangelogScrollDown, // Scroll down one line
-    ChangelogPageUp,     // Page up
-    ChangelogPageDown,   // Page down
-    ChangelogToTop,      // Jump to top (g)
-    ChangelogToBottom,   // Jump to bottom (G)
+    ShowChangelog, // Navigate to changelog view (v key)
+    ChangelogBack, // Return to home screen (Esc)
+    // Changelog scrolling is renderer-local: `ScrollAction::Changelog*`.
     // Usage analytics: variants removed. The burndown plugin owns these
     // events now; future host→plugin key forwarding flows through
     // AppEvent::Plugin{plugin_id="burndown", payload}.
@@ -6133,31 +6128,6 @@ impl EventHandler {
             AppEvent::ChangelogBack => {
                 tracing::debug!("Changelog back");
                 state.shell.current_screen = screen_ids::HOME.to_string();
-            }
-            AppEvent::ChangelogScrollUp => {
-                tracing::debug!("Changelog scroll up");
-                state.config.changelog_state.scroll_up();
-            }
-            AppEvent::ChangelogScrollDown => {
-                tracing::debug!("Changelog scroll down");
-                // Use a reasonable visible height for scrolling
-                state.config.changelog_state.scroll_down(30);
-            }
-            AppEvent::ChangelogPageUp => {
-                tracing::debug!("Changelog page up");
-                state.config.changelog_state.page_up(30);
-            }
-            AppEvent::ChangelogPageDown => {
-                tracing::debug!("Changelog page down");
-                state.config.changelog_state.page_down(30);
-            }
-            AppEvent::ChangelogToTop => {
-                tracing::debug!("Changelog scroll to top");
-                state.config.changelog_state.scroll_to_top();
-            }
-            AppEvent::ChangelogToBottom => {
-                tracing::debug!("Changelog scroll to bottom");
-                state.config.changelog_state.scroll_to_bottom(30);
             }
             // Usage analytics events: removed. The burndown plugin owns
             // every Analytics-screen state mutation now (period, filters,

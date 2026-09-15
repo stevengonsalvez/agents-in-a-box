@@ -24,7 +24,7 @@ pub mod skill_manager_screen;
 pub mod skills;
 pub mod welcome_panel;
 
-pub use changelog::ChangelogState;
+pub use changelog::changelog_lines;
 pub use git_view::GitViewState;
 pub use log_history_viewer::LogHistoryViewerState;
 pub use session_recovery::SessionRecoveryState;
