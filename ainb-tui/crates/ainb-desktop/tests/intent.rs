@@ -16,7 +16,22 @@ fn a_renderer_intent_reads_the_intent_wire_spelling() {
         let wire = serde_json::to_value(&intent).expect("serialises");
         let renderer: RendererIntent =
             serde_json::from_value(wire).expect("the renderer subset reads it");
-        assert_eq!(Intent::from(renderer), intent);
+        assert_eq!(Intent::try_from(renderer), Ok(intent));
+    }
+}
+
+#[test]
+fn a_host_authored_command_is_refused() {
+    for id in ainb_app::app::reports::ids::ALL
+        .iter()
+        .chain(ainb_app::app::plugin_action::ids::ALL)
+    {
+        let renderer = RendererIntent::Command(CommandId::new(*id), serde_json::Value::Null);
+        assert_eq!(
+            Intent::try_from(renderer),
+            Err(CommandId::new(*id)),
+            "`{id}` came from the webview"
+        );
     }
 }
 
