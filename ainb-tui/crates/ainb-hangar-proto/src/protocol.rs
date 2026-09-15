@@ -163,6 +163,12 @@ pub const CAP_CONNECTIONS_REGISTRY: &str = "hangar.connections.registry";
 /// not see this string is talking to a daemon that ignores the member and
 /// lists every connection.
 pub const CAP_CONNECTIONS_TRANSIENT: &str = "hangar.connections.transient";
+/// Capability: an authenticated `auth/hello` reply names the daemon's minted
+/// `host_id`, a ULID, and the rows it serves carry that id (spec D11, #1066).
+///
+/// A client that does not see this string is talking to a daemon whose rows
+/// name `local`.
+pub const CAP_HOST_IDENTITY: &str = "hangar.host_identity";
 /// Capability: the converged attention inbox, list, subscribe, answer.
 pub const CAP_ATTENTION_INBOX: &str = "hangar.attention.inbox";
 /// Capability: the wire attention row carries its `version`, so a client can
@@ -318,6 +324,7 @@ pub const CAPABILITY_CATALOGUE: &[&str] = &[
     crate::fleet::FLEET_CAPABILITY_STATUS_READ,
     CAP_CONNECTIONS_TRANSIENT,
     crate::fleet::FLEET_CAPABILITY_ROSTER_STATUS_READ,
+    CAP_HOST_IDENTITY,
 ];
 
 /// Whether this build advertises `id`.
