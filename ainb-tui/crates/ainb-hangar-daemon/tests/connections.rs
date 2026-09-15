@@ -363,7 +363,7 @@ impl DataSource for WebServerSource {
             Ok(FleetSnapshot::from_parts(
                 CoreSnapshot {
                     sessions: serde_json::json!([]),
-                    needs: serde_json::json!([]),
+                    needs: Vec::new(),
                 },
                 serde_json::Value::Null,
             ))
@@ -374,7 +374,7 @@ impl DataSource for WebServerSource {
         Box::pin(async {
             Ok(CoreSnapshot {
                 sessions: serde_json::json!([]),
-                needs: serde_json::json!([]),
+                needs: Vec::new(),
             })
         })
     }
