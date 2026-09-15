@@ -529,6 +529,27 @@ fn no_module_in_the_crate_owns_the_plugin_runtime() {
     );
 }
 
+/// The workspace load and the token refresh are policy the state owns
+/// (#1107): hosts call `start_workspace_load` and `refresh_oauth_tokens_if_due`,
+/// and the pieces under them stay private so no host re-implements the timeout
+/// or calls the Docker probe from a draw path.
+#[test]
+fn the_workspace_load_and_token_refresh_pieces_stay_private() {
+    let state =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/state.rs"))
+            .expect("state.rs");
+    let reopened: Vec<&str> = [
+        "pub async fn load_workspaces_async(",
+        "pub fn oauth_token_needs_refresh(",
+        "pub const DOCKER_TIMEOUT_SECS",
+        "pub async fn is_docker_available(",
+    ]
+    .into_iter()
+    .filter(|signature| state.contains(signature))
+    .collect();
+    assert!(reopened.is_empty(), "made public again: {reopened:?}");
+}
+
 /// `HostOnlyState` never serialises: nothing in it may reach a frame.
 #[test]
 fn host_only_state_is_not_serialize() {
