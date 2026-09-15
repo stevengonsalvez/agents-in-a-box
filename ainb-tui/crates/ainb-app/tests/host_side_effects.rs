@@ -439,7 +439,7 @@ fn process_and_clipboard_call_sites_match_the_allow_list() {
 /// a mirrored host cannot draw, so a new one belongs in a versioned section.
 const HOST_STATE_READS: &[(&str, usize, &str)] = &[
     (
-        "app/host.rs",
+        "host.rs",
         9,
         "`App`, the process that owns HostOnlyState: init and tick start the log \
          streaming and live window workers and stamp their timers; nothing here draws",
@@ -503,9 +503,9 @@ fn no_plugin_runtime_handle_lives_in_app_state_or_a_section() {
     }
 }
 
-/// The plugin runtime and its handle are owned by the host crate's `App`
-/// (#1086): no module of `ainb-app` holds either, so a host other than the
-/// terminal brings its own and the reducer crate cannot reach one.
+/// No field in `ainb-app` owns the plugin runtime or its handle, and the crate
+/// defines no `App` to hold them (#1086): the terminal host's `App` owns both
+/// in `ainb-core`, and any other host brings its own.
 #[test]
 fn no_module_in_the_crate_owns_the_plugin_runtime() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -517,8 +517,9 @@ fn no_module_in_the_crate_owns_the_plugin_runtime() {
             "Option<ainb_plugin_runtime::Runtime>",
             "Option<ainb_plugin_runtime::RuntimeHandle>",
             "Option<RuntimeHandle>",
+            "Option<Runtime>",
             "pub struct App ",
-            "pub struct App {",
+            "struct App {",
         ],
         &mut found,
     );
