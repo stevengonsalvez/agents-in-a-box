@@ -833,24 +833,17 @@ export type ChangedFile = {
 	deletions: number,
 };
 
-/**  A line of rendered markdown content */
-export type ChangelogLine = {
-	content: string,
-	style: ChangelogStyle,
-};
-
-/**  State for the changelog viewer */
+/**
+ *  State for the changelog viewer: where it is scrolled to. The lines
+ *  themselves are static content behind [`ChangelogState::lines`], so a frame
+ *  of this state carries two numbers, not the whole changelog (#1052).
+ */
 export type ChangelogState = {
-	/**  Parsed markdown lines */
-	lines: ChangelogLine[],
 	/**  Current scroll offset */
 	scroll_offset: number,
 	/**  Total number of lines */
 	total_lines: number,
 };
-
-/**  Styling categories for markdown content */
-export type ChangelogStyle = "Heading1" | "Heading2" | "Heading3" | "Paragraph" | "CodeBlock" | { CodeBlockHeader: string } | "ListItem" | "Bold" | "BlockQuote";
 
 /**  Authentication provider for Claude API */
 export type ClaudeAuthProvider = 
@@ -4620,8 +4613,11 @@ export type UiPreferences_Serialize = {
 	 *  so the same preference draws proportionally on every surface.
 	 */
 	home_sidebar_fraction: number | null,
-	/**  Preferred Sessions screen sidebar width in terminal columns. */
-	sessions_sidebar_width: number | null,
+	/**
+	 *  Preferred Sessions screen sidebar width as a fraction of its row, so
+	 *  the same preference draws proportionally on every surface.
+	 */
+	sessions_sidebar_fraction: number | null,
 	/**  Whether the Sessions screen sidebar starts minimized. */
 	sessions_sidebar_collapsed: boolean | null,
 	/**
