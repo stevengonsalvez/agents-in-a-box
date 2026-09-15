@@ -160,16 +160,13 @@ pub struct PluginsHostSection {
     /// placeholder, which is the difference between a screen that explains it
     /// cannot start the plugin and one that claims to be loading forever.
     pub plugin_render_errors: std::collections::HashMap<crate::app::screens::ScreenId, String>,
-    /// Cheap Send + Clone façade onto the plugin runtime, populated by
-    /// `App::init`. `None` when running plugin-free (e.g. tests, or
-    /// installs that haven't completed bundled-plugin discovery yet).
-    ///
-    /// Lives on `AppState` rather than `App` so the key-dispatch path
-    /// in `app::events::handle_key_event` can forward keystrokes to
-    /// the focused plugin without needing access to `App`. `App` still
-    /// owns the underlying `Runtime` via `plugin_runtime_owner` so the
-    /// tokio executor is torn down when `App` drops.
-    pub plugin_runtime: Option<ainb_plugin_runtime::RuntimeHandle>,
+    /// What the host's plugin runtime knows about the plugin behind each
+    /// plugin-owned screen, keyed by screen id like its neighbours, as
+    /// `App::tick_plugin_renders` last read it.
+    /// Empty until the runtime is up. The reducer decides from this whether a
+    /// key goes to the plugin or back to the host, and a renderer whether the
+    /// screen is loading or its plugin is absent; neither asks the runtime.
+    pub plugin_presence: std::collections::BTreeMap<crate::app::screens::ScreenId, PluginPresence>,
     /// Each plugin's last `ui.state` view, keyed by plugin id, for a renderer
     /// that draws the plugin's screen itself. Refreshed by
     /// `tick_plugin_renders`; the host stores the JSON and never reads into
@@ -186,6 +183,16 @@ pub struct PluginsHostSection {
     /// renewed. A watch lapses unless renewed within
     /// `AppState::PLUGIN_SCREEN_WATCH_LEASE`, and goes when its plugin does.
     pub watched_plugin_screens: std::collections::BTreeMap<String, ScreenWatch>,
+}
+
+/// One plugin as the host's runtime knows it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+pub struct PluginPresence {
+    /// The runtime has the plugin registered, running or not.
+    pub registered: bool,
+    /// Its render has blown its budget, so input sent to it sits unserviced.
+    pub wedged: bool,
 }
 
 /// The requests keeping one plugin screen rendering for hosts that are not
@@ -269,7 +276,7 @@ impl Default for PluginsHostSection {
             pending_plugin_renders: std::collections::HashMap::new(),
             plugin_captures_text: std::collections::HashMap::new(),
             plugin_render_errors: std::collections::HashMap::new(),
-            plugin_runtime: None,
+            plugin_presence: std::collections::BTreeMap::new(),
             plugin_ui_states: std::collections::HashMap::new(),
             plugin_ui_state_spent: std::collections::HashMap::new(),
             watched_plugin_screens: std::collections::BTreeMap::new(),

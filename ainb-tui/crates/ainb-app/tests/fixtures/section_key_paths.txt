@@ -571,6 +571,8 @@ onboarding.setup_menu_state.pending_action
 onboarding.setup_menu_state.selected_index
 onboarding.setup_menu_state.showing_confirmation
 plugins_host.plugin_captures_text
+plugins_host.plugin_presence{}.registered
+plugins_host.plugin_presence{}.wedged
 plugins_host.plugin_render_errors{}
 recovery.session_recovery_state.action_result
 recovery.session_recovery_state.last_error

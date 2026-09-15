@@ -28,7 +28,8 @@ pub mod state;
 pub mod versioned;
 
 pub use effect::{
-    EditorPath, Effect, Persist, Snapshot, TerminalTarget, TmuxSessionName, ToolTerminal,
+    EditorPath, Effect, Persist, PluginInput, Snapshot, TerminalTarget, TmuxSessionName,
+    ToolTerminal,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use events::{AppEvent, EventHandler};

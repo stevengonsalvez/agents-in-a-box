@@ -82,6 +82,21 @@ pub enum Effect {
         action_id: String,
         payload: serde_json::Value,
     },
+    /// Send `input`, already translated to the plugin protocol, to `plugin`,
+    /// which owns `screen`.
+    ///
+    /// Terminal host: sends it through the plugin runtime it owns. When a key
+    /// that leaves the screen (`back`) cannot be serviced (the plugin is gone
+    /// or its render is wedged), it reports
+    /// [`crate::app::reports::plugin_input_undelivered`] so the reducer leaves
+    /// the screen itself. Other input the plugin cannot take is dropped.
+    /// Desktop host: the same, through its own runtime.
+    ForwardToPlugin {
+        plugin: String,
+        screen: String,
+        input: PluginInput,
+        back: bool,
+    },
     /// Write what the step just changed in a store.
     ///
     /// The reducer never writes to disk, so `dispatch` never waits on it, and
@@ -105,6 +120,13 @@ pub enum Effect {
     /// until that setting changes again; the report says so and the host does
     /// not retry.
     Persist(Persist),
+}
+
+/// Input for a plugin, in the protocol's portable shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginInput {
+    Key(ainb_plugin_runtime::KeyEvent),
+    Mouse(ainb_plugin_runtime::MouseEvent),
 }
 
 /// A store an [`Effect::Persist`] writes.

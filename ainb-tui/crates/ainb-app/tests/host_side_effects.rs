@@ -461,6 +461,40 @@ fn terminal_host_reads_of_host_only_state_match_the_allow_list() {
     );
 }
 
+/// The plugin runtime handle is the host's (#1045): no line of `AppState`'s
+/// struct or of any section names it, so the reducer cannot reach the runtime
+/// again by holding it.
+#[test]
+fn no_plugin_runtime_handle_lives_in_app_state_or_a_section() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
+    let state = std::fs::read_to_string(src.join("state.rs")).expect("state.rs");
+    let start = state.find("pub struct AppState {").expect("AppState struct");
+    let end = start + state[start..].find("\n}\n").expect("AppState struct end");
+    let sections = std::fs::read_to_string(src.join("sections.rs")).expect("sections.rs");
+    for (file, text) in [
+        ("state.rs AppState", &state[start..end]),
+        ("sections.rs", sections.as_str()),
+    ] {
+        let holding: Vec<&str> = non_test_lines(text)
+            .into_iter()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| {
+                [
+                    "RuntimeHandle",
+                    "ainb_plugin_runtime::Runtime>",
+                    "plugin_runtime: ",
+                ]
+                .iter()
+                .any(|name| line.contains(name))
+            })
+            .collect();
+        assert!(
+            holding.is_empty(),
+            "{file} holds the plugin runtime again: {holding:?}"
+        );
+    }
+}
+
 /// `HostOnlyState` never serialises: nothing in it may reach a frame.
 #[test]
 fn host_only_state_is_not_serialize() {

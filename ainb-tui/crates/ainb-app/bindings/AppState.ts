@@ -3338,6 +3338,14 @@ export type PickerBranchEntry = {
 	in_use: boolean,
 };
 
+/**  One plugin as the host's runtime knows it. */
+export type PluginPresence = {
+	/**  The runtime has the plugin registered, running or not. */
+	registered: boolean,
+	/**  Its render has blown its budget, so input sent to it sits unserviced. */
+	wedged: boolean,
+};
+
 /**
  *  Per-plugin filter persisted in `config.toml`.
  * 
@@ -3395,6 +3403,7 @@ export type PluginsHostView = PluginsHostView_Serialize;
 
 export type PluginsHostView_Serialize = {
 	plugin_captures_text: { [key in string]: boolean },
+	plugin_presence: { [key in string]: PluginPresence },
 	plugin_render_errors: { [key in string]: string },
 };
 

@@ -6,7 +6,7 @@ pub use ainb_app::app::screens::builtin::*;
 use crate::app::ui_state::UiState;
 use ratatui::{Frame, layout::Rect};
 
-use super::{EventOutcome, Screen, ids};
+use super::{Screen, ids};
 use crate::app::AppState;
 use crate::components::{
     AttachedTerminalComponent, AuthProviderPopupComponent, AuthSetupComponent, ChangelogComponent,
@@ -141,9 +141,9 @@ pub fn crossterm_to_protocol_key(
 /// the panel was opened from. This replaces the old behaviour where
 /// Esc on a zoomed plugin view discarded zoom state and jumped
 /// straight home. `Backspace` remains a plugin-internal alias for the
-/// same one-level pop. When the plugin is missing or its runtime is
-/// down, the forwarder returns `NotHandled` and Esc falls through to
-/// the central dispatch, which still closes the placeholder screen.
+/// same one-level pop. When the plugin is missing or its render is
+/// wedged, [`route_key_to_focused_plugin`] returns `Host` for Esc and q,
+/// so the central dispatch still closes the placeholder screen.
 ///
 /// `q`, `a`, `Tab`, `Enter`, etc. remain plugin-owned — the burndown
 /// plugin re-binds them to period switches, panel focus, and zoom
@@ -163,61 +163,82 @@ pub fn is_host_reserved_key(
     }
 }
 
-/// Try to forward `key` to the plugin owning `current_screen`. Returns
-/// `Handled` if the host claimed it (plugin forwarder ran or the host
-/// reservation list bailed us out), `NotHandled` if the caller's
-/// upstream key dispatch should run instead (no plugin owns this
-/// screen, or no plugin runtime is initialised yet).
-pub fn forward_key_to_focused_plugin(
-    state: &mut AppState,
+/// Where input on a plugin-owned screen goes.
+#[derive(Debug, PartialEq)]
+pub enum PluginRoute {
+    /// The plugin takes it: run this `Effect::ForwardToPlugin`.
+    Forward(crate::app::Effect),
+    /// The plugin screen takes it, but there is nothing to send (an unmodelled
+    /// key, pointer-move spam, a click outside the plugin, a plugin the runtime
+    /// does not have). Host dispatch must not run for it either.
+    Consumed,
+    /// Not the plugin's: the host's own dispatch runs.
+    Host,
+}
+
+/// Route `key` on the focused screen: to the plugin that owns it, or back to
+/// the host.
+///
+/// Decided from state alone. The host's runtime is never asked: what it knows
+/// about the plugin arrives in `plugins_host.plugin_presence`, and a key that
+/// then cannot be delivered comes back as a report.
+#[must_use]
+pub fn route_key_to_focused_plugin(
+    state: &AppState,
     key: &crossterm::event::KeyEvent,
-) -> EventOutcome {
+) -> PluginRoute {
     let Some(plugin_name) = plugin_id_for_screen(&state.shell.current_screen) else {
-        return EventOutcome::NotHandled;
+        return PluginRoute::Host;
     };
     let capturing = focused_plugin_captures_text(state);
     if is_host_reserved_key(key, plugin_owns_help_keys(state), capturing) {
-        // Host claims this key — let the central dispatch in
-        // `events.rs` resolve it to Quit / ToggleHelp / etc.
-        return EventOutcome::NotHandled;
+        // Host claims this key: the central dispatch in `events.rs` resolves
+        // it to Quit / ToggleHelp / etc.
+        return PluginRoute::Host;
     }
-    let Some(runtime) = state.plugins_host.plugin_runtime.as_ref() else {
-        return EventOutcome::NotHandled;
-    };
+    // A screen the tick has not reported on yet (the runtime is not up, or
+    // this frame came first) is treated as absent, never as the host's: the
+    // host's rows on the screen beneath include destructive ones.
+    let presence = state
+        .plugins_host
+        .plugin_presence
+        .get(&state.shell.current_screen)
+        .copied()
+        .unwrap_or_default();
+    // Esc and q leave the screen. When the plugin is absent or its render is
+    // wedged the key would not be acted on, so the central dispatch takes it
+    // (PanelBack) rather than trapping the user with only Ctrl+C.
+    let back = matches!(
+        key.code,
+        crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q')
+    );
+    if back && (!presence.registered || presence.wedged) {
+        return PluginRoute::Host;
+    }
+    // Every other key stays claimed on an absent plugin's screen, so the
+    // session list's destructive bindings (`d` delete, `n` new session, …)
+    // cannot fire from it.
+    if !presence.registered {
+        return PluginRoute::Consumed;
+    }
     let Some(protocol_key) = crossterm_to_protocol_key(key) else {
-        // Unmodelled key (e.g. media keys) — silently drop. Better
-        // than forging a wire shape.
-        return EventOutcome::Handled;
+        // Unmodelled key (e.g. media keys): dropped rather than forging a wire
+        // shape.
+        return PluginRoute::Consumed;
     };
-    let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
-    let delivered = runtime.send_key(&pid, state.shell.current_screen.clone(), protocol_key);
-    // A plugin whose render has blown its budget is holding the one mutex its
-    // inline `handle_key` dispatch also needs, so the key WAS delivered and
-    // will simply sit in its channel unserviced. That is indistinguishable from
-    // a frozen screen to the user, so treat it exactly like a dead plugin.
-    let unserviceable = !delivered || runtime.render_wedged(&pid);
-    if unserviceable
-        && matches!(
-            key.code,
-            crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q')
-        )
-    {
-        // Plugin unregistered, its task is gone, or its render is wedged — the
-        // key is not going to be acted on. Esc/q must stay escapable there (the
-        // central dispatch resolves them to PanelBack), or the user is trapped
-        // with only Ctrl+C. Other keys stay claimed so the session-list
-        // fallthrough's destructive bindings (`d` delete, `n` new session, …)
-        // can't fire from a dead or wedged plugin screen.
-        return EventOutcome::NotHandled;
-    }
-    EventOutcome::Handled
+    PluginRoute::Forward(crate::app::Effect::ForwardToPlugin {
+        plugin: plugin_name.to_string(),
+        screen: state.shell.current_screen.clone(),
+        input: crate::app::PluginInput::Key(protocol_key),
+        back,
+    })
 }
 
 /// Convert a `crossterm::event::MouseEvent` into the portable wire shape
 /// consumed by `plugin/handle_mouse`. Coordinates are left as the
 /// absolute terminal column/row the caller received — translation into
 /// the plugin's viewport space happens in
-/// [`forward_mouse_to_focused_plugin`], which knows the screen origin.
+/// [`route_mouse_to_focused_plugin`], which knows the screen origin.
 #[must_use]
 pub fn crossterm_to_protocol_mouse(
     event: &crossterm::event::MouseEvent,
@@ -271,46 +292,46 @@ pub fn crossterm_to_protocol_mouse(
     }
 }
 
-/// Try to forward `event` to the plugin owning `current_screen`.
+/// Route a pointer `event` on the focused screen: to the plugin that owns it,
+/// or back to the host.
 ///
-/// Mirrors [`forward_key_to_focused_plugin`] for the pointer. Returns
-/// `Handled` whenever a plugin owns the focused screen — even if the
-/// event is dropped (outside the plugin's rect, or a high-frequency
-/// `Moved`) — so the host's own mouse handling never double-acts on a
-/// plugin screen. Returns `NotHandled` when no plugin owns the screen or
-/// the runtime isn't up yet, letting the caller's host-side mouse
-/// dispatch run.
-///
-/// Coordinates are translated from absolute terminal space into the
-/// plugin's viewport (origin subtracted) before forwarding, so the
-/// plugin hit-tests against the same `(0, 0)`-based grid it painted.
-pub fn forward_mouse_to_focused_plugin(
-    state: &mut AppState,
+/// Mirrors [`route_key_to_focused_plugin`]. A plugin-owned screen consumes
+/// every pointer event, even one it drops (a high-frequency `Moved`, a click
+/// outside the plugin's rect), so the host's own mouse handling never
+/// double-acts on it. Coordinates are translated from absolute terminal space
+/// into the plugin's viewport (origin subtracted), so the plugin hit-tests
+/// against the same `(0, 0)`-based grid it painted.
+#[must_use]
+pub fn route_mouse_to_focused_plugin(
+    state: &AppState,
     ui: &UiState,
     event: &crossterm::event::MouseEvent,
-) -> EventOutcome {
+) -> PluginRoute {
     use ainb_plugin_runtime::MouseKind;
 
     let Some(plugin_name) = plugin_id_for_screen(&state.shell.current_screen) else {
-        return EventOutcome::NotHandled;
+        return PluginRoute::Host;
     };
-    let Some(runtime) = state.plugins_host.plugin_runtime.as_ref() else {
-        return EventOutcome::NotHandled;
-    };
+    // Absent or not yet reported: the plugin screen still owns the pointer,
+    // so the host's click handling never runs on it.
+    let registered = state
+        .plugins_host
+        .plugin_presence
+        .get(&state.shell.current_screen)
+        .is_some_and(|presence| presence.registered);
+    if !registered {
+        return PluginRoute::Consumed;
+    }
 
     let mut mouse = crossterm_to_protocol_mouse(event);
 
     // Drop pointer-move spam: forwarding every `Moved` would flood the
     // priority mouse channel for an event the map doesn't need (no hover
-    // semantics in v1). Still report Handled so host move-handling stays
-    // off the plugin screen.
+    // semantics in v1).
     if matches!(mouse.kind, MouseKind::Moved) {
-        return EventOutcome::Handled;
+        return PluginRoute::Consumed;
     }
 
-    // Translate absolute terminal coords → plugin-viewport coords. Drop
-    // (still Handled) when the point falls outside the plugin's painted
-    // rect rather than forwarding a click the plugin would mis-hit-test.
     let origin = ui
         .plugin_render_origins
         .get(&state.shell.current_screen)
@@ -323,14 +344,17 @@ pub fn forward_mouse_to_focused_plugin(
         .copied()
         .unwrap_or((0, 0));
     let Some((col, row)) = click_to_viewport(mouse.col, mouse.row, origin, area) else {
-        return EventOutcome::Handled;
+        return PluginRoute::Consumed;
     };
     mouse.col = col;
     mouse.row = row;
 
-    let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
-    let _ = runtime.send_mouse(&pid, state.shell.current_screen.clone(), mouse);
-    EventOutcome::Handled
+    PluginRoute::Forward(crate::app::Effect::ForwardToPlugin {
+        plugin: plugin_name.to_string(),
+        screen: state.shell.current_screen.clone(),
+        input: crate::app::PluginInput::Mouse(mouse),
+        back: false,
+    })
 }
 
 /// Translate an absolute terminal `(col, row)` into a plugin-viewport
@@ -393,13 +417,12 @@ fn build_placeholder_for_unloaded_plugin(
     };
 
     let plugin_name = plugin_id_for_screen(screen_id);
-    let plugin_registered = match (plugin_name, state.plugins_host.plugin_runtime.as_ref()) {
-        (Some(name), Some(rt)) => {
-            let pid = ainb_plugin_runtime::PluginId::from(name);
-            rt.lifecycle_state(&pid).is_some()
-        }
-        _ => false,
-    };
+    let plugin_registered = plugin_name.is_some()
+        && state
+            .plugins_host
+            .plugin_presence
+            .get(screen_id)
+            .is_some_and(|presence| presence.registered);
 
     // A recorded render failure outranks the loading beat: the plugin is
     // registered, so case 3 would otherwise paint "connecting…" forever.
@@ -629,14 +652,6 @@ impl Screen for PluginScreen {
                 );
             }
         }
-    }
-
-    fn handle_key(
-        &mut self,
-        state: &mut AppState,
-        key: &crossterm::event::KeyEvent,
-    ) -> EventOutcome {
-        forward_key_to_focused_plugin(state, key)
     }
 }
 
@@ -1243,134 +1258,154 @@ mod tests {
         );
     }
 
-    /// Regression (PR #249 review HIGH-1): with the runtime up but the
-    /// plugin NOT registered — exactly the "[plugin unavailable]"
-    /// placeholder state — `send_key` drops the keystroke. Esc/q must
-    /// fall through to the central dispatch (→ PanelBack) so the
-    /// placeholder stays escapable; every other key stays claimed so
-    /// session-list bindings (`d` delete, `n` new session, …) can't
-    /// fire from a dead plugin screen.
-    #[test]
-    fn undelivered_esc_and_q_fall_through_on_placeholder_screen() {
-        use crossterm::event::{
-            KeyCode as CtKey, KeyEvent as CtEvent, KeyEventKind, KeyEventState, KeyModifiers,
-        };
-
-        // Real runtime, zero plugins registered → lifecycle_state(burndown)
-        // is None and send_key returns false.
-        let (runtime, handle) =
-            ainb_plugin_runtime::Runtime::new().expect("runtime constructs without plugins");
-        let mut state = crate::app::state::AppState::default();
-        state.plugins_host.plugin_runtime = Some(handle);
-        state.shell.current_screen = ids::ANALYTICS.to_string();
-
-        let mk = |code| CtEvent {
-            code,
-            modifiers: KeyModifiers::NONE,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::empty(),
-        };
-
-        assert!(
-            matches!(
-                forward_key_to_focused_plugin(&mut state, &mk(CtKey::Esc)),
-                EventOutcome::NotHandled
-            ),
-            "undelivered Esc must fall through so PanelBack can run"
-        );
-        assert!(
-            matches!(
-                forward_key_to_focused_plugin(&mut state, &mk(CtKey::Char('q'))),
-                EventOutcome::NotHandled
-            ),
-            "undelivered q must fall through so PanelBack can run"
-        );
-        assert!(
-            matches!(
-                forward_key_to_focused_plugin(&mut state, &mk(CtKey::Char('d'))),
-                EventOutcome::Handled
-            ),
-            "undelivered non-nav keys stay claimed — no destructive fallthrough"
-        );
-
-        runtime.shutdown();
-    }
-
-    /// On a plugin-owned screen the forwarder FORWARDS `?`/`H` to the plugin
-    /// (claiming the key) whatever the per-frame `captures_text` stash says.
-    /// That stash lags one render, so gating on it (8hx) still let the first
-    /// keystrokes into a freshly opened plugin text field reach the host help
-    /// toggle, which then swallowed every later key until Esc. `Ctrl+C` (host
-    /// quit) stays reserved regardless.
-    #[test]
-    fn plugin_screen_forwards_help_keys_regardless_of_capture_flag() {
-        use crossterm::event::{
-            KeyCode as CtKey, KeyEvent as CtEvent, KeyEventKind, KeyEventState, KeyModifiers,
-        };
-
-        // Runtime up, plugin not registered — send_key returns false but the
-        // forwarder still CLAIMS a non-nav key (returns Handled), so this
-        // isolates the reservation decision from live delivery.
-        let (runtime, handle) =
-            ainb_plugin_runtime::Runtime::new().expect("runtime constructs without plugins");
-        let mut state = crate::app::state::AppState::default();
-        state.plugins_host.plugin_runtime = Some(handle);
-        state.shell.current_screen = ids::HANGAR.to_string();
-
-        let mk = |code, mods| CtEvent {
+    fn key(
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+    ) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent {
             code,
             modifiers: mods,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::empty(),
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        }
+    }
+
+    fn on_plugin_screen(screen: &str, registered: bool, wedged: bool) -> AppState {
+        let mut state = crate::app::state::AppState::default();
+        state.shell.current_screen = screen.to_string();
+        state.plugins_host.plugin_presence.insert(
+            screen.to_string(),
+            crate::app::sections::PluginPresence { registered, wedged },
+        );
+        state
+    }
+
+    /// Regression (PR #249 review HIGH-1): with the runtime up but the plugin
+    /// NOT registered, the "[plugin unavailable]" placeholder, Esc/q go back to
+    /// the central dispatch (PanelBack) so the placeholder stays escapable, and
+    /// every other key stays claimed so session-list bindings (`d` delete, `n`
+    /// new session, …) cannot fire from a dead plugin screen. A wedged render
+    /// escapes the same way.
+    #[test]
+    fn esc_and_q_leave_an_absent_or_wedged_plugin_and_other_keys_stay_claimed() {
+        use crossterm::event::{KeyCode as CtKey, KeyModifiers};
+
+        for (registered, wedged) in [(false, false), (true, true)] {
+            let state = on_plugin_screen(ids::ANALYTICS, registered, wedged);
+            for code in [CtKey::Esc, CtKey::Char('q')] {
+                assert_eq!(
+                    route_key_to_focused_plugin(&state, &key(code, KeyModifiers::NONE)),
+                    PluginRoute::Host,
+                    "{code:?} leaves (registered {registered}, wedged {wedged})"
+                );
+            }
+        }
+        let absent = on_plugin_screen(ids::ANALYTICS, false, false);
+        assert_eq!(
+            route_key_to_focused_plugin(&absent, &key(CtKey::Char('d'), KeyModifiers::NONE)),
+            PluginRoute::Consumed,
+            "no destructive fallthrough from an absent plugin"
+        );
+
+        // Nothing reported for the screen yet (the runtime is not up, or the
+        // first tick has not run): absent, so `d` is claimed and Esc still
+        // leaves.
+        let unreported = {
+            let mut state = crate::app::state::AppState::default();
+            state.shell.current_screen = ids::ANALYTICS.to_string();
+            state
         };
-        // Forward a bare (unmodified) char key to the focused plugin.
-        let fwd = |state: &mut AppState, ch: char| {
-            forward_key_to_focused_plugin(state, &mk(CtKey::Char(ch), KeyModifiers::NONE))
+        assert_eq!(
+            route_key_to_focused_plugin(&unreported, &key(CtKey::Char('d'), KeyModifiers::NONE)),
+            PluginRoute::Consumed,
+            "an unreported plugin screen never hands `d` to the session list"
+        );
+        assert_eq!(
+            route_key_to_focused_plugin(&unreported, &key(CtKey::Esc, KeyModifiers::NONE)),
+            PluginRoute::Host,
+            "and Esc still leaves it"
+        );
+    }
+
+    /// A live plugin gets the key as an effect for the host, with `back` set
+    /// on the keys that leave the screen, and nothing touches a runtime.
+    #[test]
+    fn a_key_for_a_live_plugin_is_an_effect_for_the_host() {
+        use crossterm::event::{KeyCode as CtKey, KeyModifiers};
+
+        let state = on_plugin_screen(ids::HANGAR, true, false);
+        let PluginRoute::Forward(crate::app::Effect::ForwardToPlugin {
+            plugin,
+            screen,
+            input,
+            back,
+        }) = route_key_to_focused_plugin(&state, &key(CtKey::Esc, KeyModifiers::NONE))
+        else {
+            panic!("Esc on a live plugin is forwarded");
+        };
+        assert_eq!(
+            (plugin.as_str(), screen.as_str(), back),
+            ("hangar-tui", ids::HANGAR, true)
+        );
+        assert!(matches!(input, crate::app::PluginInput::Key(_)));
+
+        let PluginRoute::Forward(crate::app::Effect::ForwardToPlugin { back, .. }) =
+            route_key_to_focused_plugin(&state, &key(CtKey::Char('j'), KeyModifiers::NONE))
+        else {
+            panic!("a plain key on a live plugin is forwarded");
+        };
+        assert!(!back);
+    }
+
+    /// On a plugin-owned screen the router FORWARDS `?`/`H` to the plugin
+    /// whatever the per-frame `captures_text` stash says. That stash lags one
+    /// render, so gating on it (8hx) still let the first keystrokes into a
+    /// freshly opened plugin text field reach the host help toggle, which then
+    /// swallowed every later key until Esc. `Ctrl+C` (host quit) stays
+    /// reserved regardless.
+    #[test]
+    fn plugin_screen_forwards_help_keys_regardless_of_capture_flag() {
+        use crossterm::event::{KeyCode as CtKey, KeyModifiers};
+
+        let mut state = on_plugin_screen(ids::HANGAR, true, false);
+        let forwarded = |state: &AppState, ch: char| {
+            matches!(
+                route_key_to_focused_plugin(state, &key(CtKey::Char(ch), KeyModifiers::NONE)),
+                PluginRoute::Forward(_)
+            )
         };
 
-        // Capture flag unset (the stale-frame window right after a plugin opens
-        // a text field): `?`/`H` still belong to the plugin.
         assert!(
             !focused_plugin_captures_text(&state),
             "precondition: the capture stash is empty"
         );
         assert!(plugin_owns_help_keys(&state), "hangar renders its own help");
         assert!(
-            matches!(fwd(&mut state, 'H'), EventOutcome::Handled),
-            "H is forwarded to the plugin even before its capture frame lands"
+            forwarded(&state, 'H'),
+            "H is forwarded before the capture frame lands"
         );
         assert!(
-            matches!(fwd(&mut state, '?'), EventOutcome::Handled),
-            "? is forwarded to the plugin even before its capture frame lands"
+            forwarded(&state, '?'),
+            "? is forwarded before the capture frame lands"
         );
 
-        // Declare text-capture (as the plugin's `captures_text` frame would):
-        // unchanged, still forwarded.
         state.plugins_host.plugin_captures_text.insert(ids::HANGAR.to_string(), true);
         assert!(
             focused_plugin_captures_text(&state),
             "the stash drives focused_plugin_captures_text"
         );
         assert!(
-            matches!(fwd(&mut state, 'H'), EventOutcome::Handled),
-            "H must be forwarded to the plugin input while it captures text"
+            forwarded(&state, 'H'),
+            "H reaches the plugin input while it captures text"
         );
         assert!(
-            matches!(fwd(&mut state, '?'), EventOutcome::Handled),
-            "? must be forwarded to the plugin input while it captures text"
+            forwarded(&state, '?'),
+            "? reaches the plugin input while it captures text"
         );
-        // Ctrl+C stays host-reserved even while the plugin captures text.
-        assert!(
-            matches!(
-                forward_key_to_focused_plugin(
-                    &mut state,
-                    &mk(CtKey::Char('c'), KeyModifiers::CONTROL)
-                ),
-                EventOutcome::NotHandled
-            ),
+        assert_eq!(
+            route_key_to_focused_plugin(&state, &key(CtKey::Char('c'), KeyModifiers::CONTROL)),
+            PluginRoute::Host,
             "Ctrl+C (host quit) is never relaxed by text-capture"
         );
-
-        runtime.shutdown();
     }
 }

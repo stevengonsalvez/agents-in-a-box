@@ -21,13 +21,9 @@ use crate::app::{Effect, Intent, TerminalTarget, ToolTerminal};
 ///
 /// The executor holds no state: everything an effect needs rides on it, plus
 /// the renderer's own `ui` layout, the live tmux client it keeps for the
-/// preview pane, and the plugin runtime handle.
-///
-/// Divergence, D1's first: the handle is not yet the host's alone. The run
-/// loop reads `plugins` from `AppState.plugins_host.plugin_runtime`, because
-/// `forward_key_to_focused_plugin` and `forward_mouse_to_focused_plugin` in
-/// `screens/builtin.rs` call the runtime from inside the reducer step. It
-/// leaves `AppState` when forwarding becomes an effect the host runs (#1045).
+/// preview pane, and the plugin runtime handle the host owns (`App`). The
+/// reducer never reaches the runtime: plugin input and actions arrive here as
+/// `Effect::ForwardToPlugin` and `Effect::RunPluginAction`.
 ///
 /// `Err` means the terminal itself could not be suspended or restored, which
 /// the run loop treats as fatal; every failure the user can act on is a report
@@ -76,6 +72,36 @@ pub fn execute<'t>(
             Ok(()) => Vec::new(),
             Err(error) => vec![reports::persist_failed(store.store_id(), &error)],
         }),
+        Effect::ForwardToPlugin {
+            plugin,
+            screen,
+            input,
+            back,
+        } => {
+            let pid = ainb_plugin_runtime::PluginId::from(plugin.as_str());
+            // A render past its budget holds the mutex the plugin's input
+            // dispatch also needs, so a delivered key sits unserviced there,
+            // which to the user is the same as a dead plugin.
+            let serviced = plugins.is_some_and(|runtime| {
+                let delivered = match input {
+                    crate::app::PluginInput::Key(key) => {
+                        runtime.send_key(&pid, screen.clone(), key)
+                    }
+                    crate::app::PluginInput::Mouse(mouse) => {
+                        runtime.send_mouse(&pid, screen.clone(), mouse)
+                    }
+                };
+                delivered && !runtime.render_wedged(&pid)
+            });
+            Work::Done(if back && !serviced {
+                vec![reports::plugin_input_undelivered(&plugin, &screen)]
+            } else {
+                if !serviced {
+                    tracing::debug!(%plugin, %screen, "plugin input dropped: not serviced");
+                }
+                Vec::new()
+            })
+        }
         Effect::RunPluginAction {
             plugin,
             action_id,

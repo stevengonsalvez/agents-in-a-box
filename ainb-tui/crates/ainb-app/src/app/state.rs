@@ -12837,6 +12837,18 @@ impl AppState {
         }
     }
 
+    /// Record what the host's runtime knows about the plugin behind
+    /// `screen`. Bumps the plugins-host section only when that changed.
+    pub fn record_plugin_presence(
+        &mut self,
+        screen: &str,
+        presence: crate::app::sections::PluginPresence,
+    ) {
+        if self.plugins_host.plugin_presence.get(screen) != Some(&presence) {
+            self.plugins_host.plugin_presence.insert(screen.to_string(), presence);
+        }
+    }
+
     /// How long another host's watch on a plugin screen lasts unless renewed.
     /// A host keeping a screen live re-sends its watch within this; a host
     /// that went away stops, and so does the rendering done for it.
@@ -13198,10 +13210,13 @@ pub struct App {
     pub state: AppState,
     /// Owning handle to the plugin runtime's tokio executor. Held by `App`
     /// so dropping `App` joins every plugin task and tears down the runtime.
-    /// `None` until [`App::init`] runs. The cheap Send + Clone façade lives
-    /// on `state.plugins_host.plugin_runtime` so dispatchers reach it without needing
-    /// access to `App`.
+    /// `None` until [`App::init`] runs.
     plugin_runtime_owner: Option<ainb_plugin_runtime::Runtime>,
+    /// The Send + Clone façade onto that runtime. The host's alone: the
+    /// reducer never reaches the runtime, it queues `Effect::ForwardToPlugin`
+    /// and `Effect::RunPluginAction`, and reads what the runtime knows from
+    /// `plugins_host.plugin_presence`.
+    plugin_runtime: Option<ainb_plugin_runtime::RuntimeHandle>,
     /// Filesystem watcher that keeps the burndown usage snapshot live by
     /// nudging session-reader to rescan on provider-dir changes. Held by
     /// `App` so the watch (and its debounce task) stops when `App` drops.
@@ -13234,6 +13249,7 @@ impl App {
         Self {
             state,
             plugin_runtime_owner: None,
+            plugin_runtime: None,
             usage_dir_watcher: None,
             plugin_render_outcomes: std::collections::HashMap::new(),
         }
@@ -13247,6 +13263,18 @@ impl App {
     /// `Runtime::shutdown` doc for the wider picture.
     pub fn take_plugin_runtime(&mut self) -> Option<ainb_plugin_runtime::Runtime> {
         self.plugin_runtime_owner.take()
+    }
+
+    /// The host's plugin runtime handle, once [`App::init`] brought it up.
+    #[must_use]
+    pub const fn plugin_runtime(&self) -> Option<&ainb_plugin_runtime::RuntimeHandle> {
+        self.plugin_runtime.as_ref()
+    }
+
+    /// Use `handle` as the host's plugin runtime, for a host that brings its
+    /// own runtime up (tests, a host without bundled discovery).
+    pub fn set_plugin_runtime(&mut self, handle: ainb_plugin_runtime::RuntimeHandle) {
+        self.plugin_runtime = Some(handle);
     }
 
     /// Drain any freshly-painted plugin frames into
@@ -13273,7 +13301,7 @@ impl App {
         // Clone the cheap Send + Clone handle so we can hold a reference
         // to the runtime while also mutably borrowing the various
         // `state.*` plugin caches below.
-        let Some(handle) = self.state.plugins_host.plugin_runtime.clone() else {
+        let Some(handle) = self.plugin_runtime.clone() else {
             return false;
         };
         let mut drained = false;
@@ -13310,10 +13338,22 @@ impl App {
             // its global single-char shortcuts while a plugin input is focused
             // (8hx). Done before the lifecycle skip so an unregistered plugin's
             // stale flag is cleared to false rather than lingering true.
-            self.state
-                .plugins_host
-                .plugin_captures_text
-                .insert((*screen_id).to_string(), handle.captures_text(&pid));
+            // Compare first: an unconditional write bumps the section every
+            // tick, and a mirrored host would be sent a frame for nothing.
+            let captures = handle.captures_text(&pid);
+            if self.state.plugins_host.plugin_captures_text.get(*screen_id) != Some(&captures) {
+                self.state
+                    .plugins_host
+                    .plugin_captures_text
+                    .insert((*screen_id).to_string(), captures);
+            }
+            self.state.record_plugin_presence(
+                screen_id,
+                crate::app::sections::PluginPresence {
+                    registered: handle.lifecycle_state(&pid).is_some(),
+                    wedged: handle.render_wedged(&pid),
+                },
+            );
 
             // Skip plugins the runtime doesn't know about — keeps the
             // loop cheap and resilient when discovery comes up empty.
@@ -13498,7 +13538,7 @@ impl App {
                     warn!(plugin = %name, error = %err, "plugin failed to load");
                 }
                 self.plugin_runtime_owner = Some(runtime);
-                self.state.plugins_host.plugin_runtime = Some(handle.clone());
+                self.plugin_runtime = Some(handle.clone());
 
                 // Surface each loaded plugin's `[[config]]` schema in the
                 // Settings ▸ Plugins category. `from_app_config` built the
@@ -14007,7 +14047,7 @@ mod plugin_render_gate_tests {
             ));
         }
         let mut app = App::new();
-        app.state.plugins_host.plugin_runtime = Some(handle);
+        app.set_plugin_runtime(handle);
         (runtime, app)
     }
 
@@ -14015,7 +14055,7 @@ mod plugin_render_gate_tests {
     fn hidden_screen_gets_no_render_kick_and_stays_dirty() {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
         let mut viewports = crate::app::screens::PluginViewports::default();
-        let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
+        let handle = app.plugin_runtime().cloned().expect("handle wired");
         let pid = PluginId::from("learnings");
 
         app.state.shell.current_screen = ids::SESSION_LIST.to_string();
@@ -14042,7 +14082,7 @@ mod plugin_render_gate_tests {
     fn dirty_plugin_kick_deferred_until_viewport_known() {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
         let mut viewports = crate::app::screens::PluginViewports::default();
-        let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
+        let handle = app.plugin_runtime().cloned().expect("handle wired");
         let pid = PluginId::from("learnings");
 
         // Ticks while hidden: gated, dirty preserved (proved above).
@@ -14081,7 +14121,7 @@ mod plugin_render_gate_tests {
     fn only_the_focused_plugin_screen_is_kicked() {
         let (runtime, mut app) = app_with_plugins(&["learnings", "burndown"]);
         let mut viewports = crate::app::screens::PluginViewports::default();
-        let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
+        let handle = app.plugin_runtime().cloned().expect("handle wired");
 
         app.state.shell.current_screen = ids::LEARNINGS.to_string();
         // Focused screen has painted once (area known); the hidden one hasn't.
