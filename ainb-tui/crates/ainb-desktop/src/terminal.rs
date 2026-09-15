@@ -876,23 +876,30 @@ fn attach_command(tmux: &Tmux, name: &str) -> CommandBuilder {
 /// and `TMUX_TMPDIR` from the parent, `TERM` for the xterm.js it draws into,
 /// and no `TMUX`, or a desktop started inside tmux would refuse to nest.
 ///
-/// An app started from a desktop launcher often has no locale at all, and
-/// under the C locale tmux draws UTF-8 as underscores, so one is supplied.
+/// An app started from a desktop launcher often has no locale, or a C one,
+/// and under it tmux draws UTF-8 as underscores. The character type in effect
+/// is the first set of `LC_ALL`, `LC_CTYPE` and `LANG`; when it is not UTF-8 a
+/// default goes in `LC_ALL`, which outranks a copied-through `LC_ALL=C`.
 fn apply_client_env(
     command: &mut CommandBuilder,
     vars: impl IntoIterator<Item = (String, String)>,
 ) {
-    let mut locale = false;
+    let (mut all, mut ctype, mut lang) = (None, None, None);
     for (key, value) in vars {
         if key == "PATH" || key == "LANG" || key == "TMUX_TMPDIR" || key.starts_with("LC_") {
-            locale |= (key == "LANG" || key == "LC_ALL" || key == "LC_CTYPE")
-                && value.to_uppercase().contains("UTF-8");
+            match key.as_str() {
+                "LC_ALL" => all = Some(value.clone()),
+                "LC_CTYPE" => ctype = Some(value.clone()),
+                "LANG" => lang = Some(value.clone()),
+                _ => {}
+            }
             command.env(key, value);
         }
     }
-    if !locale {
+    let in_effect = [all, ctype, lang].into_iter().flatten().find(|value| !value.is_empty());
+    if !in_effect.is_some_and(|value| value.to_uppercase().replace('-', "").contains("UTF8")) {
         command.env(
-            "LANG",
+            "LC_ALL",
             if cfg!(target_os = "macos") {
                 "en_US.UTF-8"
             } else {
@@ -978,7 +985,7 @@ mod tests {
 
         assert_eq!(env_of(&command, "PATH").as_deref(), Some("/usr/bin"));
         assert_eq!(env_of(&command, "TMUX_TMPDIR").as_deref(), Some("/tmp/t"));
-        assert!(env_of(&command, "LANG").is_some_and(|lang| lang.ends_with("UTF-8")));
+        assert!(env_of(&command, "LC_ALL").is_some_and(|all| all.ends_with("UTF-8")));
         assert_eq!(env_of(&command, "TERM").as_deref(), Some("xterm-256color"));
         assert_eq!(env_of(&command, "TMUX"), None);
 
@@ -994,6 +1001,17 @@ mod tests {
             None,
             "a UTF-8 locale from the parent is kept as is"
         );
+
+        // LC_ALL=C outranks a UTF-8 LANG, so the default replaces it.
+        let mut command = CommandBuilder::new("tmux");
+        command.env_clear();
+        apply_client_env(
+            &mut command,
+            [("LC_ALL", "C"), ("LANG", "en_GB.UTF-8")]
+                .map(|(key, value)| (key.to_string(), value.to_string())),
+        );
+        assert!(env_of(&command, "LC_ALL").is_some_and(|all| all.ends_with("UTF-8")));
+        assert_eq!(env_of(&command, "LANG").as_deref(), Some("en_GB.UTF-8"));
     }
 
     /// A pump whose webview acknowledges nothing stops at the window.
