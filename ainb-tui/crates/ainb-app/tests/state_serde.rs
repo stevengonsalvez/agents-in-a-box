@@ -501,6 +501,18 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "session working directory, drawn in the session list",
     ),
     (
+        "WebNeedCard.hostId",
+        "the host a web needs card came from, e.g. `local`",
+    ),
+    (
+        "WebNeedCard.sessionKey",
+        "the card's `provider:session-id` identity, not a credential",
+    ),
+    (
+        "WebNeedPayload.message",
+        "attention message text on a web needs card, scrubbed through redact::scrub",
+    ),
+    (
         "WebSessionRow.worktree_path",
         "the web session list's worktree path, Session.workspace_path from the Sessions frame",
     ),
@@ -732,6 +744,14 @@ const TYPE_ALLOW: &[(&str, &str)] = &[
     (
         "UnitRow.targets",
         "tool names a skill unit targets, e.g. `claude`",
+    ),
+    (
+        "WebNeedCard.channels",
+        "push channel tokens (`web`, `os`) resolved at raise time",
+    ),
+    (
+        "WebNeedPayload.options",
+        "ASK option labels on a web needs card, each scrubbed through redact::scrub",
     ),
     (
         "ValidatedPath.expanded_path",
