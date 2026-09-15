@@ -211,6 +211,90 @@ jobs:
           fi
 
   # ────────────────────────────────────────────────────────────────────────────
+  # Mirror fan-out bench (W0-mirror, D15). A SolidJS store at 100 sessions takes
+  # a seeded 2,000-frame burst over 2 s. Per-drain apply must hold the spike 4
+  # ceilings (12,800 computation runs, 32.5 ms apply per 1,000 frames, 2.4 ms
+  # longest unit, exactly 125 apply units) and per-send mode must fail both
+  # numeric gates, so a regression to one write per frame cannot pass. No Rust
+  # build: the bench is the renderer half of the contract.
+  # ────────────────────────────────────────────────────────────────────────────
+  mirror-fanout:
+    name: Mirror fan-out bench
+    needs: changes
+    if: >-
+      !cancelled() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ainb-tui/bench/mirror-fanout
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ainb-tui/bench/mirror-fanout/package-lock.json
+      - name: Install the bench's pinned SolidJS
+        run: npm ci --no-audit --no-fund
+      - name: Run the bench and assert the ceilings
+        run: npm run bench
+      - name: Keep the numbers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirror-fanout-results
+          path: ainb-tui/bench/mirror-fanout/results.json
+          if-no-files-found: warn
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # TypeScript bindings freshness (W0-mirror, D15). `AppState.ts` is generated
+  # from the mirror frame's Rust types by specta behind the one
+  # `typescript-bindings` feature and committed, like docs/tui/cli.md. This job
+  # builds the feature across the type closure, regenerates the file and fails
+  # on any diff, then type-checks the sample frames' real JSON against it with
+  # `tsc --strict`, so the contract describes what a host sends.
+  # ────────────────────────────────────────────────────────────────────────────
+  bindings:
+    name: TypeScript bindings freshness
+    needs: changes
+    if: >-
+      !cancelled() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "ainb-tui -> target"
+      - name: Regenerate AppState.ts and write the sample frames
+        run: |
+          UPDATE_APP_STATE_TS=1 WRITE_BINDINGS_SAMPLE="$PWD/crates/ainb-app/bindings/sample.check.ts" \
+            cargo test -p ainb-app --features typescript-bindings --test bindings
+        working-directory: ${{ env.WORKING_DIR }}
+      - name: Assert ainb-app/bindings/AppState.ts is up to date
+        run: |
+          if ! git ls-files --error-unmatch ainb-tui/crates/ainb-app/bindings/AppState.ts > /dev/null 2>&1; then
+            echo "::error::AppState.ts is not tracked by git: generate it and commit the result." >&2
+            exit 1
+          fi
+          if ! git diff --exit-code -- ainb-tui/crates/ainb-app/bindings/AppState.ts; then
+            echo "::error::AppState.ts is stale: run UPDATE_APP_STATE_TS=1 cargo test -p ainb-app --features typescript-bindings --test bindings and commit the result." >&2
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ainb-tui/crates/ainb-app/bindings/package-lock.json
+      - name: Type-check the sample frames against AppState.ts
+        run: npm ci --no-audit --no-fund && npm run check
+        working-directory: ainb-tui/crates/ainb-app/bindings
+
+  # ────────────────────────────────────────────────────────────────────────────
   # Tests — cross-platform with nextest
   # ────────────────────────────────────────────────────────────────────────────
   test:

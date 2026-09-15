@@ -65,6 +65,7 @@ pub fn attention_stale_after_ms() -> i64 {
 /// surface and stable display names for the text/TUI surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum DaemonKind {
     /// Native Telegram/Slack phone bridge.
     Bridge,
@@ -148,6 +149,7 @@ impl DaemonKind {
 /// a live-and-working daemon from a dead one, and a clean stop from a crash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum DaemonState {
     /// Process alive and heartbeating (or native signals confirm it's serving).
     Running,
@@ -180,6 +182,7 @@ impl DaemonState {
 
 /// One row of the Daemons view — the typed model both surfaces render.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct DaemonStatus {
     /// Which daemon this describes.
     pub kind: DaemonKind,
@@ -219,6 +222,7 @@ pub struct DaemonStatus {
         skip_serializing_if = "Option::is_none",
         serialize_with = "crate::wire::fields::scrub_opt_in_frame"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub last_error: Option<String>,
     /// Epoch ms of the last SUCCESSFUL poll of the attention source by this
     /// daemon's outbound worker (bridge only). `None` = never polled.
@@ -230,6 +234,7 @@ pub struct DaemonStatus {
         skip_serializing_if = "Option::is_none",
         serialize_with = "crate::wire::fields::scrub_opt_in_frame"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub last_attention_error: Option<String>,
     /// How many INBOUND chat channels the daemon started (bridge only). `0` for
     /// a daemon that makes no inbound claim.
@@ -246,10 +251,12 @@ pub struct DaemonStatus {
         skip_serializing_if = "Option::is_none",
         serialize_with = "crate::wire::fields::scrub_opt_in_frame"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub last_inbound_error: Option<String>,
     /// A short human explanation of the state — the load-bearing field for
     /// telling "clean stop" from "crashed (stale heartbeat)".
     #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub reason: String,
     /// The instance whose OS scheduler is installed while the instance itself
     /// is NOT provisioned (ATC only). A timer firing into nothing produces an

@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use super::state::{DepInstall, OnboardingState, OnboardingStep, QuestionnaireKind};
-use crate::setup::{DepReport, DepState, Tier, TopicReport};
+use crate::setup::{DepReport, DepState, DepTier, TopicReport};
 use std::collections::HashMap;
 
 // Color palette from TUI style guide
@@ -1509,9 +1509,9 @@ fn dep_checkbox(d: &DepReport) -> (&'static str, Color) {
         return ("[✓]", SELECTION_GREEN);
     }
     match d.tier {
-        Tier::Required => ("[ ]", ERROR_RED),
-        Tier::Recommended => ("[ ]", WARNING_YELLOW),
-        Tier::Optional | Tier::Suggested => ("[ ]", MUTED_GRAY),
+        DepTier::Required => ("[ ]", ERROR_RED),
+        DepTier::Recommended => ("[ ]", WARNING_YELLOW),
+        DepTier::Optional | DepTier::Suggested => ("[ ]", MUTED_GRAY),
     }
 }
 
@@ -1533,7 +1533,7 @@ mod tests {
     use crate::components::onboarding::state::{
         DepInstall, OnboardingState, OnboardingStep, QuestionnaireKind,
     };
-    use crate::setup::{DepReport, DepState, SetupStatus, Tier, TopicReport};
+    use crate::setup::{DepReport, DepState, DepTier, SetupStatus, TopicReport};
     use ratatui::{Terminal, backend::TestBackend};
 
     /// Render the wizard at `state` and return the screen as text.
@@ -1666,7 +1666,7 @@ mod tests {
             id: "witr",
             name: "witr",
             why: "process causality tracing",
-            tier: Tier::Optional,
+            tier: DepTier::Optional,
             consumers: vec![],
             install_hint: "brew install witr".to_string(),
             auto_installable: true,

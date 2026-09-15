@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct McpServerConfig {
     /// Server name
     pub name: String,
@@ -37,6 +38,7 @@ pub struct McpServerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum McpInstallation {
     /// NPM package
     Npm {
@@ -53,9 +55,11 @@ pub enum McpInstallation {
     /// Git repository
     Git {
         #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
         url: String,
         branch: Option<String>,
         #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
         install_command: Option<String>,
     },
 
@@ -65,25 +69,30 @@ pub enum McpInstallation {
     /// Custom installation script
     Custom {
         #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
         script: String,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum McpServerDefinition {
     /// Simple command-based server
     Command {
         command: String,
         #[serde(serialize_with = "crate::wire::fields::scrub_vec_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<String>))]
         args: Vec<String>,
         #[serde(default, serialize_with = "crate::wire::fields::env_values_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = HashMap<String, String>))]
         env: HashMap<String, String>,
     },
 
     /// JSON-based configuration (for complex servers)
     Json {
         #[serde(skip_serializing_if = "crate::wire::fields::omit_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(skip))]
         config: serde_json::Value,
     },
 }

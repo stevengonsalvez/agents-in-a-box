@@ -255,9 +255,8 @@ fleet.fleet_snapshot[].capabilities.tmux_text
 fleet.fleet_snapshot[].capabilities.verified_picker
 fleet.fleet_snapshot[].confidence
 fleet.fleet_snapshot[].current_request_fingerprint
-fleet.fleet_snapshot[].cwd
 fleet.fleet_snapshot[].discovered_at
-fleet.fleet_snapshot[].display_name
+fleet.fleet_snapshot[].host_id
 fleet.fleet_snapshot[].last_observed_at
 fleet.fleet_snapshot[].lifecycle
 fleet.fleet_snapshot[].lifecycle_updated_at
@@ -269,6 +268,7 @@ fleet.fleet_snapshot[].process_start_fingerprint
 fleet.fleet_snapshot[].provenance
 fleet.fleet_snapshot[].provider
 fleet.fleet_snapshot[].provider_session_id
+fleet.fleet_snapshot[].reasoning_effort
 fleet.fleet_snapshot[].session_key
 fleet.fleet_snapshot[].tmux_target
 fleet.fleet_snapshot[].transport_health
@@ -288,6 +288,12 @@ fleet.live_window.seven_day_pct
 fleet.live_window.seven_day_resets_at
 fleet.live_window.source
 fleet.live_window.today_cost_usd
+frame.daemon_read.clock_ms
+frame.daemon_read.revision
+frame.epoch
+frame.host_id
+frame.section
+frame.version
 git_view.git_view_state.active_tab
 git_view.git_view_state.can_push
 git_view.git_view_state.changed_files[].deletions
@@ -623,7 +629,6 @@ sessions.workspaces[].sessions[].branch_name
 sessions.workspaces[].sessions[].codex_model
 sessions.workspaces[].sessions[].container_id
 sessions.workspaces[].sessions[].created_at
-sessions.workspaces[].sessions[].display_name
 sessions.workspaces[].sessions[].git_changes.added
 sessions.workspaces[].sessions[].git_changes.deleted
 sessions.workspaces[].sessions[].git_changes.modified
@@ -770,7 +775,6 @@ ssh.ssh_sessions[].branch_name
 ssh.ssh_sessions[].codex_model
 ssh.ssh_sessions[].container_id
 ssh.ssh_sessions[].created_at
-ssh.ssh_sessions[].display_name
 ssh.ssh_sessions[].git_changes.added
 ssh.ssh_sessions[].git_changes.deleted
 ssh.ssh_sessions[].git_changes.modified

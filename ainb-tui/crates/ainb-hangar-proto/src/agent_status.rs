@@ -44,6 +44,7 @@ use crate::fleet::{
 /// [`Tier::AcpFeed`] may assert that a human is needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum Tier {
     /// 0: a provider lifecycle hook pushed this.
     Hook,
@@ -88,6 +89,7 @@ impl Tier {
 /// Who produced the state, in the vocabulary every surface prints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum Provenance {
     /// A provider lifecycle hook.
     Hook,
@@ -104,6 +106,7 @@ pub enum Provenance {
 /// cannot be explained to an operator in one word does not belong here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AgentState {
     /// The agent is running a turn.
     Working,
@@ -238,6 +241,7 @@ pub const LOCAL_HOST_ID: &str = "local";
 /// The kind of human input a waiting agent needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum WaitKind {
     /// A structured question.
     Ask,
@@ -265,6 +269,7 @@ impl WaitKind {
 /// How an operator can reach a session's terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum Attachment {
     /// An exact tmux pane can be attached.
     Tmux,
@@ -347,6 +352,12 @@ pub struct RosterStatusResult {
     /// As [`AgentStatusResult::unknown_events`].
     #[serde(default)]
     pub unknown_events: Vec<UnknownEventCount>,
+    /// The daemon's own clock, epoch ms, when it took the read. Evidence stamps
+    /// (`evidence_observed_at`) are on this clock too, so a surface computes an
+    /// age from the two and never from its own now (W0-mirror). `0` from a
+    /// daemon that predates the field.
+    #[serde(default)]
+    pub read_at_ms: i64,
 }
 
 /// Join a roster snapshot and a status read per `session_key`.
@@ -355,8 +366,25 @@ pub struct RosterStatusResult {
 /// surface on the pre-section read (`[fleet.status] legacy_panel`) calls it on
 /// its two replies instead of keeping a join of its own. A session the status
 /// read does not name is left out: a row without a state is not a row.
+///
+/// `read_at_ms` is the daemon's clock at the read, the clock the evidence
+/// stamps are on; a caller that has no daemon clock passes `0`, which surfaces
+/// read as "unknown" and age on their own now. It is a parameter, not a field
+/// set afterwards, so no producer can forget it:
+///
+/// ```compile_fail
+/// # use ainb_hangar_proto::agent_status::{join, AgentStatusResult};
+/// # use ainb_hangar_proto::fleet::FleetSnapshot;
+/// fn producer(snapshot: &FleetSnapshot, status: &AgentStatusResult) {
+///     let _ = join(snapshot, status); // no daemon clock: does not compile
+/// }
+/// ```
 #[must_use]
-pub fn join(snapshot: &FleetSnapshot, status: &AgentStatusResult) -> RosterStatusResult {
+pub fn join(
+    snapshot: &FleetSnapshot,
+    status: &AgentStatusResult,
+    read_at_ms: i64,
+) -> RosterStatusResult {
     let states: std::collections::BTreeMap<&str, &AgentStatusRow> =
         status.rows.iter().map(|row| (row.session_key.as_str(), row)).collect();
     let read_revision = snapshot.head_revision.min(status.head_revision);
@@ -376,6 +404,7 @@ pub fn join(snapshot: &FleetSnapshot, status: &AgentStatusResult) -> RosterStatu
         rows,
         read_revision,
         unknown_events: status.unknown_events.clone(),
+        read_at_ms,
     }
 }
 
@@ -793,7 +822,7 @@ mod tests {
             head_revision: 8,
             unknown_events: Vec::new(),
         };
-        let joined = join(&snapshot, &status);
+        let joined = join(&snapshot, &status, 0);
         assert_eq!(joined.read_revision, 8);
         assert_eq!(joined.rows.len(), 1, "a session with no state is not a row");
         assert_eq!(joined.rows[0].session.session_key, "claude:s-1");

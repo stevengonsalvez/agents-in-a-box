@@ -8,7 +8,7 @@ pub mod detect;
 pub mod installer;
 pub mod provision;
 
-pub use catalog::{Consumer, Dep, Detect, Install, Platform, Tier, Topic, catalog};
+pub use catalog::{Consumer, Dep, DepTier, Detect, Install, Platform, Topic, catalog};
 pub use detect::{
     DepReport, DepState, Env, RealEnv, SetupStatus, TopicReport, detect_all, detect_dep,
 };

@@ -57,6 +57,7 @@ const MASCOT_MINI: &[&str] = &["╭─◉◉─╮", "│ ── │", "╰─�
 
 /// Animation frame types
 #[derive(serde::Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum MascotFrame {
     Neutral,
     Blink,
@@ -66,6 +67,7 @@ pub enum MascotFrame {
 
 /// Mascot animation controller
 #[derive(serde::Serialize, Clone, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct MascotAnimation {
     pub current_frame: MascotFrame,
     #[serde(skip)]

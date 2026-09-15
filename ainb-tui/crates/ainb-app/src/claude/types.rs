@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ClaudeRole {
     #[serde(rename = "user")]
     User,
@@ -13,6 +14,7 @@ pub enum ClaudeRole {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ClaudeMessage {
     pub role: ClaudeRole,
     pub content: String,

@@ -51,6 +51,7 @@ pub const SOURCE_TMUX: &str = "tmux";
 /// Evidence health for a hook-backed fleet reader. This describes observation
 /// only: callers decide what, if anything, to do with it.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum EvidenceHealth {
     /// Hook wiring has current evidence for active Claude work, or no work is expected.
     Healthy,
@@ -74,6 +75,7 @@ impl EvidenceHealth {
 
 /// Counts behind one hook-evidence health verdict.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct EvidenceCensus {
     /// Verdict for the hook-backed state reader.
     pub health: EvidenceHealth,

@@ -32,17 +32,7 @@ enum Ansi {
 
 async fn capture(tmux_session: &str, lines: u32, ansi: Ansi) -> Result<String> {
     let scroll_arg = format!("-{lines}");
-    let mut args = vec![
-        "capture-pane",
-        "-t",
-        tmux_session,
-        "-p",
-        "-S",
-        scroll_arg.as_str(),
-    ];
-    if ansi == Ansi::Kept {
-        args.push("-e");
-    }
+    let args = capture_args(tmux_session, &scroll_arg, ansi);
     let output = Command::new("tmux")
         .args(args)
         .output()
@@ -61,6 +51,20 @@ async fn capture(tmux_session: &str, lines: u32, ansi: Ansi) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn capture_args<'a>(tmux_session: &'a str, scroll_arg: &'a str, ansi: Ansi) -> Vec<&'a str> {
+    let mut args = vec!["capture-pane", "-t", tmux_session, "-p", "-S", scroll_arg];
+    match ansi {
+        Ansi::Kept => args.push("-e"),
+        // `-J` joins lines tmux soft-wrapped at the pane width. Without it a
+        // token longer than the pane is split across two lines, and every
+        // reader of this text, a redaction scrub included, sees two halves
+        // that match no shape. The send path's `-e` capture keeps the wrap: its
+        // composer check compares the pane's rows as drawn.
+        Ansi::Stripped => args.push("-J"),
+    }
+    args
 }
 
 pub fn detect_signals_from_pane(pane: &str, at_ms: i64) -> Vec<Signal> {
@@ -84,6 +88,19 @@ pub fn detect_signals_from_pane(pane: &str, at_ms: i64) -> Vec<Signal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stripped_capture_joins_soft_wrapped_lines_and_a_kept_one_does_not() {
+        let stripped = capture_args("dev", "-200", Ansi::Stripped);
+        assert!(stripped.contains(&"-J"), "{stripped:?}");
+        assert!(!stripped.contains(&"-e"), "{stripped:?}");
+        let kept = capture_args("dev", "-200", Ansi::Kept);
+        assert!(kept.contains(&"-e"), "{kept:?}");
+        assert!(
+            !kept.contains(&"-J"),
+            "the send path compares rows as drawn: {kept:?}"
+        );
+    }
 
     #[test]
     fn box_drawn_pane_snippet_does_not_panic() {
