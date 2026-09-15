@@ -73,11 +73,10 @@ pub(crate) struct HandleInner {
     pub(crate) workspace_store: crate::workspace_store::SharedWorkspaceStore,
     pub(crate) config: RuntimeConfig,
     /// Monotonic counter the host bumps once per `send_key` call.
-    /// Stamped into `HandleKeyParams.generation`; the plugin echoes it
-    /// back via the next `plugin/render` so the host has a freshness
-    /// witness. Shared across every clone of the handle so the same
-    /// sequence works regardless of which `RuntimeHandle` queued the
-    /// keystroke.
+    /// Stamped into `HandleKeyParams.generation`, which the plugin task uses
+    /// to order keys against the renders it requests (#1087). Shared across
+    /// every clone of the handle so the same sequence works regardless of
+    /// which `RuntimeHandle` queued the keystroke.
     pub(crate) key_generation: Arc<AtomicU64>,
     /// Monotonic counter the host bumps once per `send_mouse` call.
     /// Parallel to [`Self::key_generation`]; stamped into
@@ -310,14 +309,17 @@ impl RuntimeHandle {
     /// `plugin/handle_key` notification frame.
     ///
     /// The host allocates a monotonic `generation` per call (shared
-    /// across all clones of [`RuntimeHandle`]) so the plugin can echo
-    /// it back via the next `plugin/render` and the host can prove the
-    /// keystroke landed before the frame was painted.
+    /// across all clones of [`RuntimeHandle`]). The plugin task stamps each
+    /// render with the last one it wrote, which is how it tells whether a
+    /// frame reflects a key; the plugin reads nothing back.
     ///
     /// Returns `false` if the plugin is unknown or the task is gone, or when
-    /// the key is an Esc and the plugin has painted no answer to the last
-    /// [`crate::plugin_task::ESC_UNANSWERED_LIMIT`] in a row (#1087); the
-    /// keystroke is dropped on the floor in every case. Caller is
+    /// the key is an Esc that goes to the host instead (#1087): the plugin
+    /// has painted no answer to the last
+    /// [`crate::plugin_task::ESC_UNANSWERED_LIMIT`] Esc presses in a row, or
+    /// the user has pressed Esc [`crate::plugin_task::ESC_PRESS_CEILING`]
+    /// times with no other key. The keystroke is dropped on the floor in
+    /// every case. Caller is
     /// expected to surface a soft error or simply ignore — interactive
     /// keys are tolerant of loss compared to snapshots.
     pub fn send_key(
