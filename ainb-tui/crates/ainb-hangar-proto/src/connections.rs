@@ -98,6 +98,22 @@ pub struct ConnectionRow {
     pub connected_at: DateTime<Utc>,
     /// Tmux clients observed by the daemon's periodic probe.
     pub tmux_clients: Vec<String>,
+    /// For a [`SurfaceKind::Plugin`] connection, the surface hosting it, set by
+    /// the daemon only when the kernel backed the plugin's host claim (#1040).
+    /// `None` for every other connection, and for an unbacked claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_surface: Option<SurfaceHost>,
+}
+
+impl ConnectionRow {
+    /// The surface a person acting through this connection sat at (#1073): a
+    /// verified plugin's host (the TUI whose Hangar screen sent an answer),
+    /// otherwise the connection's own surface kind. An unbacked host claim is
+    /// attributed to the plugin itself, so it cannot borrow a surface's name.
+    #[must_use]
+    pub fn attributed_kind(&self) -> SurfaceKind {
+        self.host_surface.map_or(self.surface.kind, |host| host.kind)
+    }
 }
 
 /// Result of `hangar/connections_list`.
@@ -137,6 +153,40 @@ mod tests {
                 kind: SurfaceKind::Desktop,
                 pid: 42
             }
+        );
+    }
+
+    /// #1073: a verified plugin acts for its host; anything else for itself.
+    #[test]
+    fn a_verified_plugin_row_is_attributed_to_its_host() {
+        let row = |kind, host_surface| ConnectionRow {
+            conn_id: 1,
+            surface: SurfaceInfo { kind, pid: 7 },
+            host: "box".into(),
+            connected_at: DateTime::<Utc>::UNIX_EPOCH,
+            tmux_clients: Vec::new(),
+            host_surface,
+        };
+        let tui = Some(SurfaceHost {
+            kind: SurfaceKind::Tui,
+            pid: 5,
+        });
+        assert_eq!(
+            row(SurfaceKind::Plugin, tui).attributed_kind(),
+            SurfaceKind::Tui
+        );
+        assert_eq!(
+            row(SurfaceKind::Plugin, None).attributed_kind(),
+            SurfaceKind::Plugin
+        );
+        assert_eq!(
+            row(SurfaceKind::Web, None).attributed_kind(),
+            SurfaceKind::Web
+        );
+        let wire = serde_json::to_value(row(SurfaceKind::Web, None)).unwrap();
+        assert!(
+            wire.get("host_surface").is_none(),
+            "absent unless a host was verified"
         );
     }
 
