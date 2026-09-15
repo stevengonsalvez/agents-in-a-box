@@ -897,7 +897,7 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
                     adopted_sessions = outcome.adopted_sessions,
                     "daemon identity"
                 );
-                crate::host_identity::spawn_event_adoption(
+                let _adoption = crate::host_identity::spawn_event_adoption(
                     store.pool().clone(),
                     outcome.identity.host_id,
                 );
