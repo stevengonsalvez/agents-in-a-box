@@ -1,21 +1,41 @@
 //! Slow fixture plugin: identical to `fixture_plugin` except render
 //! sleeps 200ms before replying — used by `tripwire_nonblocking` to
 //! prove the TUI render thread never blocks on a slow plugin.
+//!
+//! A render whose viewport is [`HOLD_VIEWPORT_WIDTH`] wide is not answered on a
+//! timer at all: its reply is held until the plugin receives the
+//! [`RELEASE_KEY`] key through `plugin/handle_key`, a notification that gets no
+//! reply of its own. Any other key (an Esc a host test sends to a wedged
+//! screen) leaves it held. The render watchdog tests use it so the overrun, and
+//! the late answer that lifts the wedge, happen in a fixed order instead of
+//! racing a sleep (#1133). The same width is written into
+//! `tests/render_watchdog.rs` and `ainb-core/tests/plugin_forward_executor.rs`;
+//! change all three together.
 
 use std::io::{BufReader, Write};
 use std::time::Duration;
 
 use ainb_plugin_protocol::framing::{MAX_BODY_BYTES, encode};
 use ainb_plugin_protocol::methods;
-use ainb_plugin_protocol::params::{PluginInitResult, RenderResult};
+use ainb_plugin_protocol::params::{
+    HandleKeyParams, KeyCode, PluginInitResult, RenderParams, RenderResult,
+};
 use ainb_plugin_protocol::wire_buffer::{Cell, Coord, WireBuffer};
 use serde_json::{Value, json};
+
+/// A render requested this wide is held until [`RELEASE_KEY`] arrives.
+const HOLD_VIEWPORT_WIDTH: u16 = 4093;
+
+/// The key that releases a held render.
+const RELEASE_KEY: char = 'r';
 
 fn main() {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = stdout.lock();
+    // The id of a render whose reply is held, per `HOLD_VIEWPORT_WIDTH`.
+    let mut held_render: Option<u64> = None;
 
     loop {
         let body = match read_frame_sync(&mut reader) {
@@ -48,18 +68,30 @@ fn main() {
                 }
             }
             methods::PLUGIN_RENDER => {
+                // Parsed hard: a params shape this build no longer reads would
+                // otherwise fall back to the sleeping reply and quietly bring
+                // back the race the hold mode exists to remove.
+                let params: RenderParams =
+                    serde_json::from_value(v.get("params").cloned().unwrap_or(Value::Null))
+                        .expect("slow-fixture: render params");
+                if params.viewport.width == HOLD_VIEWPORT_WIDTH {
+                    held_render = id;
+                    continue;
+                }
                 // Deliberate 200ms delay to simulate slow plugin.
                 std::thread::sleep(Duration::from_millis(200));
                 if let Some(id) = id {
-                    let mut buf = WireBuffer::new(1, 1);
-                    buf.push(Coord::new(0, 0), Cell::new("S"));
-                    let result = serde_json::to_value(RenderResult {
-                        buffer: buf,
-                        redraw: false,
-                        captures_text: false,
-                    })
-                    .unwrap();
-                    write_response(&mut writer, id, &result);
+                    write_render_reply(&mut writer, id);
+                }
+            }
+            methods::PLUGIN_HANDLE_KEY => {
+                let params: HandleKeyParams =
+                    serde_json::from_value(v.get("params").cloned().unwrap_or(Value::Null))
+                        .expect("slow-fixture: handle_key params");
+                if params.key.code == (KeyCode::Char { ch: RELEASE_KEY }) {
+                    if let Some(held) = held_render.take() {
+                        write_render_reply(&mut writer, held);
+                    }
                 }
             }
             methods::PLUGIN_SHUTDOWN => {
@@ -77,6 +109,18 @@ fn main() {
             }
         }
     }
+}
+
+fn write_render_reply<W: Write>(w: &mut W, id: u64) {
+    let mut buf = WireBuffer::new(1, 1);
+    buf.push(Coord::new(0, 0), Cell::new("S"));
+    let result = serde_json::to_value(RenderResult {
+        buffer: buf,
+        redraw: false,
+        captures_text: false,
+    })
+    .unwrap();
+    write_response(w, id, &result);
 }
 
 fn write_response<W: Write>(w: &mut W, id: u64, result: &Value) {

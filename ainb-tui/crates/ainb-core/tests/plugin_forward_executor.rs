@@ -110,7 +110,11 @@ async fn a_back_key_sent_to_a_wedged_plugin_is_reported() {
 
     isolated_home();
     let fixture = tripwire_helpers::sibling_bin("ainb-slow-fixture-plugin");
-    // The slow fixture sleeps 200ms in render; a 20ms budget wedges it.
+    // A render 4093 wide is held by the slow fixture (its `HOLD_VIEWPORT_WIDTH`,
+    // also written into ainb-plugin-runtime's `tests/render_watchdog.rs`) until
+    // it receives `r`, so only the 20ms watchdog can answer it and the Esc sent
+    // below does not release it. Racing the fixture's 200ms sleep instead let a
+    // loaded runner's late answer clear the wedge first (#1133).
     let (runtime, handle) =
         ainb_plugin_runtime::Runtime::with_config(ainb_plugin_runtime::RuntimeConfig {
             default_render_timeout: Duration::from_millis(20),
@@ -118,7 +122,7 @@ async fn a_back_key_sent_to_a_wedged_plugin_is_reported() {
         })
         .expect("runtime");
     let id = tripwire_helpers::register_plugin(&runtime, "burndown", fixture);
-    let rx = handle.render(&id, ainb_plugin_protocol::params::Viewport::new(40, 8), 0);
+    let rx = handle.render(&id, ainb_plugin_protocol::params::Viewport::new(4093, 8), 0);
     let _ = tokio::time::timeout(Duration::from_secs(5), rx)
         .await
         .expect("watchdog answers");

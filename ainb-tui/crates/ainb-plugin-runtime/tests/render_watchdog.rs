@@ -8,9 +8,13 @@
 //! `handle_key` dispatch, the plugin's keys stopped being serviced too. That is
 //! how pressing `[s]` on the hangar screen made `q` and `Esc` dead.
 //!
-//! The deliberately-wedging plugin here is the existing slow fixture (200ms
-//! render) run against a render budget far below that, which is exactly the
-//! shape of a render that overruns.
+//! The deliberately-wedging plugin here is the slow fixture in its hold mode: a
+//! render requested with [`HOLD_VIEWPORT`] is not answered until the plugin next
+//! receives a key. Racing its old 200ms sleep against the budget on the wall
+//! clock let a loaded runner deliver the answer first (the task's `select!`
+//! reads inbound frames before the deadline arm), so the overrun, and the late
+//! answer that lifts the wedge, now happen in an order the test controls
+//! (#1133).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,13 +22,18 @@ use std::time::Duration;
 use ainb_plugin_protocol::manifest::{
     Capabilities, Lifecycle, Manifest, PluginMeta, Provides, SpawnMode, Subscribes,
 };
-use ainb_plugin_protocol::params::Viewport;
+use ainb_plugin_protocol::params::{KeyCode, KeyEvent, KeyKind, Viewport};
 use ainb_plugin_runtime::registry::RegisteredPlugin;
 use ainb_plugin_runtime::types::{PluginId, RenderOutcome};
 use ainb_plugin_runtime::{Runtime, RuntimeConfig};
 
-/// The slow fixture sleeps 200ms inside render.
-const FIXTURE_RENDER_COST: Duration = Duration::from_millis(200);
+/// A render this size is held by the slow fixture until it receives `r`.
+/// Mirrors `HOLD_VIEWPORT_WIDTH` in `tests/fixtures/slow_fixture_plugin.rs`, as
+/// does `ainb-core/tests/plugin_forward_executor.rs`.
+const HOLD_VIEWPORT: Viewport = Viewport {
+    width: 4093,
+    height: 8,
+};
 
 fn slow_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb-slow-fixture-plugin"))
@@ -79,15 +88,11 @@ fn register_slow_fixture(rt: &Runtime) -> PluginId {
 /// key path can release `q`/`Esc`.
 #[test]
 fn a_render_that_overruns_its_budget_is_failed_and_flags_the_plugin_wedged() {
-    let budget = Duration::from_millis(20);
-    assert!(
-        budget < FIXTURE_RENDER_COST,
-        "the fixture must be slower than the budget or this proves nothing"
-    );
-    let (rt, handle) = runtime_with_render_budget(budget);
+    let (rt, handle) = runtime_with_render_budget(Duration::from_millis(20));
     let id = register_slow_fixture(&rt);
 
-    let rx = handle.render(&id, Viewport::new(40, 8), 0);
+    // Held: the fixture never answers this render, so only the watchdog can.
+    let rx = handle.render(&id, HOLD_VIEWPORT, 0);
     let outcome = rt.tokio_handle().block_on(async {
         // Generous relative to the budget: the point is that the watchdog — not
         // this timeout — is what ends the wait.
@@ -104,6 +109,7 @@ fn a_render_that_overruns_its_budget_is_failed_and_flags_the_plugin_wedged() {
         ),
         other => panic!("expected the watchdog to fail the render, got {other:?}"),
     }
+    // Nothing is released, so no late answer can clear the flag before this.
     assert!(
         handle.render_wedged(&id),
         "an overrunning plugin must be flagged so the host can keep q/Esc alive"
@@ -118,13 +124,10 @@ fn a_render_that_overruns_its_budget_is_failed_and_flags_the_plugin_wedged() {
 /// registration starts clean, and never exercised the lift path at all.
 #[test]
 fn the_wedge_lifts_once_the_same_plugin_renders_again() {
-    // A budget the fixture blows on the first render but can meet once the
-    // process is warm would be racy, so instead: wedge under a tight budget,
-    // then prove the very same plugin lifts it by answering.
     let (rt, handle) = runtime_with_render_budget(Duration::from_millis(20));
     let id = register_slow_fixture(&rt);
 
-    let rx = handle.render(&id, Viewport::new(40, 8), 0);
+    let rx = handle.render(&id, HOLD_VIEWPORT, 0);
     let outcome = rt.tokio_handle().block_on(async {
         tokio::time::timeout(Duration::from_secs(5), rx)
             .await
@@ -136,27 +139,26 @@ fn the_wedge_lifts_once_the_same_plugin_renders_again() {
     );
     assert!(handle.render_wedged(&id), "precondition: wedged");
 
-    // The fixture answers ~200ms after each request. Keep asking until one of
-    // those late answers lands and clears the flag on THIS plugin — that is the
-    // lift path, and nothing else in the suite covers it.
-    let lifted = rt.tokio_handle().block_on(async {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while tokio::time::Instant::now() < deadline {
-            let rx = handle.render(&id, Viewport::new(40, 8), 0);
-            // The watchdog answers this receiver at the 20ms budget; the
-            // fixture's own answer lands ~180ms later. It is that later answer
-            // that must lift the wedge, so wait past it before checking.
-            let _ = tokio::time::timeout(Duration::from_secs(2), rx).await;
-            tokio::time::sleep(Duration::from_millis(400)).await;
-            if !handle.render_wedged(&id) {
-                return true;
-            }
-        }
-        false
-    });
+    // Release the held render. The key is a notification the fixture does not
+    // reply to, so the late render answer is the only frame that can reach the
+    // runtime, and it is that answer, on THIS plugin, that must lift the wedge.
+    let key = KeyEvent {
+        // The fixture's `RELEASE_KEY`.
+        code: KeyCode::Char { ch: 'r' },
+        mods: 0,
+        kind: KeyKind::Press,
+    };
     assert!(
-        lifted,
-        "a plugin that answers a render again must stop being treated as wedged, \
-         or q/Esc are permanently diverted away from a healthy screen"
+        handle.send_key(&id, "slow-fixture", key),
+        "the task is alive"
     );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while handle.render_wedged(&id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a plugin that answers a render again must stop being treated as wedged, \
+             or q/Esc are permanently diverted away from a healthy screen"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
