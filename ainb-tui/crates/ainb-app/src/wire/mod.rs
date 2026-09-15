@@ -181,20 +181,23 @@ fn locked<T: Serialize, S: Serializer>(cell: &&Mutex<T>, serializer: S) -> Resul
 /// `current_request` (the complete tool input of a pending approval, unbounded
 /// and shaped by the agent; the fingerprint stays), `cwd` and `display_name`
 /// (the operator's paths and labels, #983 M19, as section 20 does). On goes
-/// `host_id`: these rows are the local daemon's, which names itself
-/// `LOCAL_HOST_ID` until R1 pairs hosts, so a row stays addressable once it is
-/// mirrored next to another host's.
+/// `host_id`: these rows are the daemon's, named with the `host_id` it gave in
+/// `auth/hello` (#1066), so a row stays addressable once it is mirrored next to
+/// another host's. A daemon that names none leaves them `local`, as before.
 // serde's `serialize_with` hands the view's `&&T`, so the double reference is its signature.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn fleet_rows<S: Serializer>(
     cell: &&Mutex<Vec<ainb_hangar_proto::fleet::FleetSession>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
+    // One read of the host for the whole section, so every row in one frame
+    // names the same daemon even if a hello lands mid-serialisation.
+    let host_id = crate::wire::frame::HostId::daemon();
     let rows: Vec<FleetRowFrame> = cell
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .map(FleetRowFrame::from)
+        .map(|row| FleetRowFrame::from_row(row, host_id.as_str()))
         .collect();
     rows.serialize(serializer)
 }
@@ -202,8 +205,8 @@ fn fleet_rows<S: Serializer>(
 /// One fleet row on the wire; see [`fleet_rows`].
 #[derive(Serialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
-struct FleetRowFrame {
-    host_id: &'static str,
+struct FleetRowFrame<'a> {
+    host_id: &'a str,
     session_key: String,
     provider: ainb_hangar_proto::fleet::FleetProvider,
     provider_session_id: Option<String>,
@@ -230,8 +233,9 @@ struct FleetRowFrame {
     updated_revision: i64,
 }
 
-impl From<&ainb_hangar_proto::fleet::FleetSession> for FleetRowFrame {
-    fn from(row: &ainb_hangar_proto::fleet::FleetSession) -> Self {
+impl<'a> FleetRowFrame<'a> {
+    /// One row, named with the host the daemon gave in `auth/hello` (#1066).
+    fn from_row(row: &ainb_hangar_proto::fleet::FleetSession, host_id: &'a str) -> Self {
         // Destructured, so a field added to the protocol row fails to compile
         // here until someone decides whether a frame carries it.
         let ainb_hangar_proto::fleet::FleetSession {
@@ -264,7 +268,7 @@ impl From<&ainb_hangar_proto::fleet::FleetSession> for FleetRowFrame {
             updated_revision,
         } = row;
         Self {
-            host_id: ainb_hangar_proto::agent_status::LOCAL_HOST_ID,
+            host_id,
             session_key: session_key.clone(),
             provider: *provider,
             provider_session_id: provider_session_id.clone(),
