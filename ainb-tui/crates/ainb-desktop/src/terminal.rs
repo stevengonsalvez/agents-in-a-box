@@ -46,6 +46,10 @@ pub const WINDOW_BYTES: usize = 4 * 1024 * 1024;
 /// fast pane crosses the IPC boundary in few, large messages.
 const CHUNK_BYTES: usize = 64 * 1024;
 
+/// The largest grid a tab may ask its PTY for.
+const MAX_ROWS: u16 = 500;
+const MAX_COLS: u16 = 1000;
+
 /// Read chunks queued between the PTY reader and the pump.
 const READ_QUEUE: usize = 64;
 
@@ -469,9 +473,11 @@ impl Terminals {
             return;
         };
         let tab = &mut tabs[index];
+        // The size reaches the shared tmux window of every client on the
+        // session, so a webview cannot ask for more than a screen holds.
         tab.size = PtySize {
-            rows: rows.max(1),
-            cols: cols.max(1),
+            rows: rows.clamp(1, MAX_ROWS),
+            cols: cols.clamp(1, MAX_COLS),
             pixel_width: 0,
             pixel_height: 0,
         };
