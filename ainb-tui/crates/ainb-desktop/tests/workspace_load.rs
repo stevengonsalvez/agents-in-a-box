@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ainb_app::config::AppConfig;
-use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
+use ainb_app::wire::frame::{FrameBatch, Subscription};
 use ainb_app::{Keymap, SectionId};
 use ainb_desktop::host::DesktopHost;
 
@@ -24,7 +24,6 @@ fn a_started_workspace_load_is_applied_on_a_later_tick() {
     let mut host = DesktopHost::new(
         AppConfig::default(),
         Keymap::defaults(),
-        HostId::local(),
         Subscription::only(&[SectionId::WorkspaceLoad]),
         move |batch: FrameBatch| {
             for frame in batch.frames {
