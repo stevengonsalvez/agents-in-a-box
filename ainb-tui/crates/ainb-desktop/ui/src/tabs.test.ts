@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { accelerator, escEsc, stepTab, type Tab } from "./tabs.ts";
+import { accelerator, escEsc, openRowIntent, rowOf, stepTab, type Tab } from "./tabs.ts";
 
 const key = (code: string, mods: Partial<{ meta: boolean; ctrl: boolean; shift: boolean; alt: boolean }> = {}) => ({
   code,
@@ -48,4 +48,12 @@ test("tab steps wrap in both directions", () => {
   assert.equal(stepTab(tabs, "c", 1), "a");
   assert.equal(stepTab(tabs, "a", -1), "c");
   assert.equal(stepTab([], null, 1), null);
+});
+
+test("a tab reopens through its session-list row", () => {
+  assert.deepEqual(rowOf({ kind: "session", id: "u-1", tmux: "t" }), { session: "u-1" });
+  assert.deepEqual(rowOf({ kind: "tmux", tmux: "other" }), { other_tmux: "other" });
+  assert.deepEqual(openRowIntent({ session: "u-1" }), {
+    Command: ["session_list.select_row", { target: { session: "u-1" }, open: true }],
+  });
 });
