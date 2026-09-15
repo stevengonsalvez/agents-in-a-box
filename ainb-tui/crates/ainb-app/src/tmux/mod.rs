@@ -107,10 +107,25 @@ pub(crate) fn cap_session_name(name: String) -> String {
     format!("{head}{}", &name[tail_start..])
 }
 
+/// Whether `name` is one [`cap_session_name`] shortened: `tmux_`, eight hex
+/// digits and `_`, at the cap. The cap cuts the tail on a character boundary,
+/// so a capped name can fall up to three bytes short of it. Kept beside the
+/// capper so the layout it produces is described in one place.
+pub(crate) fn is_capped_name(name: &str) -> bool {
+    use crate::app::effect::TmuxSessionName;
+    let at_cap =
+        (TmuxSessionName::MAX_BYTES - 3..=TmuxSessionName::MAX_BYTES).contains(&name.len());
+    let hashed_head = name.strip_prefix("tmux_").is_some_and(|stripped| {
+        let bytes = stripped.as_bytes();
+        bytes.len() > 8 && bytes[..8].iter().all(u8::is_ascii_hexdigit) && bytes[8] == b'_'
+    });
+    at_cap && hashed_head
+}
+
 /// FNV-1a, 32 bits. A fixed algorithm rather than the std hasher, whose output
 /// is not promised to stay the same across Rust releases: a session minted by
 /// one build must be found by the next.
-fn fnv1a_32(bytes: &[u8]) -> u32 {
+pub(crate) fn fnv1a_32(bytes: &[u8]) -> u32 {
     bytes.iter().fold(0x811c_9dc5_u32, |hash, byte| {
         (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
     })
