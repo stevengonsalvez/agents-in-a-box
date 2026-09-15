@@ -273,3 +273,13 @@ D1a, on `stevengonsalvez/d1a-desktop-host`:
 Decisions:
 - "Reconnecting" is the banner a lost daemon shows while the supervisor finds one again; "Degraded" is only the state after the spawn retries are spent, which is when "show log" and "retry" apply.
 - The crate layout is `ainb-desktop/` with the Tauri config at the crate root and the frontend under `ui/`; the Tauri CLI did not need the `src-tauri` nesting.
+
+D1a review (#1116, "Review of ed3069109"), applied on `stevengonsalvez/d1a-desktop-host`:
+- The host and the executor sit behind one `Mutex` in `ainb_desktop::shell::Shell`, so the window's `dispatch` and its tick cannot take two locks in opposite orders; `tests/shell.rs` runs 500 ticks against 200 dispatches and requires the dispatches to return.
+- The bundled daemon resolves beside the executable. `AINB_DESKTOP_DAEMON_BIN` is honoured in a debug build only, there is no `PATH` fallback, and a build that cannot place its own executable fails at setup.
+- The supervisor bounds the wait for presence by `hello_budget` and degrades past it; reconnects back off 1 s, 4 s, 16 s (`SidecarConfig::reconnect_backoff`) and a fourth loss in a row degrades, with the count starting over after a connection held for a minute; Retry leaves Degraded whatever put it there. A daemon child that never answers is killed and reaped; the one that became the daemon is reaped by a thread whenever it exits.
+- The window's tracing goes to `<hangar home>/desktop.log`.
+- `ainb` for daemon verbs resolves once from absolute `PATH` entries to an executable file, and the choice is logged.
+- The desktop workflow's `paths` filter applies to pull requests as well as pushes.
+- The webview gets `SidecarView`: no daemon pid, error text with every path replaced by `<path>` (`scrub_paths`), and `has_log` with a `show_log` command returning the last 64 KiB of the sidecar log. The paths stay in `SidecarState` and in the log file.
+- Carried into D1b by the review: narrow `dispatch` to a renderer intent subset, take the tick from `ui.app_tick_ms`, a `Mirror::reframe()` helper, test HOME isolation. Required by D1d: a bundle smoke step in CI and a `productName` that is not `ainb`.
