@@ -313,6 +313,11 @@ fn every_section_moves_its_own_slot_and_only_its_own() {
                 s.agent_status_absent("daemon has no fleet/roster_status");
             }),
         ),
+        // Section 21: a scroll moves the changelog, not Config (#1052).
+        (
+            SectionId::Changelog,
+            Box::new(|s: &mut AppState| s.changelog.changelog_state.scroll_down(1)),
+        ),
     ];
 
     assert_eq!(
