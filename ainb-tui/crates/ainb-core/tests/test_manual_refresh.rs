@@ -1,8 +1,9 @@
 // ABOUTME: Test manual refresh functionality using 'f' key
 
+use ainb::App;
 use ainb::app::events::{AppEvent, EventHandler};
 use ainb::app::screens::ids as screen_ids;
-use ainb::app::{App, state::AsyncAction};
+use ainb::app::state::AsyncAction;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // The default screen is now HOME, where `f` opens the Fleet panel. Manual

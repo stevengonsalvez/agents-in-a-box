@@ -39,6 +39,8 @@ pub mod ids {
     pub const PLUGIN_ACTION_UNDELIVERED: &str = "global.plugin_action_undelivered";
     /// `{"plugin": String, "screen": String}`
     pub const PLUGIN_INPUT_UNDELIVERED: &str = "global.plugin_input_undelivered";
+    /// `{"host": HostId}`
+    pub const HOST_DISCONNECTED: &str = "global.host_disconnected";
     /// No arguments.
     pub const DETACHED: &str = "global.detached";
     /// `{"outcome": EditorOutcome}`
@@ -67,6 +69,7 @@ pub mod ids {
         TERMINAL_INPUT_CLOSED,
         PLUGIN_ACTION_UNDELIVERED,
         PLUGIN_INPUT_UNDELIVERED,
+        HOST_DISCONNECTED,
         DETACHED,
         EDITOR_FINISHED,
         CLIPBOARD_FAILED,
@@ -349,6 +352,13 @@ pub fn plugin_input_undelivered(plugin: &str, screen: &str) -> Intent {
     )
 }
 
+/// Report that `host` went away, so what it held (its plugin screen watches) is
+/// released now rather than when its leases lapse.
+#[must_use]
+pub fn host_disconnected(host: &crate::wire::frame::HostId) -> Intent {
+    command(ids::HOST_DISCONNECTED, json!({ "host": host }))
+}
+
 /// Report that the user left the live terminal.
 #[must_use]
 pub fn detached() -> Intent {
@@ -481,6 +491,12 @@ struct InputUndeliveredArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct HostArgs {
+    host: crate::wire::frame::HostId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EditorArgs {
     outcome: EditorOutcome,
 }
@@ -584,6 +600,9 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
                 plugin: args.plugin,
                 screen: args.screen,
             })
+        }
+        AppEvent::HostDisconnected { .. } => {
+            parse::<HostArgs>(args).map(|args| AppEvent::HostDisconnected { host: args.host })
         }
         AppEvent::Detached => args.is_null().then_some(AppEvent::Detached),
         AppEvent::EditorFinished { .. } => {

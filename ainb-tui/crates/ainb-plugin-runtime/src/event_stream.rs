@@ -192,24 +192,18 @@ pub fn stream_topic(id: &str) -> String {
 ///   already confirmed `is_granted()`): wildcard — any topic permitted.
 /// - **list grant**: each entry is a prefix pattern. A trailing `*`
 ///   matches any suffix (`workspace:*` allows `workspace:default`); an
-///   entry without `*` must match the topic exactly.
+///   entry without `*` must match the topic exactly. No wildcard reaches a
+///   `fleet.` topic; only its exact name does (#1101). The matcher is the one
+///   the `event_bus` grant uses, [`crate::plugin_task::grant_entry_covers`].
 ///
 /// The caller is responsible for the prior `is_granted()` gate — this
 /// function only answers "does the allow-list permit this topic?".
 #[must_use]
 pub fn topic_allowed(allow_list: Option<&[String]>, topic: &str) -> bool {
     // `None` = bool-true grant: wildcard across all topics.
-    allow_list.is_none_or(|patterns| patterns.iter().any(|p| pattern_matches(p, topic)))
-}
-
-/// Match a single allow-list pattern against a topic.
-///
-/// `prefix*` matches any topic starting with `prefix`; an exact pattern
-/// matches only itself. A bare `*` matches everything.
-fn pattern_matches(pattern: &str, topic: &str) -> bool {
-    pattern
-        .strip_suffix('*')
-        .map_or_else(|| pattern == topic, |prefix| topic.starts_with(prefix))
+    allow_list.is_none_or(|patterns| {
+        patterns.iter().any(|p| crate::plugin_task::grant_entry_covers(p, topic))
+    })
 }
 
 #[cfg(test)]
@@ -304,5 +298,22 @@ mod tests {
     fn topic_allowed_empty_list_denies() {
         let list: Vec<String> = vec![];
         assert!(!topic_allowed(Some(&list), "workspace:default"));
+    }
+
+    /// #1101: a stream allow-list reaches a `fleet.` topic only by its exact
+    /// name, the same rule as the `event_bus` grant.
+    #[test]
+    fn topic_allowed_no_wildcard_names_a_fleet_topic() {
+        for wildcard in ["*", "f*", "fleet.*"] {
+            let list = vec![wildcard.to_string()];
+            assert!(
+                !topic_allowed(Some(&list), "fleet.agent_status"),
+                "{wildcard} named a fleet topic"
+            );
+        }
+        let star = vec!["*".to_string()];
+        assert!(topic_allowed(Some(&star), "workspace:default"));
+        let exact = vec!["fleet.agent_status".to_string()];
+        assert!(topic_allowed(Some(&exact), "fleet.agent_status"));
     }
 }

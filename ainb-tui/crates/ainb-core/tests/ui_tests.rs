@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use ainb::app::App;
+use ainb::App;
 use ainb::app::events::EventHandler;
 use ainb::app::screens::ids as screen_ids;
 use ainb::app::state::NewSessionStep;

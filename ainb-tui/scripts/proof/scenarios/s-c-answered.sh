@@ -5,35 +5,9 @@
 # shellcheck disable=SC2034  # read by write_result in lib.sh
 EXPECT="an ASK answered from the web retires the TUI control-center card at once with 'answered by web@<host>'; an ASK answered in the TUI shows 'answered by tui@<host>' and the web's later POST /api/answer returns already_answered by tui"
 
-# web_card_id <question regex> <capture name>: the attentionId the web snapshot
-# lists for a card, waited on up to 180 s. The web's poller can sit behind
-# `ainb fleet cost` runs (#1055); past 15 s the scenario records which cost
-# runs the world has, so a slow card is explained by evidence, not assumed.
-WEB_CARD_ID=""
-WEB_CARD_WAIT=0
 # How far behind the web may list a new session or card (#1055): its poller
 # reads sessions and needs every 2 s and never waits on `fleet cost`.
 WEB_LAG_BOUND=10
-web_card_id() {
-  local question="$1" name="$2" start=$SECONDS noted=0 p cmd
-  WEB_CARD_ID=""
-  while (( SECONDS - start < 180 )); do
-    WEB_CARD_ID="$(web_attention_id "$question")"
-    [[ -n "$WEB_CARD_ID" ]] && break
-    if (( !noted && SECONDS - start >= 15 )); then
-      noted=1
-      for p in $(world_pids); do
-        cmd="$( { tr '\0' ' ' <"/proc/$p/cmdline"; } 2>/dev/null)"
-        if grep -F 'fleet cost' <<<"$cmd" >/dev/null; then printf '%s %s\n' "$p" "$cmd"; fi
-      done >"$NODE_DIR/$name-cost-runs.txt"
-      CAPTURES+=("$name-cost-runs.txt")
-      observe "web had no card after 15 s; ainb fleet cost runs in this world: $(wc -l <"$NODE_DIR/$name-cost-runs.txt")"
-    fi
-    sleep 1
-  done
-  WEB_CARD_WAIT=$((SECONDS - start))
-  observe "web snapshot card for '$question' after ${WEB_CARD_WAIT}s: ${WEB_CARD_ID:-none}"
-}
 
 scenario() {
   start_tui tui || { check "the TUI reaches the home screen" false; return; }
@@ -58,8 +32,11 @@ scenario() {
   check "the TUI control center shows the web-bound card" wait_screen tui '1 need you' 20
   capture tui control-before-web-answer
   local id reply
-  web_card_id 'answered from the web' web-card
-  check "the web lists the web-bound card within ${WEB_LAG_BOUND} s" test "$WEB_CARD_WAIT" -le "$WEB_LAG_BOUND"
+  if ! web_card_id 'answered from the web' web-card "$WEB_LAG_BOUND"; then
+    check "the web lists the web-bound card within ${WEB_LAG_BOUND} s" false
+    return
+  fi
+  check "the web lists the web-bound card within ${WEB_LAG_BOUND} s" true
   id="$WEB_CARD_ID"
   curl -sS "$WEB_URL/api/snapshot" | redact_host >"$NODE_DIR/web-snapshot-before-answer.json"
   CAPTURES+=("web-snapshot-before-answer.json")
@@ -74,8 +51,11 @@ scenario() {
   sleep 4
   ask_session "Proof S-C: answered in the TUI?" proof-sc-tui || { check "second ASK session" false; return; }
   check "the TUI shows the second card" wait_screen tui '1 need you' 20
-  web_card_id 'answered in the TUI' tui-card
-  check "the web lists the TUI-bound card within ${WEB_LAG_BOUND} s" test "$WEB_CARD_WAIT" -le "$WEB_LAG_BOUND"
+  if ! web_card_id 'answered in the TUI' tui-card "$WEB_LAG_BOUND"; then
+    check "the web lists the TUI-bound card within ${WEB_LAG_BOUND} s" false
+    return
+  fi
+  check "the web lists the TUI-bound card within ${WEB_LAG_BOUND} s" true
   id="$WEB_CARD_ID"
   capture tui control-before-tui-answer
   keys tui Enter
