@@ -85,7 +85,10 @@ pub enum EscVerdict {
 /// A plugin that keeps rendering while ignoring Esc used to hold its screen
 /// with Ctrl+C as the only way out (#1087). An Esc counts as UNANSWERED once a
 /// frame rendered after it reached the plugin looks exactly like the frame
-/// before it, and as ANSWERED once any such frame differs. With no frame yet,
+/// before it, and as ANSWERED when it differs. Only the FIRST such frame is
+/// judged, the one the render kicked right after the key produces: a later
+/// repaint (a ticking clock, an animation) says nothing about the Esc, and
+/// counting it would let any plugin that repaints hold the screen. With no frame yet,
 /// there is no evidence and the streak is left alone, so pressing Esc faster
 /// than the plugin paints never ejects it. Any other key ends the streak.
 #[derive(Debug, Default)]
@@ -99,18 +102,23 @@ pub struct BackWatch {
 struct PendingEsc {
     generation: u64,
     frame_before: Option<u64>,
-    /// `Some(true)` once a frame after the Esc differed, `Some(false)` while
-    /// every such frame matched the one before it.
+    /// Whether the first frame after the Esc differed from the one before it;
+    /// `None` until that frame arrives.
     changed: Option<bool>,
 }
 
 impl BackWatch {
-    /// A painted frame, reflecting every key up to generation `keys_through`.
-    pub fn frame(&mut self, frame: u64, keys_through: u64) {
-        if let Some(pending) = self.pending.as_mut() {
-            if keys_through >= pending.generation {
-                let differs = pending.frame_before != Some(frame);
-                pending.changed = Some(pending.changed == Some(true) || differs);
+    /// A painted frame, reflecting every key up to generation `keys_through`
+    /// (`None` when no key had been written when it was requested).
+    pub fn frame(&mut self, frame: u64, keys_through: Option<u64>) {
+        if let Some(pending) = self.pending.as_mut().filter(|pending| pending.changed.is_none()) {
+            if keys_through.is_some_and(|keys| keys >= pending.generation) {
+                pending.changed = Some(pending.frame_before != Some(frame));
+            } else {
+                // Requested before the Esc reached the plugin but painted after
+                // it was sent: this, not the older frame, is what the Esc
+                // started from.
+                pending.frame_before = Some(frame);
             }
         }
         self.last_frame = Some(frame);
@@ -144,12 +152,15 @@ impl BackWatch {
 }
 
 /// Hash a painted frame for [`BackWatch`]. Equal buffers hash equal; the
-/// buffer has no `Hash` of its own, so its serialised form is hashed.
-fn frame_hash(buffer: &WireBuffer) -> u64 {
+/// buffer has no `Hash` of its own, so its serialised form is hashed. `None`
+/// when it will not serialise, so a failure is never mistaken for an unchanged
+/// frame.
+fn frame_hash(buffer: &WireBuffer) -> Option<u64> {
     use std::hash::{Hash, Hasher};
+    let bytes = serde_json::to_vec(buffer).ok()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_vec(buffer).unwrap_or_default().hash(&mut hasher);
-    hasher.finish()
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 /// Cached render output kept alive between async response and the
@@ -196,8 +207,9 @@ impl RenderCache {
 
     /// Fold one painted frame into the Esc watch: `frame` hashes the buffer and
     /// `keys_through` is the last key generation written to the plugin before
-    /// the render was requested, so the frame reflects every key up to it.
-    pub fn observe_frame(&self, frame: u64, keys_through: u64) {
+    /// the render was requested (`None` before any key), so the frame reflects
+    /// every key up to it.
+    pub fn observe_frame(&self, frame: u64, keys_through: Option<u64>) {
         self.back_watch.lock().frame(frame, keys_through);
     }
 
@@ -527,7 +539,7 @@ pub fn spawn(
         redraw_governor: RedrawGovernor::default(),
         render_deadlines: HashMap::new(),
         render_key_stamps: HashMap::new(),
-        last_key_written: 0,
+        last_key_written: None,
         render_wedged: render_wedged.clone(),
     };
     handle.spawn(task.run());
@@ -657,9 +669,9 @@ struct PluginTask {
     /// Per outstanding `plugin/render`, the last key generation written to the
     /// plugin before it was requested, so its frame can be judged against the
     /// Esc presses it reflects ([`BackWatch`]).
-    render_key_stamps: HashMap<u64, u64>,
-    /// The generation of the last key written to the plugin.
-    last_key_written: u64,
+    render_key_stamps: HashMap<u64, Option<u64>>,
+    /// The generation of the last key written to the plugin, `None` before any.
+    last_key_written: Option<u64>,
     /// Set when a render blew its deadline, cleared when one completes.
     ///
     /// The host reads this (`RuntimeHandle::render_wedged`) to stop forwarding
@@ -739,7 +751,7 @@ impl PluginTask {
         let generation = params.generation;
         let json = serde_json::to_value(params).expect("HandleKeyParams is serializable");
         if self.send_notification(methods::PLUGIN_HANDLE_KEY, json).await.is_ok() {
-            self.last_key_written = generation;
+            self.last_key_written = Some(generation);
         }
     }
 
@@ -1171,8 +1183,10 @@ impl PluginTask {
                             // single-char shortcuts while the plugin's input is
                             // focused (8hx). Persistent — survives try_take.
                             self.cache.set_captures_text(rr.captures_text);
-                            if let Some(keys_through) = self.render_key_stamps.remove(&id) {
-                                self.cache.observe_frame(frame_hash(&rr.buffer), keys_through);
+                            if let (Some(keys_through), Some(frame)) =
+                                (self.render_key_stamps.remove(&id), frame_hash(&rr.buffer))
+                            {
+                                self.cache.observe_frame(frame, keys_through);
                             }
                             self.cache.put(rr.buffer.clone());
                             RenderOutcome::Ok(rr.buffer)
@@ -2560,10 +2574,10 @@ mod tests {
     fn back_watch_returns_to_host_after_unanswered_esc_presses() {
         use super::{BackWatch, ESC_UNANSWERED_LIMIT, EscVerdict};
         let mut watch = BackWatch::default();
-        watch.frame(7, 0);
+        watch.frame(7, None);
         for n in 1..=u64::from(ESC_UNANSWERED_LIMIT) {
             assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
-            watch.frame(7, n);
+            watch.frame(7, Some(n));
         }
         assert_eq!(watch.esc(99), EscVerdict::ReturnToHost);
         assert_eq!(
@@ -2579,10 +2593,10 @@ mod tests {
     fn back_watch_keeps_a_plugin_that_answers_each_esc() {
         use super::{BackWatch, EscVerdict};
         let mut watch = BackWatch::default();
-        watch.frame(0, 0);
+        watch.frame(0, None);
         for n in 1..=10 {
             assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
-            watch.frame(n, n);
+            watch.frame(n, Some(n));
         }
     }
 
@@ -2592,10 +2606,10 @@ mod tests {
     fn back_watch_needs_a_frame_after_the_esc() {
         use super::{BackWatch, EscVerdict};
         let mut watch = BackWatch::default();
-        watch.frame(7, 0);
+        watch.frame(7, None);
         for n in 1..=10 {
             assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
-            watch.frame(7, n - 1);
+            watch.frame(7, Some(n - 1));
         }
     }
 
@@ -2604,15 +2618,48 @@ mod tests {
     fn back_watch_resets_on_another_key() {
         use super::{BackWatch, EscVerdict};
         let mut watch = BackWatch::default();
-        watch.frame(7, 0);
+        watch.frame(7, None);
         for n in 1..=2 {
             assert_eq!(watch.esc(n), EscVerdict::Deliver);
-            watch.frame(7, n);
+            watch.frame(7, Some(n));
         }
         watch.other_key();
         for n in 3..=5 {
             assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
-            watch.frame(7, n);
+            watch.frame(7, Some(n));
+        }
+    }
+
+    /// #1087 review: a plugin that repaints on its own (a ticking clock) while
+    /// ignoring Esc is still ejected. Only the first frame after each Esc is
+    /// judged, so the tick that follows it proves nothing.
+    #[test]
+    fn back_watch_ejects_a_repainting_plugin_that_ignores_esc() {
+        use super::{BackWatch, ESC_UNANSWERED_LIMIT, EscVerdict};
+        let mut watch = BackWatch::default();
+        let mut clock = 100;
+        watch.frame(clock, None);
+        for n in 1..=u64::from(ESC_UNANSWERED_LIMIT) {
+            assert_eq!(watch.esc(n), EscVerdict::Deliver, "esc {n}");
+            watch.frame(clock, Some(n));
+            clock += 1;
+            watch.frame(clock, Some(n));
+        }
+        assert_eq!(watch.esc(99), EscVerdict::ReturnToHost);
+    }
+
+    /// A frame requested before the Esc but painted after it was sent is what
+    /// the Esc starts from, so an Esc that undoes that frame counts as answered.
+    #[test]
+    fn back_watch_judges_the_esc_against_a_frame_still_in_flight() {
+        use super::{BackWatch, EscVerdict};
+        let mut watch = BackWatch::default();
+        for n in 1..=10 {
+            // A click opened a drawer (frame 2); the Esc closes it (frame 1).
+            watch.frame(1, Some(n * 10));
+            assert_eq!(watch.esc(n * 10 + 1), EscVerdict::Deliver, "esc {n}");
+            watch.frame(2, Some(n * 10));
+            watch.frame(1, Some(n * 10 + 1));
         }
     }
 }
