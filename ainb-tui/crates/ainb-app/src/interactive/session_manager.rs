@@ -1996,7 +1996,9 @@ impl InteractiveSessionManager {
             // Try matching both new format (tmux_{folder}_{branch}) and legacy format (tmux_{branch})
             let worktree_folder = Self::extract_worktree_folder(&worktree.path);
             let matches_new_format =
-                Self::generate_tmux_name(&worktree_folder, &worktree.branch_name) == tmux_name;
+                Self::generate_tmux_name(&worktree_folder, &worktree.branch_name) == tmux_name
+                    || Self::generate_tmux_name_uncapped(&worktree_folder, &worktree.branch_name)
+                        == tmux_name;
             let matches_legacy_format =
                 Self::generate_tmux_name_legacy(&worktree.branch_name) == tmux_name;
             let matches_branch_guess = worktree.branch_name.contains(&branch_guess);
@@ -2345,8 +2347,12 @@ impl InteractiveSessionManager {
                     let worktree_folder = Self::extract_worktree_folder(&worktree.path);
                     let tmux_name =
                         Self::generate_tmux_name(&worktree_folder, &worktree.branch_name);
+                    let uncapped_name =
+                        Self::generate_tmux_name_uncapped(&worktree_folder, &worktree.branch_name);
                     let legacy_name = Self::generate_tmux_name_legacy(&worktree.branch_name);
-                    // Check if new format session exists, otherwise try legacy.
+                    // Check if new format session exists, then the uncapped form a
+                    // session minted before #1122 may still run under, otherwise
+                    // try legacy.
                     // `=name` is exact: a bare `-t` prefix-matches, so a live
                     // "feat-auth-2" would answer for "feat-auth" and we would
                     // then kill the exact "feat-auth", which matches nothing,
@@ -2354,9 +2360,22 @@ impl InteractiveSessionManager {
                     let check_new = std::process::Command::new("tmux")
                         .args(["has-session", "-t", &format!("={tmux_name}")])
                         .output();
+                    let exists = |name: &str| {
+                        std::process::Command::new("tmux")
+                            .args(["has-session", "-t", &format!("={name}")])
+                            .output()
+                            .map(|o| o.status.success())
+                            .unwrap_or(false)
+                    };
                     let final_name = if check_new.map(|o| o.status.success()).unwrap_or(false) {
                         info!("Found tmux session with new format: {}", tmux_name);
                         tmux_name
+                    } else if uncapped_name != tmux_name && exists(&uncapped_name) {
+                        info!(
+                            "Found tmux session under its uncapped name: {}",
+                            uncapped_name
+                        );
+                        uncapped_name
                     } else {
                         info!("Trying legacy tmux session name: {}", legacy_name);
                         legacy_name
@@ -2529,6 +2548,15 @@ impl InteractiveSessionManager {
     /// result so a long folder and branch still mint a session the list shows
     /// (#1122).
     fn generate_tmux_name(worktree_folder: &str, branch_name: &str) -> String {
+        crate::tmux::cap_session_name(Self::generate_tmux_name_uncapped(
+            worktree_folder,
+            branch_name,
+        ))
+    }
+
+    /// The `tmux_{folder}_{branch}` name before the cap: what a session minted
+    /// before #1122 runs under, so lookup and teardown still find it.
+    fn generate_tmux_name_uncapped(worktree_folder: &str, branch_name: &str) -> String {
         let sanitized_folder = worktree_folder
             .replace(' ', "_")
             .replace('.', "_")
@@ -2539,7 +2567,7 @@ impl InteractiveSessionManager {
             .replace('.', "_")
             .replace('/', "_")
             .replace(':', "_");
-        crate::tmux::cap_session_name(format!("tmux_{}_{}", sanitized_folder, sanitized_branch))
+        format!("tmux_{}_{}", sanitized_folder, sanitized_branch)
     }
 
     /// Generate legacy tmux session name (branch only) for backwards compatibility
