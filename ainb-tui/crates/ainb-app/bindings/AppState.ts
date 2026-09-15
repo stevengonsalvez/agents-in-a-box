@@ -4620,8 +4620,11 @@ export type UiPreferences_Serialize = {
 	 *  so the same preference draws proportionally on every surface.
 	 */
 	home_sidebar_fraction: number | null,
-	/**  Preferred Sessions screen sidebar width in terminal columns. */
-	sessions_sidebar_width: number | null,
+	/**
+	 *  Preferred Sessions screen sidebar width as a fraction of its row, so
+	 *  the same preference draws proportionally on every surface.
+	 */
+	sessions_sidebar_fraction: number | null,
 	/**  Whether the Sessions screen sidebar starts minimized. */
 	sessions_sidebar_collapsed: boolean | null,
 	/**
