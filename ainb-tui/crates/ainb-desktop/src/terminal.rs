@@ -656,6 +656,9 @@ impl Terminals {
             return;
         }
         let (size, flow) = (tab.size, Arc::clone(&tab.flow));
+        // A redialing tab holds no client, so it is not counted: without this
+        // eight attached tabs plus a redial would exceed the cap.
+        self.make_room(&mut tabs);
         match self.spawn(key, size, &flow, generation) {
             Ok(client) => {
                 let tab = &mut tabs[index];
