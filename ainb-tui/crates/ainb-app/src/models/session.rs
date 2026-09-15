@@ -672,10 +672,22 @@ pub struct Session {
     /// A row can carry MORE THAN ONE: an ASK arriving while an ERR is still
     /// open shows both, and only the ASK is counted in the header badge (see
     /// [`crate::fleet::attention::needs_you_count`]). Empty while the agent is
-    /// actively generating — nothing is waiting on a human then.
+    /// actively generating, when nothing is waiting on a human.
     ///
-    /// Transient — never persisted; set in `AppState::refresh_attention_markers`.
-    #[serde(skip)]
+    /// Transient: never persisted; set in `AppState::refresh_attention`. A
+    /// mirror frame carries it as `attention`, each chip's kind and scrubbed
+    /// detail, so a renderer draws the merged picture instead of re-deriving a
+    /// weaker one.
+    #[serde(
+        rename = "attention",
+        skip_deserializing,
+        skip_serializing_if = "crate::wire::fields::omit_outside_frame",
+        serialize_with = "crate::wire::fields::attention_marks"
+    )]
+    #[cfg_attr(
+        feature = "typescript-bindings",
+        specta(type = Vec<crate::fleet::attention::AttentionMark>)
+    )]
     pub live_attention: Vec<crate::fleet::attention::SessionAttention>,
 
     /// Every ERR observed for this session, INCLUDING the ones too old to still
@@ -688,7 +700,7 @@ pub struct Session {
     /// `live_attention` at render time, so a retired failure is still
     /// inspectable without ever being re-promoted onto the row.
     ///
-    /// Transient — never persisted; set in `AppState::refresh_attention_markers`.
+    /// Transient: never persisted; set in `AppState::refresh_attention`.
     #[serde(skip)]
     pub errors: Vec<crate::fleet::attention::SessionAttention>,
 
@@ -701,7 +713,7 @@ pub struct Session {
     /// place the host sees it — a session that has never fired a hook has none,
     /// and the surfaces that need it say so rather than guessing.
     ///
-    /// Transient — never persisted; set in `AppState::refresh_attention_markers`.
+    /// Transient: never persisted; set in `AppState::refresh_attention`.
     #[serde(skip)]
     pub provider_session_id: Option<String>,
 }
