@@ -40,6 +40,7 @@ use uuid::Uuid;
 /// Location of an attachable row inside `AppState`, independent of the
 /// row's current visible position.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AttachableRef {
     WorkspaceSession {
         workspace_idx: usize,
@@ -74,6 +75,7 @@ pub enum SessionContextAction {
 /// Absent fields mean Hangar has never observed them. The UI must omit those
 /// fields, never replace them with a guessed provider default.
 #[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SessionFleetMetadata {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -87,6 +89,7 @@ pub struct SessionFleetMetadata {
 
 /// Ephemeral state for the keyboard-accessible right-click context menu.
 #[derive(serde::Serialize, Debug, Clone, Copy)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SessionContextMenu {
     pub target: AttachableRef,
     pub selected: usize,
@@ -94,6 +97,7 @@ pub struct SessionContextMenu {
 
 /// Notification system for TUI messages
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum NotificationType {
     Success,
     Error,
@@ -102,8 +106,10 @@ pub enum NotificationType {
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Notification {
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub message: String,
     pub notification_type: NotificationType,
     #[serde(skip)]
@@ -190,6 +196,7 @@ impl Notification {
 }
 
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum FocusedPane {
     Sessions, // Left pane - workspace/session list
     LiveLogs, // Right pane - live logs
@@ -200,6 +207,20 @@ pub const DEFAULT_SESSIONS_SIDEBAR_WIDTH: u16 = 40;
 pub const MIN_SESSIONS_SIDEBAR_WIDTH: u16 = 24;
 pub const SESSIONS_PREVIEW_RESERVE: u16 = 50;
 pub const COLLAPSED_SESSIONS_SIDEBAR_WIDTH: u16 = 5;
+
+/// The Sessions sidebar width a `row`-wide screen can draw for a requested
+/// `width`: at least the minimum, leaving the preview its reserve.
+#[must_use]
+pub fn clamp_sessions_sidebar_width(width: u16, row: u16) -> u16 {
+    if row <= COLLAPSED_SESSIONS_SIDEBAR_WIDTH {
+        return row;
+    }
+    let max_width = row.saturating_sub(SESSIONS_PREVIEW_RESERVE);
+    if max_width < MIN_SESSIONS_SIDEBAR_WIDTH {
+        return row.saturating_sub(1).max(1);
+    }
+    width.clamp(MIN_SESSIONS_SIDEBAR_WIDTH, max_width)
+}
 pub const SESSIONS_ROW_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
 const OBSERVER_SETTLE_DELAY: Duration = Duration::from_millis(250);
 const OBSERVER_RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -686,13 +707,16 @@ pub enum SessionListRowId {
 pub use crate::app::screens::{ScreenId, ids as screen_ids};
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ConfirmationDialog {
     pub title: String,
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub message: String,
     pub confirm_action: ConfirmAction,
     pub selected_option: bool, // true = Yes, false = No (binary mode)
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub warning: Option<String>, // Optional warning (e.g., uncommitted files in worktree)
     // Tri-option mode: when `options` is `Some`, the dialog renders one button per
     // entry and Left/Right cycles `selected_index`. The final-option index is
@@ -703,12 +727,14 @@ pub struct ConfirmationDialog {
 
 /// One choice in a tri-option (or n-option) confirmation dialog.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct DialogOption {
     pub label: String,
     pub action: ConfirmAction,
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ConfirmAction {
     DeleteSession(Uuid),
     StopSession(Uuid), // Soft-stop interactive session (tmux only; preserves worktree)
@@ -869,6 +895,7 @@ pub struct McpFetchResult {
 /// the overlay is open; dropping it (on close) stops all refresh activity —
 /// nothing polls the daemon when the overlay isn't showing.
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct McpOverlayState {
     pub pool_enabled: bool,
     pub daemon_running: bool,
@@ -886,6 +913,7 @@ pub struct McpOverlayState {
     /// Status line from the last in-overlay action (e.g. `import`). Sticky
     /// across plain refreshes; cleared only when the overlay closes.
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub last_action: Option<String>,
 }
 
@@ -1023,6 +1051,7 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
 // ============================================================================
 
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum HomeTile {
     SkillManager, // Install / sync / doctor (spec §10.1)
     Config,       // Settings & presets
@@ -1084,6 +1113,7 @@ impl HomeTile {
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct HomeScreenState {
     pub selected_tile: usize,
     pub tiles: Vec<HomeTile>,
@@ -1496,6 +1526,7 @@ fn config_value_to_toml(value: &ConfigValue) -> toml::Value {
 
 /// Tracks which pane has focus in the config screen
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ConfigPane {
     #[default]
     Categories,
@@ -1534,6 +1565,7 @@ pub struct AppliedEdits {
 /// list, and a save routes every edit through
 /// [`registry::set_validated`](crate::config::registry::set_validated).
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ConfigScreenState {
     /// Index into [`visible_nodes`](Self::visible_nodes) — the tree row the
     /// left pane has selected.
@@ -1562,6 +1594,7 @@ pub struct ConfigScreenState {
         rename = "search_len",
         serialize_with = "crate::wire::fields::opt_char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<u32>))]
     pub search: Option<String>,
     /// Keys the user has actually edited this session, and therefore the only
     /// keys a save writes.
@@ -1595,6 +1628,7 @@ pub struct ConfigScreenState {
         rename = "edit_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub edit_buffer: String,
     /// True when entering API key (special handling - saves to keychain)
     pub api_key_input_mode: bool,
@@ -2543,6 +2577,7 @@ pub(crate) fn merge_external_sections(seed: &mut toml::Value, on_disk: &toml::Va
 
 // Auth provider option for the popup
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AuthProviderOption {
     pub id: String,
     pub name: String,
@@ -2566,6 +2601,7 @@ impl AuthProviderOption {
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AuthProviderPopupState {
     pub providers: Vec<AuthProviderOption>,
     pub selected_index: usize,
@@ -2574,6 +2610,7 @@ pub struct AuthProviderPopupState {
         rename = "api_key_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub api_key_input: String,
     pub show_popup: bool,
 }
@@ -2751,6 +2788,7 @@ impl AuthProviderPopupState {
 }
 
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AuthMethod {
     OAuth,
     ApiKey,
@@ -2758,33 +2796,40 @@ pub enum AuthMethod {
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AuthSetupState {
     pub selected_method: AuthMethod,
     #[serde(
         rename = "api_key_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub api_key_input: String,
     pub is_processing: bool,
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub error_message: Option<String>,
     pub show_cursor: bool,
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ClaudeChatState {
     #[serde(
         rename = "message_count",
         serialize_with = "crate::wire::fields::len_of"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub messages: Vec<ClaudeMessage>,
     #[serde(
         rename = "input_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub input_buffer: String,
     pub is_streaming: bool,
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub current_streaming_response: Option<String>,
     pub associated_session_id: Option<Uuid>,
     pub total_tokens_used: u32,
@@ -3081,6 +3126,7 @@ pub enum BranchCheckoutMode {
 }
 
 #[derive(serde::Serialize, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct NewSessionState {
     /// The current step in the redesigned 2-screen flow (PickRepo →
     /// Configure → Creating).
@@ -3133,6 +3179,7 @@ struct ConfigureLaunchSnapshot {
 }
 
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum NewSessionStep {
     /// Phase 6 (new-session redesign): the unified repo picker (screen 1).
     /// Owns its own state via `NewSessionState.pick_repo_state`.
@@ -11793,7 +11840,11 @@ impl AppState {
             // seconds old rendered as "40m" and its `request_id`
             // (`ASK:<since_ms>`) collided with the older one — which is how a
             // previous question's draft could land under a new one.
-            let key = (id, chip.kind, chip.detail.clone());
+            let key = AttentionLocalKey {
+                session_id: id,
+                kind: chip.kind,
+                detail: chip.detail.clone(),
+            };
             let first_seen = *self.fleet.attention_local_since.entry(key).or_insert(chip.since_ms);
             chip.since_ms = first_seen;
         }
@@ -12018,17 +12069,21 @@ impl AppState {
         // A session that recovered (or vanished) must lose its ERR clock, or a
         // later failure would render with the age of the previous one.
         self.fleet.attention_error_since.retain(|id, _| live.contains(id));
-        self.fleet.attention_local_since.retain(|(id, ..), _| live.contains(id));
+        self.fleet.attention_local_since.retain(|key, _| live.contains(&key.session_id));
         // Every (session, kind) a LOCAL chip still claims this pass. Anything
         // else loses its clock below, so a question that closed and a later one
         // of the same kind do not share an instant.
-        let still_open: HashSet<(Uuid, AttentionKind, Option<String>)> = marks
+        let still_open: HashSet<AttentionLocalKey> = marks
             .iter()
             .flat_map(|(id, chips, ..)| {
                 chips
                     .iter()
                     .filter(|chip| !matches!(chip.answerable, Answerable::Daemon { .. }))
-                    .map(move |chip| (*id, chip.kind, chip.detail.clone()))
+                    .map(move |chip| AttentionLocalKey {
+                        session_id: *id,
+                        kind: chip.kind,
+                        detail: chip.detail.clone(),
+                    })
             })
             .collect();
         self.fleet.attention_local_since.retain(|key, _| still_open.contains(key));
@@ -12794,22 +12849,30 @@ impl AppState {
         now: std::time::Instant,
         gone: impl Fn(&str) -> bool,
     ) {
-        let lapsed: Vec<String> = self
-            .plugins_host
+        let lease = Self::PLUGIN_SCREEN_WATCH_LEASE;
+        // One predicate: a watch goes when its last request has lapsed or its
+        // plugin is gone. The section moves only when something went.
+        self.plugins_host.update(|host| {
+            let mut changed = false;
+            host.watched_plugin_screens.retain(|screen, watch| {
+                changed |= watch.lapse(now, lease);
+                let keep = !watch.requests.is_empty()
+                    && !crate::app::screens::builtin::plugin_id_for_screen(screen)
+                        .is_none_or(&gone);
+                changed |= !keep;
+                keep
+            });
+            changed
+        });
+    }
+
+    /// The size a screen another host watches renders at, when one does.
+    #[must_use]
+    pub fn watched_viewport(&self, screen_id: &str) -> Option<(u16, u16)> {
+        self.plugins_host
             .watched_plugin_screens
-            .iter()
-            .filter(|(screen, renewed)| {
-                now.saturating_duration_since(**renewed) > Self::PLUGIN_SCREEN_WATCH_LEASE
-                    || crate::app::screens::builtin::plugin_id_for_screen(screen).is_none_or(&gone)
-            })
-            .map(|(screen, _)| screen.clone())
-            .collect();
-        if !lapsed.is_empty() {
-            let host = self.plugins_host.get_mut();
-            for screen in lapsed {
-                host.watched_plugin_screens.remove(&screen);
-            }
-        }
+            .get(screen_id)
+            .and_then(ScreenWatch::viewport)
     }
 
     /// Whether some host wants `screen_id`'s plugin rendering: the terminal
@@ -13305,17 +13368,17 @@ impl App {
                 continue;
             }
 
-            // Viewport comes from the previous frame's allocated area
+            // Shown here, the viewport is the previous frame's allocated area
             // (stashed by `PluginScreen::render`); (0, 0) means that render
-            // hasn't happened yet. A screen another host keeps live but this
-            // one never drew renders at the plugin's fallback size: the frame
-            // is not painted here, only its `ui.state` view is read.
+            // hasn't happened yet. Kept live for other hosts, it is the
+            // largest size a watching host asked for: the frame is not painted
+            // here, only its `ui.state` view is read.
             let shown_here = self.state.shell.current_screen == *screen_id;
-            let (width, height) = viewports
-                .render_areas
-                .get(*screen_id)
-                .copied()
-                .unwrap_or(if shown_here { (0, 0) } else { (80, 24) });
+            let (width, height) = if shown_here {
+                viewports.render_areas.get(*screen_id).copied().unwrap_or((0, 0))
+            } else {
+                self.state.watched_viewport(screen_id).unwrap_or((0, 0))
+            };
 
             // No allocated area stashed yet — the very first entry to this
             // screen, before `PluginScreen::render` has run once. Kicking now

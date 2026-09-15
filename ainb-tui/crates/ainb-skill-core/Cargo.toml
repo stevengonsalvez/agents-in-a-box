@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+# Derives `specta::Type` on the types a mirror frame carries; forwarded from
+# `ainb-app/typescript-bindings`. Off in every normal build.
+typescript-bindings = ["dep:specta"]
 default = []
 # Enables the test-fixture builder (`src/fixtures.rs`) used by integration
 # tests + manual sandbox testing. Off by default so production binaries
@@ -12,6 +15,7 @@ default = []
 test-fixtures = []
 
 [dependencies]
+specta = { workspace = true, optional = true }
 fs2 = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }

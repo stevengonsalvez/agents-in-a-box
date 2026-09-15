@@ -24,6 +24,8 @@ bash scripts/build-plugins.sh
 
 `target/debug/ainb` is the binary every step below means, and every `./target/debug/ainb` below is run from that `ainb-tui` directory. The version line must name the `v2` SHA you checked out. Do not build from a closed lane's worktree: those branches are behind `v2`.
 
+**Automated by the proof harness.** `ainb-tui/scripts/proof/run.sh` (run from `ainb-tui/`, `--build` to build first, `--only <node>` for one scenario) drives steps 1 to 7 end to end against the built binary in a private `HOME`, `TMUX_TMPDIR` and daemon, with a fixture agent and hook-raised ASK cards: step 1 in `phase1-keymap` (plus step 2's embed and step 3's overlay spot check), steps 4 and 5 in `s-a-config-and-headroom`, step 6 in `s-b-connections`, step 7 in `s-c-answered`. Step 10 is covered except the sidebar drag resize (`phase3-uistate`: sidebar single and double click, legend collapse and restore). Step 8 is covered only as today's binary behaves: a live preview is read-only, so `shift+up` shows "Live preview has no scrollback" and `esc` does not quit; scrolling scrollback now needs `A`. Step 9 is not covered (#991). Each node writes `proof-out/<node>/result.json` with its captures and `proof-out/summary.md`; the steps below stay the literal manual check. See `ainb-tui/scripts/proof/README.md`.
+
 ## 1. Keymap override (Phase 1)
 
 Terminal A:

@@ -8,9 +8,11 @@ use tracing::{debug, warn};
 
 /// A single skill parsed from `SKILL.md`.
 #[derive(serde::Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Skill {
     pub name: String,
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub description: String,
     pub user_invocable: Option<bool>,
     pub source_path: PathBuf,
@@ -18,9 +20,11 @@ pub struct Skill {
 
 /// An agent definition parsed from an `.md` file under `~/.claude/agents/`.
 #[derive(serde::Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AgentDef {
     pub name: String,
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub description: String,
     pub tools: Vec<String>,
     pub source_path: PathBuf,
@@ -38,6 +42,7 @@ struct ScannedAgent {
 
 /// Complete parsed skills + agents snapshot.
 #[derive(serde::Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SkillsData {
     pub skills: Vec<Skill>,
     pub agents: Vec<AgentDef>,

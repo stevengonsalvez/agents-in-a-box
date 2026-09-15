@@ -4,6 +4,7 @@
 
 /// Menu items in the setup menu
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum SetupMenuItem {
     RerunWizard,
     CheckDependencies,
@@ -72,6 +73,7 @@ impl SetupMenuItem {
 
 /// State for the setup menu
 #[derive(serde::Serialize, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SetupMenuState {
     /// Currently selected item index
     pub selected_index: usize,

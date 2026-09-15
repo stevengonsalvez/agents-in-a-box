@@ -6,6 +6,7 @@ use crate::models::skills::{AgentDef, Skill, SkillsData};
 
 /// Which agent provider's skills to show.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum SkillsProvider {
     #[default]
     Claude,
@@ -58,6 +59,7 @@ impl SkillsProvider {
 
 /// Which sub-tab is active.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum SkillsTab {
     #[default]
     Skills,
@@ -101,6 +103,7 @@ impl SkillsTab {
 
 /// View state for the Skills screen.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SkillsViewState {
     pub provider: SkillsProvider,
     pub active_tab: SkillsTab,
@@ -112,6 +115,7 @@ pub struct SkillsViewState {
         rename = "search_query_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub search_query: String,
 }
 

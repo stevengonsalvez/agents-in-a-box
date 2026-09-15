@@ -15,8 +15,12 @@
 // The four leak checks and the key-path fixture all read the frame through
 // [`serialize_section`], so they judge exactly what a host receives.
 
+#[cfg(feature = "typescript-bindings")]
+pub mod bindings;
 pub mod fields;
+pub mod frame;
 pub mod shape;
+pub mod store;
 pub mod trace;
 
 use crate::app::AppState;
@@ -44,6 +48,49 @@ use std::sync::Mutex;
 pub fn section_json(state: &AppState, id: SectionId) -> serde_json::Value {
     serialize_section(state, id, serde_json::value::Serializer)
         .expect("a section view always serialises to JSON")
+}
+
+/// The daemon read behind a section's content, for [`frame::Mirror`].
+///
+/// Section 20 is fed by one joined daemon read and says so. The Fleet poller's
+/// reads carry no revision or daemon clock yet, so its section has none.
+#[must_use]
+pub fn daemon_read(state: &AppState, id: SectionId) -> Option<frame::DaemonRead> {
+    match id {
+        // Section 20 is one daemon read: its revision, and the daemon's clock
+        // at the read, so a renderer ages a card on the daemon's clock.
+        SectionId::AgentStatus => state.agent_status.view.as_ref().map(|view| frame::DaemonRead {
+            revision: view.read_revision,
+            clock_ms: view.read_at_ms,
+        }),
+        // The Fleet rows' stamps (`attention_updated_at`, `last_observed_at`) are
+        // on the same daemon's clock. The snapshot poll that fills them carries
+        // no clock of its own, so the frame names the newest daemon clock this
+        // host holds: section 20's last read, and the newest revision it saw. A
+        // renderer ages a row against that, never against its own now (#1044).
+        SectionId::Fleet => state.agent_status.view.as_ref().map(|view| frame::DaemonRead {
+            revision: view.head_revision.max(view.read_revision),
+            clock_ms: view.read_at_ms,
+        }),
+        SectionId::Sessions
+        | SectionId::SessionLabels
+        | SectionId::Tmux
+        | SectionId::Ssh
+        | SectionId::GitView
+        | SectionId::WorkspaceLoad
+        | SectionId::NewSession
+        | SectionId::Logs
+        | SectionId::ClaudeChat
+        | SectionId::Hangar
+        | SectionId::McpPool
+        | SectionId::Inbox
+        | SectionId::PluginsHost
+        | SectionId::Config
+        | SectionId::Skills
+        | SectionId::Recovery
+        | SectionId::Onboarding
+        | SectionId::Shell => None,
+    }
 }
 
 /// Stable wire name of a section, used as the frame key and the fixture root.
@@ -126,34 +173,123 @@ fn locked<T: Serialize, S: Serializer>(cell: &&Mutex<T>, serializer: S) -> Resul
     guard.serialize(serializer)
 }
 
-/// The Hangar fleet snapshot without `current_request`.
+/// The Hangar fleet snapshot as a frame carries it.
 ///
-/// `FleetSession` is the daemon's protocol row, so its own `Serialize` must
-/// keep the request for the RPC it comes from. That field is the complete tool
-/// input of a pending approval (the command about to run, the file about to be
-/// written), unbounded and shaped by the agent, so a frame carries the
-/// fingerprint and never the request.
-///
-/// `cwd` stays (#983 M19): it is the working directory the fleet pane draws on
-/// each row, a path rather than a credential. `cwd` and `current_request` are
-/// deny words, so this field is allow-listed by name in `tests/state_serde.rs`
-/// and section 20 (`agent_status`) leaves both off its frame.
+/// `FleetSession` is the daemon's protocol row, so its own `Serialize` keeps
+/// every field for the RPC it comes from. A frame projects it: off go
+/// `current_request` (the complete tool input of a pending approval, unbounded
+/// and shaped by the agent; the fingerprint stays), `cwd` and `display_name`
+/// (the operator's paths and labels, #983 M19, as section 20 does). On goes
+/// `host_id`: these rows are the local daemon's, which names itself
+/// `LOCAL_HOST_ID` until R1 pairs hosts, so a row stays addressable once it is
+/// mirrored next to another host's.
 // serde's `serialize_with` hands the view's `&&T`, so the double reference is its signature.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn fleet_rows<S: Serializer>(
     cell: &&Mutex<Vec<ainb_hangar_proto::fleet::FleetSession>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    let rows: Vec<_> = cell
+    let rows: Vec<FleetRowFrame> = cell
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .map(|row| ainb_hangar_proto::fleet::FleetSession {
-            current_request: None,
-            ..row.clone()
-        })
+        .map(FleetRowFrame::from)
         .collect();
     rows.serialize(serializer)
+}
+
+/// One fleet row on the wire; see [`fleet_rows`].
+#[derive(Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+struct FleetRowFrame {
+    host_id: &'static str,
+    session_key: String,
+    provider: ainb_hangar_proto::fleet::FleetProvider,
+    provider_session_id: Option<String>,
+    tmux_target: Option<String>,
+    pane_binding: ainb_hangar_proto::fleet::PaneBinding,
+    process_start_fingerprint: Option<String>,
+    lifecycle: ainb_hangar_proto::fleet::LifecycleState,
+    active_work_count: i64,
+    attention: ainb_hangar_proto::fleet::AttentionState,
+    current_request_fingerprint: Option<String>,
+    management: ainb_hangar_proto::fleet::ManagementState,
+    transport_health: ainb_hangar_proto::fleet::TransportHealth,
+    capabilities: ainb_hangar_proto::fleet::FleetCapabilities,
+    provenance: ainb_hangar_proto::fleet::FleetProvenance,
+    confidence: ainb_hangar_proto::fleet::FleetConfidence,
+    discovered_at: i64,
+    last_observed_at: i64,
+    lifecycle_updated_at: i64,
+    attention_updated_at: i64,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    model_updated_at: i64,
+    version: i64,
+    updated_revision: i64,
+}
+
+impl From<&ainb_hangar_proto::fleet::FleetSession> for FleetRowFrame {
+    fn from(row: &ainb_hangar_proto::fleet::FleetSession) -> Self {
+        // Destructured, so a field added to the protocol row fails to compile
+        // here until someone decides whether a frame carries it.
+        let ainb_hangar_proto::fleet::FleetSession {
+            session_key,
+            provider,
+            provider_session_id,
+            tmux_target,
+            pane_binding,
+            process_start_fingerprint,
+            cwd: _,
+            display_name: _,
+            lifecycle,
+            active_work_count,
+            attention,
+            current_request_fingerprint,
+            current_request: _,
+            management,
+            transport_health,
+            capabilities,
+            provenance,
+            confidence,
+            discovered_at,
+            last_observed_at,
+            lifecycle_updated_at,
+            attention_updated_at,
+            model,
+            reasoning_effort,
+            model_updated_at,
+            version,
+            updated_revision,
+        } = row;
+        Self {
+            host_id: ainb_hangar_proto::agent_status::LOCAL_HOST_ID,
+            session_key: session_key.clone(),
+            provider: *provider,
+            provider_session_id: provider_session_id.clone(),
+            tmux_target: tmux_target.clone(),
+            pane_binding: *pane_binding,
+            process_start_fingerprint: process_start_fingerprint.clone(),
+            lifecycle: *lifecycle,
+            active_work_count: *active_work_count,
+            attention: *attention,
+            current_request_fingerprint: current_request_fingerprint.clone(),
+            management: *management,
+            transport_health: *transport_health,
+            capabilities: capabilities.clone(),
+            provenance: *provenance,
+            confidence: *confidence,
+            discovered_at: *discovered_at,
+            last_observed_at: *last_observed_at,
+            lifecycle_updated_at: *lifecycle_updated_at,
+            attention_updated_at: *attention_updated_at,
+            model: model.clone(),
+            reasoning_effort: reasoning_effort.clone(),
+            model_updated_at: *model_updated_at,
+            version: *version,
+            updated_revision: *updated_revision,
+        }
+    }
 }
 
 /// Section 20 (agent status) on the wire (#1015, #983).
@@ -165,6 +301,7 @@ fn fleet_rows<S: Serializer>(
 /// full tool input of a pending approval), `cwd` and `display_name` (the
 /// operator's paths and labels, #983 M19). The failure reason and the unbound
 /// detail are free text, so they are scrubbed as the frame is built.
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Serialize)]
 struct AgentStatusView<'a> {
     absent: Option<String>,
@@ -172,6 +309,7 @@ struct AgentStatusView<'a> {
     view: Option<StatusViewFrame<'a>>,
 }
 
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Serialize)]
 struct StatusViewFrame<'a> {
     host_id: &'a str,
@@ -182,6 +320,7 @@ struct StatusViewFrame<'a> {
     cards: Vec<AgentCardFrame<'a>>,
 }
 
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum HealthFrame {
@@ -196,6 +335,7 @@ enum HealthFrame {
     },
 }
 
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Serialize)]
 struct AgentCardFrame<'a> {
     session_key: &'a str,
@@ -302,6 +442,7 @@ fn opt_len<S: Serializer>(value: &&Option<String>, serializer: S) -> Result<S::O
 macro_rules! view {
     ($view:ident<$lt:lifetime> for $section:ty { $( $(#[$attr:meta])* $field:ident : $ty:ty ),* $(,)? }) => {
         #[derive(Serialize)]
+        #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
         // Field names mirror the section's, prefixes and all, so the frame
         // keys match the Rust fields a later derive would emit.
         #[allow(clippy::struct_field_names)]
@@ -358,6 +499,7 @@ view!(SshView<'a> for SshSection {
 view!(GitViewView<'a> for GitViewSection {
     git_view_state: Option<crate::components::GitViewState>,
     #[serde(rename = "quick_commit_message_len", serialize_with = "opt_len")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<u32>))]
     quick_commit_message: Option<String>,
     quick_commit_cursor: usize,
     is_current_dir_git_repo: bool,
@@ -366,6 +508,7 @@ view!(GitViewView<'a> for GitViewSection {
 view!(WorkspaceLoadView<'a> for WorkspaceLoadSection {
     is_loading_workspaces: bool,
     #[serde(serialize_with = "scrubbed_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     workspace_load_error: Option<String>,
 });
 
@@ -393,8 +536,10 @@ view!(FleetView<'a> for FleetSection {
     ask_state: crate::fleet::answer::AskState,
     broadcast: crate::fleet::broadcast::Broadcast,
     #[serde(serialize_with = "locked")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = crate::fleet::attention::DaemonAttention))]
     daemon_attention: Mutex<crate::fleet::attention::DaemonAttention>,
     #[serde(serialize_with = "fleet_rows")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<FleetRowFrame>))]
     fleet_snapshot: Mutex<Vec<ainb_hangar_proto::fleet::FleetSession>>,
     fleet_metadata: std::collections::HashMap<uuid::Uuid, crate::app::state::SessionFleetMetadata>,
     daemon_attention_seen: u64,
@@ -415,6 +560,7 @@ view!(McpPoolView<'a> for McpPoolSection {
 });
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 struct InboxView {}
 
 // `plugin_ui_states` stays out: each view is JSON its plugin wrote, with keys
@@ -424,6 +570,7 @@ struct InboxView {}
 view!(PluginsHostView<'a> for PluginsHostSection {
     plugin_captures_text: std::collections::HashMap<crate::app::screens::ScreenId, bool>,
     #[serde(serialize_with = "scrubbed_values")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = std::collections::HashMap<crate::app::screens::ScreenId, String>))]
     plugin_render_errors: std::collections::HashMap<crate::app::screens::ScreenId, String>,
 });
 
@@ -534,4 +681,60 @@ mod tests {
         assert!(frame.contains("draft_len"), "{frame}");
         assert!(!frame.contains("typed answer"), "{frame}");
     }
+}
+
+/// The body type of every section's frame, keyed by its wire name. Exists only
+/// for the TypeScript export: a renderer narrows `frame.body` with
+/// `SectionBodies[frame.section]`.
+#[cfg(feature = "typescript-bindings")]
+#[derive(specta::Type)]
+#[allow(dead_code)]
+struct SectionBodies<'a> {
+    sessions: SessionsView<'a>,
+    session_labels: SessionLabelsView<'a>,
+    tmux: TmuxView<'a>,
+    ssh: SshView<'a>,
+    git_view: GitViewView<'a>,
+    workspace_load: WorkspaceLoadView<'a>,
+    new_session: NewSessionView<'a>,
+    logs: LogsView<'a>,
+    claude_chat: ClaudeChatView<'a>,
+    fleet: FleetView<'a>,
+    hangar: HangarView<'a>,
+    mcp_pool: McpPoolView<'a>,
+    inbox: InboxView,
+    plugins_host: PluginsHostView<'a>,
+    config: ConfigView<'a>,
+    skills: SkillsView<'a>,
+    recovery: RecoveryView<'a>,
+    onboarding: OnboardingView<'a>,
+    shell: ShellView<'a>,
+    agent_status: AgentStatusView<'a>,
+}
+
+/// Register every section view with the TypeScript export, named for its section.
+#[cfg(feature = "typescript-bindings")]
+pub(crate) fn register_section_views(types: specta::Types) -> specta::Types {
+    types
+        .register::<SectionBodies<'static>>()
+        .register::<SessionsView<'static>>()
+        .register::<SessionLabelsView<'static>>()
+        .register::<TmuxView<'static>>()
+        .register::<SshView<'static>>()
+        .register::<GitViewView<'static>>()
+        .register::<WorkspaceLoadView<'static>>()
+        .register::<NewSessionView<'static>>()
+        .register::<LogsView<'static>>()
+        .register::<ClaudeChatView<'static>>()
+        .register::<FleetView<'static>>()
+        .register::<HangarView<'static>>()
+        .register::<McpPoolView<'static>>()
+        .register::<InboxView>()
+        .register::<PluginsHostView<'static>>()
+        .register::<ConfigView<'static>>()
+        .register::<SkillsView<'static>>()
+        .register::<RecoveryView<'static>>()
+        .register::<OnboardingView<'static>>()
+        .register::<ShellView<'static>>()
+        .register::<AgentStatusView<'static>>()
 }

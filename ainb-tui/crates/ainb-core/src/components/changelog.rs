@@ -42,25 +42,25 @@ impl ChangelogComponent {
             .iter()
             .map(|md_line| {
                 let style = match &md_line.style {
-                    MarkdownStyle::Heading1 => Style::default()
+                    ChangelogStyle::Heading1 => Style::default()
                         .fg(heading1_color)
                         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                    MarkdownStyle::Heading2 => {
+                    ChangelogStyle::Heading2 => {
                         Style::default().fg(heading2_color).add_modifier(Modifier::BOLD)
                     }
-                    MarkdownStyle::Heading3 => {
+                    ChangelogStyle::Heading3 => {
                         Style::default().fg(heading3_color).add_modifier(Modifier::BOLD)
                     }
-                    MarkdownStyle::Paragraph => Style::default().fg(SOFT_WHITE),
-                    MarkdownStyle::CodeBlock => Style::default().fg(code_fg).bg(code_bg),
-                    MarkdownStyle::CodeBlockHeader(_) => {
+                    ChangelogStyle::Paragraph => Style::default().fg(SOFT_WHITE),
+                    ChangelogStyle::CodeBlock => Style::default().fg(code_fg).bg(code_bg),
+                    ChangelogStyle::CodeBlockHeader(_) => {
                         Style::default().fg(GOLD).add_modifier(Modifier::BOLD)
                     }
-                    MarkdownStyle::ListItem => Style::default().fg(SOFT_WHITE),
-                    MarkdownStyle::Bold => {
+                    ChangelogStyle::ListItem => Style::default().fg(SOFT_WHITE),
+                    ChangelogStyle::Bold => {
                         Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)
                     }
-                    MarkdownStyle::BlockQuote => {
+                    ChangelogStyle::BlockQuote => {
                         Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC)
                     }
                 };

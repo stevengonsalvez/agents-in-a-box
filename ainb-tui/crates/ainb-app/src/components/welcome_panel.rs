@@ -29,6 +29,7 @@ Each session runs in its own git worktree + tmux + agent, fully isolated.
 
 /// Welcome panel state with scroll position
 #[derive(serde::Serialize, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct WelcomePanelState {
     /// Whether the panel is focused
     pub is_focused: bool,

@@ -76,3 +76,6 @@ ainb-tui/crates/ainb-plugin-burndown/target/
 /plans/
 /research/
 /HANDOVER.md
+
+# Proof harness results (scripts/proof/run.sh)
+proof-out/

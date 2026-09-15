@@ -7,6 +7,7 @@ use crate::components::git_view::GitFileStatus;
 /// A full review of working-directory (or commit) changes: every changed file
 /// with its structured hunks, ready to flatten into a scrollable row list.
 #[derive(serde::Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ReviewModel {
     /// Changed files, sorted by path.
     pub files: Vec<ReviewFile>,
@@ -26,6 +27,7 @@ impl ReviewModel {
 
 /// One changed file and its hunks.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ReviewFile {
     /// Repo-relative path.
     pub path: String,
@@ -51,6 +53,7 @@ pub struct ReviewFile {
 
 /// A contiguous run of changed + surrounding-context lines.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Hunk {
     /// 1-based first old (pre-image) line number in this hunk; 0 if none.
     pub old_start: usize,
@@ -70,6 +73,7 @@ pub struct Hunk {
     /// spans rows) and drops the word-emphasis ranges of any row the scrub
     /// changed, since those byte offsets point into the original text.
     #[serde(serialize_with = "scrub_rows")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<DiffRow>))]
     pub rows: Vec<DiffRow>,
 }
 
@@ -92,6 +96,7 @@ fn scrub_rows<S: serde::Serializer>(rows: &[DiffRow], serializer: S) -> Result<S
 
 /// Whether a row is unchanged context, an addition, or a removal.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum RowKind {
     /// Unchanged line shown for context.
     Context,
@@ -103,6 +108,7 @@ pub enum RowKind {
 
 /// A single diff line with its line numbers, text, and word-emphasis ranges.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct DiffRow {
     /// Context / Added / Removed.
     pub kind: RowKind,
@@ -112,6 +118,7 @@ pub struct DiffRow {
     pub new_lineno: Option<usize>,
     /// Full line text with the trailing newline stripped (no diff marker).
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub raw: String,
     /// Byte ranges within `raw` that changed at the word level (brighter
     /// highlight).

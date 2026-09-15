@@ -11,11 +11,13 @@ use std::path::PathBuf;
 use tracing::{debug, error};
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct GitViewState {
     pub active_tab: GitTab,
     pub changed_files: Vec<ChangedFile>,
     pub selected_file_index: usize,
     #[serde(serialize_with = "crate::wire::fields::scrub_lines")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<String>))]
     pub diff_content: Vec<String>,
     pub diff_scroll_offset: usize,
     pub worktree_path: PathBuf,
@@ -25,6 +27,7 @@ pub struct GitViewState {
         rename = "commit_message_len",
         serialize_with = "crate::wire::fields::opt_char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<u32>))]
     pub commit_message_input: Option<String>, // None = not in commit mode, Some = commit message being entered
     pub commit_message_cursor: usize, // Cursor position in commit message
     // File tree state
@@ -44,6 +47,7 @@ pub struct GitViewState {
 
 /// Represents an item in the file tree (either a folder or file)
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct FileTreeItem {
     pub display_name: String,          // Just the filename or folder name
     pub full_path: String,             // Full path for file operations
@@ -57,15 +61,18 @@ pub struct FileTreeItem {
 
 /// A line of rendered markdown content
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct MarkdownLine {
     /// Arbitrary repo file content, so a frame carries it scrubbed.
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub content: String,
     pub style: MarkdownStyle,
 }
 
 /// Styling categories for markdown content
 #[derive(serde::Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum MarkdownStyle {
     Heading1,
     Heading2,
@@ -82,6 +89,7 @@ pub enum MarkdownStyle {
 }
 
 #[derive(serde::Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum GitTab {
     Review,   // Warp-style unified code review (default surface)
     Files,    // Legacy file tree — retired from the tab cycle, kept for compatibility
@@ -91,6 +99,7 @@ pub enum GitTab {
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ChangedFile {
     pub path: String,
     pub status: GitFileStatus,
@@ -99,6 +108,7 @@ pub struct ChangedFile {
 }
 
 #[derive(serde::Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum GitFileStatus {
     Added,
     Modified,

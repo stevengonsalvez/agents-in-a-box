@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Represents a tmux session that exists on the system but was not
 /// created by agents-in-a-box (i.e., doesn't have the "tmux_" prefix)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct OtherTmuxSession {
     /// The tmux session name
     pub name: String,

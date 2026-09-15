@@ -79,6 +79,13 @@ git2 = { version = "0.18", features = ["vendored-openssl"] }
 # Data persistence
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# TypeScript bindings for the mirror frame contract (D15, W0-mirror), compiled
+# only under each crate's `typescript-bindings` feature. Pinned together:
+# specta-typescript and specta-serde 0.0.12 resolve against this release
+# candidate only.
+specta = { version = "=2.0.0-rc.25", features = ["derive", "uuid", "chrono", "serde_json"] }
+specta-serde = "=0.0.12"
+specta-typescript = "=0.0.12"
 serde_yaml = "0.9"
 serde_yaml_ng = "0.10"
 toml = "0.8"

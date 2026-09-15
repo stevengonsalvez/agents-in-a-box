@@ -21,6 +21,7 @@ pub const CUSTOM_PRESET_LABEL: &str = "Custom";
 /// per-row editor rows (Agent / Model / Mode / Yolo). The Custom slot sits
 /// at the end of the cycling ring, after the last named preset.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum PresetSelection {
     Named(usize),
     Custom,
@@ -31,6 +32,7 @@ pub enum PresetSelection {
 /// a named preset — the seed values come from whatever preset was selected
 /// just before the switch.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct CustomOverrides {
     pub agent_provider: String,
     pub agent_model: String,
@@ -56,6 +58,7 @@ impl CustomOverrides {
 /// empty mysocialmedia died at `prepare_remote_worktree` with a cryptic
 /// origin/HEAD error; a typo'd repo died with "Clone failed").
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum RepoCheck {
     /// Local path / SSH session — nothing to validate.
     NotApplicable,
@@ -72,7 +75,11 @@ pub enum RepoCheck {
     Initializing,
     /// Remote is unreachable or missing. Blocks Launch; the message renders
     /// on the form.
-    Failed(#[serde(serialize_with = "crate::wire::fields::scrub_str")] String),
+    Failed(
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        String,
+    ),
 }
 
 impl RepoCheck {
@@ -102,6 +109,7 @@ impl RepoCheck {
 /// Source opens the base-branch picker popup, Worktree opens the inline
 /// name edit (2026-06 base-picker feature).
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum BranchSegment {
     Source,
     Worktree,
@@ -109,6 +117,7 @@ pub enum BranchSegment {
 
 /// How a picked base ref is applied at launch.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum BaseMode {
     /// Cut a fresh `agents/xxx` branch off the picked ref (default).
     BaseOff,
@@ -134,6 +143,7 @@ pub enum BranchProblem {
 /// The user's pick from the base-branch popup. Threaded through `LaunchSpec`
 /// into `create_session_from_configure`.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct BaseSelection {
     /// Display ref — `origin/feature-x` for remote entries, `feature-x` for
     /// local ones. Doubles as the git start-point (revparse-able).
@@ -149,6 +159,7 @@ pub struct BaseSelection {
 /// One row in the base-branch popup: the git entry plus the live-worktree
 /// collision flag (drives the `⚠ in use` marker and blocks Checkout picks).
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct PickerBranchEntry {
     pub entry: BranchEntry,
     pub in_use: bool,
@@ -158,11 +169,13 @@ pub struct PickerBranchEntry {
 /// when closed. Entries are seeded from cached refs at open (instant) and
 /// replaced in place when the background fetch lands (`loading` spinner).
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct BranchPickerState {
     #[serde(
         rename = "filter_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub filter: String,
     pub entries: Vec<PickerBranchEntry>,
     /// Index into `filtered_indices()` — NOT into `entries`.
@@ -171,6 +184,7 @@ pub struct BranchPickerState {
     pub loading: bool,
     /// Inline error line (e.g. Checkout pick on an in-use branch).
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub error: Option<String>,
     /// Action applied on Enter; Tab toggles.
     pub mode: BaseMode,
@@ -225,6 +239,7 @@ impl BranchPickerState {
 /// rows depends on the active variant (SSH vs. local) and on whether
 /// `PresetSelection::Custom` is active.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ConfigureRow {
     Preset,
     Agent,
@@ -255,6 +270,7 @@ pub enum ConfigureRow {
 /// State for the Configure screen. Constructed once when the user advances
 /// from `PickRepo`. Owned by `NewSessionState.configure_state`.
 #[derive(serde::Serialize, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ConfigureState {
     /// What the user selected on screen 1 — drives the layout variant.
     pub repo_source: RepoSource,
@@ -293,6 +309,7 @@ pub struct ConfigureState {
     pub session_prefix_edit: Option<String>,
     /// Multi-line prompt editor (Boss mode only).
     #[serde(serialize_with = "crate::wire::fields::scrub_editor")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<String>))]
     pub prompt: TextEditor,
     /// When `Some`, the save-preset modal is open and the contained string is
     /// the typed name buffer.

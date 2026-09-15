@@ -61,6 +61,13 @@ lazy_static! {
     static ref OPENAI_KEY: Regex =
         Regex::new(r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}")
             .expect("valid openai key regex");
+    /// An AWS secret access key: 40 base64 characters carry no prefix of their
+    /// own, so the shape is the assignment that names one. Group 1 keeps the
+    /// name so a scrubbed `.env` line still says what was there.
+    static ref AWS_SECRET_KEY: Regex = Regex::new(
+        r#"((?i:aws_secret_access_key|aws_secret_key|secret_access_key|secretaccesskey)["']?\s*[:=]\s*["']?)[A-Za-z0-9/+=]{40}"#
+    )
+    .expect("valid aws secret key regex");
     /// Stripe secret and restricted keys, live and test.
     static ref STRIPE_KEY: Regex =
         Regex::new(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}").expect("valid stripe key regex");
@@ -117,7 +124,7 @@ lazy_static! {
 /// PEM runs first so a key block is removed whole before a narrower pattern
 /// eats a line of its body, and the Anthropic shape runs before the `sk-` one
 /// so an `sk-ant-` key is named for what it is.
-fn shapes() -> [(&'static str, &'static Regex); 19] {
+fn shapes() -> [(&'static str, &'static Regex); 20] {
     [
         ("pem private key", &PEM_PRIVATE_KEY),
         ("telegram bot token", &TELEGRAM_TOKEN),
@@ -129,6 +136,7 @@ fn shapes() -> [(&'static str, &'static Regex); 19] {
         ("github token", &GITHUB_TOKEN),
         ("gitlab token", &GITLAB_TOKEN),
         ("aws access key", &AWS_ACCESS_KEY),
+        ("aws secret key", &AWS_SECRET_KEY),
         ("google api key", &GOOGLE_API_KEY),
         ("stripe key", &STRIPE_KEY),
         ("npm token", &NPM_TOKEN),
@@ -222,6 +230,8 @@ fn scrub_shapes(input: &str) -> String {
         }
         let replaced = if name == "url userinfo" {
             re.replace_all(&out, format!("${{1}}{REDACTED}@").as_str()).into_owned()
+        } else if name == "aws secret key" {
+            re.replace_all(&out, format!("${{1}}{REDACTED}").as_str()).into_owned()
         } else {
             re.replace_all(&out, REDACTED).into_owned()
         };
@@ -404,6 +414,7 @@ mod tests {
             ),
             ("slack token", fake("xoxc-", '1', 40)),
             ("slack token", fake("xoxd-", '2', 40)),
+            ("aws secret key", fake("AWS_SECRET_ACCESS_KEY=", 'w', 40)),
         ];
         for (shape, secret) in cases {
             let text = format!("before {secret} after");
@@ -472,6 +483,26 @@ mod tests {
         // Colour stays when there is nothing to scrub.
         let clean = "\x1b[32mcargo test\x1b[0m";
         assert_eq!(scrub(clean), clean);
+    }
+
+    #[test]
+    fn an_aws_secret_key_keeps_its_name_and_loses_its_value() {
+        let secret = fake("", 'W', 40);
+        for line in [
+            format!("export AWS_SECRET_ACCESS_KEY={secret}"),
+            format!("aws_secret_access_key = {secret}"),
+            format!("\"SecretAccessKey\": \"{secret}\""),
+        ] {
+            let scrubbed = scrub(&line);
+            assert!(!scrubbed.contains(&secret), "{scrubbed}");
+            assert!(scrubbed.contains(REDACTED), "{scrubbed}");
+            assert!(
+                scrubbed.to_ascii_lowercase().contains("secret"),
+                "the name stays: {scrubbed}"
+            );
+        }
+        // Forty base64 characters with no name are not claimed.
+        assert!(find_secret(&secret).is_none());
     }
 
     #[test]
