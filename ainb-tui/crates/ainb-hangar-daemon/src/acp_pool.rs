@@ -3445,7 +3445,7 @@ impl AcpPool {
         // counting as attaching. Reading `attaching` first and the routes
         // second means that arrival is counted in at least one of the two
         // whenever it moves between them; at worst it is counted in both,
-        // which refuses early and never overshoots. The routes used to be read
+        // which evicts or refuses one arrival early and never overshoots. The routes used to be read
         // first and `attaching` only after a store read per tenant, so an
         // arrival that attached during those reads was counted in neither, and
         // the process settled at cap+1.
