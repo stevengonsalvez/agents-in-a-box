@@ -10,8 +10,16 @@ cd "$(dirname "$0")/.."
 
 included='binary(/^tripwire_/)'
 excluded=''
-while read -r name _; do
+# `|| [ -n "$name" ]` keeps a last line with no trailing newline.
+while read -r name _ || [ -n "$name" ]; do
   case "$name" in '' | '#'*) continue ;; esac
+  case "$name" in
+    *::?*) ;;
+    *)
+      echo "tripwire_ci_exclusions.txt: '$name' is not binary::test" >&2
+      exit 1
+      ;;
+  esac
   test_expr="(binary(=${name%%::*}) & test(=${name#*::}))"
   included="$included & not $test_expr"
   excluded="${excluded:+$excluded | }$test_expr"
