@@ -122,12 +122,19 @@ impl ConnectionRegistry {
         let mut state = self.state.lock().await;
         let conn_id = state.next_conn_id;
         state.next_conn_id = state.next_conn_id.saturating_add(1);
+        // A plugin acts for its host only once the kernel backed the claim
+        // (`anchor_for`), so attribution (#1073) and folding share one check.
+        let host_surface = host.filter(|host| {
+            surface.as_ref().is_some_and(|surface| surface.kind == SurfaceKind::Plugin)
+                && anchor == Some(host.pid)
+        });
         let row = ConnectionRow {
             conn_id,
             surface: surface.unwrap_or_else(SurfaceInfo::unknown),
             host: self.host.clone(),
             connected_at: Utc::now(),
             tmux_clients: Vec::new(),
+            host_surface,
         };
         state.rows.insert(
             conn_id,
@@ -482,5 +489,47 @@ mod tests {
         let (_, listed) = registry.insert(Some(plugin(77)), true, tui_host(tui_pid), Some(1)).await;
         assert!(listed);
         assert_eq!(registry.list().await.connections.len(), 2);
+    }
+
+    /// #1073: with the TUI's presence lease and the hangar plugin's dial both
+    /// in the registry, an answer through the plugin's connection is attributed
+    /// `tui@<host>`, and a claim the peer does not back stays `plugin@<host>`.
+    #[tokio::test]
+    async fn an_answer_through_a_backed_plugin_dial_is_attributed_to_its_host() {
+        let registry = ConnectionRegistry::new();
+        let tui_pid = std::process::id();
+        registry
+            .insert(
+                Some(SurfaceInfo {
+                    kind: SurfaceKind::Tui,
+                    pid: tui_pid,
+                }),
+                false,
+                None,
+                None,
+            )
+            .await;
+        let (plugin_row, listed) = registry
+            .insert(
+                Some(plugin(tui_pid + 1)),
+                true,
+                tui_host(tui_pid),
+                Some(tui_pid),
+            )
+            .await;
+        assert!(!listed, "the plugin folds into the TUI");
+        assert_eq!(
+            crate::answer::answered_by(&plugin_row),
+            format!("tui@{}", plugin_row.host)
+        );
+
+        let (unbacked, _) = registry
+            .insert(Some(plugin(tui_pid + 2)), true, tui_host(tui_pid), Some(1))
+            .await;
+        assert_eq!(unbacked.host_surface, None);
+        assert_eq!(
+            crate::answer::answered_by(&unbacked),
+            format!("plugin@{}", unbacked.host)
+        );
     }
 }
