@@ -28,6 +28,7 @@ pub mod error;
 pub mod event_stream;
 pub mod framing;
 pub mod handle;
+pub mod inbox;
 pub mod managed_subprocess;
 pub mod plugin_task;
 pub mod process;
