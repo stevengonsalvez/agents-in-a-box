@@ -175,7 +175,7 @@ fn main() {
             // dispatch: the same `ui.app_tick_ms` the terminal host paces by.
             let tick = Duration::from_millis(config.ui.app_tick_ms.max(1));
             let frames = ChannelSink::default();
-            let host = DesktopHost::new(
+            let mut host = DesktopHost::new(
                 config,
                 Keymap::defaults(),
                 HostId::local(),
@@ -184,8 +184,11 @@ fn main() {
             );
             let daemon_bin = daemon_bin()?;
             let sidecar_config = SidecarConfig::new(hangar_home, daemon_bin);
-            let sidecar =
-                tauri::async_runtime::block_on(async { Sidecar::start(sidecar_config.clone()) });
+            // Both spawn onto the app's tokio runtime, so they start inside it.
+            let sidecar = tauri::async_runtime::block_on(async {
+                host.start_workspace_load();
+                Sidecar::start(sidecar_config.clone())
+            });
             let mut states = sidecar.state();
             app.manage(Window {
                 shell: Shell::new(host, DesktopExecutor::new(ainb_bin())),
