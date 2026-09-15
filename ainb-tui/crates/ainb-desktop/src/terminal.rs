@@ -534,12 +534,17 @@ impl Terminals {
     }
 
     /// Size the tab's client to the webview's grid.
+    ///
+    /// The webview sizes a tab whenever it shows it, so this also counts as
+    /// activity: the tab the user is looking at is never the one idle longest,
+    /// however quiet its pane.
     pub fn resize(&self, key: &str, cols: u16, rows: u16) {
         let mut tabs = lock(&self.inner.tabs);
         let Some(index) = position(&tabs, key) else {
             return;
         };
         let tab = &mut tabs[index];
+        tab.flow.touch();
         // The size reaches the shared tmux window of every client on the
         // session, so a webview cannot ask for more than a screen holds.
         tab.size = PtySize {
