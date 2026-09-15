@@ -121,6 +121,53 @@ mod tests {
         })
     }
 
+    /// The own-session rule follows the session the host reported, not a
+    /// lookup from the process the reducer runs in (#1077).
+    #[test]
+    fn the_session_the_host_reported_gets_no_observer() {
+        let own = "ainb-host-session";
+        let mut state = state_with_other_tmux_sessions(&[own]);
+        state.shell.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
+
+        let before = state.versions();
+        state.set_host_tmux_session(Some(own.to_string()));
+        assert_eq!(
+            state.versions(),
+            before,
+            "a host fact bumps no section, so no frame carries it"
+        );
+        assert!(state.is_host_tmux_session_selected());
+        assert!(settled_observer_request(&mut state).is_none());
+
+        state.set_host_tmux_session(None);
+        assert!(!state.is_host_tmux_session_selected());
+        assert_eq!(settled_observer_request(&mut state), Some(observe(own)));
+    }
+
+    /// A dotted name tmux accepts but `TmuxSessionName` refuses still matches
+    /// its own row.
+    #[test]
+    fn a_dotted_host_session_matches_its_own_row() {
+        let own = "work.main";
+        let mut state = state_with_other_tmux_sessions(&[own]);
+        assert!(!state.is_host_tmux_session_selected());
+        state.set_host_tmux_session(Some(own.to_string()));
+        assert!(state.is_host_tmux_session_selected());
+    }
+
+    /// A reported session that is not the selected row leaves the row's
+    /// observer alone.
+    #[test]
+    fn a_row_other_than_the_host_session_still_gets_its_observer() {
+        let row = "ainb-other-row";
+        let mut state = state_with_other_tmux_sessions(&[row]);
+        state.shell.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
+        state.set_host_tmux_session(Some("ainb-host-session".to_string()));
+
+        assert!(!state.is_host_tmux_session_selected());
+        assert_eq!(settled_observer_request(&mut state), Some(observe(row)));
+    }
+
     #[test]
     fn dead_observer_stays_suppressed_for_the_retry_window() {
         let missing = "ainb-missing-observer";

@@ -514,6 +514,22 @@ fn host_only_state_is_not_serialize() {
     );
 }
 
+/// The own-session rule reads the session the host reported (#1077). The
+/// lookup spawns `tmux` and `ps`, so the crate only defines it: no module
+/// calls it, and no dispatch path can reach a spawn to answer the rule.
+#[test]
+fn nothing_in_the_crate_looks_up_the_tmux_session_the_host_runs_in() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = BTreeMap::new();
+    count_call_sites(&src, &src, &["host_tmux_session_name("], &mut found);
+    assert_eq!(
+        found,
+        BTreeMap::from([("tmux/process_detection.rs".to_string(), 1)]),
+        "only the definition names the lookup; a host calls it and reports the \
+         name through AppState::set_host_tmux_session"
+    );
+}
+
 #[test]
 fn no_reducer_module_saves_a_store_outside_the_persistence_effect() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
