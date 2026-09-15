@@ -9221,14 +9221,23 @@ mod session_composer_key_tests {
         assert_eq!(chat.composer(), " ");
     }
 
+    /// Run `body` with `AINB_HANGAR_HOME` on a scratch directory, restoring the
+    /// prior value after: answering a card starts a daemon write, which must
+    /// not reach the real home.
+    fn with_scratch_hangar_home(body: impl FnOnce()) {
+        let hangar_home = tempfile::tempdir().expect("scratch hangar home");
+        let previous = std::env::var_os("AINB_HANGAR_HOME");
+        std::env::set_var("AINB_HANGAR_HOME", hangar_home.path());
+        body();
+        match previous {
+            Some(value) => std::env::set_var("AINB_HANGAR_HOME", value),
+            None => std::env::remove_var("AINB_HANGAR_HOME"),
+        }
+    }
+
     /// The composer with one open confirm card selected and the cards focused.
     fn a_card_focused() -> AppState {
         use ainb_plugin_hangar::screen::fleet_chat::{ChatFocus, ChatSnapshot};
-
-        // Answering a card starts a daemon write; keep it off the real home.
-        let hangar_home = tempfile::tempdir().expect("scratch hangar home");
-        std::env::set_var("AINB_HANGAR_HOME", hangar_home.path());
-        std::mem::forget(hangar_home);
 
         let mut state = composing();
         let chat = state.host.pal_chat.as_mut().expect("pal chat").state_mut();
@@ -9276,7 +9285,8 @@ mod session_composer_key_tests {
             "precondition: y on this card is a confirm answer: {outcome:?}"
         );
 
-        let event = press(&mut state, Char('y'));
+        let mut event = None;
+        with_scratch_hangar_home(|| event = press(&mut state, Char('y')));
 
         assert!(matches!(event, Some(AppEvent::Consumed)), "{event:?}");
         assert_eq!(
