@@ -382,6 +382,9 @@ impl Terminals {
         if let Some(index) = position(&tabs, &key) {
             if tabs[index].state == TabState::Detached {
                 if let Err(report) = self.reattach_at(&mut tabs, index) {
+                    // The tab may be gone with its session: the strip hears it
+                    // before the reducer does.
+                    self.emit(&tabs, None);
                     return Some(report);
                 }
             }
@@ -477,21 +480,6 @@ impl Terminals {
                 tracing::warn!(tab = key, %error, "terminal resize failed");
             }
         }
-    }
-
-    /// Re-attach a detached tab, on the user's click.
-    pub fn reattach(&self, key: &str) {
-        let mut tabs = lock(&self.inner.tabs);
-        let Some(index) = position(&tabs, key) else {
-            return;
-        };
-        if tabs[index].state != TabState::Detached {
-            return;
-        }
-        if let Err(report) = self.reattach_at(&mut tabs, index) {
-            self.report(report);
-        }
-        self.emit(&tabs, Some(key.to_string()));
     }
 
     /// Close the tab: its client goes, and the reducer hears the user left it.
