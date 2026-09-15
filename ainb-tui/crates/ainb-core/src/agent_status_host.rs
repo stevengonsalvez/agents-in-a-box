@@ -222,14 +222,14 @@ impl AgentStatusHost {
 /// render in whole seconds.
 const CLOCK_TICK: Duration = Duration::from_secs(1);
 
-/// The clock a card's age is measured on: the daemon's, the clock evidence
-/// stamps are on.
+/// The local clock the tick carries.
 ///
-/// Every daemon today is on this machine (`host_id = local`), so its clock is
-/// this one. When the joined read carries the daemon's clock at the read
-/// (#1036: `RosterStatusResult.read_at_ms`, `StatusView::daemon_now_ms`), this
-/// becomes `view.daemon_now_ms(local_now_ms)`, so a paired host with a skewed
-/// clock still ages its cards correctly.
+/// The pane maps it onto the daemon's clock itself: since W0-mirror,
+/// `FleetPaneState::evidence_clock_ms` is `view.daemon_now_ms(now)`, the
+/// daemon's clock at its last read (`read_at_ms`) plus the local time held
+/// since. So the tick must stay LOCAL: sending the daemon estimate here would
+/// apply the skew twice. What the tick adds is the "since": without it the
+/// pane's `now` never moves and every age freezes at the read (#1054).
 fn card_clock_ms(_section: &AgentStatusSection, local_now_ms: i64) -> i64 {
     local_now_ms
 }
