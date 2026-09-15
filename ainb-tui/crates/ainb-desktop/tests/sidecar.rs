@@ -310,3 +310,77 @@ fn scrub_paths_hides_every_path_and_keeps_the_words() {
         "the daemon exited with exit status: 1"
     );
 }
+
+/// A fixture "daemon" that stays up without ever answering hello. With
+/// `own_lock` it first writes its pid to the home's ownership lock, as the real
+/// daemon's flock does, and `exec`s so the child pid is the one it wrote.
+fn slow_daemon(world: &World, own_lock: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let script = world.dir.path().join(if own_lock { "owner.sh" } else { "stray.sh" });
+    let lock = if own_lock {
+        "mkdir -p \"$AINB_HANGAR_HOME/hangar\" && echo $$ > \"$AINB_HANGAR_HOME/hangar/daemon.lock\"\n"
+    } else {
+        ""
+    };
+    std::fs::write(&script, format!("#!/bin/sh\n{lock}exec sleep 120\n")).expect("fixture");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    script
+}
+
+/// A daemon that holds the home's lock but is slower to answer than the
+/// budget is still the only daemon for that home: the app degrades and the
+/// daemon lives on for Retry to attach to.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_booting_daemon_that_owns_the_home_is_never_killed() {
+    let world = World::new();
+    let mut config = world.config();
+    config.daemon_bin = slow_daemon(&world, true);
+    config.grace = Duration::from_millis(300);
+    config.hello_budget = Duration::from_secs(1);
+    let sidecar = Sidecar::start(config);
+    let mut state = sidecar.state();
+
+    let SidecarState::Degraded { error, .. } = wait_for(&mut state, "degraded", |state| {
+        matches!(state, SidecarState::Degraded { .. })
+    })
+    .await
+    else {
+        unreachable!("matched degraded");
+    };
+    assert!(error.contains("still starting"), "{error}");
+    let owner = daemon_pid(&world.home()).expect("the fixture wrote its lock");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(alive(owner), "the booting owner of the home was not killed");
+}
+
+/// A child that never took the lock and never answers is stopped, on every
+/// attempt, rather than left running.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_that_never_owned_the_home_is_stopped() {
+    let world = World::new();
+    let mut config = world.config();
+    config.daemon_bin = slow_daemon(&world, false);
+    config.grace = Duration::from_millis(300);
+    config.hello_budget = Duration::from_secs(1);
+    config.max_spawn_attempts = 2;
+    let sidecar = Sidecar::start(config);
+    let mut state = sidecar.state();
+
+    let SidecarState::Degraded { error, .. } = wait_for(&mut state, "degraded", |state| {
+        matches!(state, SidecarState::Degraded { .. })
+    })
+    .await
+    else {
+        unreachable!("matched degraded");
+    };
+    assert!(error.contains("attempt 2"), "{error}");
+    let script = world.dir.path().join("stray.sh");
+    let strays = std::process::Command::new("pgrep")
+        .args(["-f", &script.display().to_string()])
+        .output()
+        .expect("pgrep");
+    assert!(
+        String::from_utf8_lossy(&strays.stdout).trim().is_empty(),
+        "a child that never owned the home is still running"
+    );
+}
