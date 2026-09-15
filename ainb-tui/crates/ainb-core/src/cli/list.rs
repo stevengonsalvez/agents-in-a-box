@@ -189,9 +189,21 @@ fn web_rows(sessions: &[SessionInfo]) -> Vec<ainb_app::wire::web::WebSessionRow>
     // as `ainb list` does. Sorted on the parsed instant: RFC 3339 text is not in
     // time order when two stamps carry fractions of different widths.
     let mut rows = ainb_app::wire::web::session_rows(&state);
-    let instant = |stamp: &str| DateTime::parse_from_rfc3339(stamp).ok();
-    rows.sort_by(|a, b| instant(&b.created_at).cmp(&instant(&a.created_at)));
+    sort_newest_first(&mut rows);
     rows
+}
+
+/// Newest `created_at` first. A stamp that does not parse sorts last, as the
+/// oldest possible instant.
+fn sort_newest_first(rows: &mut [ainb_app::wire::web::WebSessionRow]) {
+    rows.sort_by_cached_key(|row| {
+        std::cmp::Reverse(
+            DateTime::parse_from_rfc3339(&row.created_at)
+                .map_or(DateTime::<Utc>::MIN_UTC, |instant| {
+                    instant.with_timezone(&Utc)
+                }),
+        )
+    });
 }
 
 /// Output sessions as JSON
@@ -285,6 +297,33 @@ mod tests {
             rows[2].worktree_path,
             "/w/repo-5b1f2a8e-0000-4000-8000-000000000003"
         );
+    }
+
+    #[test]
+    fn an_unparseable_created_at_sorts_last() {
+        let mut rows = vec![
+            ainb_app::wire::web::WebSessionRow {
+                session_id: "bad".to_string(),
+                tmux_session_name: None,
+                workspace_name: "repo".to_string(),
+                worktree_path: "/w".to_string(),
+                created_at: "not a stamp".to_string(),
+                is_running: true,
+                claude_active: false,
+            },
+            ainb_app::wire::web::WebSessionRow {
+                session_id: "good".to_string(),
+                tmux_session_name: None,
+                workspace_name: "repo".to_string(),
+                worktree_path: "/w".to_string(),
+                created_at: "2026-09-15T00:00:00Z".to_string(),
+                is_running: true,
+                claude_active: false,
+            },
+        ];
+        sort_newest_first(&mut rows);
+        let ids: Vec<_> = rows.iter().map(|row| row.session_id.as_str()).collect();
+        assert_eq!(ids, ["good", "bad"]);
     }
 
     #[test]
