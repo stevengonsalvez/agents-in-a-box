@@ -320,3 +320,8 @@ D1c review (four passes at 2c8545b77), applied:
 - Host: no absolute tmux means no terminals and a report naming the missing tmux; the no-tmux arm has its own message.
 - Webview: credit returns in `finally` however the paint went, and the byte channel opens only with its listener in place, so the transport buffers nothing.
 - Tests: each tmux test runs its own server on an explicit `-S` socket in its own temporary directory, with no environment mutation; sessions are killed by exact name and each server exits on its own before its directory is removed (no server is killed, per the lane's tmux rule); new tests show credit is per tab and that redials hold attached tabs to the cap, the latter failing with 10 attached when the redial's `make_room` is removed.
+
+#1131 (#1140 for the reducer, this for the desktop):
+- The Sessions frame carries each row's merged attention as `attention` (kind and scrubbed detail), set by `AppState::refresh_attention`, which now writes a section only when a value changed.
+- The desktop tick merges attention at once on daemon news (the published generation moved) and otherwise every 5 s, the terminal host's cadence, since each merge reads the notifications store; `tests/host_contract.rs` pins that a merge finding nothing new frames nothing.
+- `ui/src/sessions.ts` rings a row from its framed `attention`, tightest kind first; the Fleet-based correlation (provider id against `daemon_attention.by_session_id`, the status-error fallback, the attached check) is deleted, since the host's merge does all of it. The sidebar, the header counts and `ROOT_SELECTORS` read no Fleet section; Fleet stays subscribed for the D2 attention list.
