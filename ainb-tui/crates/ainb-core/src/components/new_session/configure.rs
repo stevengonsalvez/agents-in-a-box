@@ -265,7 +265,8 @@ fn render_preset_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     // Width-fit gate (as render_agent_row and render_model_row do), counting
     // the modified badge too: it is the one thing on this row that must stay
     // visible. Drop the `←/→ to change` hint first; if the pills still do not
-    // fit, show the single `◀ value ▶` cycle display.
+    // fit, show the single `◀ value ▶` cycle display, whose name gives way
+    // so the badge still fits.
     const MODIFIED_BADGE: &str = "  \u{2022} modified";
     let badge_width = if modified {
         MODIFIED_BADGE.chars().count()
@@ -285,12 +286,23 @@ fn render_preset_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
             }
             spans
         } else {
+            // Indicator, label and both arrows take 15 cells around the name.
+            let room = width.saturating_sub(15 + badge_width);
+            let name = if current.chars().count() > room {
+                let mut name: String = current.chars().take(room.saturating_sub(1)).collect();
+                if room > 0 {
+                    name.push('\u{2026}');
+                }
+                name
+            } else {
+                current.clone()
+            };
             vec![
                 focus_indicator(focused),
                 label_span("Preset:  "),
                 cyclable_arrow_left(focused),
                 Span::styled(
-                    current.clone(),
+                    name,
                     Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
                 ),
                 cyclable_arrow_right(focused),
