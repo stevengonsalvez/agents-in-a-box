@@ -845,6 +845,10 @@ export type ChangelogState = {
 	total_lines: number,
 };
 
+export type ChangelogView = {
+	changelog_state: ChangelogState,
+};
+
 /**  Authentication provider for Claude API */
 export type ClaudeAuthProvider = 
 /**  System authentication (Claude Pro/Max subscription) */
@@ -1196,7 +1200,6 @@ export type ConfigView_Serialize = {
 	app_config: AppConfig_Serialize,
 	config_screen_state: ConfigScreenState_Serialize,
 	config_popup_state: ConfigPopupState_Serialize,
-	changelog_state: ChangelogState,
 	statusline_status: StatuslineStatus_Serialize | null,
 };
 
@@ -3722,6 +3725,7 @@ export type SectionBodies_Serialize = {
 	onboarding: OnboardingView_Serialize,
 	shell: ShellView_Serialize,
 	agent_status: AgentStatusView,
+	changelog: ChangelogView,
 };
 
 /**
