@@ -5310,6 +5310,19 @@ impl AppState {
                     continue;
                 }
 
+                // A name past the cap is not listed: every row is mirrored to
+                // every renderer, and a local process could otherwise rename a
+                // session to a string of any size (#1096). Logged at debug:
+                // discovery runs on every poll, so the same session repeats.
+                if name.len() > crate::app::effect::TmuxSessionName::MAX_BYTES {
+                    debug!(
+                        bytes = name.len(),
+                        "skipping a tmux session whose name is past {} bytes",
+                        crate::app::effect::TmuxSessionName::MAX_BYTES
+                    );
+                    continue;
+                }
+
                 let attached_clients = parts[parts.len() - 2].parse::<usize>().unwrap_or(0);
                 let attached =
                     attached_clients > usize::from(self.is_observing_tmux_session(name.as_str()));

@@ -277,17 +277,24 @@ impl<T: serde::Serialize> Eq for Snapshot<T> {}
 /// and of control characters, with no whitespace at either end, and not
 /// starting with `$`, `%`, `@` or `=`, which tmux reads as a session, pane or
 /// window id or an exact-match marker, so such a name could reach another
-/// session.
+/// session. At most [`TmuxSessionName::MAX_BYTES`] long: a name is mirrored to
+/// every renderer, and a local process could otherwise rename a session to a
+/// 100 KB string (#1096).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct TmuxSessionName(String);
 
 impl TmuxSessionName {
+    /// The longest name accepted, in bytes. Far past any name ainb mints
+    /// (`tmux_<repo>_<branch>`), and small enough to put in every frame.
+    pub const MAX_BYTES: usize = 128;
+
     /// The name, or `None` when tmux could not address a session by it.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Option<Self> {
         let name = name.into();
         let addressable = !name.is_empty()
+            && name.len() <= Self::MAX_BYTES
             && name.trim() == name
             && !name.contains([':', '.'])
             && !name.starts_with(['$', '%', '@', '='])
@@ -481,6 +488,10 @@ mod tests {
             TmuxSessionName::new("tmux_api_feat-login").map(|name| name.as_str().to_string()),
             Some("tmux_api_feat-login".to_string())
         );
+        // #1096: the length is capped, at the boundary exactly.
+        let longest = "a".repeat(TmuxSessionName::MAX_BYTES);
+        assert!(TmuxSessionName::new(longest.clone()).is_some());
+        assert_eq!(TmuxSessionName::new(format!("{longest}a")), None);
     }
 
     #[test]

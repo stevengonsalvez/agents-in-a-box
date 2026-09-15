@@ -4460,7 +4460,9 @@ export type TmuxDecision =
  *  and of control characters, with no whitespace at either end, and not
  *  starting with `$`, `%`, `@` or `=`, which tmux reads as a session, pane or
  *  window id or an exact-match marker, so such a name could reach another
- *  session.
+ *  session. At most [`TmuxSessionName::MAX_BYTES`] long: a name is mirrored to
+ *  every renderer, and a local process could otherwise rename a session to a
+ *  100 KB string (#1096).
  */
 export type TmuxSessionName = string;
 
