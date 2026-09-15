@@ -56,8 +56,12 @@ use crate::events::EventSink;
 /// decoding, but the socket handler replaces it with this value before any
 /// database write. Client input can therefore never forge another surface.
 #[must_use]
+///
+/// A plugin connection whose host the daemon verified is attributed to that
+/// host (#1073): an answer sent from the TUI's Hangar screen is `tui@<host>`,
+/// the surface the person sat at, not the plugin process that relayed it.
 pub fn answered_by(connection: &ConnectionRow) -> String {
-    format!("{}@{}", connection.surface.kind, connection.host)
+    format!("{}@{}", connection.attributed_kind(), connection.host)
 }
 
 /// Test seam: whether [`answer`] parks forever at the `writing` boundary.
