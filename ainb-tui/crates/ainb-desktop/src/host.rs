@@ -101,6 +101,9 @@ pub struct DesktopHost<S: FrameSink> {
     /// When the last scan was asked for, so the tick can pace the next.
     scanned_at: Instant,
     rescan_every: Duration,
+    /// The daemon's publish counter as it stood when the last scan started, so
+    /// news the poller brings can start one before the cadence would (#1156).
+    scanned_generation: u64,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -127,6 +130,7 @@ impl<S: FrameSink> DesktopHost<S> {
             sink,
             scanned_at: Instant::now(),
             rescan_every: WORKSPACE_RESCAN,
+            scanned_generation: 0,
         }
     }
 
@@ -194,7 +198,22 @@ impl<S: FrameSink> DesktopHost<S> {
         // A session another process created is found by a scan and by nothing
         // else, so the window keeps asking for one. Never two at once: the
         // reducer owns the load and reports it running.
-        if !self.state.workspace_scan_running() && self.scanned_at.elapsed() >= self.rescan_every {
+        //
+        // The daemon already knows when something happened, so its publish
+        // counter starts a scan at once and the cadence is the floor under it
+        // (#1156): a box whose sessions never touch the daemon still gets one
+        // on the timer. The counter is recorded at the START of the scan, so
+        // news that arrives while it runs is still news when it finishes.
+        let generation = self
+            .state
+            .host
+            .daemon_attention_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        let news = generation != self.scanned_generation;
+        if !self.state.workspace_scan_running()
+            && (news || self.scanned_at.elapsed() >= self.rescan_every)
+        {
+            self.scanned_generation = generation;
             self.state.start_workspace_load();
         }
         let effects = self.state.take_effects();
