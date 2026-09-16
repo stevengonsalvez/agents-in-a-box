@@ -8,7 +8,17 @@ import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
-import { accelerator, openRowIntent, rowOf, stepTab, type Accelerator, type RowId, type Tab, type TabsView } from "./tabs.ts";
+import {
+  accelerator,
+  openRowIntent,
+  rowOf,
+  stepTab,
+  type Accelerator,
+  type RendererIntent,
+  type RowId,
+  type Tab,
+  type TabsView,
+} from "./tabs.ts";
 import { TerminalView } from "./terminal.tsx";
 import "./shell.css";
 
@@ -95,7 +105,7 @@ function Shell() {
     if (view.focus !== null) activate(view.focus);
     else if (!view.tabs.some((tab) => tab.key === active())) activate(view.tabs[0]?.key ?? null);
   };
-  const dispatch = (intent: unknown) => void invoke("dispatch", { intent });
+  const dispatch = (intent: RendererIntent) => void invoke("dispatch", { intent });
   /** Select a session-list row and attach it, so the reducer marks it attached. */
   const openRow = (row: RowId) => dispatch(openRowIntent(row));
 
@@ -138,7 +148,10 @@ function Shell() {
       case "paste":
         return;
       case "palette":
-        setPalette((open) => !open);
+        // The second press closes it the way Esc does, so focus goes back to
+        // the pane or the sidebar rather than to the body.
+        if (palette()) closePalette();
+        else setPalette(true);
         return;
     }
   };
@@ -187,7 +200,10 @@ function Shell() {
       // log. Names and a count, never a body, and never a drain that carried
       // nothing for this window.
       const applied = [...new Set(batches.flatMap(({ frames }) => frames.map((frame) => frame.section)))];
-      if (applied.length > 0) {
+      // A drain carrying nothing but the loading flag is not something the
+      // renderer applied for a reader to see, and the window asks for a scan
+      // on a cadence, so reporting it would append a line forever.
+      if (applied.some((section) => section !== "workspace_load")) {
         void invoke("renderer_applied", {
           sections: applied,
           sessions: allSessions(store.section(host, "sessions")).length,
