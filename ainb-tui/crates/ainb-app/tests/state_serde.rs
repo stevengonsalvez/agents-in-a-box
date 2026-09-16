@@ -974,6 +974,8 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "Snapshot.hook_health",
     "DepState.detail",
     "ImageSource.base_image",
+    "ImageSource.name",
+    "McpInstallation.branch",
     "McpInstallation.package",
     "McpInstallation.script",
     "McpInstallation.version",
@@ -1785,6 +1787,8 @@ const UNSEEDED_VARIANTS: &[(&str, &str)] = &[];
 const TAGGED_SCRUB_CARRIERS: &[(&str, &str)] = &[
     ("DepState.detail", "DepState::ok|alt|too_old"),
     ("ImageSource.base_image", "ImageSource::ClaudeDocker"),
+    ("ImageSource.name", "ImageSource::Image"),
+    ("McpInstallation.branch", "McpInstallation::Git"),
     ("McpInstallation.package", "McpInstallation::Npm|Python"),
     ("McpInstallation.script", "McpInstallation::Custom"),
     ("McpInstallation.version", "McpInstallation::Npm|Python"),
