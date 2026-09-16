@@ -133,6 +133,19 @@ impl Broadcast {
         changed
     }
 
+    /// Publish a finished call the way the send worker does, for `tick` to
+    /// fold in. `Ok` is the receipts, `Err` the call's failure. The wire sample
+    /// uses it to put each phase on a frame without a daemon (#1146).
+    pub(crate) fn publish_outcome(&self, outcome: Result<Vec<FleetActionReceipt>, String>) {
+        let outcome = match outcome {
+            Ok(receipts) => BroadcastOutcome::Sent(receipts),
+            Err(detail) => BroadcastOutcome::Failed(detail),
+        };
+        if let Ok(mut inbox) = self.inbox.lock() {
+            inbox.push(outcome);
+        }
+    }
+
     /// Send to `targets`, if there is anything to send and anyone to send it to.
     ///
     /// Returns whether a send started, so the caller can leave the key alone
