@@ -12554,49 +12554,7 @@ impl AppState {
             }
         }
 
-        // Apply status-only updates for non-selected sessions
-        for (session_id, claude_running) in status_updates {
-            // Accumulate the change flag inside the session borrow, then
-            // touch `self.shell.ui_needs_refresh` only after it ends (avoids a
-            // borrow conflict between `find_session_mut` and `self`).
-            let mut changed = false;
-            if let Some(session) = self.find_session_mut(session_id) {
-                use crate::models::SessionStatus;
-                let new_status = if claude_running {
-                    SessionStatus::Running
-                } else {
-                    SessionStatus::Idle
-                };
-                if session.status != new_status {
-                    session.set_status(new_status);
-                    changed = true;
-                }
-            }
-            if changed {
-                self.shell.ui_needs_refresh = true;
-            }
-        }
-
-        // Apply updates for the selected session (preview always changes,
-        // so this loop unconditionally requests a refresh).
-        for (session_id, content, claude_running) in updates {
-            if let Some(session) = self.find_session_mut(session_id) {
-                session.set_preview(content);
-
-                use crate::models::SessionStatus;
-                let new_status = if claude_running {
-                    SessionStatus::Running
-                } else {
-                    SessionStatus::Idle
-                };
-
-                if session.status != new_status {
-                    session.set_status(new_status);
-                }
-            }
-
-            self.shell.ui_needs_refresh = true;
-        }
+        self.apply_pane_captures(updates, status_updates);
 
         // Now that per-session running/idle status is current, recompute each
         // session's attention chips. Independent of pane capture, so it also
@@ -12631,14 +12589,7 @@ impl AppState {
                     join_wrapped_lines: true,
                 };
                 match capture_pane(&tmux_name, opts).await {
-                    Ok(content) => {
-                        if let Some(workspace) = self.sessions.workspaces.get_mut(ws_idx) {
-                            if let Some(shell) = workspace.shell_session.as_mut() {
-                                shell.preview_content = Some(content);
-                                self.shell.ui_needs_refresh = true;
-                            }
-                        }
-                    }
+                    Ok(content) => self.apply_shell_preview(ws_idx, content),
                     Err(e) => {
                         debug!(
                             "Failed to capture shell session content for {}: {}",
@@ -12650,6 +12601,86 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    /// Apply one preview pass's captures: `updates` are the selected session's
+    /// (content, claude running), `status_updates` the others' running flag.
+    ///
+    /// Runs every preview interval whether or not a pane moved, so it writes
+    /// Sessions, and asks for a redraw through Shell, only for a session whose
+    /// preview or status actually differs (#1139).
+    pub(crate) fn apply_pane_captures(
+        &mut self,
+        updates: Vec<(uuid::Uuid, String, bool)>,
+        status_updates: Vec<(uuid::Uuid, bool)>,
+    ) {
+        use crate::models::SessionStatus;
+        let status_of = |claude_running: bool| {
+            if claude_running {
+                SessionStatus::Running
+            } else {
+                SessionStatus::Idle
+            }
+        };
+        let mut changed = false;
+        for (session_id, claude_running) in status_updates {
+            let new_status = status_of(claude_running);
+            let differs = self
+                .find_session(session_id)
+                .is_some_and(|session| session.status != new_status);
+            if differs {
+                if let Some(session) = self.find_session_mut(session_id) {
+                    session.set_status(new_status);
+                    changed = true;
+                }
+            }
+        }
+        for (session_id, content, claude_running) in updates {
+            let new_status = status_of(claude_running);
+            let differs = self.find_session(session_id).is_some_and(|session| {
+                session.preview_content.as_deref() != Some(content.as_str())
+                    || session.status != new_status
+            });
+            if !differs {
+                continue;
+            }
+            if let Some(session) = self.find_session_mut(session_id) {
+                if session.preview_content.as_deref() != Some(content.as_str()) {
+                    session.set_preview(content);
+                }
+                if session.status != new_status {
+                    session.set_status(new_status);
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
+        }
+    }
+
+    /// Show `content` as the shell preview of workspace `ws_idx`, writing
+    /// Sessions and asking for a redraw only when it differs from what is
+    /// shown (#1139).
+    pub(crate) fn apply_shell_preview(&mut self, ws_idx: usize, content: String) {
+        let differs = self
+            .sessions
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.shell_session.as_ref())
+            .is_some_and(|shell| shell.preview_content.as_deref() != Some(content.as_str()));
+        if !differs {
+            return;
+        }
+        if let Some(shell) = self
+            .sessions
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|workspace| workspace.shell_session.as_mut())
+        {
+            shell.preview_content = Some(content);
+        }
+        self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
     }
 
     /// Restart Claude in an existing tmux session (for Idle sessions)
