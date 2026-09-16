@@ -1522,17 +1522,8 @@ impl EventHandler {
                     tracing::warn!("command `{id}` runs only from its key");
                     return None;
                 }
-                // Confirm runs whatever the open dialog holds, so it is judged
-                // by that action rather than by the row.
-                if matches!(binding.action, KeyAction::App(AppEvent::ConfirmationConfirm))
-                    && state
-                        .shell
-                        .confirmation_dialog
-                        .as_ref()
-                        .and_then(crate::app::state::ConfirmationDialog::selected_action)
-                        .is_some_and(crate::app::state::ConfirmAction::runs_only_from_key)
-                {
-                    tracing::warn!("command `{id}` would confirm an action that runs only from its key");
+                if let Some(why) = state.remote_command_refusal(&binding.action) {
+                    tracing::warn!("command `{id}` refused: {why}");
                     return None;
                 }
                 let host_authored = crate::app::reports::ids::ALL.contains(&id.as_str())
