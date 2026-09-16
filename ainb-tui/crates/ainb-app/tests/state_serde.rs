@@ -663,6 +663,18 @@ const DENY_TYPES: &[(&str, &str)] = &[
 /// Fields of a denied type that stay on the wire, each with its reason.
 const TYPE_ALLOW: &[(&str, &str)] = &[
     (
+        "ConfirmAction::BulkDeleteSessions.0",
+        "ids of the sessions a bulk delete names; uuids, not text",
+    ),
+    (
+        "ConfirmAction::BulkStopSessions.0",
+        "ids of the sessions a bulk stop names; uuids, not text",
+    ),
+    (
+        "ConfirmAction::KillOtherTmuxSessions.0",
+        "tmux session names the kill dialog lists; the same names the tmux section carries",
+    ),
+    (
         "ConfigPopupType::Choice.options",
         "the choices a registry setting declares; labels, not user text",
     ),
@@ -1136,14 +1148,6 @@ const UNFILLED_WAIVED: &[(&str, &str)] = &[
     (
         "SessionFleetMetadata.lifecycle",
         "a LifecycleState unit enum; no text",
-    ),
-    (
-        "SessionLabelsView.session_context_menu",
-        "row indices and a cursor; no text",
-    ),
-    (
-        "SessionLabelsView.session_label_rename_target",
-        "row indices; no text",
     ),
     (
         "SetupMenuState.pending_action",
@@ -1694,94 +1698,6 @@ const UNSEEDED_VARIANTS: &[(&str, &str)] = &[
     (
         "new_session.new_session_state.pick_repo_state.rows[].source.SshUrl",
         "RepoSource: the sample repo rows are local paths, not this source (#1146)",
-    ),
-    (
-        "session_labels.session_context_menu.target.OtherTmux",
-        "AttachableRef: the sample never targets this ref from the context menu (#1146)",
-    ),
-    (
-        "session_labels.session_context_menu.target.SshSession",
-        "AttachableRef: the sample never targets this ref from the context menu (#1146)",
-    ),
-    (
-        "session_labels.session_context_menu.target.WorkspaceSession",
-        "AttachableRef: the sample never targets this ref from the context menu (#1146)",
-    ),
-    (
-        "session_labels.session_context_menu.target.WorkspaceShell",
-        "AttachableRef: the sample never targets this ref from the context menu (#1146)",
-    ),
-    (
-        "session_labels.session_label_rename_target.OtherTmux",
-        "AttachableRef: the sample never renames this ref (#1146)",
-    ),
-    (
-        "session_labels.session_label_rename_target.SshSession",
-        "AttachableRef: the sample never renames this ref (#1146)",
-    ),
-    (
-        "session_labels.session_label_rename_target.WorkspaceSession",
-        "AttachableRef: the sample never renames this ref (#1146)",
-    ),
-    (
-        "session_labels.session_label_rename_target.WorkspaceShell",
-        "AttachableRef: the sample never renames this ref (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.BulkDeleteSessions",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.BulkStopSessions",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.KillOtherTmux",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.KillOtherTmuxSessions",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.KillWorkspaceShell",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.McpStopServer",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.StopSession",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.BulkDeleteSessions",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.BulkStopSessions",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.KillOtherTmux",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.KillOtherTmuxSessions",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.KillWorkspaceShell",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.McpStopServer",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.StopSession",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
     ),
 ];
 
