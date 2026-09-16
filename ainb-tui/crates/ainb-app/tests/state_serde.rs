@@ -1687,6 +1687,75 @@ fn saves_outside_a_frame_keep_what_the_frame_withholds() {
     );
 }
 
+/// The frame-only scrubs #1146 added (npm and python package and version, a
+/// claude-docker base image, a detected dependency's detail) leave disk and CLI
+/// output alone. Those fields are seeded only by the alternate samples, so the
+/// last of them is the one read here.
+#[test]
+fn frame_only_scrubs_leave_the_saved_config_and_the_dependency_report_alone() {
+    struct TokenSeed(String);
+    impl Seed for TokenSeed {
+        fn text(&mut self, label: &'static str, kind: TextKind) -> String {
+            match kind {
+                TextKind::Typed => format!("typed {label}"),
+                TextKind::Captured => format!("{label} {}", self.0),
+            }
+        }
+    }
+    isolated_home();
+    let plain = shape::sample_states(&mut shape::PlainSeed)
+        .pop()
+        .expect("the alternate samples");
+    let config = toml::to_string(&plain.config.app_config).expect("config serialises to TOML");
+    assert!(
+        config.contains("sample config.mcp.npm_package"),
+        "npm package kept on disk"
+    );
+    assert!(
+        config.contains("sample config.container.base_image"),
+        "base image kept on disk"
+    );
+    let dependencies = serde_json::to_string(
+        &plain
+            .onboarding
+            .onboarding_state
+            .as_ref()
+            .and_then(|wizard| wizard.dependency_status.as_ref())
+            .expect("the alternate sample reports dependencies"),
+    )
+    .expect("dependency report serialises");
+    assert!(
+        dependencies.contains("sample onboarding.dep.version"),
+        "a detected version kept outside a frame"
+    );
+
+    let token = credential_samples()[2].clone();
+    let seeded = shape::sample_states(&mut TokenSeed(token.clone()))
+        .pop()
+        .expect("the alternate samples");
+    let config = toml::to_string(&seeded.config.app_config).expect("config serialises to TOML");
+    for label in ["config.mcp.npm_package", "config.container.base_image"] {
+        assert!(
+            config.contains(&format!("{label} {token}")),
+            "{label} kept verbatim on disk"
+        );
+    }
+    let frame = section_json(&seeded, SectionId::Config).to_string();
+    let onboarding = section_json(&seeded, SectionId::Onboarding).to_string();
+    for (label, frame) in [
+        ("config.mcp.npm_package", &frame),
+        ("config.mcp.npm_version", &frame),
+        ("config.container.base_image", &frame),
+        ("onboarding.dep.version", &onboarding),
+    ] {
+        assert!(frame.contains(label), "{label} reaches its frame");
+        assert!(
+            !frame.contains(&format!("{label} {token}")),
+            "{label} reached its frame unscrubbed"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 5. Payload-carrying enum variants (#1145)
 // ---------------------------------------------------------------------------
