@@ -321,15 +321,23 @@ fn roster_read(
 #[test]
 fn two_hosts_fold_into_one_renderer_without_collision() {
     isolated_home();
-    let subscription = Subscription::only(&[SectionId::AgentStatus]);
+    let subscription = Subscription::only(&[SectionId::Fleet, SectionId::AgentStatus]);
     let mut store = MirrorStore::new(subscription);
     let (h1, h2) = (HostId::new("h1"), HostId::new("h2"));
     for host in [&h1, &h2] {
         let mut state = AppState::new();
-        state.apply_agent_status_read(roster_read(host.as_str(), 10_000, 9_000), 10_000);
+        let read = roster_read(host.as_str(), 10_000, 9_000);
+        *state.fleet.get_mut().fleet_snapshot.lock().unwrap() = vec![read.rows[0].session.clone()];
+        state.apply_agent_status_read(read, 10_000);
         let batch = Mirror::new(host.clone(), subscription).batch(&state);
         let commit = store.apply_drain(host, [batch]);
-        assert_eq!(commit.changed, vec![(host.clone(), SectionId::AgentStatus)]);
+        assert_eq!(
+            commit.changed,
+            vec![
+                (host.clone(), SectionId::Fleet),
+                (host.clone(), SectionId::AgentStatus)
+            ]
+        );
     }
     let renderer = Renderer {
         store,
@@ -345,6 +353,11 @@ fn two_hosts_fold_into_one_renderer_without_collision() {
             "a row names the host it came from"
         );
         assert_eq!(card["session_key"], "claude:shared-key");
+        // The fleet row and the card name the same host: the frame's, not a
+        // process-wide one (#1066).
+        let row =
+            &renderer.store.section(host, SectionId::Fleet).unwrap().body["fleet_snapshot"][0];
+        assert_eq!(row["host_id"], card["host_id"], "row and card agree");
     }
     let selectors = renderer.store.read_selectors();
     let read = |name: &str| selectors.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone());
