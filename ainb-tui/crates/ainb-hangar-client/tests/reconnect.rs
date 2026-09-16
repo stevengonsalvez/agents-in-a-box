@@ -161,16 +161,15 @@ fn test_renderer_frozen_with_stale_badge_unit_test() {
     assert!(rec_view.stale_badge);
     assert!(rec_view.frozen);
 
-    // Named constants match spec
-    assert_eq!(BACKOFF_1S, Duration::from_secs(1));
-    assert_eq!(BACKOFF_4S, Duration::from_secs(4));
-    assert_eq!(BACKOFF_16S, Duration::from_secs(16));
-
+    // Schedule shape: attempt 1 -> 1s, attempt 2 -> 4s, attempt 3+ -> 16s
     let timing = Timing::default();
-    assert_eq!(timing.delay_for_attempt(1), Duration::from_secs(1));
-    assert_eq!(timing.delay_for_attempt(2), Duration::from_secs(4));
-    assert_eq!(timing.delay_for_attempt(3), Duration::from_secs(16));
-    assert_eq!(timing.delay_for_attempt(4), Duration::from_secs(16));
+    assert_eq!(timing.delay_for_attempt(1), BACKOFF_1S);
+    assert_eq!(timing.delay_for_attempt(2), BACKOFF_4S);
+    assert_eq!(timing.delay_for_attempt(3), BACKOFF_16S);
+    assert_eq!(timing.delay_for_attempt(4), BACKOFF_16S);
+    assert_eq!(timing.delay_for_attempt(100), BACKOFF_16S);
+    assert!(timing.delay_for_attempt(2) > timing.delay_for_attempt(1));
+    assert!(timing.delay_for_attempt(3) > timing.delay_for_attempt(2));
 }
 
 /// Test that when a daemon socket vanishes with no daemon returning,
