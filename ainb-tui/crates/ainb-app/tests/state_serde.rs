@@ -507,6 +507,10 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "clone URL, scrubbed so userinfo becomes `<redacted>@`",
     ),
     (
+        "RepoSource::SshUrl.0",
+        "ssh clone URL, scrubbed like the https one",
+    ),
+    (
         "ServerStatus.socket",
         "MCP pool socket path under ~/.agents-in-a-box/mcp/sockets, drawn in the overlay",
     ),
@@ -1038,7 +1042,11 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "PluginsHostView.plugin_render_errors",
     "RecoveryResultLine.detail",
     "RepoCheck::Failed.0",
+    "RepoSource::GithubShorthand.owner",
+    "RepoSource::GithubShorthand.repo",
     "RepoSource::HttpsUrl.0",
+    "RepoSource::SshSession.0",
+    "RepoSource::SshUrl.0",
     "RepositoryPreset.custom_rules",
     "RepositoryPreset.environment",
     "SecretValue.reference",
@@ -1650,56 +1658,7 @@ const BINDINGS: &str = include_str!("../bindings/AppState.ts");
 /// was written; the fix for each is to seed it in `wire::shape::sample_state`
 /// and regenerate the fixture, not to extend this list. A line that is no
 /// longer missing fails too, so the list cannot go stale.
-const UNSEEDED_VARIANTS: &[(&str, &str)] = &[
-    (
-        "new_session.new_session_state.configure_state.repo_source.GithubShorthand",
-        "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.configure_state.repo_source.LocalPath",
-        "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.configure_state.repo_source.SshSession",
-        "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.configure_state.repo_source.SshUrl",
-        "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.pending_clone_source.GithubShorthand",
-        "RepoSource: the sample pending clone is an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.pending_clone_source.LocalPath",
-        "RepoSource: the sample pending clone is an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.pending_clone_source.SshSession",
-        "RepoSource: the sample pending clone is an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.pending_clone_source.SshUrl",
-        "RepoSource: the sample pending clone is an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.rows[].source.GithubShorthand",
-        "RepoSource: the sample repo rows are local paths, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.rows[].source.HttpsUrl",
-        "RepoSource: the sample repo rows are local paths, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.rows[].source.SshSession",
-        "RepoSource: the sample repo rows are local paths, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.rows[].source.SshUrl",
-        "RepoSource: the sample repo rows are local paths, not this source (#1146)",
-    ),
-];
+const UNSEEDED_VARIANTS: &[(&str, &str)] = &[];
 
 /// Every externally tagged enum variant with a payload, reachable from a
 /// section's view type, is seeded by the sample (#1145).
