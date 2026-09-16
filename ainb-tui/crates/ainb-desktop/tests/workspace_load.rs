@@ -56,3 +56,52 @@ fn a_started_workspace_load_is_applied_on_a_later_tick() {
         let _ = host.tick();
     }
 }
+
+/// A session another process creates reaches the sidebar only because the tick
+/// keeps asking for a fresh scan, so the tick starts a second one on its own.
+#[test]
+fn the_tick_starts_another_scan_once_the_cadence_has_passed() {
+    support::isolated_home();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let _runtime = runtime.enter();
+
+    let loading = Arc::new(Mutex::new(Vec::<bool>::new()));
+    let seen = Arc::clone(&loading);
+    let mut host = DesktopHost::new(
+        AppConfig::default(),
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::only(&[SectionId::WorkspaceLoad]),
+        move |batch: FrameBatch| {
+            for frame in batch.frames {
+                if let Some(flag) = frame.body()["is_loading_workspaces"].as_bool() {
+                    seen.lock().expect("frame log").push(flag);
+                }
+            }
+        },
+    )
+    // Long enough that a finished load is framed before the next one starts:
+    // one tick applies the result and then asks for the next scan, and a tick
+    // frames once, so a shorter cadence would hide the gap.
+    .rescanning_every(Duration::from_secs(2));
+
+    // Nothing is started by hand here: the first scan is the tick's too.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let starts = || {
+        loading
+            .lock()
+            .expect("frame log")
+            .windows(2)
+            .filter(|pair| pair == &[false, true])
+            .count()
+    };
+    while starts() < 1 {
+        assert!(
+            Instant::now() < deadline,
+            "the tick never started a second scan: {:?}",
+            loading.lock()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = host.tick();
+    }
+}
