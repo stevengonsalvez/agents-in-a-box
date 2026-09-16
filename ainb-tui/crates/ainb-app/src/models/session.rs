@@ -493,7 +493,7 @@ impl std::str::FromStr for AntigravityModel {
 // ============================================================================
 
 /// SSH connection target configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SshTarget {
     pub host: String,
@@ -631,7 +631,7 @@ impl SessionStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Session {
     pub id: Uuid,
@@ -725,7 +725,7 @@ pub struct Session {
     pub provider_session_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct GitChanges {
     pub added: u32,
@@ -784,7 +784,7 @@ impl Default for ShellSessionStatus {
 }
 
 /// A plain shell session (no AI agent) tied to a workspace
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ShellSession {
     pub id: Uuid,
