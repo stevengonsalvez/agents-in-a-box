@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::presence::Dialer;
-use crate::{DaemonClient, DaemonError, FleetStreamEvent, RPC_TIMEOUT};
+use crate::{DaemonClient, DaemonError, FleetStreamEvent};
 
 /// Spec-mandated 1st backoff delay: 1 second.
 pub const BACKOFF_1S: Duration = Duration::from_secs(1);
@@ -34,10 +34,6 @@ pub struct Timing {
     pub backoff_4s: Duration,
     /// 3rd+ retry delay (default 16s).
     pub backoff_16s: Duration,
-    /// Timeout for RPC operations.
-    pub rpc_timeout: Duration,
-    /// Timeout when closing.
-    pub close_timeout: Duration,
 }
 
 impl Default for Timing {
@@ -46,8 +42,6 @@ impl Default for Timing {
             backoff_1s: BACKOFF_1S,
             backoff_4s: BACKOFF_4S,
             backoff_16s: BACKOFF_16S,
-            rpc_timeout: RPC_TIMEOUT,
-            close_timeout: Duration::from_secs(1),
         }
     }
 }
@@ -57,7 +51,7 @@ impl Timing {
     #[must_use]
     pub const fn delay_for_attempt(&self, attempt: u32) -> Duration {
         match attempt {
-            0 | 1 => self.backoff_1s,
+            1 => self.backoff_1s,
             2 => self.backoff_4s,
             _ => self.backoff_16s,
         }
@@ -112,15 +106,6 @@ impl ConnectionState {
     #[must_use]
     pub const fn is_closed(&self) -> bool {
         matches!(self, Self::Closed)
-    }
-
-    /// Banner string for renderers ("reconnecting" when reconnecting).
-    #[must_use]
-    pub const fn banner_text(&self) -> Option<&'static str> {
-        match self {
-            Self::Reconnecting { .. } => Some("reconnecting"),
-            _ => None,
-        }
     }
 
     /// Whether sections should be frozen with a stale badge in renderers.
@@ -287,7 +272,6 @@ impl Drop for ReconnectingFleetSubscription {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 async fn run_reconnecting_fleet(
     dialer: Dialer,
     revision_tracker: Arc<AtomicI64>,
@@ -314,10 +298,9 @@ async fn run_reconnecting_fleet(
             res = dial_fut => res,
         };
 
-        match dial_res {
+        let last_error: Option<String> = match dial_res {
             Ok((subscribe_result, mut subscription)) => {
-                // Successful hello + subscription resets backoff
-                attempt = 1;
+                let connected_at = std::time::Instant::now();
                 state_tx.send_replace(ConnectionState::Connected);
 
                 // Handle replay events contiguous to head
@@ -334,6 +317,8 @@ async fn run_reconnecting_fleet(
                         }
                     }
                     FleetReplayState::SnapshotReset { .. } => {
+                        // SnapshotReset indicates subscriber lag or bootstrap; the caller
+                        // must perform a fresh fleet/snapshot read to reconcile state.
                         revision_tracker
                             .fetch_max(subscribe_result.snapshot.head_revision, Ordering::SeqCst);
                         if events_tx.send(Ok(FleetStreamEvent::ResyncRequired)).await.is_err() {
@@ -379,40 +364,29 @@ async fn run_reconnecting_fleet(
                     }
                 }
 
-                // Live connection lost: transition to Reconnecting
-                let delay = timing.delay_for_attempt(attempt);
-                state_tx.send_replace(ConnectionState::Reconnecting {
-                    delay,
-                    attempt,
-                    error: disconnect_error,
-                });
-
-                tokio::select! {
-                    _ = &mut shutdown_rx => {
-                        state_tx.send_replace(ConnectionState::Closed);
-                        return;
-                    }
-                    () = tokio::time::sleep(delay) => {}
+                // Reset backoff only after connection has held for at least 1s
+                if connected_at.elapsed() >= Duration::from_secs(1) {
+                    attempt = 1;
                 }
-                attempt = attempt.saturating_add(1);
+                disconnect_error
             }
-            Err(err) => {
-                let delay = timing.delay_for_attempt(attempt);
-                state_tx.send_replace(ConnectionState::Reconnecting {
-                    delay,
-                    attempt,
-                    error: Some(err.to_string()),
-                });
+            Err(err) => Some(err.to_string()),
+        };
 
-                tokio::select! {
-                    _ = &mut shutdown_rx => {
-                        state_tx.send_replace(ConnectionState::Closed);
-                        return;
-                    }
-                    () = tokio::time::sleep(delay) => {}
-                }
-                attempt = attempt.saturating_add(1);
+        let delay = timing.delay_for_attempt(attempt);
+        state_tx.send_replace(ConnectionState::Reconnecting {
+            delay,
+            attempt,
+            error: last_error,
+        });
+
+        tokio::select! {
+            _ = &mut shutdown_rx => {
+                state_tx.send_replace(ConnectionState::Closed);
+                return;
             }
+            () = tokio::time::sleep(delay) => {}
         }
+        attempt = attempt.saturating_add(1);
     }
 }
