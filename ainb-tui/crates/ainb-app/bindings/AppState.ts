@@ -3566,17 +3566,24 @@ export type RepoSource = RepoSource_Serialize;
 export type RepoSource_Serialize = 
 /**  HTTPS URL (https://github.com/user/repo) */
 ({ HttpsUrl: string }) & { Filter?: never; GithubShorthand?: never; LocalPath?: never; SshSession?: never; SshUrl?: never } | 
-/**  SSH URL for clone (git@github.com:user/repo.git) */
+/**
+ *  SSH URL for clone (git@github.com:user/repo.git). Typed or pasted, so a
+ *  frame carries it scrubbed, like `HttpsUrl` (#1146).
+ */
 ({ SshUrl: string }) & { Filter?: never; GithubShorthand?: never; HttpsUrl?: never; LocalPath?: never; SshSession?: never } | 
 /**
  *  `ssh://user@host[:port]` with no repo segment — opens an interactive SSH
  *  session, NOT a clone. New-session screen 1 (smart-parse v2) introduces
- *  this variant to distinguish from `SshUrl`.
+ *  this variant to distinguish from `SshUrl`. Scrubbed on a frame for the
+ *  same reason.
  */
 ({ SshSession: string }) & { Filter?: never; GithubShorthand?: never; HttpsUrl?: never; LocalPath?: never; SshUrl?: never } | 
 /**  Local filesystem path */
 ({ LocalPath: string }) & { Filter?: never; GithubShorthand?: never; HttpsUrl?: never; SshSession?: never; SshUrl?: never } | 
-/**  GitHub shorthand (user/repo) - expands to HTTPS */
+/**
+ *  GitHub shorthand (user/repo) - expands to HTTPS. Both halves are typed
+ *  text, scrubbed on a frame.
+ */
 ({ GithubShorthand: {
 	owner: string,
 	repo: string,
