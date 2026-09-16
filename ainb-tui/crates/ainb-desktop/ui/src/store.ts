@@ -107,7 +107,7 @@ export function createFrameStore(subscribed: readonly SectionName[]): FrameStore
     const hosts = new Set([...Object.keys(state.hosts), ...Object.keys(state.stale)]);
     if (!hosts.has(peer) && hosts.size >= MAX_HOSTS) {
       const refused = batches.reduce((sum, { frames }) => sum + frames.length, 0);
-      if (refused > 0) setFramesIgnored((count) => count + refused);
+      if (refused > 0) batch(() => setFramesIgnored((count) => count + refused));
       return;
     }
     let ignored = 0;
