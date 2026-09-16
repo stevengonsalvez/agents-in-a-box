@@ -17,8 +17,11 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-/** The desktop binary under test: a debug build with the `wdio` feature on. */
-export const APP_BIN = process.env.AINB_DESKTOP_BIN ?? resolve(HERE, "../../../target-desktop/debug/ainb-desktop");
+/**
+ * The desktop binary under test: a debug build with the `wdio` feature on,
+ * which is what `cargo build --features wdio` in `crates/ainb-desktop` writes.
+ */
+export const APP_BIN = process.env.AINB_DESKTOP_BIN ?? resolve(HERE, "../target/debug/ainb-desktop");
 
 /** The CLI the world seeds with, and that the journey creates a session from. */
 export const AINB_BIN = process.env.AINB_BIN ?? resolve(HERE, "../../../target/debug/ainb");
@@ -29,7 +32,7 @@ export const AINB_BIN = process.env.AINB_BIN ?? resolve(HERE, "../../../target/d
  * hands it the one the desktop workspace built.
  */
 export const DAEMON_BIN =
-  process.env.AINB_DESKTOP_DAEMON_BIN ?? resolve(HERE, "../../../target-desktop/debug/ainb-hangar-daemon");
+  process.env.AINB_DESKTOP_DAEMON_BIN ?? resolve(HERE, "../../../target/debug/ainb-hangar-daemon");
 
 /**
  * The agent a seeded session runs: it prints a tick a second, echoes back
@@ -142,7 +145,9 @@ export function up(sessions = 2) {
 /** One more session from the CLI, as a separate process, and its ids. */
 export function seed() {
   const repo = join(world().root, "repo");
-  const out = run(AINB_BIN, ["run", "--repo", repo, "--worktree", "--format", "json"], { cwd: repo });
+  // No --format json: the command prints the labelled lines `field` parses
+  // whatever is asked for.
+  const out = run(AINB_BIN, ["run", "--repo", repo, "--worktree"], { cwd: repo });
   const field = (label) => out.split("\n").find((line) => line.trim().startsWith(label))?.split(":").slice(1).join(":").trim();
   const session = {
     id: field("Session ID"),
