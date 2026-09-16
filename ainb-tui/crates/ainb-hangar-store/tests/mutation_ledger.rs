@@ -503,9 +503,11 @@ async fn distinct_hosts_names_every_ledger_host_once_and_falls_back_to_local() {
     ];
     let fp = MutationLedgerRepo::fingerprint("attention/answer", &body());
     for key in &keys {
-        MutationLedgerRepo::claim(pool, key, "attention/answer", &fp, TIER_DEDUPE, NOW)
-            .await
-            .unwrap();
+        let outcome =
+            MutationLedgerRepo::claim(pool, key, "attention/answer", &fp, TIER_DEDUPE, NOW)
+                .await
+                .unwrap();
+        assert_eq!(outcome, ClaimOutcome::Fresh, "{key:?}");
     }
     let mut hosts = MutationLedgerRepo::distinct_hosts(pool).await;
     hosts.sort();
