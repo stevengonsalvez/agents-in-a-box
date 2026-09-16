@@ -23,6 +23,9 @@ const REPORT = process.env.AINB_E2E_REPORT ?? join(HERE, "..", "throughput.json"
 /** The shell accelerator, as this platform spells it. */
 const MOD = process.platform === "darwin" ? ["Meta"] : ["Control", "Shift"];
 
+/** The session whose tab the journey opened, for the recorded read to use. */
+let attached = null;
+
 const paintedBy = async (key) => Number(await $(`.terminal[data-tab="${key}"]`).getAttribute("data-painted"));
 
 describe("the desktop shell", () => {
@@ -44,9 +47,15 @@ describe("the desktop shell", () => {
     });
     assert.ok((await $$(".workspace")).length >= 1, "the rows are grouped by workspace");
 
-    // A row opens a terminal tab, which paints the pane's own output.
-    const [first] = sessions;
-    await $(`.session-row[data-session="${first.id}"]`).click();
+    // The sidebar's own first row opens a terminal tab, which paints the
+    // pane's own output. It is taken in the order the sidebar draws, not the
+    // order the world seeded, so the palette's "next" has somewhere to go.
+    const firstRow = (await $$(".session-row"))[0];
+    const firstId = await firstRow.getAttribute("data-session");
+    const first = sessions.find((session) => session.id === firstId);
+    assert.ok(first, `the sidebar's first row ${firstId} is one of the seeded sessions`);
+    attached = first;
+    await firstRow.click();
     const tab = await $(".terminal[data-tab]");
     await tab.waitForExist({ timeout: 60_000 });
     const key = await tab.getAttribute("data-tab");
@@ -80,10 +89,13 @@ describe("the desktop shell", () => {
     });
 
     // The palette opens on the shell accelerator and runs a named command:
-    // `session_list.next` moves the session list's selection.
+    // `session_list.next` moves the session list's selection. The selection is
+    // put back on the sidebar's first row immediately before, so the row the
+    // command moves from is never the last one, whatever a scan in between
+    // did to the order.
     const selected = async () => await $(".session-row.selected").getAttribute("data-session");
+    await (await $$(".session-row"))[0].click();
     const wasSelected = await selected();
-    assert.equal(wasSelected, first.id, "opening a row selects it");
     await browser.keys([...MOD, "k"]);
     await $(".palette-query").waitForExist({ timeout: 30_000 });
     await browser.keys("Select next session");
@@ -120,7 +132,7 @@ describe("the desktop shell", () => {
   // rendered screen updates, not a replay of the pane's output, so the figure
   // to read is the time the read took with a live window attached.
   it("records what a 50 MiB read costs the window", async () => {
-    const [first] = seeded();
+    const first = attached ?? seeded()[0];
     const key = await $(".terminal[data-tab]").getAttribute("data-tab");
     const path = `${env().HOME}/bulk.txt`;
     run("bash", ["-c", `head -c ${BULK_BYTES} /dev/urandom | base64 | head -c ${BULK_BYTES} > ${path}`]);
