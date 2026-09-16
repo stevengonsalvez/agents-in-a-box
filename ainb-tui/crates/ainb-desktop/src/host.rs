@@ -185,6 +185,12 @@ impl<S: FrameSink> DesktopHost<S> {
         // reducer paces it: at once on daemon news, otherwise on its own
         // cadence, and a merge that finds nothing new bumps nothing.
         self.state.refresh_attention(ainb_app::fleet::daemons::heartbeat::now_ms());
+        // What the answer worker reported, the tab reconciled, and the composer
+        // pointed at the request it is showing. Without it an answer sent from
+        // this window would leave the row reading SENT for as long as the shell
+        // is open: the worker reports into the state, and this is the only
+        // thing in this process that folds it.
+        self.state.tick_answers();
         // A session another process created is found by a scan and by nothing
         // else, so the window keeps asking for one. Never two at once: the
         // reducer owns the load and reports it running.
