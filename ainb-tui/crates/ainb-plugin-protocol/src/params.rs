@@ -211,6 +211,10 @@ pub enum KeyCode {
     Backspace,
     /// Delete (forward delete).
     Delete,
+    /// Insert. New in 0.3.0, so the terminal's key table routes through this
+    /// enum without losing a key (#1123). A host does not send it to a plugin
+    /// built against an older protocol, which could not decode it.
+    Insert,
     /// Up arrow.
     Up,
     /// Down arrow.
@@ -1541,6 +1545,8 @@ mod tests {
         assert_eq!(s, r#"{"type":"page_down"}"#);
         let s = serde_json::to_string(&KeyCode::F { n: 7 }).unwrap();
         assert_eq!(s, r#"{"type":"f","n":7}"#);
+        let s = serde_json::to_string(&KeyCode::Insert).unwrap();
+        assert_eq!(s, r#"{"type":"insert"}"#);
     }
 
     #[test]
@@ -1600,6 +1606,7 @@ mod tests {
             KeyCode::Esc,
             KeyCode::Backspace,
             KeyCode::Delete,
+            KeyCode::Insert,
             KeyCode::Up,
             KeyCode::Down,
             KeyCode::Left,
