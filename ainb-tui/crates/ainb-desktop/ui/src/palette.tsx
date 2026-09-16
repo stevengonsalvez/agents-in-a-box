@@ -37,7 +37,9 @@ export function Palette(props: Props) {
   const rows = createMemo(() => [...sessionRows(props.sessions), ...commandRows(entries() ?? [])]);
   const shown = createMemo(() => rank(rows(), query()));
   const choose = (row: PaletteRow | undefined) => {
-    if (row === undefined) return;
+    // A row the reducer would refuse now is drawn, so the list does not shift
+    // under the user, but choosing it would do nothing and say nothing.
+    if (row === undefined || !row.active) return;
     props.onChoose(row.intent);
     props.onClose();
   };
@@ -69,6 +71,7 @@ export function Palette(props: Props) {
           placeholder="Run a command or open a session"
           aria-label="Command palette"
           autofocus
+          maxlength="200"
           ref={(element) => queueMicrotask(() => element.focus())}
           value={query()}
           onInput={(event) => {
@@ -86,6 +89,7 @@ export function Palette(props: Props) {
                     type="button"
                     class="palette-row"
                     classList={{ at: index() === at(), inactive: !row.active }}
+                    disabled={!row.active}
                     role="option"
                     aria-selected={index() === at()}
                     data-row={row.key}
