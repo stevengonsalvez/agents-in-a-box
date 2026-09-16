@@ -287,6 +287,18 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "a plain setting being edited, scrubbed; secret and credential-bearing rows open SecretInput",
     ),
     ("ActionOutcome.detail", "daemon action output, scrubbed"),
+    (
+        "FleetActionReceipt.detail",
+        "a broadcast leg's daemon detail, scrubbed by scrub_receipts",
+    ),
+    (
+        "FleetActionReceipt.idempotency_key",
+        "the tui-minted broadcast key (a uuid), not a credential",
+    ),
+    (
+        "FleetActionReceipt.session_key",
+        "the daemon's stable session identity a receipt names",
+    ),
     ("BrowseRow.install_uri", "catalog install URI, scrubbed"),
     ("ChangedFile.path", "repo-relative path of a changed file"),
     ("CloneProgress.url", "clone URL in progress, scrubbed"),
@@ -940,6 +952,8 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "OrphanedWorktree.last_commit",
     "Skill.description",
     "Snapshot.hook_health",
+    "BroadcastPhase::Failed.0",
+    "BroadcastPhase::Sent.0",
     "ConfigPopupType::NumberInput.input_buffer",
     "ConfigPopupType::TextInput.value",
     "MarkdownStyle::CodeBlockHeader.0",
@@ -1633,38 +1647,6 @@ const BINDINGS: &str = include_str!("../bindings/AppState.ts");
 /// and regenerate the fixture, not to extend this list. A line that is no
 /// longer missing fails too, so the list cannot go stale.
 const UNSEEDED_VARIANTS: &[(&str, &str)] = &[
-    (
-        "fleet.broadcast.phase.Failed",
-        "BroadcastPhase: the sample never sets this phase (#1146)",
-    ),
-    (
-        "fleet.broadcast.phase.Sent",
-        "BroadcastPhase: the sample never sets this phase (#1146)",
-    ),
-    (
-        "fleet.daemon_attention.all{}.answerable.Broker",
-        "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
-    (
-        "fleet.daemon_attention.all{}.answerable.Daemon",
-        "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
-    (
-        "fleet.daemon_attention.all{}.answerable.No",
-        "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
-    (
-        "fleet.daemon_attention.by_session_id{}[].answerable.Broker",
-        "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
-    (
-        "fleet.daemon_attention.by_session_id{}[].answerable.Daemon",
-        "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
-    (
-        "fleet.daemon_attention.by_session_id{}[].answerable.No",
-        "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
     (
         "new_session.new_session_state.configure_state.repo_source.GithubShorthand",
         "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
