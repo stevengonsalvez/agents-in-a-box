@@ -32,6 +32,18 @@ pub fn refused_from_webview(id: &CommandId) -> bool {
         || ainb_app::app::KEY_ONLY_COMMANDS.contains(&id.as_str())
 }
 
+/// Whether a palette may offer `row`, which is [`refused_from_webview`] plus
+/// the rows that cannot run from a name alone.
+///
+/// A row a palette names carries no payload, so a row whose action refuses
+/// `Args::Null` (a pointer row parsing a position, a step or a character) has
+/// nothing to run with and is not offered. Both halves live here, so what a
+/// surface may offer and what it may send are one list.
+#[must_use]
+pub fn palette_offers(id: &CommandId, row: &ainb_app::app::keymap::Binding) -> bool {
+    !refused_from_webview(id) && row.action.with_args(&serde_json::Value::Null).is_some()
+}
+
 impl TryFrom<RendererIntent> for Intent {
     /// The refused command id the webview tried to send.
     type Error = CommandId;
