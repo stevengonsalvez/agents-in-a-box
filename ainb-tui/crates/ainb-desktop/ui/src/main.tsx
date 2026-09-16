@@ -13,10 +13,10 @@ import "./shell.css";
 
 /**
  * The one list of sections this window subscribes to; `subscribe` hands it to
- * the host. Sessions and Fleet feed the sidebar and the header counts, and
- * WorkspaceLoad the sidebar's loading state. Shell, Tmux, Config and
- * AgentStatus are subscribed ahead of their readers (settings in D3, agent
- * cards in D2).
+ * the host. Sessions feeds the sidebar and the header counts (its rows carry
+ * the merged attention), and WorkspaceLoad the sidebar's loading state. Shell,
+ * Tmux, Fleet, Config and AgentStatus are subscribed ahead of their readers
+ * (the attention list and agent cards in D2, settings in D3).
  */
 const SUBSCRIBED: SectionName[] = [
   "sessions",
@@ -173,7 +173,6 @@ function Shell() {
   // In this node the window holds exactly one host, the local one.
   const host = peer;
   const sessions = () => (host() ? store.section(host()!, "sessions") : undefined);
-  const fleet = () => (host() ? store.section(host()!, "fleet") : undefined);
   const counts = HEADER_COUNTS.map(([select, label]) => ({
     label,
     count: createMemo(() => select(store, host())),
@@ -260,7 +259,6 @@ function Shell() {
       <div class="body">
         <Sidebar
           sessions={sessions()}
-          fleet={fleet()}
           stale={sessionsStale()}
           loading={loading()}
           onOpen={openSession}
