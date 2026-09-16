@@ -201,6 +201,9 @@ impl Default for RuntimeConfig {
             failure_window: Duration::from_secs(60),
             quarantine_failure_threshold: 3,
             default_render_timeout: Duration::from_secs(2),
+            // Tracks `default_render_timeout` above: a plugin that cannot take a
+            // write in the time it is given to paint is as stuck as one that
+            // cannot paint. Retune the two together.
             frame_write_timeout: Duration::from_secs(2),
             host_kind: "tui",
         }
