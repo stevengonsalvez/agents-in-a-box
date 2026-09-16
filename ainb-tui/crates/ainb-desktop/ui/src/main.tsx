@@ -6,6 +6,7 @@ import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/Ap
 import { createFrameStore, type SectionName } from "./store.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
+import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
 import { accelerator, openRowIntent, rowOf, stepTab, type Accelerator, type RowId, type Tab, type TabsView } from "./tabs.ts";
 import { TerminalView } from "./terminal.tsx";
@@ -92,8 +93,19 @@ function Shell() {
     if (view.focus !== null) activate(view.focus);
     else if (!view.tabs.some((tab) => tab.key === active())) activate(view.tabs[0]?.key ?? null);
   };
+  const dispatch = (intent: unknown) => void invoke("dispatch", { intent });
   /** Select a session-list row and attach it, so the reducer marks it attached. */
-  const openRow = (row: RowId) => void invoke("dispatch", { intent: openRowIntent(row) });
+  const openRow = (row: RowId) => dispatch(openRowIntent(row));
+
+  // The palette is mounted only while it is open: each opening lists the
+  // commands afresh, with the host's answer for which of them run now.
+  const [palette, setPalette] = createSignal(false);
+  const closePalette = () => {
+    setPalette(false);
+    const key = active();
+    if (key !== null) focusers.get(key)?.();
+    else sidebar?.focus();
+  };
   const choose = (tab: Tab) => {
     if (tab.state === "detached") openRow(rowOf(tab.target));
     activate(tab.key);
@@ -124,6 +136,7 @@ function Shell() {
       case "paste":
         return;
       case "palette":
+        setPalette((open) => !open);
         return;
     }
   };
@@ -168,6 +181,16 @@ function Shell() {
       const batches = queue;
       queue = [];
       store.applyDrain(host, batches);
+      // What the renderer applied, for the proof harness to read from the
+      // log. Names and a count, never a body, and never a drain that carried
+      // nothing for this window.
+      const applied = [...new Set(batches.flatMap(({ frames }) => frames.map((frame) => frame.section)))];
+      if (applied.length > 0) {
+        void invoke("renderer_applied", {
+          sections: applied,
+          sessions: allSessions(store.section(host, "sessions")).length,
+        });
+      }
     };
     const frames = new Channel<FrameBatch_Serialize>();
     frames.onmessage = (batch) => {
@@ -316,6 +339,9 @@ function Shell() {
           </For>
         </section>
       </div>
+      <Show when={palette()}>
+        <Palette sessions={sessions()} onChoose={dispatch} onClose={closePalette} />
+      </Show>
       <div class="toasts" aria-live="polite">
         <For each={toasts()}>{(entry) => <div class="toast">{entry.text}</div>}</For>
       </div>
