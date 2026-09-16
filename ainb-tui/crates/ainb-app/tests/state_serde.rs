@@ -275,6 +275,14 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "the plain-text popup variant (`Input` in its name); its value is scrubbed",
     ),
     (
+        "ConfigPopupType::NumberInput",
+        "the number popup variant (`Input` in its name); its buffer is scrubbed",
+    ),
+    (
+        "ConfigPopupType::NumberInput.input_buffer",
+        "digits being typed into a number setting, scrubbed; the popup draws them",
+    ),
+    (
         "ConfigPopupType::TextInput.value",
         "a plain setting being edited, scrubbed; secret and credential-bearing rows open SecretInput",
     ),
@@ -643,6 +651,14 @@ const DENY_TYPES: &[(&str, &str)] = &[
 /// Fields of a denied type that stay on the wire, each with its reason.
 const TYPE_ALLOW: &[(&str, &str)] = &[
     (
+        "ConfigPopupType::Choice.options",
+        "the choices a registry setting declares; labels, not user text",
+    ),
+    (
+        "DiscoveryBannerCounts.orphan_units_per_tool",
+        "(tool name, count) pairs; tool names come from the agent registry",
+    ),
+    (
         "AgentDef.source_path",
         "agent definition file under ~/.claude/agents",
     ),
@@ -924,7 +940,9 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "OrphanedWorktree.last_commit",
     "Skill.description",
     "Snapshot.hook_health",
+    "ConfigPopupType::NumberInput.input_buffer",
     "ConfigPopupType::TextInput.value",
+    "MarkdownStyle::CodeBlockHeader.0",
     "AgentAuthStatus.has_key",
     "AnswerPhase::Failed.draft_len",
     "AnswerPhase::InFlight.draft_len",
@@ -1285,6 +1303,10 @@ fn the_sample_fills_every_string_field() {
 /// other typed label's marker must not.
 const CANARY_SHOWN: &[(&str, &str)] = &[
     (
+        "config.number_popup",
+        "digits being typed into a number setting, scrubbed; the popup draws them",
+    ),
+    (
         "fleet.ask.delivered_via",
         "how an answer was delivered, built from the tmux session name; the chip draws it",
     ),
@@ -1612,18 +1634,6 @@ const BINDINGS: &str = include_str!("../bindings/AppState.ts");
 /// longer missing fails too, so the list cannot go stale.
 const UNSEEDED_VARIANTS: &[(&str, &str)] = &[
     (
-        "config.config_popup_state.popup_type.Boolean",
-        "ConfigPopupType: the sample opens the text and secret popups, not this one (#1146)",
-    ),
-    (
-        "config.config_popup_state.popup_type.Choice",
-        "ConfigPopupType: the sample opens the text and secret popups, not this one (#1146)",
-    ),
-    (
-        "config.config_popup_state.popup_type.NumberInput",
-        "ConfigPopupType: the sample opens the text and secret popups, not this one (#1146)",
-    ),
-    (
         "fleet.broadcast.phase.Failed",
         "BroadcastPhase: the sample never sets this phase (#1146)",
     ),
@@ -1654,10 +1664,6 @@ const UNSEEDED_VARIANTS: &[(&str, &str)] = &[
     (
         "fleet.daemon_attention.by_session_id{}[].answerable.No",
         "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
-    (
-        "git_view.git_view_state.markdown_content[].style.CodeBlockHeader",
-        "MarkdownStyle: the sample never renders this style (#1146)",
     ),
     (
         "new_session.new_session_state.configure_state.repo_source.GithubShorthand",
@@ -1706,14 +1712,6 @@ const UNSEEDED_VARIANTS: &[(&str, &str)] = &[
     (
         "new_session.new_session_state.pick_repo_state.rows[].source.SshUrl",
         "RepoSource: the sample repo rows are local paths, not this source (#1146)",
-    ),
-    (
-        "onboarding.onboarding_state.auth_pane.MethodPicker",
-        "AuthPane: the sample auth pane is on key entry (#1146)",
-    ),
-    (
-        "onboarding.onboarding_state.focus.Item",
-        "OnboardingFocus: the sample never focuses an item (#1146)",
     ),
     (
         "session_labels.session_context_menu.target.OtherTmux",
@@ -1802,14 +1800,6 @@ const UNSEEDED_VARIANTS: &[(&str, &str)] = &[
     (
         "shell.confirmation_dialog.options[].action.StopSession",
         "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "skills.skill_manager_state.banner.Details",
-        "DiscoveryBannerState: the sample never shows this banner state (#1146)",
-    ),
-    (
-        "skills.skill_manager_state.banner.Visible",
-        "DiscoveryBannerState: the sample never shows this banner state (#1146)",
     ),
 ];
 
