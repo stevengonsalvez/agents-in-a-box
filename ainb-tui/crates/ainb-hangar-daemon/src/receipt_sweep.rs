@@ -25,7 +25,6 @@ use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_proto::mutation::{REASON_EFFECTS_AMBIGUOUS, REASON_NOT_DELIVERED, ReceiptState};
 use ainb_hangar_store::repo::attention::AttentionRepo;
-use ainb_hangar_store::repo::daemon_identity::UNMINTED_HOST_ID;
 use ainb_hangar_store::repo::mutation_ledger::{
     LedgerRow, MutationLedgerRepo, STATUS_ACCEPTED, STATUS_REJECTED, TIER_RECEIPT,
 };
@@ -56,18 +55,8 @@ pub struct SweepReport {
 /// Returns the store fault that stopped the sweep.
 pub async fn run(pool: &SqlitePool) -> Result<SweepReport, sqlx::Error> {
     let now_ms = SystemClock.now_ms();
-    // Every host the ledger holds rows under: `local` from a pre-#1066 daemon,
-    // this daemon's minted id, and any id a restored database carried in. A
-    // read failure still sweeps `local`, as the sweep always did (#1066).
-    let hosts = sqlx::query_scalar::<_, String>("SELECT DISTINCT host_id FROM mutation_ledger")
-        .fetch_all(pool)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "ledger hosts unreadable; sweeping local only");
-            vec![UNMINTED_HOST_ID.to_string()]
-        });
     let mut rows = Vec::new();
-    for host_id in hosts {
+    for host_id in MutationLedgerRepo::distinct_hosts(pool).await {
         rows.extend(MutationLedgerRepo::unresolved_at_boot(pool, &host_id).await?);
     }
     let mut report = SweepReport::default();
