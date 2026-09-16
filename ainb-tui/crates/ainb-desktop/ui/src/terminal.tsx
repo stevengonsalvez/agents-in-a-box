@@ -1,4 +1,4 @@
-import { onCleanup, onMount, Show } from "solid-js";
+import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -26,6 +26,10 @@ interface Props {
 export function TerminalView(props: Props) {
   let host!: HTMLDivElement;
   const attempt = () => (props.tab.state === "reconnecting" ? props.tab.attempt : 0);
+  // Bytes this pane has painted, kept on the element. It says the pane is
+  // live without reaching into the renderer's canvas, and it is what the
+  // journey times a large read by.
+  const [painted, setPainted] = createSignal(0);
 
   onMount(() => {
     const term = new Terminal({
@@ -47,7 +51,15 @@ export function TerminalView(props: Props) {
     }
 
     const transport = tauriTransport(props.tab.key);
-    transport.onBytes((bytes) => new Promise<void>((painted) => term.write(bytes, painted)));
+    transport.onBytes(
+      (bytes) =>
+        new Promise<void>((done) =>
+          term.write(bytes, () => {
+            setPainted((total) => total + bytes.byteLength);
+            done();
+          }),
+        ),
+    );
     term.onData((data) => transport.send(data));
 
     // Focus rules: the shell accelerators stay with the shell, Esc Esc leaves,
@@ -101,7 +113,7 @@ export function TerminalView(props: Props) {
   });
 
   return (
-    <div class="terminal" hidden={!props.active} data-tab={props.tab.key}>
+    <div class="terminal" hidden={!props.active} data-tab={props.tab.key} data-painted={painted()}>
       <div class="xterm-host" ref={host} />
       <Show when={props.tab.state !== "attached"}>
         <div class="terminal-overlay" role="status">
