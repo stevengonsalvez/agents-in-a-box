@@ -741,6 +741,10 @@ pub struct DialogOption {
     pub action: ConfirmAction,
 }
 
+/// What a confirmation dialog will do. Every payload reaches a mirror frame
+/// raw, and each is a name or id the rest of the frame already carries:
+/// session ids (uuids), tmux session names (the same names the tmux section
+/// lists), a workspace index, and an MCP server's own key from config.toml.
 #[derive(serde::Serialize, Debug, Clone)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ConfirmAction {
