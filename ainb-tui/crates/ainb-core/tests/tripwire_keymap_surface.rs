@@ -275,7 +275,7 @@ fn state_with_selected_stopped_managed_session() -> AppState {
 
 fn enter_event(state: &mut AppState) -> Option<AppEvent> {
     EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&KeyEvent::new(
+        ainb::app::screens::builtin::chord_from_key_event(&KeyEvent::new(
             KeyCode::Enter,
             KeyModifiers::NONE,
         ))
