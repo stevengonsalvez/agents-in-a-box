@@ -66,6 +66,8 @@ pub enum McpInstallation {
         #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
         #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
         url: String,
+        #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
         branch: Option<String>,
         #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
         #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
