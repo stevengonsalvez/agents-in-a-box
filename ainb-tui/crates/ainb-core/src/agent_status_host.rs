@@ -380,10 +380,7 @@ async fn serve(
         Ok(read_revision) => read_revision,
         Err(ended) => return (ended, false),
     };
-    let (_seed, mut subscription) = match client.open_fleet_subscription(covered).await {
-        Ok(opened) => opened,
-        Err(error) => return (report(tx, &error), true),
-    };
+    let mut subscription = client.reconnecting_fleet_subscription(covered);
     loop {
         match subscription.next_event().await {
             Ok(FleetStreamEvent::Revision(event)) => {
@@ -399,7 +396,10 @@ async fn serve(
             Err(error) => return (report(tx, &error), true),
         }
         match read(client, tx, false, &mut path).await {
-            Ok(read_revision) => covered = read_revision,
+            Ok(read_revision) => {
+                covered = read_revision;
+                subscription.set_after_revision(covered);
+            }
             Err(ended) => return (ended, true),
         }
     }
