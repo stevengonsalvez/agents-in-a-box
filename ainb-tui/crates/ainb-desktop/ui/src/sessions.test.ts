@@ -5,11 +5,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type {
   AttentionKind,
+  SessionFilter,
   SessionStatus,
   Session_Serialize,
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
-import { idleCount, label, LABEL_CHARS, ringCount, ringFor } from "./sessions.ts";
+import { idleCount, label, LABEL_CHARS, ringCount, ringFor, visibleRows } from "./sessions.ts";
 
 function session(id: string, status: SessionStatus = "Running", marks: AttentionKind[] = []): Session_Serialize {
   return {
@@ -51,4 +52,40 @@ test("header counts are per ring kind and idle status", () => {
 test("a label drops control and format characters and stops at the cap", () => {
   assert.equal(label("feat/\u202Eevil\u001b[31m\u200Bx"), "feat/evil[31mx");
   assert.equal(label("\u{1F600}".repeat(100)), "\u{1F600}".repeat(LABEL_CHARS));
+});
+
+test("the sidebar draws only the rows the session list's filter keeps", () => {
+  const rows = (filter: SessionFilter) => {
+    const sessions = {
+      workspaces: [
+        {
+          name: "repo",
+          sessions: [
+            { ...session("live"), mode: "Interactive" },
+            { ...session("gone", "Stopped"), mode: "Interactive" },
+            { ...session("boss", "Stopped"), mode: "Boss" },
+          ],
+        },
+      ],
+      session_filter: filter,
+    } as unknown as SessionsView_Serialize;
+    return visibleRows(sessions, sessions.workspaces[0]);
+  };
+
+  assert.deepEqual(
+    rows("active_only").map((row) => [row.index, row.session.id]),
+    [
+      [0, "live"],
+      // A Boss session is not the filter's business, as the reducer has it.
+      [2, "boss"],
+    ],
+  );
+  assert.deepEqual(
+    rows("stopped_only").map((row) => [row.index, row.session.id]),
+    [
+      [1, "gone"],
+      [2, "boss"],
+    ],
+  );
+  assert.equal(rows("all").length, 3);
 });
