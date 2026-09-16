@@ -267,6 +267,44 @@ impl MutationLedgerRepo {
     /// # Errors
     ///
     /// Propagates the `SQLite` failure.
+    /// Resolve which host owns `op_id` and claim it on that key, on ONE
+    /// connection (#1066).
+    ///
+    /// An op id a pre-mint daemon already holds under [`LOCAL_HOST_ID`] keeps
+    /// that key, so a retry across the upgrade replays instead of executing a
+    /// second time; every other claim is keyed under this daemon's minted id,
+    /// or `local` on a home with no identity. The host read and the holder read
+    /// share the claim's own connection, so no other statement can land between
+    /// deciding the key and taking it.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the `SQLite` failure.
+    pub async fn claim_resolving_host_on(
+        conn: &mut SqliteConnection,
+        principal: &str,
+        op_id: &str,
+        method: &str,
+        body_fingerprint: &str,
+        tier: &str,
+        now_ms: i64,
+    ) -> Result<(LedgerKey, ClaimOutcome), sqlx::Error> {
+        let legacy = Self::holder_of_on(&mut *conn, LOCAL_HOST_ID, op_id).await?;
+        let host_id = if legacy.is_some() {
+            LOCAL_HOST_ID.to_string()
+        } else {
+            crate::repo::daemon_identity::host_id_on(&mut *conn).await?
+        };
+        let key = LedgerKey {
+            host_id,
+            principal: principal.to_string(),
+            op_id: op_id.to_string(),
+        };
+        let outcome =
+            Self::claim_on(&mut *conn, &key, method, body_fingerprint, tier, now_ms).await?;
+        Ok((key, outcome))
+    }
+
     pub async fn claim_on(
         conn: &mut SqliteConnection,
         key: &LedgerKey,
