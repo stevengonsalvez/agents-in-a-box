@@ -1,6 +1,8 @@
 //! The desktop's embedded host: one `AppState`, driven through `dispatch`, with
 //! every change framed for the webview.
 
+use std::time::{Duration, Instant};
+
 use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
 use ainb_app::app::{KEY_ONLY_COMMANDS, RendererHost};
@@ -74,6 +76,15 @@ pub struct PaletteEntry {
     pub active: bool,
 }
 
+/// How often the window asks for a fresh workspace scan.
+///
+/// A session another process creates reaches the sidebar only because this
+/// runs: the scan is what finds it, and nothing else tells this window it
+/// exists. Each completed scan writes the Sessions section whether or not the
+/// list moved, so the cadence is a frame cost as well as a scan cost; the
+/// wider "write only what changed" audit is #1139.
+pub const WORKSPACE_RESCAN: Duration = Duration::from_secs(10);
+
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
     state: AppState,
@@ -81,6 +92,9 @@ pub struct DesktopHost<S: FrameSink> {
     layout: DesktopLayout,
     mirror: Mirror,
     sink: S,
+    /// When the last scan was asked for, so the tick can pace the next.
+    scanned_at: Instant,
+    rescan_every: Duration,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -100,7 +114,17 @@ impl<S: FrameSink> DesktopHost<S> {
             layout: DesktopLayout::default(),
             mirror: Mirror::new(host_id, subscription),
             sink,
+            scanned_at: Instant::now(),
+            rescan_every: WORKSPACE_RESCAN,
         }
+    }
+
+    /// Rescan on `every` instead of [`WORKSPACE_RESCAN`]. For tests, which
+    /// cannot wait ten seconds to see the second scan.
+    #[must_use]
+    pub const fn rescanning_every(mut self, every: Duration) -> Self {
+        self.rescan_every = every;
+        self
     }
 
     /// The hosted state, read-only: the host never writes it outside dispatch.
@@ -140,6 +164,15 @@ impl<S: FrameSink> DesktopHost<S> {
             &self.state.host.daemon_attention_generation,
         );
         self.state.refresh_daemon_attention_generation();
+        // A session another process created is found by a scan and by nothing
+        // else, so the window keeps asking for one. Never two at once: the
+        // reducer owns the load and reports it running.
+        if !self.state.workspace_load.is_loading_workspaces
+            && self.scanned_at.elapsed() >= self.rescan_every
+        {
+            self.scanned_at = Instant::now();
+            self.state.start_workspace_load();
+        }
         let effects = self.state.take_effects();
         self.pump();
         effects
