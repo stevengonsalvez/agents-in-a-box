@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ainb_hangar_client::DaemonClient;
+use ainb_hangar_client::{DaemonClient, FleetStreamEvent};
 use ainb_hangar_client::reconnect::{BACKOFF_1S, BACKOFF_4S, BACKOFF_16S, ConnectionState, Timing};
 use tokio::sync::watch;
 
@@ -137,7 +137,7 @@ fn test_renderer_frozen_with_stale_badge_unit_test() {
     assert!(connected.is_connected());
     assert!(!connected.is_reconnecting());
     assert!(!connected.is_closed());
-    assert_eq!(connected.banner_text(), None);
+    assert_eq!(connected.renderer_view().banner, None);
     assert!(!connected.sections_stale_and_frozen());
 
     let connected_view = connected.renderer_view();
@@ -153,7 +153,7 @@ fn test_renderer_frozen_with_stale_badge_unit_test() {
     assert!(!reconnecting.is_connected());
     assert!(reconnecting.is_reconnecting());
     assert!(!reconnecting.is_closed());
-    assert_eq!(reconnecting.banner_text(), Some("reconnecting"));
+    assert_eq!(reconnecting.renderer_view().banner, Some("reconnecting"));
     assert!(reconnecting.sections_stale_and_frozen());
 
     let rec_view = reconnecting.renderer_view();
@@ -204,7 +204,7 @@ async fn test_daemon_socket_vanishes_stays_reconnecting() {
     .await;
 
     assert!(rec_state.is_reconnecting());
-    assert_eq!(rec_state.banner_text(), Some("reconnecting"));
+    assert_eq!(rec_state.renderer_view().banner, Some("reconnecting"));
     assert!(rec_state.sections_stale_and_frozen());
     assert!(rec_state.renderer_view().stale_badge);
     assert!(rec_state.renderer_view().frozen);
@@ -214,7 +214,7 @@ async fn test_daemon_socket_vanishes_stays_reconnecting() {
 
     let current = state_rx.borrow().clone();
     assert!(current.is_reconnecting());
-    assert_eq!(current.banner_text(), Some("reconnecting"));
+    assert_eq!(current.renderer_view().banner, Some("reconnecting"));
     assert!(current.sections_stale_and_frozen());
 
     sub.close().await;
@@ -236,15 +236,63 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
     let (socket, token) = wait_for_daemon_ready(&home).await;
     let client = DaemonClient::with_parts(socket.clone(), token);
 
-    let sub = client.reconnecting_fleet_subscription(0);
+    let mut sub = client.reconnecting_fleet_subscription(0);
     let mut state_rx = sub.state();
 
-    // 1. Initial connection
+    // 1. Initial connection (bootstrap yields ResyncRequired)
     wait_for_condition(&mut state_rx, Duration::from_secs(5), |s| s.is_connected()).await;
     assert!(state_rx.borrow().is_connected());
+    let init_ev = tokio::time::timeout(Duration::from_secs(5), sub.next_event())
+        .await
+        .expect("initial next_event timeout")
+        .expect("initial next_event");
+    assert_eq!(init_ev, FleetStreamEvent::ResyncRequired);
 
     // 2. Kill daemon mid-stream
     daemon.kill_sigkill();
+
+    // Query max revision while daemon is down and set covered revision
+    let db_path = home.join("hangar.db");
+    let init_sql = "INSERT INTO fleet_session (session_key, discovered_at, last_observed_at) \
+         VALUES ('sess-resync-test', 1000, 1000) \
+         ON CONFLICT DO NOTHING;\n\
+         INSERT INTO fleet_event (event_id, session_key, observed_at, authority, event_type, payload, session_version, applied) \
+         VALUES ('ev-baseline', 'sess-resync-test', 1000, 'authoritative', 'Heartbeat', '{}', 1, 1) \
+         ON CONFLICT DO NOTHING;";
+    let init_res = Command::new("sqlite3")
+        .arg(&db_path)
+        .arg(init_sql)
+        .output()
+        .expect("init baseline fleet_event");
+    assert!(init_res.status.success(), "init sqlite3 failed: {:?}", init_res);
+
+    let output = Command::new("sqlite3")
+        .arg(&db_path)
+        .arg("SELECT COALESCE(MAX(revision), 0) FROM fleet_event;")
+        .output()
+        .expect("query max revision from sqlite3");
+    assert!(output.status.success(), "sqlite3 query failed");
+    let covered: i64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("parse covered revision");
+    assert!(covered >= 1, "covered revision must be >= 1");
+    sub.set_after_revision(covered);
+
+    // Seed fleet revisions while daemon is down
+    let seed_sql = format!(
+        "INSERT INTO fleet_event (revision, event_id, session_key, observed_at, authority, event_type, payload, session_version, applied) \
+         VALUES ({rev1}, 'ev-seed-1', 'sess-resync-test', 1001, 'authoritative', 'Heartbeat', '{{}}', 1, 1),\
+                ({rev2}, 'ev-seed-2', 'sess-resync-test', 1002, 'authoritative', 'Heartbeat', '{{}}', 2, 1);",
+        rev1 = covered + 1,
+        rev2 = covered + 2,
+    );
+    let seed_res = Command::new("sqlite3")
+        .arg(&db_path)
+        .arg(&seed_sql)
+        .output()
+        .expect("seed fleet_event into sqlite3");
+    assert!(seed_res.status.success(), "seed sqlite3 failed: {:?}", seed_res);
 
     // 3. Observe 1st reconnect attempt (1s backoff)
     let s1 = wait_for_condition(&mut state_rx, Duration::from_secs(5), |s| {
@@ -295,7 +343,7 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
     );
 
     // Verify banner and stale badge during reconnect
-    assert_eq!(s3.banner_text(), Some("reconnecting"));
+    assert_eq!(s3.renderer_view().banner, Some("reconnecting"));
     assert!(s3.sections_stale_and_frozen());
     let view = s3.renderer_view();
     assert_eq!(view.banner, Some("reconnecting"));
@@ -332,8 +380,37 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
         wait_for_condition(&mut state_rx, Duration::from_secs(25), |s| s.is_connected()).await;
 
     assert!(reconnected.is_connected());
-    assert_eq!(reconnected.banner_text(), None);
+    assert_eq!(reconnected.renderer_view().banner, None);
     assert!(!reconnected.sections_stale_and_frozen());
+
+    // 8. Assert events received after reconnect start at covered plus one with no hole
+    let ev1 = tokio::time::timeout(Duration::from_secs(5), sub.next_event())
+        .await
+        .expect("timed out waiting for ev1")
+        .expect("next_event ev1");
+    let r1 = match ev1 {
+        FleetStreamEvent::Revision(e) => {
+            assert_eq!(e.revision, covered + 1);
+            assert_eq!(e.event_id, "ev-seed-1");
+            e.revision
+        }
+        other => panic!("expected Revision ev-seed-1, got {other:?}"),
+    };
+
+    let ev2 = tokio::time::timeout(Duration::from_secs(5), sub.next_event())
+        .await
+        .expect("timed out waiting for ev2")
+        .expect("next_event ev2");
+    let r2 = match ev2 {
+        FleetStreamEvent::Revision(e) => {
+            assert_eq!(e.revision, covered + 2);
+            assert_eq!(e.event_id, "ev-seed-2");
+            e.revision
+        }
+        other => panic!("expected Revision ev-seed-2, got {other:?}"),
+    };
+
+    assert_eq!(r2, r1 + 1, "revisions must be contiguous with no hole");
 
     sub.close().await;
 }
