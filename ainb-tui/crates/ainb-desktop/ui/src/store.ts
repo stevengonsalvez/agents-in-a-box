@@ -67,12 +67,19 @@ export interface FrameStore {
   section<S extends SectionName>(host: HostId, name: S): SectionBodies_Serialize[S] | undefined;
   /** How many hosts the store holds any section from. */
   hostCount: Accessor<number>;
+  /**
+   * Drop everything held from `host`, its stale marks included, as
+   * `wire::store::MirrorStore::evict_host`: the host went away, or the window's
+   * peer was re-pinned to a new id (#1066). The slot no longer counts toward
+   * `MAX_HOSTS`, and a later frame from the host starts it over.
+   */
+  evictHost(host: HostId): void;
 }
 
 /**
  * The most distinct hosts one store holds, as `wire::store::MAX_HOSTS`. A drain
  * from a host beyond it applies nothing, so a misbehaving peer set cannot grow
- * the store without bound. Making room (`evictHost`) arrives with D2.
+ * the store without bound. `evictHost` makes room.
  */
 export const MAX_HOSTS = 64;
 
@@ -161,5 +168,14 @@ export function createFrameStore(subscribed: readonly SectionName[]): FrameStore
 
   const hostCount = createMemo(() => Object.keys(state.hosts).length);
 
-  return { state, applyDrain, section, hostCount };
+  function evictHost(host: HostId) {
+    batch(() => {
+      // Setting a key to `undefined` deletes it from a Solid store, so the
+      // host leaves the key sets `applyDrain` counts against `MAX_HOSTS`.
+      if (host in state.hosts) setState("hosts", host, undefined as never);
+      if (host in state.stale) setState("stale", host, undefined as never);
+    });
+  }
+
+  return { state, applyDrain, section, hostCount, evictHost };
 }
