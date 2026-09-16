@@ -104,7 +104,9 @@ pub enum ImageSource {
 
     /// Use claude-docker Dockerfile with modifications
     ClaudeDocker {
-        /// Override base image
+        /// Override base image, scrubbed on a frame only (#1146).
+        #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
         base_image: Option<String>,
         /// Additional build args
         #[serde(serialize_with = "crate::wire::fields::env_values_in_frame")]
