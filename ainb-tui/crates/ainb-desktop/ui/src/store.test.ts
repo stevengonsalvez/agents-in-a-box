@@ -172,7 +172,7 @@ test("the daemon read is held in both the fresh and the in-place write", () => {
 
 test("evicting a host drops its sections and stale marks and no other host's", () => {
   withStore(["sessions"], (store) => {
-    drain(store, "local", frame("local", "sessions", 1, 1, sessions("a")));
+    drain(store, "local", frame("local", "sessions", 5, 1, sessions("a")));
     store.applyDrain("local", [oversize]);
     drain(store, "peer", frame("peer", "sessions", 1, 1, sessions("b")));
     assert.equal(store.hostCount(), 2);
@@ -185,7 +185,12 @@ test("evicting a host drops its sections and stale marks and no other host's", (
     assert.equal(store.hostCount(), 1);
     assert.deepEqual(names(store, "peer"), ["b"]);
 
-    // A later frame from the evicted host starts it over, at any epoch.
+    // Evicting a host the store does not hold changes nothing.
+    store.evictHost("absent");
+    assert.equal(store.hostCount(), 1);
+
+    // A later frame from the evicted host starts it over, even at an epoch
+    // older than the one it was evicted at.
     drain(store, "local", frame("local", "sessions", 1, 1, sessions("again")));
     assert.deepEqual(names(store, "local"), ["again"]);
   });
@@ -194,7 +199,7 @@ test("evicting a host drops its sections and stale marks and no other host's", (
 test("an evicted host does not consume a MAX_HOSTS slot", () => {
   withStore(["sessions"], (store) => {
     for (let i = 0; i < MAX_HOSTS; i++) drain(store, `h${i}`, frame(`h${i}`, "sessions", 1, 1, sessions("a")));
-    // The stale `local` entry a re-pinned window leaves behind.
+    // `h0` stands in for the stale `local` entry a re-pinned window evicts.
     store.evictHost("h0");
     assert.equal(store.hostCount(), MAX_HOSTS - 1);
 
