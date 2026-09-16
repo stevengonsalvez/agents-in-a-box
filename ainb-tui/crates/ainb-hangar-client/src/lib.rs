@@ -1133,8 +1133,14 @@ async fn read_response(reader: &mut BufReader<OwnedReadHalf>) -> Result<RpcRespo
     }
 }
 
+/// Maximum allowed header section size before Content-Length separator.
+const MAX_FRAME_HEADER_BYTES: usize = 16 * 1024;
+/// Maximum allowed frame body allocation (4 MiB).
+const MAX_FRAME_BODY_BYTES: usize = 4 * 1024 * 1024;
+
 async fn read_frame(reader: &mut BufReader<OwnedReadHalf>) -> Result<Value, DaemonError> {
     let mut len: Option<usize> = None;
+    let mut header_bytes = 0usize;
     loop {
         let mut line = String::new();
         let n = reader.read_line(&mut line).await.map_err(|e| DaemonError::Io(e.to_string()))?;
@@ -1143,11 +1149,22 @@ async fn read_frame(reader: &mut BufReader<OwnedReadHalf>) -> Result<Value, Daem
                 "connection closed while awaiting a frame".to_string(),
             ));
         }
+        header_bytes = header_bytes.saturating_add(n);
+        if header_bytes > MAX_FRAME_HEADER_BYTES {
+            return Err(DaemonError::Decode(format!(
+                "frame headers exceed {MAX_FRAME_HEADER_BYTES} bytes limit"
+            )));
+        }
         let trimmed = line.trim_end_matches("\r\n");
         if trimmed.is_empty() {
             let content_len = len.ok_or_else(|| {
                 DaemonError::Decode("frame missing Content-Length header".to_string())
             })?;
+            if content_len > MAX_FRAME_BODY_BYTES {
+                return Err(DaemonError::Decode(format!(
+                    "frame Content-Length {content_len} exceeds {MAX_FRAME_BODY_BYTES} bytes limit"
+                )));
+            }
             let mut body = vec![0u8; content_len];
             reader.read_exact(&mut body).await.map_err(|e| DaemonError::Io(e.to_string()))?;
             return serde_json::from_slice(&body).map_err(|e| DaemonError::Decode(e.to_string()));
