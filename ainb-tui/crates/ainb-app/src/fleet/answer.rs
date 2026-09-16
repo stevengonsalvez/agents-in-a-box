@@ -371,7 +371,11 @@ impl AskState {
         changed
     }
 
-    /// Send the current answer for `chip`.
+    /// Send the current answer for `chip`, as the surface `surface` names.
+    ///
+    /// The kind rides down to the daemon transport, which records the row as
+    /// answered by it: the surface a person sat at, not whichever surface this
+    /// code was written for first.
     ///
     /// # Errors
     ///
@@ -382,6 +386,7 @@ impl AskState {
         chip: &SessionAttention,
         session_id: &str,
         cwd: &str,
+        surface: ainb_hangar_proto::connections::SurfaceKind,
     ) -> Result<(), String> {
         // One outstanding send at a time. Key-repeat on Enter would otherwise
         // deliver the same answer N times into an agent's open picker, and the
@@ -408,7 +413,7 @@ impl AskState {
         let spawned = std::thread::Builder::new().name("ainb-ask-send".into()).spawn(move || {
             let outcome = match route {
                 Answerable::Daemon { attention_id } => {
-                    crate::fleet::control::answer_via_daemon_blocking(attention_id, sent)
+                    crate::fleet::control::answer_via_daemon_blocking(attention_id, sent, surface)
                 }
                 Answerable::Tmux => {
                     crate::fleet::control::answer_via_tmux_blocking(&session_id, &cwd, &sent)
@@ -479,6 +484,7 @@ impl AskState {
 mod tests {
     use super::*;
     use crate::fleet::attention::{AttentionKind, AttentionOption, Unanswerable};
+    use ainb_hangar_proto::connections::SurfaceKind;
 
     fn ask_with_options(labels: &[&str]) -> SessionAttention {
         SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into()).with_options(
@@ -609,13 +615,22 @@ mod tests {
     }
 
     #[test]
+    fn a_host_that_names_no_surface_answers_as_the_terminal() {
+        // The kind rides from the state to `attention/answer`, so the default
+        // decides what an unnamed host is recorded as. The terminal is what
+        // every answer was stamped before the kind came from the surface, so
+        // no existing host changes provenance by the field arriving.
+        assert_eq!(crate::app::AppState::new().host.surface, SurfaceKind::Tui);
+    }
+
+    #[test]
     fn a_row_with_no_transport_refuses_with_its_own_reason() {
         let chip =
             SessionAttention::local(AttentionKind::Ask, 0).unanswerable(Unanswerable::DaemonGone);
         let mut state = AskState::default();
         state.push_char('y');
         state.focus = AskFocus::FreeText;
-        let refused = state.send(&chip, "s", "/w").expect_err("must refuse");
+        let refused = state.send(&chip, "s", "/w", SurfaceKind::Tui).expect_err("must refuse");
         assert!(
             refused.contains("attention/answer"),
             "and name the call that is unavailable: {refused}"
@@ -637,7 +652,7 @@ mod tests {
         // is filed under the question, not under whatever the pane shows.
         latch(&mut state, &chip, None);
         assert_eq!(
-            state.send(&chip, "s", "/w"),
+            state.send(&chip, "s", "/w", SurfaceKind::Tui),
             Err("an answer is already in flight".to_string())
         );
     }
@@ -770,7 +785,7 @@ mod tests {
             "returning to A must still refuse a second send"
         );
         assert_eq!(
-            state.send(&a, "sid", "/work").unwrap_err(),
+            state.send(&a, "sid", "/work", SurfaceKind::Tui).unwrap_err(),
             "an answer is already in flight"
         );
     }
