@@ -24,6 +24,16 @@ required-features = ["app"]
 [features]
 default = []
 app = ["dep:tauri", "dep:tauri-build", "dep:ainb-hangar-core", "dep:tracing-subscriber"]
+# The window serves `ui/dist` over its own protocol instead of the dev server
+# at `build.devUrl`. A plain `cargo build` keeps the dev server, which is what
+# `tauri dev` and the frontend's hot reload want; every build that has to run
+# on its own (the journey, the bundle, the proof scenario) takes this.
+bundled = ["app", "tauri/custom-protocol"]
+# The embedded WebDriver the wdio journey drives, off in every normal build and
+# in every bundle: the CI bundle smoke asserts the release binary carries no
+# WebDriver symbol and binds no driver port. The journey drives a window
+# serving its own frontend, so this implies `bundled`.
+wdio = ["bundled", "dep:tauri-plugin-wdio-webdriver"]
 
 [dependencies]
 ainb-app = { path = "../ainb-app" }
@@ -40,6 +50,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", optional = true, features = ["fmt"] }
 uuid = { version = "1.5", features = ["serde"] }
 tauri = { version = "~2.11.5", optional = true }
+tauri-plugin-wdio-webdriver = { version = "1.4", optional = true }
 
 [build-dependencies]
 tauri-build = { version = "~2.6.3", optional = true }

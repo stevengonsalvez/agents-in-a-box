@@ -3541,6 +3541,121 @@ mod tests {
         );
     }
 
+    /// A host that rescans on a timer must not reframe the world every time.
+    /// A scan whose result matches what the state holds writes nothing: the
+    /// Sessions section keeps its version, the operator's selection stays put,
+    /// and no notice is raised.
+    #[test]
+    fn a_scan_that_found_no_change_writes_nothing() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        let mut workspace = Workspace::new("repo".to_string(), "/tmp/repo".into());
+        workspace.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+        workspace.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(vec![workspace.clone()]))
+            .expect("send load result");
+        assert!(
+            state.check_workspace_loading_complete(),
+            "the first scan applies"
+        );
+
+        // The operator moves the selection, and the notice from the first load
+        // is read and cleared, so a second write would be visible.
+        state.sessions.selected_session_index = Some(1);
+        state.shell.notifications.clear();
+
+        // What a live row picks up after a scan: the merge runs, and the row
+        // carries a chip and a learned provider id. A scan builds neither, so
+        // comparing them would call every scan a change.
+        state.merge_attention(crate::fleet::daemons::heartbeat::now_ms());
+        state.sessions.workspaces[0].sessions[0].provider_session_id = Some("agent-1".to_string());
+        state.sessions.workspaces[0].sessions[0].live_attention =
+            vec![crate::fleet::attention::SessionAttention::local(
+                crate::fleet::attention::AttentionKind::Ask,
+                crate::fleet::daemons::heartbeat::now_ms(),
+            )];
+        let version = state.sessions.version();
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(vec![workspace]))
+            .expect("send load result");
+        assert!(
+            !state.check_workspace_loading_complete(),
+            "a scan that found the same list reports no update"
+        );
+        assert_eq!(
+            state.sessions.version(),
+            version,
+            "the Sessions section was written"
+        );
+        assert_eq!(
+            state.sessions.selected_session_index,
+            Some(1),
+            "the selection was reset by a scan that changed nothing"
+        );
+        assert!(
+            state.shell.notifications.is_empty(),
+            "a scan that changed nothing raised a notice"
+        );
+    }
+
+    /// A scan that keeps failing says so once. A host that rescans on a cadence
+    /// would otherwise raise the same warning and write the same section every
+    /// time Docker stays slow.
+    #[test]
+    fn a_repeated_scan_timeout_bumps_nothing_and_warns_once() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        // A window that has shown its sessions, which is when a repeat matters.
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
+        assert!(
+            state.check_workspace_loading_complete(),
+            "the first scan applies"
+        );
+        state.shell.notifications.clear();
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Timeout).expect("send load result");
+        assert!(
+            state.check_workspace_loading_complete(),
+            "the first timeout is news"
+        );
+        assert_eq!(
+            state.shell.notifications.len(),
+            1,
+            "the first timeout warns"
+        );
+        let version = state.workspace_load.version();
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Timeout).expect("send load result");
+        assert!(
+            !state.check_workspace_loading_complete(),
+            "the same timeout again reports no update"
+        );
+        assert_eq!(
+            state.workspace_load.version(),
+            version,
+            "the same timeout again wrote the WorkspaceLoad section"
+        );
+        assert_eq!(
+            state.shell.notifications.len(),
+            1,
+            "the same timeout warned twice"
+        );
+    }
+
     // ========================================================================
     // Onboarding completion: State -> Config mapping
     // ========================================================================

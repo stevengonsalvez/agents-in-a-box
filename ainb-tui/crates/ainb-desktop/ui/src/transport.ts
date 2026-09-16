@@ -16,19 +16,40 @@ export interface TerminalTransport {
   onBytes(listener: (bytes: Uint8Array) => Promise<void> | void): void;
 }
 
+/** A channel the host writes raw buffers to, as `Channel<ArrayBuffer>` is. */
+export interface ByteChannel {
+  onmessage: (buffer: ArrayBuffer) => void;
+}
+
+/**
+ * The window calls the local leg makes. The app passes the real ones; a test
+ * passes its own and drives the channel itself, with no webview in the way.
+ */
+export interface Bridge {
+  invoke(command: string, args: Record<string, unknown>): Promise<unknown>;
+  channel(): ByteChannel;
+}
+
+/** The window's own bridge: Tauri's `invoke` and a raw-buffer `Channel`. */
+export const TAURI: Bridge = {
+  invoke: (command, args) => invoke(command, args),
+  channel: () => new Channel<ArrayBuffer>(),
+};
+
 /** The local leg: tab `key`'s output over a raw-buffer channel. */
-export function tauriTransport(key: string): TerminalTransport {
+export function tauriTransport(key: string, bridge: Bridge = TAURI): TerminalTransport {
+  const call = bridge.invoke.bind(bridge);
   return {
-    send: (data) => void invoke("terminal_input", { key, data }),
-    resize: (cols, rows) => void invoke("terminal_resize", { key, cols, rows }),
+    send: (data) => void call("terminal_input", { key, data }),
+    resize: (cols, rows) => void call("terminal_resize", { key, cols, rows }),
     onBytes(listener) {
       // The channel opens only now, with its listener in place, so no output
       // arrives before there is somewhere to paint it and nothing is buffered.
-      const output = new Channel<ArrayBuffer>();
+      const output = bridge.channel();
       output.onmessage = (buffer) => {
         const bytes = new Uint8Array(buffer);
         const acknowledge = () => {
-          invoke("terminal_ack", { key, bytes: bytes.byteLength }).catch((error: unknown) =>
+          call("terminal_ack", { key, bytes: bytes.byteLength }).catch((error: unknown) =>
             console.warn("terminal acknowledgement not delivered", error),
           );
         };
@@ -43,7 +64,7 @@ export function tauriTransport(key: string): TerminalTransport {
           acknowledge();
         }
       };
-      void invoke<boolean>("terminal_output", { key, bytes: output });
+      void call("terminal_output", { key, bytes: output });
     },
   };
 }

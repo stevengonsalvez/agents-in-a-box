@@ -79,3 +79,6 @@ ainb-tui/crates/ainb-plugin-burndown/target/
 
 # Proof harness results (scripts/proof/run.sh)
 proof-out/
+
+# The wdio journey's recorded throughput figure (crates/ainb-desktop/e2e)
+crates/ainb-desktop/e2e/throughput.json

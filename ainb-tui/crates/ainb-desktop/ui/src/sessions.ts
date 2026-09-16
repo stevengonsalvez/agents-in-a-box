@@ -5,9 +5,11 @@
 
 import type {
   AttentionKind,
+  SessionFilter,
   SessionStatus,
   Session_Serialize,
   SessionsView_Serialize,
+  Workspace_Serialize,
 } from "../../../ainb-app/bindings/AppState";
 
 /** Precedence, tightest first, as `AttentionKind`'s `Ord` in Rust. */
@@ -65,6 +67,46 @@ export function label(text: string): string {
 /** Every session row the Sessions frame lists, across its workspaces. */
 export function allSessions(view: SessionsView_Serialize | undefined): Session_Serialize[] {
   return view?.workspaces.flatMap((workspace) => workspace.sessions) ?? [];
+}
+
+/**
+ * Whether the session list's filter keeps this row, exactly as
+ * `AppState::session_passes_filter` decides it: the filter applies to
+ * interactive sessions and to nothing else.
+ */
+export function passesFilter(session: Session_Serialize, filter: SessionFilter): boolean {
+  if (session.mode !== "Interactive") return true;
+  switch (filter) {
+    case "active_only":
+      return session.status !== "Stopped";
+    case "stopped_only":
+      return session.status === "Stopped";
+    // `all`, and a filter a host at another version may send.
+    default:
+      return true;
+  }
+}
+
+/** A row the sidebar draws, with its place in the frame's own list. */
+export interface VisibleRow {
+  /** The index the reducer selects by, which filtering must not shift. */
+  index: number;
+  session: Session_Serialize;
+}
+
+/**
+ * One workspace's rows as the sidebar draws them: the filter's own, in frame
+ * order. The sidebar draws what the reducer walks, so a row its navigation
+ * skips is not on screen either.
+ */
+export function visibleRows(
+  view: SessionsView_Serialize | undefined,
+  workspace: Workspace_Serialize,
+): VisibleRow[] {
+  const filter = view?.session_filter ?? "all";
+  return workspace.sessions
+    .map((session, index) => ({ index, session }))
+    .filter((row) => passesFilter(row.session, filter));
 }
 
 /** How many rows ring with `kind`: one header count. */

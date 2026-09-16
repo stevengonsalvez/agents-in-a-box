@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
 import type { SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
-import { label, ringFor, rowStatus } from "./sessions.ts";
+import { label, ringFor, rowStatus, visibleRows } from "./sessions.ts";
 
 interface Props {
   sessions: SessionsView_Serialize | undefined;
@@ -34,14 +34,19 @@ export function Sidebar(props: Props) {
       >
         <For each={props.sessions?.workspaces}>
           {(workspace, w) => (
-            <section class="workspace" data-workspace={workspace.name}>
-              <div class="workspace-name">{label(workspace.name)}</div>
-              <ul>
-                <For each={workspace.sessions}>
-                  {(session, s) => {
+            <Show when={visibleRows(props.sessions, workspace).length > 0}>
+              <section class="workspace" data-workspace={workspace.name}>
+                <div class="workspace-name">{label(workspace.name)}</div>
+                <ul>
+                {/* The session list's own filter decides which rows are
+                    here, so what the sidebar draws and what the reducer's
+                    navigation walks are the same set. */}
+                <For each={visibleRows(props.sessions, workspace)}>
+                  {(row) => {
+                    const session = row.session;
                     const selected = () =>
                       props.sessions?.selected_workspace_index === w() &&
-                      props.sessions?.selected_session_index === s();
+                      props.sessions?.selected_session_index === row.index;
                     const ring = () => ringFor(session);
                     return (
                       <li>
@@ -63,8 +68,9 @@ export function Sidebar(props: Props) {
                     );
                   }}
                 </For>
-              </ul>
-            </section>
+                </ul>
+              </section>
+            </Show>
           )}
         </For>
       </Show>

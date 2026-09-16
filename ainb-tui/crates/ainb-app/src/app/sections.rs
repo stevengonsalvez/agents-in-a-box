@@ -1011,6 +1011,11 @@ pub type BranchRefreshPayload = (
 pub struct HostOnlyState {
     // Tmux integration
     pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,
+    /// Whether a workspace scan has ever been applied. A later scan that finds
+    /// the same list writes nothing, so a host that rescans on a timer does not
+    /// reframe the whole Sessions section, reset the selection or raise a
+    /// notice every time; the first one always applies.
+    pub workspaces_applied: bool,
     pub preview_update_task: Option<tokio::task::JoinHandle<()>>,
     // A changed selection must settle before starting a read-only client.
     pub(crate) observer_pending: Option<(String, Instant)>,
@@ -1138,6 +1143,7 @@ impl Default for HostOnlyState {
     fn default() -> Self {
         Self {
             tmux_sessions: HashMap::new(),
+            workspaces_applied: false,
             preview_update_task: None,
             observer_pending: None,
             observer_failed_target: None,

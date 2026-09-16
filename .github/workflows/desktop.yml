@@ -34,6 +34,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  # Which leg the macOS journey runs, declared rather than discovered. It is
+  # the substitute until the DOM journey has actually passed on a macOS runner:
+  # the journey has only ever been run on Linux, so claiming the other leg
+  # would be switching on a leg nobody has seen. The job's "Record which e2e
+  # leg ran" step names whichever ran and fails if neither did.
+  MACOS_E2E_LEG: substitute
 
 jobs:
   desktop:
@@ -93,3 +99,220 @@ jobs:
         working-directory: ainb-tui/crates/ainb-desktop
         env:
           AINB_CODEX_MANAGED: "0"
+
+  # The DOM journey: the shell launched for real, driving a real daemon and
+  # real tmux sessions in a private world. The app under test is a debug build
+  # with the `wdio` feature on, which carries the embedded WebDriver; the
+  # `bundle` job below asserts the release binary carries none.
+  e2e:
+    name: Desktop journey (${{ matrix.os }})
+    timeout-minutes: 90
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ainb-tui -> target
+            ainb-tui/crates/ainb-desktop -> target
+      - name: Install the Tauri system packages (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf tmux xvfb
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: brew list tmux >/dev/null 2>&1 || brew install tmux
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ainb-tui/crates/ainb-desktop/ui/package-lock.json
+      - name: Build the shell frontend
+        run: npm ci --no-audit --no-fund && npm run build
+        working-directory: ainb-tui/crates/ainb-desktop/ui
+      # The world seeds its sessions with this CLI, and the journey creates one
+      # more from it while the window is open.
+      - name: Build the ainb CLI and the hangar daemon
+        run: cargo build --bin ainb --bin ainb-hangar-daemon
+        working-directory: ainb-tui
+      # The window build reads `bundle.externalBin`, so the sidecar has to be
+      # staged beside it first, exactly as the other two jobs do.
+      - name: Stage the hangar daemon sidecar
+        run: cargo xtask stage-desktop-sidecar
+        working-directory: ainb-tui
+      - name: Build the shell with the embedded WebDriver
+        run: cargo build --features wdio
+        working-directory: ainb-tui/crates/ainb-desktop
+      - name: Install the journey's runner
+        run: npm ci --no-audit --no-fund
+        working-directory: ainb-tui/crates/ainb-desktop/e2e
+        env:
+          # Hard dependencies of @wdio/utils whose install scripts fetch
+          # browser drivers this journey never uses; esbuild's own script is
+          # still needed, so this is not --ignore-scripts.
+          GECKODRIVER_SKIP_DOWNLOAD: "true"
+          EDGEDRIVER_SKIP_DOWNLOAD: "true"
+      - name: Desktop journey (Linux, under xvfb)
+        id: journey_linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm test
+        working-directory: ainb-tui/crates/ainb-desktop/e2e
+        env:
+          AINB_DESKTOP_BIN: ${{ github.workspace }}/ainb-tui/crates/ainb-desktop/target/debug/ainb-desktop
+          AINB_BIN: ${{ github.workspace }}/ainb-tui/target/debug/ainb
+          AINB_DESKTOP_DAEMON_BIN: ${{ github.workspace }}/ainb-tui/target/debug/ainb-hangar-daemon
+      - name: Desktop journey (macOS)
+        id: journey_macos
+        if: runner.os == 'macOS' && env.MACOS_E2E_LEG == 'journey'
+        run: npm test
+        working-directory: ainb-tui/crates/ainb-desktop/e2e
+        env:
+          AINB_DESKTOP_BIN: ${{ github.workspace }}/ainb-tui/crates/ainb-desktop/target/debug/ainb-desktop
+          AINB_BIN: ${{ github.workspace }}/ainb-tui/target/debug/ainb
+          AINB_DESKTOP_DAEMON_BIN: ${{ github.workspace }}/ainb-tui/target/debug/ainb-hangar-daemon
+      # The recorded substitute, run only when MACOS_E2E_LEG says so: the Rust
+      # host contract and sidecar tests, with the bundle smoke in its own job.
+      - name: The macOS substitute for the journey
+        id: substitute_macos
+        if: runner.os == 'macOS' && env.MACOS_E2E_LEG != 'journey'
+        run: cargo test
+        working-directory: ainb-tui/crates/ainb-desktop
+        env:
+          AINB_CODEX_MANAGED: "0"
+      # Which leg ran is a job outcome, never a silent pass: this step names it
+      # in the summary and fails if neither leg reported one.
+      - name: Record which e2e leg ran
+        if: always()
+        run: |
+          set -euo pipefail
+          leg="none"
+          outcome="none"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            leg="journey (Linux, xvfb)"
+            outcome="${{ steps.journey_linux.outcome }}"
+          elif [ "${{ steps.journey_macos.outcome }}" != "" ] && [ "${{ steps.journey_macos.outcome }}" != "skipped" ]; then
+            leg="journey (macOS)"
+            outcome="${{ steps.journey_macos.outcome }}"
+          elif [ "${{ steps.substitute_macos.outcome }}" != "" ] && [ "${{ steps.substitute_macos.outcome }}" != "skipped" ]; then
+            leg="substitute (host contract and sidecar tests; the DOM journey is Linux only)"
+            outcome="${{ steps.substitute_macos.outcome }}"
+          fi
+          echo "e2e leg on ${{ matrix.os }}: $leg ($outcome)" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$outcome" = "success"
+      # The 50 MiB figure is recorded, never a pass condition (spec :368).
+      - name: Upload the throughput figure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-throughput-${{ matrix.os }}
+          path: ainb-tui/crates/ainb-desktop/e2e/throughput.json
+          if-no-files-found: warn
+
+  # The release bundle carries no WebDriver: the `wdio` feature is off, so the
+  # binary exports no driver symbol, holds no plugin string and binds no port.
+  bundle:
+    name: Bundle smoke (${{ matrix.os }})
+    timeout-minutes: 90
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ainb-tui -> target
+            ainb-tui/crates/ainb-desktop -> target
+      - name: Install the Tauri system packages (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf binutils xvfb
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ainb-tui/crates/ainb-desktop/ui/package-lock.json
+      - name: Build the shell frontend
+        run: npm ci --no-audit --no-fund && npm run build
+        working-directory: ainb-tui/crates/ainb-desktop/ui
+      - name: Stage the hangar daemon sidecar
+        run: cargo xtask stage-desktop-sidecar --release
+        working-directory: ainb-tui
+      # `bundled` serves `ui/dist` over the window's own protocol, which is what
+      # a shipped build does; it does not pull the WebDriver in.
+      - name: Build the release shell
+        run: cargo build --release --features bundled
+        working-directory: ainb-tui/crates/ainb-desktop
+      # Run this exact block against any release build to check it yourself.
+      - name: No WebDriver symbol or plugin string in the release binary
+        run: |
+          set -euo pipefail
+          BIN=target/release/ainb-desktop
+          test -x "$BIN"
+          # Each tool's output is kept and asserted non-empty first: a stripped
+          # binary would otherwise pass by telling us nothing. An `! pipeline`
+          # never trips errexit, so each guard fails the step itself.
+          nm -a "$BIN" > symbols.txt 2>/dev/null || true
+          test -s symbols.txt
+          if grep -i -e wdio_webdriver -e tauri_plugin_wdio symbols.txt; then
+            echo "the release binary exports a WebDriver symbol" >&2
+            exit 1
+          fi
+          strings -a "$BIN" > strings.txt
+          test -s strings.txt
+          if grep -i -e tauri-plugin-wdio -e wdio-webdriver strings.txt; then
+            echo "the release binary names the WebDriver plugin" >&2
+            exit 1
+          fi
+          echo "the release binary exports no WebDriver symbol and names no driver plugin"
+        working-directory: ainb-tui/crates/ainb-desktop
+      # The other half of the same claim: the running window owns no listener.
+      - name: The release shell binds no driver port (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          BIN=target/release/ainb-desktop
+          HOME_DIR="$(mktemp -d)"
+          HOME="$HOME_DIR" AINB_HANGAR_HOME="$HOME_DIR/.agents-in-a-box" \
+            xvfb-run -a "$BIN" &
+          runner=$!
+          sleep 20
+          # The window is the child of xvfb-run, so the pid to ask about is the
+          # binary's own. It is matched by process name: the cmdline carries
+          # the path exactly as it was passed, which is relative, so an
+          # absolute pattern matches nothing.
+          app="$(pgrep -x ainb-desktop | head -1 || true)"
+          if [ -z "$app" ]; then
+            echo "no release shell was running 20 s after launch" >&2
+            ps -o pid,args -u "$(id -u)" >&2
+            kill "$runner" || true
+            exit 1
+          fi
+          # Printed before the checks, so a failing step is never silent about
+          # which process it asked about.
+          echo "release shell pid $app: $(tr '\0' ' ' < "/proc/$app/cmdline")"
+          # A crashed app owns no listener either, so it has to still be alive.
+          kill -0 "$app"
+          if ss -ltnp 2>/dev/null | grep -q "pid=$app,"; then
+            echo "the release shell is listening on a port of its own" >&2
+            ss -ltnp | grep "pid=$app," >&2
+            kill "$app" || true
+            kill "$runner" || true
+            exit 1
+          fi
+          kill "$app" || true
+          kill "$runner" || true
+          echo "the running release shell owns no listener"
+        working-directory: ainb-tui/crates/ainb-desktop

@@ -74,6 +74,7 @@ ALL_NODES=(
   p1-app-extraction p2-effects p3-hangar-host p4-review-screens
   w0-wire t0-daemon issue-963-presence issue-962-fleet-panel
   t0-section issue-983-redaction issue-1094-own-session
+  d1-shell
 )
 if ((${#ONLY[@]})); then NODES=("${ONLY[@]}"); else NODES=("${ALL_NODES[@]}"); fi
 for node in "${NODES[@]}"; do
@@ -126,7 +127,7 @@ for node in "${NODES[@]}"; do
     jq --argjson files "$files" '.capture = $files' "$PROOF_OUT/$node/result.json" >"$PROOF_OUT/$node/result.json.tmp" \
       && mv "$PROOF_OUT/$node/result.json.tmp" "$PROOF_OUT/$node/result.json"
   fi
-  echo "   $(jq -r 'if .pass then "PASS" else "FAIL" + (if .issue then " (#\(.issue))" else "" end) end' \
+  echo "   $(jq -r 'if .skipped then "SKIP (\(.skipped))" elif .pass then "PASS" else "FAIL" + (if .issue then " (#\(.issue))" else "" end) end' \
     "$PROOF_OUT/$node/result.json" 2>/dev/null || echo "NO RESULT")" >&2
 done
 

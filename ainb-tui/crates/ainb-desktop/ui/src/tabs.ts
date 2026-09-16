@@ -28,10 +28,21 @@ export function rowOf(target: TabTarget): RowId {
 }
 
 /**
+ * What the window's `dispatch` command takes, as
+ * `ainb_desktop::intent::RendererIntent` spells it: a key, a named command
+ * with its arguments, or pasted text. There is no pointer variant; the webview
+ * hit-tests its own DOM and sends the command a press means.
+ */
+export type RendererIntent =
+  | { Key: string }
+  | { Command: [string, unknown] }
+  | { Text: string };
+
+/**
  * The intent that selects `row` and attaches it. Opening goes through the
  * session list's own row, so the reducer marks the session attached each time.
  */
-export function openRowIntent(row: RowId) {
+export function openRowIntent(row: RowId): RendererIntent {
   return { Command: ["session_list.select_row", { target: row, open: true }] };
 }
 
@@ -49,7 +60,9 @@ export type Accelerator =
   | { kind: "close" }
   | { kind: "palette" }
   | { kind: "attention" }
-  | { kind: "hosts" };
+  | { kind: "hosts" }
+  | { kind: "copy" }
+  | { kind: "paste" };
 
 interface KeyLike {
   /** The physical key (`KeyW`, `Digit1`), so Shift does not change it. */
@@ -71,6 +84,11 @@ export function accelerator(event: KeyLike, mac: boolean): Accelerator | null {
   if (!mod || event.altKey) return null;
   if (event.code === "KeyH" && (!mac || event.shiftKey)) return { kind: "hosts" };
   if (mac && event.shiftKey) return null;
+  // Copy and paste: macOS has them on the Edit menu, natively. Elsewhere the
+  // pane owns ctrl+c and ctrl+v, so the shell's ctrl+shift pair does it.
+  if (!mac && (event.code === "KeyC" || event.code === "KeyV")) {
+    return { kind: event.code === "KeyC" ? "copy" : "paste" };
+  }
   const digit = /^Digit([1-9])$/.exec(event.code);
   if (digit) return { kind: "tab", index: Number(digit[1]) - 1 };
   switch (event.code) {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ainb",
+  "productName": "Agents in a Box",
   "version": "0.1.0",
   "identifier": "dev.agentsinabox.desktop",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "ainb",
+        "title": "Agents in a Box",
         "width": 1280,
         "height": 800,
         "minWidth": 800,

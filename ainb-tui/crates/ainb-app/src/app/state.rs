@@ -4279,6 +4279,7 @@ impl AppState {
     }
 
     /// Timeout for Docker operations in seconds
+    /// The whole scan's budget.
     const DOCKER_TIMEOUT_SECS: u64 = 10;
 
     /// Load the workspaces in the background and apply them on a later tick
@@ -4367,10 +4368,56 @@ impl AppState {
     fn start_background_workspace_loading(&mut self) -> mpsc::UnboundedSender<WorkspaceLoadResult> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.host.workspace_load_receiver = Some(rx);
-        self.workspace_load.is_loading_workspaces = true;
+        // The flag is the sidebar's "Loading sessions" state, which is only
+        // true before anything has been shown. A host that rescans on a
+        // cadence would otherwise flip this section on and off forever.
+        if !self.host.workspaces_applied {
+            self.workspace_load
+                .set_if_changed(|section| &mut section.is_loading_workspaces, true);
+        }
         self.host.workspace_load_started = Some(Instant::now());
-        self.workspace_load.workspace_load_error = None;
+        // The last failure stays up while scans keep failing: a scan that
+        // succeeds clears it, and clearing it here would make every repeat of
+        // the same failure look like news to a host that rescans on a cadence.
         tx
+    }
+
+    /// Record a scan that failed, saying so once per distinct reason.
+    ///
+    /// A host that rescans on a cadence would otherwise raise the same notice
+    /// and write the same section every time a broken Docker or a slow scan
+    /// repeats. The flag is written only when the text changes, and the notice
+    /// is raised only then too.
+    fn record_scan_failure(&mut self, error: String, notice: String) -> bool {
+        let changed = self
+            .workspace_load
+            .set_if_changed(|section| &mut section.workspace_load_error, Some(error));
+        if changed {
+            self.add_warning_notification(notice);
+        }
+        changed
+    }
+
+    /// The shortest a host's own rescan cadence may be.
+    ///
+    /// A host that asks for a scan on a timer keeps its interval strictly
+    /// longer than this, so a scan that spends the whole budget and times out
+    /// is not followed by the next one starting as it gives up. The desktop
+    /// reads it for its own `WORKSPACE_RESCAN`; the budget itself stays the
+    /// state's.
+    #[must_use]
+    pub const fn workspace_rescan_floor() -> std::time::Duration {
+        std::time::Duration::from_secs(Self::DOCKER_TIMEOUT_SECS)
+    }
+
+    /// Whether a workspace scan is running.
+    ///
+    /// A host that rescans on a cadence asks this before starting another: the
+    /// sidebar's `is_loading_workspaces` flag is only the first load's, so it
+    /// is not the answer to "is one in flight".
+    #[must_use]
+    pub const fn workspace_scan_running(&self) -> bool {
+        self.host.workspace_load_receiver.is_some()
     }
 
     /// Check for completed background workspace loading and apply results
@@ -4379,7 +4426,8 @@ impl AppState {
         if let Some(ref mut receiver) = self.host.workspace_load_receiver {
             match receiver.try_recv() {
                 Ok(result) => {
-                    self.workspace_load.is_loading_workspaces = false;
+                    self.workspace_load
+                        .set_if_changed(|section| &mut section.is_loading_workspaces, false);
                     self.host.workspace_load_receiver = None;
 
                     match result {
@@ -4410,9 +4458,36 @@ impl AppState {
                                 workspaces.len()
                             );
 
+                            // A scan that found nothing new writes nothing.
+                            // The desktop asks for one every ten seconds, so
+                            // this is the difference between a quiet window
+                            // and the whole Sessions section reframed on a
+                            // timer, with the selection reset and a notice
+                            // raised each time.
+                            self.workspace_load
+                                .set_if_changed(|section| &mut section.workspace_load_error, None);
+                            // Compared on the fields a scan discovers: the
+                            // chips, errors and provider ids the merge sets on
+                            // a live row are the host's, and a fresh scan
+                            // builds them at their defaults every time, so
+                            // comparing those would call every scan a change.
+                            if self.host.workspaces_applied
+                                && crate::models::workspace::same_scan_workspaces(
+                                    &self.sessions.workspaces,
+                                    &workspaces,
+                                )
+                                && crate::models::session::same_scan_rows(
+                                    &self.ssh.ssh_sessions,
+                                    &ssh_sessions,
+                                )
+                            {
+                                debug!("background workspace scan found no change");
+                                return false;
+                            }
+
+                            self.host.workspaces_applied = true;
                             self.sessions.workspaces = workspaces;
                             self.ssh.ssh_sessions = ssh_sessions;
-                            self.workspace_load.workspace_load_error = None;
 
                             // Resolve favorite status once per workspace now
                             // that the list changed, so the session-list render
@@ -4476,11 +4551,15 @@ impl AppState {
                             // session, delete one, press `f`). Enqueue exactly one
                             // full refresh so the complete picture (stopped
                             // sessions included) appears right after first paint.
-                            // Fires once per launch: this branch runs a single
-                            // time (the receiver is cleared above), and
-                            // `load_real_workspaces` doesn't re-arm it — no loop.
-                            // Guard on `None` so a user-queued action is never
-                            // clobbered.
+                            // Queued on every scan that changed the list, not
+                            // once per launch: a host that rescans on a cadence
+                            // reaches this branch again whenever the list moves.
+                            // `load_real_workspaces` does not re-arm it, so
+                            // there is still no loop. Guard on `None` so a
+                            // user-queued action is never clobbered, and note
+                            // that a host which never drains
+                            // `pending_async_action` (the desktop today) never
+                            // runs the full refresh at all.
                             if self.shell.pending_async_action.is_none() {
                                 self.shell.pending_async_action =
                                     Some(AsyncAction::RefreshWorkspaces);
@@ -4490,21 +4569,17 @@ impl AppState {
                         }
                         WorkspaceLoadResult::Error(err) => {
                             warn!("Background workspace loading failed: {}", err);
-                            self.workspace_load.workspace_load_error = Some(err.clone());
-                            self.add_warning_notification(format!(
-                                "Failed to load sessions: {}",
-                                err
-                            ));
-                            return true;
+                            return self.record_scan_failure(
+                                err.clone(),
+                                format!("Failed to load sessions: {err}"),
+                            );
                         }
                         WorkspaceLoadResult::Timeout => {
                             warn!("Background workspace loading timed out");
-                            self.workspace_load.workspace_load_error =
-                                Some("Docker operation timed out".to_string());
-                            self.add_warning_notification(
+                            return self.record_scan_failure(
+                                "Docker operation timed out".to_string(),
                                 "Docker is slow - sessions may be incomplete".to_string(),
                             );
-                            return true;
                         }
                     }
                 }
@@ -4514,24 +4589,27 @@ impl AppState {
                         if started.elapsed().as_secs() > Self::DOCKER_TIMEOUT_SECS * 3 {
                             // Hard timeout - stop waiting
                             warn!("Workspace loading hard timeout reached");
-                            self.workspace_load.is_loading_workspaces = false;
+                            self.workspace_load.set_if_changed(
+                                |section| &mut section.is_loading_workspaces,
+                                false,
+                            );
                             self.host.workspace_load_receiver = None;
-                            self.workspace_load.workspace_load_error =
-                                Some("Loading timed out".to_string());
-                            self.add_warning_notification(
+                            return self.record_scan_failure(
+                                "Loading timed out".to_string(),
                                 "Session loading timed out - using cached data".to_string(),
                             );
-                            return true;
                         }
                     }
                 }
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     // Channel closed without result - error
-                    self.workspace_load.is_loading_workspaces = false;
+                    self.workspace_load
+                        .set_if_changed(|section| &mut section.is_loading_workspaces, false);
                     self.host.workspace_load_receiver = None;
-                    self.workspace_load.workspace_load_error =
-                        Some("Loading task failed".to_string());
-                    return true;
+                    return self.record_scan_failure(
+                        "Loading task failed".to_string(),
+                        "Session loading failed".to_string(),
+                    );
                 }
             }
         }

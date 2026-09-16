@@ -7,6 +7,7 @@
 //!   and answers the ones this shell cannot run yet with their documented
 //!   failure report.
 //! - [`intent::RendererIntent`] is what the webview may send.
+//! - [`clipboard`] holds the size rule a copy and a paste share.
 //! - [`shell::Shell`] locks the host and the executor together for the
 //!   window's commands and tick.
 //! - [`sidecar`] finds or starts the bundled hangar daemon and holds this
@@ -15,6 +16,7 @@
 //! None of it needs a window: the Tauri binary (`app` feature) wires these to
 //! channels and commands, and the tests drive them headless.
 
+pub mod clipboard;
 pub mod executor;
 pub mod host;
 pub mod intent;

@@ -493,7 +493,7 @@ impl std::str::FromStr for AntigravityModel {
 // ============================================================================
 
 /// SSH connection target configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SshTarget {
     pub host: String,
@@ -631,7 +631,7 @@ impl SessionStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Session {
     pub id: Uuid,
@@ -725,7 +725,79 @@ pub struct Session {
     pub provider_session_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+impl Session {
+    /// Whether a scan that rebuilt this row would have found nothing new.
+    ///
+    /// A workspace scan discovers a session from tmux, Docker and the
+    /// worktree; it does not know what the host has since learned about a live
+    /// row, and it builds those fields at their defaults every time. Comparing
+    /// them would call every scan a change, so this compares the scan's own
+    /// fields and skips the host's: the attention chips, the error list and the
+    /// provider id `AppState::refresh_attention` sets, the preview and log text
+    /// a preview refresh fills in, and the attach mark a surface sets when it
+    /// opens the session.
+    ///
+    /// The destructuring is exhaustive on purpose: a new field will not
+    /// compile until it has been put on one side of that line.
+    #[must_use]
+    pub fn same_scan_fields(&self, other: &Self) -> bool {
+        let Self {
+            id,
+            name,
+            workspace_path,
+            branch_name,
+            container_id,
+            status,
+            created_at,
+            last_accessed,
+            git_changes,
+            skip_permissions,
+            mode,
+            boss_prompt,
+            agent_type,
+            model,
+            codex_model,
+            ssh_target,
+            display_name,
+            tmux_session_name,
+            // The host's, not the scan's.
+            recent_logs: _,
+            preview_content: _,
+            is_attached: _,
+            live_attention: _,
+            errors: _,
+            provider_session_id: _,
+        } = self;
+        *id == other.id
+            && *name == other.name
+            && *workspace_path == other.workspace_path
+            && *branch_name == other.branch_name
+            && *container_id == other.container_id
+            && *status == other.status
+            && *created_at == other.created_at
+            && *last_accessed == other.last_accessed
+            && *git_changes == other.git_changes
+            && *skip_permissions == other.skip_permissions
+            && *mode == other.mode
+            && *boss_prompt == other.boss_prompt
+            && *agent_type == other.agent_type
+            && *model == other.model
+            && *codex_model == other.codex_model
+            && *ssh_target == other.ssh_target
+            && *display_name == other.display_name
+            && *tmux_session_name == other.tmux_session_name
+    }
+}
+
+/// Whether a scan found the same rows it is holding, by
+/// [`Session::same_scan_fields`] and in the same order.
+#[must_use]
+pub fn same_scan_rows(held: &[Session], found: &[Session]) -> bool {
+    held.len() == found.len()
+        && held.iter().zip(found).all(|(held, found)| held.same_scan_fields(found))
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct GitChanges {
     pub added: u32,
@@ -784,7 +856,7 @@ impl Default for ShellSessionStatus {
 }
 
 /// A plain shell session (no AI agent) tied to a workspace
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ShellSession {
     pub id: Uuid,
