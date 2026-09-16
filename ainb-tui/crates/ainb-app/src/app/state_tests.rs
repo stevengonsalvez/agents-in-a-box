@@ -3541,6 +3541,62 @@ mod tests {
         );
     }
 
+    /// A host that rescans on a timer must not reframe the world every time.
+    /// A scan whose result matches what the state holds writes nothing: the
+    /// Sessions section keeps its version, the operator's selection stays put,
+    /// and no notice is raised.
+    #[test]
+    fn a_scan_that_found_no_change_writes_nothing() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        let mut workspace = Workspace::new("repo".to_string(), "/tmp/repo".into());
+        workspace.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+        workspace.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(vec![workspace.clone()]))
+            .expect("send load result");
+        assert!(
+            state.check_workspace_loading_complete(),
+            "the first scan applies"
+        );
+
+        // The operator moves the selection, and the notice from the first load
+        // is read and cleared, so a second write would be visible.
+        state.sessions.selected_session_index = Some(1);
+        state.shell.notifications.clear();
+        let version = state.sessions.version();
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(vec![workspace]))
+            .expect("send load result");
+        assert!(
+            !state.check_workspace_loading_complete(),
+            "a scan that found the same list reports no update"
+        );
+        assert_eq!(
+            state.sessions.version(),
+            version,
+            "the Sessions section was written"
+        );
+        assert_eq!(
+            state.sessions.selected_session_index,
+            Some(1),
+            "the selection was reset by a scan that changed nothing"
+        );
+        assert!(
+            state.shell.notifications.is_empty(),
+            "a scan that changed nothing raised a notice"
+        );
+    }
+
     // ========================================================================
     // Onboarding completion: State -> Config mapping
     // ========================================================================
