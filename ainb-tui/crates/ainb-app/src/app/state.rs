@@ -4698,29 +4698,38 @@ impl AppState {
     }
 
     /// Poll the background scan. Returns true if data was applied this tick.
+    ///
+    /// Polled every tick, so the poll itself goes through `update`: an idle or
+    /// empty channel leaves Skills' version alone (#1139).
     pub fn check_skills_load_complete(&mut self) -> bool {
-        if let Some(ref mut receiver) = self.skills.skills_load_receiver {
+        let mut dropped = false;
+        let applied = self.skills.update(|skills| {
+            let Some(receiver) = skills.skills_load_receiver.as_mut() else {
+                return false;
+            };
             match receiver.try_recv() {
                 Ok(data) => {
-                    self.skills.skills_state.data = Some(data);
-                    self.skills.skills_state.loading = false;
-                    self.skills.skills_load_receiver = None;
+                    skills.skills_state.data = Some(data);
+                    skills.skills_state.loading = false;
+                    skills.skills_load_receiver = None;
                     true
                 }
                 Err(mpsc::error::TryRecvError::Empty) => false,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.skills.skills_state.loading = false;
-                    self.skills.skills_load_receiver = None;
-                    warn!("Skills parse task dropped its sender without delivering data");
-                    self.add_warning_notification(
-                        "Failed to parse skills; keeping cached data".to_string(),
-                    );
+                    skills.skills_state.loading = false;
+                    skills.skills_load_receiver = None;
+                    dropped = true;
                     true
                 }
             }
-        } else {
-            false
+        });
+        if dropped {
+            warn!("Skills parse task dropped its sender without delivering data");
+            self.add_warning_notification(
+                "Failed to parse skills; keeping cached data".to_string(),
+            );
         }
+        applied
     }
 
     /// Kick off a background drift scan against `home` (the ainb data
@@ -4769,24 +4778,28 @@ impl AppState {
     /// Poll the background drift scan. Returns true if results were
     /// applied this tick. Drains a single message — backend returns
     /// the whole map in one go so a single drain is enough.
+    ///
+    /// Polled every tick, so an idle or empty channel leaves Skills' version
+    /// alone (#1139).
     pub fn check_drift_load_complete(&mut self) -> bool {
-        if let Some(ref mut receiver) = self.skills.drift_load_receiver {
+        self.skills.update(|skills| {
+            let Some(receiver) = skills.drift_load_receiver.as_mut() else {
+                return false;
+            };
             match receiver.try_recv() {
                 Ok(map) => {
-                    self.skills.skill_manager_state.drift_cache = map;
-                    self.skills.drift_load_receiver = None;
+                    skills.skill_manager_state.drift_cache = map;
+                    skills.drift_load_receiver = None;
                     true
                 }
                 Err(mpsc::error::TryRecvError::Empty) => false,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.skills.drift_load_receiver = None;
+                    skills.drift_load_receiver = None;
                     warn!("Drift detect task dropped its sender without delivering data");
                     true
                 }
             }
-        } else {
-            false
-        }
+        })
     }
 
     // ── Shared MCP pool overlay ────────────────────────────────────────────
@@ -4861,36 +4874,43 @@ impl AppState {
     /// lazy refresh when the cadence has elapsed. Cheap and non-blocking:
     /// `try_recv` never waits, and no fetch is spawned when one is pending or
     /// the cadence is disabled. Called from the 250ms app tick.
+    ///
+    /// The drain goes through `update`, so a closed overlay or an empty
+    /// channel leaves McpPool's version alone (#1139).
     pub fn check_mcp_overlay(&mut self) {
-        let Some(o) = self.mcp_pool.mcp_overlay.as_mut() else {
-            return;
-        };
-
-        if let Some(rx) = o.fetch_rx.as_mut() {
-            if let Ok(result) = rx.try_recv() {
-                o.fetch_rx = None;
-                o.loading = false;
-                o.daemon_running = result.daemon_running;
-                o.servers = result.servers;
-                // Sticky: only an action (import) sets a message; plain
-                // refreshes carry None and leave the prior summary in place.
-                if result.action_msg.is_some() {
-                    o.last_action = result.action_msg;
-                }
-                o.last_refreshed = Some(std::time::Instant::now());
-                if o.selected >= o.servers.len() {
-                    o.selected = o.servers.len().saturating_sub(1);
-                }
+        self.mcp_pool.update(|pool| {
+            let Some(o) = pool.mcp_overlay.as_mut() else {
+                return false;
+            };
+            let Some(rx) = o.fetch_rx.as_mut() else {
+                return false;
+            };
+            let Ok(result) = rx.try_recv() else {
+                return false;
+            };
+            o.fetch_rx = None;
+            o.loading = false;
+            o.daemon_running = result.daemon_running;
+            o.servers = result.servers;
+            // Sticky: only an action (import) sets a message; plain
+            // refreshes carry None and leave the prior summary in place.
+            if result.action_msg.is_some() {
+                o.last_action = result.action_msg;
             }
-        }
+            o.last_refreshed = Some(std::time::Instant::now());
+            if o.selected >= o.servers.len() {
+                o.selected = o.servers.len().saturating_sub(1);
+            }
+            true
+        });
 
         // Lazy auto-refresh: only while open, only when nothing is pending,
-        // only if a cadence is configured and it has elapsed.
-        let due = o.refresh_secs > 0
-            && o.fetch_rx.is_none()
-            && o.last_refreshed
-                .map(|t| t.elapsed().as_secs() >= o.refresh_secs)
-                .unwrap_or(false);
+        // only if a cadence is configured and it has elapsed. A read.
+        let due = self.mcp_pool.mcp_overlay.as_ref().is_some_and(|o| {
+            o.refresh_secs > 0
+                && o.fetch_rx.is_none()
+                && o.last_refreshed.is_some_and(|t| t.elapsed().as_secs() >= o.refresh_secs)
+        });
         if due {
             self.spawn_mcp_fetch();
         }
@@ -10186,7 +10206,15 @@ impl AppState {
             let edits = std::mem::take(&mut self.hangar.pending_daemon_config_edits);
             self.set_hangar_daemon_config(edits).await;
         }
-        if let Some(action) = self.shell.pending_async_action.take() {
+        // Read before taking: this runs every tick, and a `take()` through
+        // Shell's `DerefMut` would bump it on every tick with nothing queued
+        // (#1139).
+        let queued = if self.shell.pending_async_action.is_some() {
+            self.shell.pending_async_action.take()
+        } else {
+            None
+        };
+        if let Some(action) = queued {
             info!(
                 ">>> process_async_action() called with action: {:?}",
                 action
@@ -11267,9 +11295,14 @@ impl AppState {
         self.add_notification(Notification::warning(message));
     }
 
-    /// Remove expired notifications
+    /// Remove expired notifications. Called every tick, so a tick with nothing
+    /// expired leaves Shell's version alone (#1139).
     pub fn cleanup_expired_notifications(&mut self) {
-        self.shell.notifications.retain(|n| !n.is_expired());
+        self.shell.update(|shell| {
+            let before = shell.notifications.len();
+            shell.notifications.retain(|n| !n.is_expired());
+            shell.notifications.len() != before
+        });
     }
 
     /// Retire every notice currently on screen (`Ctrl+X`).
@@ -12603,49 +12636,7 @@ impl AppState {
             }
         }
 
-        // Apply status-only updates for non-selected sessions
-        for (session_id, claude_running) in status_updates {
-            // Accumulate the change flag inside the session borrow, then
-            // touch `self.shell.ui_needs_refresh` only after it ends (avoids a
-            // borrow conflict between `find_session_mut` and `self`).
-            let mut changed = false;
-            if let Some(session) = self.find_session_mut(session_id) {
-                use crate::models::SessionStatus;
-                let new_status = if claude_running {
-                    SessionStatus::Running
-                } else {
-                    SessionStatus::Idle
-                };
-                if session.status != new_status {
-                    session.set_status(new_status);
-                    changed = true;
-                }
-            }
-            if changed {
-                self.shell.ui_needs_refresh = true;
-            }
-        }
-
-        // Apply updates for the selected session (preview always changes,
-        // so this loop unconditionally requests a refresh).
-        for (session_id, content, claude_running) in updates {
-            if let Some(session) = self.find_session_mut(session_id) {
-                session.set_preview(content);
-
-                use crate::models::SessionStatus;
-                let new_status = if claude_running {
-                    SessionStatus::Running
-                } else {
-                    SessionStatus::Idle
-                };
-
-                if session.status != new_status {
-                    session.set_status(new_status);
-                }
-            }
-
-            self.shell.ui_needs_refresh = true;
-        }
+        self.apply_pane_captures(updates, status_updates);
 
         // Now that per-session running/idle status is current, recompute each
         // session's attention chips. Independent of pane capture, so it also
@@ -12680,14 +12671,7 @@ impl AppState {
                     join_wrapped_lines: true,
                 };
                 match capture_pane(&tmux_name, opts).await {
-                    Ok(content) => {
-                        if let Some(workspace) = self.sessions.workspaces.get_mut(ws_idx) {
-                            if let Some(shell) = workspace.shell_session.as_mut() {
-                                shell.preview_content = Some(content);
-                                self.shell.ui_needs_refresh = true;
-                            }
-                        }
-                    }
+                    Ok(content) => self.apply_shell_preview(ws_idx, content),
                     Err(e) => {
                         debug!(
                             "Failed to capture shell session content for {}: {}",
@@ -12699,6 +12683,86 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    /// Apply one preview pass's captures: `updates` are the selected session's
+    /// (content, claude running), `status_updates` the others' running flag.
+    ///
+    /// Runs every preview interval whether or not a pane moved, so it writes
+    /// Sessions, and asks for a redraw through Shell, only for a session whose
+    /// preview or status actually differs (#1139).
+    pub(crate) fn apply_pane_captures(
+        &mut self,
+        updates: Vec<(uuid::Uuid, String, bool)>,
+        status_updates: Vec<(uuid::Uuid, bool)>,
+    ) {
+        use crate::models::SessionStatus;
+        let status_of = |claude_running: bool| {
+            if claude_running {
+                SessionStatus::Running
+            } else {
+                SessionStatus::Idle
+            }
+        };
+        let mut changed = false;
+        for (session_id, claude_running) in status_updates {
+            let new_status = status_of(claude_running);
+            let differs = self
+                .find_session(session_id)
+                .is_some_and(|session| session.status != new_status);
+            if differs {
+                if let Some(session) = self.find_session_mut(session_id) {
+                    session.set_status(new_status);
+                    changed = true;
+                }
+            }
+        }
+        for (session_id, content, claude_running) in updates {
+            let new_status = status_of(claude_running);
+            let differs = self.find_session(session_id).is_some_and(|session| {
+                session.preview_content.as_deref() != Some(content.as_str())
+                    || session.status != new_status
+            });
+            if !differs {
+                continue;
+            }
+            if let Some(session) = self.find_session_mut(session_id) {
+                if session.preview_content.as_deref() != Some(content.as_str()) {
+                    session.set_preview(content);
+                }
+                if session.status != new_status {
+                    session.set_status(new_status);
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
+        }
+    }
+
+    /// Show `content` as the shell preview of workspace `ws_idx`, writing
+    /// Sessions and asking for a redraw only when it differs from what is
+    /// shown (#1139).
+    pub(crate) fn apply_shell_preview(&mut self, ws_idx: usize, content: String) {
+        let differs = self
+            .sessions
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.shell_session.as_ref())
+            .is_some_and(|shell| shell.preview_content.as_deref() != Some(content.as_str()));
+        if !differs {
+            return;
+        }
+        if let Some(shell) = self
+            .sessions
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|workspace| workspace.shell_session.as_mut())
+        {
+            shell.preview_content = Some(content);
+        }
+        self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
     }
 
     /// Restart Claude in an existing tmux session (for Idle sessions)
