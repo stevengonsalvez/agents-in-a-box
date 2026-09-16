@@ -265,7 +265,10 @@ impl MutationLedgerRepo {
     /// instead of executing a second time. Every other claim is keyed under this
     /// daemon's minted id, or `local` on a home with no identity. The legacy
     /// lookup is by the full key, so another principal's `local` row never
-    /// decides this caller's host.
+    /// decides this caller's host. That lookup is also what makes the
+    /// non-atomic interleaving safe: once the daemon has minted, nothing writes
+    /// a new `local` row, so no statement landing between the lookup and the
+    /// claim can change which key this op id belongs to.
     ///
     /// What sharing the connection buys is one pool acquisition for every read
     /// and the insert. It is not a transaction: the statements are
