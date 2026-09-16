@@ -4147,6 +4147,10 @@ impl AppState {
     pub async fn load_real_workspaces(&mut self) {
         info!("Loading active sessions (both Docker and Interactive)");
 
+        // Before the list goes: the selection is restored by identity below, so
+        // a refresh does not move the operator off the row they chose (#1155).
+        let keep = self.selected_row_identity();
+
         // Preserve shell_sessions before clearing workspaces
         // Map workspace path -> shell_session for restoration after reload
         let preserved_shells: std::collections::HashMap<
@@ -4259,6 +4263,12 @@ impl AppState {
         self.sessions.shell_selected = false;
         self.ssh.selected_ssh_session_index = None;
         self.tmux.selected_other_tmux_index = None;
+
+        // The row the operator chose, wherever it is now (#1155).
+        if self.restore_selected_row(keep) {
+            self.queue_logs_fetch();
+            return;
+        }
 
         // Set initial selection from rows visible under the active filter.
         if !self.select_first_visible_workspace_item_from(0) {
@@ -4485,6 +4495,13 @@ impl AppState {
                                 return false;
                             }
 
+                            // Taken before the write, restored by identity
+                            // after it: a scan that found a change reorders
+                            // rows, and the desktop asks for one whenever the
+                            // daemon reports news, so an index restored here
+                            // would land on whatever took the row's place
+                            // (#1155).
+                            let keep = self.selected_row_identity();
                             self.host.workspaces_applied = true;
                             self.sessions.workspaces = workspaces;
                             self.ssh.ssh_sessions = ssh_sessions;
@@ -4529,7 +4546,11 @@ impl AppState {
                             self.ssh.selected_ssh_session_index = None;
                             self.tmux.selected_other_tmux_index = None;
 
-                            if !self.select_first_visible_workspace_item_from(0) {
+                            // The operator's row first, the first visible row
+                            // only when that row has left the list.
+                            if !self.restore_selected_row(keep)
+                                && !self.select_first_visible_workspace_item_from(0)
+                            {
                                 if !self.ssh.ssh_sessions.is_empty() {
                                     // No workspaces but there are SSH sessions - select the first one
                                     self.ssh.selected_ssh_session_index = Some(0);
@@ -6086,6 +6107,51 @@ impl AppState {
     /// Where the row `id` names sits in the current list, or `None` when it is
     /// gone.
     #[must_use]
+    /// What is selected in the session list, as an identity rather than a set
+    /// of indices.
+    ///
+    /// Taken before a scan replaces the list, so the row the operator chose can
+    /// be found again wherever it now sits (#1155). An index cannot survive
+    /// that: a session created anywhere on the box reorders the list, and
+    /// restoring the old index lands on whatever took the row's place.
+    #[must_use]
+    pub fn selected_row_identity(&self) -> Option<SessionListRowId> {
+        if let Some(index) = self.ssh.selected_ssh_session_index {
+            return Some(SessionListRowId::SshSession(
+                self.ssh.ssh_sessions.get(index)?.id,
+            ));
+        }
+        if let Some(index) = self.tmux.selected_other_tmux_index {
+            return Some(SessionListRowId::OtherTmux(
+                self.tmux.other_tmux_sessions.get(index)?.name.clone(),
+            ));
+        }
+        let workspace = self.sessions.workspaces.get(self.sessions.selected_workspace_index?)?;
+        if self.sessions.shell_selected {
+            return Some(SessionListRowId::WorkspaceShell(workspace.path.clone()));
+        }
+        match self.sessions.selected_session_index {
+            Some(index) => Some(SessionListRowId::Session(workspace.sessions.get(index)?.id)),
+            None => Some(SessionListRowId::Workspace(workspace.path.clone())),
+        }
+    }
+
+    /// Put the selection back on the row `keep` names, reporting whether that
+    /// row is still in the list.
+    ///
+    /// The pane keeps the focus it had: a scan is not the operator asking for
+    /// the sidebar, and a window whose composer had the keyboard must not lose
+    /// it because something elsewhere on the box started a session.
+    fn restore_selected_row(&mut self, keep: Option<SessionListRowId>) -> bool {
+        let Some(target) = keep.and_then(|id| self.session_list_row_target_for(&id)) else {
+            return false;
+        };
+        let pane = self.shell.focused_pane.clone();
+        self.select_session_list_row(target);
+        self.shell.set_if_changed(|shell| &mut shell.focused_pane, pane);
+        true
+    }
+
     pub fn session_list_row_target_for(
         &self,
         id: &SessionListRowId,
@@ -14530,5 +14596,86 @@ mod codex_degrade_notice_tests {
             added, 2,
             "two distinct sessions must each be announced once"
         );
+    }
+}
+
+#[cfg(test)]
+mod scan_selection_tests {
+    //! What a scan does to the operator's selection (#1155).
+    //!
+    //! The row is remembered as an identity and looked up again in the list the
+    //! scan produced. An index cannot do this job: a session created anywhere
+    //! on the box reorders the list, and the desktop asks for a scan whenever
+    //! the daemon reports news, so restoring an index moved the sidebar under
+    //! the operator's hands.
+
+    use super::{AppState, FocusedPane, SessionListRowId};
+    use crate::models::{Session, Workspace};
+
+    /// Two workspaces, one session each, with the second one's session chosen.
+    fn with_the_second_session_selected() -> (AppState, uuid::Uuid) {
+        let mut state = AppState::new();
+        let mut first = Workspace::new("api".to_string(), "/scan/api".into());
+        first.add_session(Session::new(
+            "feat-login".to_string(),
+            "/scan/api/wt".to_string(),
+        ));
+        let mut second = Workspace::new("web".to_string(), "/scan/web".into());
+        second.add_session(Session::new(
+            "spike-ssr".to_string(),
+            "/scan/web/wt".to_string(),
+        ));
+        let chosen = second.sessions[0].id;
+        state.sessions.workspaces = vec![first, second];
+        state.sessions.selected_workspace_index = Some(1);
+        state.sessions.selected_session_index = Some(0);
+        (state, chosen)
+    }
+
+    #[test]
+    fn a_scan_that_reorders_the_list_keeps_the_row_the_operator_chose() {
+        let (mut state, chosen) = with_the_second_session_selected();
+        let keep = state.selected_row_identity();
+        assert_eq!(keep, Some(SessionListRowId::Session(chosen)));
+        // The scan's new list: the workspace above the chosen row has gone, so
+        // every index below it has moved up.
+        state.sessions.workspaces.remove(0);
+        state.sessions.selected_workspace_index = None;
+        state.sessions.selected_session_index = None;
+
+        assert!(state.restore_selected_row(keep));
+
+        assert_eq!(state.sessions.selected_workspace_index, Some(0));
+        assert_eq!(
+            state.sessions.workspaces[0].sessions[0].id, chosen,
+            "the session the operator chose, not whatever took its place"
+        );
+    }
+
+    #[test]
+    fn a_scan_that_removed_the_chosen_row_restores_nothing() {
+        let (mut state, _) = with_the_second_session_selected();
+        let keep = state.selected_row_identity();
+        // The session ended somewhere else on the box.
+        state.sessions.workspaces.remove(1);
+
+        assert!(
+            !state.restore_selected_row(keep),
+            "so the caller falls back to the first visible row"
+        );
+    }
+
+    #[test]
+    fn restoring_the_selection_does_not_take_the_focus() {
+        // A scan is not the operator asking for the sidebar. A window whose
+        // composer had the keyboard must not lose it because something
+        // elsewhere on the box started a session.
+        let (mut state, _) = with_the_second_session_selected();
+        let keep = state.selected_row_identity();
+        state.shell.focused_pane = FocusedPane::LiveLogs;
+
+        assert!(state.restore_selected_row(keep));
+
+        assert_eq!(state.shell.focused_pane, FocusedPane::LiveLogs);
     }
 }
