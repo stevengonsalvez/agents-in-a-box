@@ -927,6 +927,7 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "ConfigPopupType::TextInput.value",
     "AgentAuthStatus.has_key",
     "AnswerPhase::Failed.draft_len",
+    "AnswerPhase::InFlight.draft_len",
     "AnswerPhase::Failed.reason",
     "AttentionMark.detail",
     "AskState.free_text_len",
