@@ -1609,61 +1609,215 @@ const BINDINGS: &str = include_str!("../bindings/AppState.ts");
 /// was written; the fix for each is to seed it in `wire::shape::sample_state`
 /// and regenerate the fixture, not to extend this list. A line that is no
 /// longer missing fails too, so the list cannot go stale.
-const UNSEEDED_VARIANTS: &[&str] = &[
-    "config.config_popup_state.popup_type.Boolean",
-    "config.config_popup_state.popup_type.Choice",
-    "config.config_popup_state.popup_type.NumberInput",
-    "fleet.broadcast.phase.Failed",
-    "fleet.broadcast.phase.Sent",
-    "fleet.daemon_attention.all{}.answerable.Broker",
-    "fleet.daemon_attention.all{}.answerable.Daemon",
-    "fleet.daemon_attention.all{}.answerable.No",
-    "fleet.daemon_attention.by_session_id{}[].answerable.Broker",
-    "fleet.daemon_attention.by_session_id{}[].answerable.Daemon",
-    "fleet.daemon_attention.by_session_id{}[].answerable.No",
-    "git_view.git_view_state.markdown_content[].style.CodeBlockHeader",
-    "new_session.new_session_state.configure_state.repo_source.GithubShorthand",
-    "new_session.new_session_state.configure_state.repo_source.LocalPath",
-    "new_session.new_session_state.configure_state.repo_source.SshSession",
-    "new_session.new_session_state.configure_state.repo_source.SshUrl",
-    "new_session.new_session_state.pick_repo_state.pending_clone_source.GithubShorthand",
-    "new_session.new_session_state.pick_repo_state.pending_clone_source.LocalPath",
-    "new_session.new_session_state.pick_repo_state.pending_clone_source.SshSession",
-    "new_session.new_session_state.pick_repo_state.pending_clone_source.SshUrl",
-    "new_session.new_session_state.pick_repo_state.rows[].source.GithubShorthand",
-    "new_session.new_session_state.pick_repo_state.rows[].source.HttpsUrl",
-    "new_session.new_session_state.pick_repo_state.rows[].source.SshSession",
-    "new_session.new_session_state.pick_repo_state.rows[].source.SshUrl",
-    "onboarding.onboarding_state.auth_pane.MethodPicker",
-    "onboarding.onboarding_state.focus.Item",
-    "session_labels.session_context_menu.target.OtherTmux",
-    "session_labels.session_context_menu.target.SshSession",
-    "session_labels.session_context_menu.target.WorkspaceSession",
-    "session_labels.session_context_menu.target.WorkspaceShell",
-    "session_labels.session_label_rename_target.OtherTmux",
-    "session_labels.session_label_rename_target.SshSession",
-    "session_labels.session_label_rename_target.WorkspaceSession",
-    "session_labels.session_label_rename_target.WorkspaceShell",
-    // Seeding these two trips the credential tripwire: the payload reaches a
-    // section frame unredacted, so seeding alone is not the fix for them.
-    "sessions.workspaces[].sessions[].status.Error",
-    "ssh.ssh_sessions[].status.Error",
-    "shell.confirmation_dialog.confirm_action.BulkDeleteSessions",
-    "shell.confirmation_dialog.confirm_action.BulkStopSessions",
-    "shell.confirmation_dialog.confirm_action.KillOtherTmux",
-    "shell.confirmation_dialog.confirm_action.KillOtherTmuxSessions",
-    "shell.confirmation_dialog.confirm_action.KillWorkspaceShell",
-    "shell.confirmation_dialog.confirm_action.McpStopServer",
-    "shell.confirmation_dialog.confirm_action.StopSession",
-    "shell.confirmation_dialog.options[].action.BulkDeleteSessions",
-    "shell.confirmation_dialog.options[].action.BulkStopSessions",
-    "shell.confirmation_dialog.options[].action.KillOtherTmux",
-    "shell.confirmation_dialog.options[].action.KillOtherTmuxSessions",
-    "shell.confirmation_dialog.options[].action.KillWorkspaceShell",
-    "shell.confirmation_dialog.options[].action.McpStopServer",
-    "shell.confirmation_dialog.options[].action.StopSession",
-    "skills.skill_manager_state.banner.Details",
-    "skills.skill_manager_state.banner.Visible",
+const UNSEEDED_VARIANTS: &[(&str, &str)] = &[
+    (
+        "config.config_popup_state.popup_type.Boolean",
+        "ConfigPopupType: the sample opens the text and secret popups, not this one (#1146)",
+    ),
+    (
+        "config.config_popup_state.popup_type.Choice",
+        "ConfigPopupType: the sample opens the text and secret popups, not this one (#1146)",
+    ),
+    (
+        "config.config_popup_state.popup_type.NumberInput",
+        "ConfigPopupType: the sample opens the text and secret popups, not this one (#1146)",
+    ),
+    (
+        "fleet.broadcast.phase.Failed",
+        "BroadcastPhase: the sample never sets this phase (#1146)",
+    ),
+    (
+        "fleet.broadcast.phase.Sent",
+        "BroadcastPhase: the sample never sets this phase (#1146)",
+    ),
+    (
+        "fleet.daemon_attention.all{}.answerable.Broker",
+        "Answerable: the sample never sets this route on a chip (#1146)",
+    ),
+    (
+        "fleet.daemon_attention.all{}.answerable.Daemon",
+        "Answerable: the sample never sets this route on a chip (#1146)",
+    ),
+    (
+        "fleet.daemon_attention.all{}.answerable.No",
+        "Answerable: the sample never sets this route on a chip (#1146)",
+    ),
+    (
+        "fleet.daemon_attention.by_session_id{}[].answerable.Broker",
+        "Answerable: the sample never sets this route on a chip (#1146)",
+    ),
+    (
+        "fleet.daemon_attention.by_session_id{}[].answerable.Daemon",
+        "Answerable: the sample never sets this route on a chip (#1146)",
+    ),
+    (
+        "fleet.daemon_attention.by_session_id{}[].answerable.No",
+        "Answerable: the sample never sets this route on a chip (#1146)",
+    ),
+    (
+        "git_view.git_view_state.markdown_content[].style.CodeBlockHeader",
+        "MarkdownStyle: the sample never renders this style (#1146)",
+    ),
+    (
+        "new_session.new_session_state.configure_state.repo_source.GithubShorthand",
+        "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
+    ),
+    (
+        "new_session.new_session_state.configure_state.repo_source.LocalPath",
+        "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
+    ),
+    (
+        "new_session.new_session_state.configure_state.repo_source.SshSession",
+        "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
+    ),
+    (
+        "new_session.new_session_state.configure_state.repo_source.SshUrl",
+        "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
+    ),
+    (
+        "new_session.new_session_state.pick_repo_state.pending_clone_source.GithubShorthand",
+        "RepoSource: the sample pending clone is an HTTPS repo, not this source (#1146)",
+    ),
+    (
+        "new_session.new_session_state.pick_repo_state.pending_clone_source.LocalPath",
+        "RepoSource: the sample pending clone is an HTTPS repo, not this source (#1146)",
+    ),
+    (
+        "new_session.new_session_state.pick_repo_state.pending_clone_source.SshSession",
+        "RepoSource: the sample pending clone is an HTTPS repo, not this source (#1146)",
+    ),
+    (
+        "new_session.new_session_state.pick_repo_state.pending_clone_source.SshUrl",
+        "RepoSource: the sample pending clone is an HTTPS repo, not this source (#1146)",
+    ),
+    (
+        "new_session.new_session_state.pick_repo_state.rows[].source.GithubShorthand",
+        "RepoSource: the sample repo rows are local paths, not this source (#1146)",
+    ),
+    (
+        "new_session.new_session_state.pick_repo_state.rows[].source.HttpsUrl",
+        "RepoSource: the sample repo rows are local paths, not this source (#1146)",
+    ),
+    (
+        "new_session.new_session_state.pick_repo_state.rows[].source.SshSession",
+        "RepoSource: the sample repo rows are local paths, not this source (#1146)",
+    ),
+    (
+        "new_session.new_session_state.pick_repo_state.rows[].source.SshUrl",
+        "RepoSource: the sample repo rows are local paths, not this source (#1146)",
+    ),
+    (
+        "onboarding.onboarding_state.auth_pane.MethodPicker",
+        "AuthPane: the sample auth pane is on key entry (#1146)",
+    ),
+    (
+        "onboarding.onboarding_state.focus.Item",
+        "OnboardingFocus: the sample never focuses an item (#1146)",
+    ),
+    (
+        "session_labels.session_context_menu.target.OtherTmux",
+        "AttachableRef: the sample never targets this ref from the context menu (#1146)",
+    ),
+    (
+        "session_labels.session_context_menu.target.SshSession",
+        "AttachableRef: the sample never targets this ref from the context menu (#1146)",
+    ),
+    (
+        "session_labels.session_context_menu.target.WorkspaceSession",
+        "AttachableRef: the sample never targets this ref from the context menu (#1146)",
+    ),
+    (
+        "session_labels.session_context_menu.target.WorkspaceShell",
+        "AttachableRef: the sample never targets this ref from the context menu (#1146)",
+    ),
+    (
+        "session_labels.session_label_rename_target.OtherTmux",
+        "AttachableRef: the sample never renames this ref (#1146)",
+    ),
+    (
+        "session_labels.session_label_rename_target.SshSession",
+        "AttachableRef: the sample never renames this ref (#1146)",
+    ),
+    (
+        "session_labels.session_label_rename_target.WorkspaceSession",
+        "AttachableRef: the sample never renames this ref (#1146)",
+    ),
+    (
+        "session_labels.session_label_rename_target.WorkspaceShell",
+        "AttachableRef: the sample never renames this ref (#1146)",
+    ),
+    (
+        "sessions.workspaces[].sessions[].status.Error",
+        "SessionStatus::Error: seeding it trips the credential tripwire, the payload is unredacted (#1146)",
+    ),
+    (
+        "ssh.ssh_sessions[].status.Error",
+        "SessionStatus::Error: seeding it trips the credential tripwire, the payload is unredacted (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.confirm_action.BulkDeleteSessions",
+        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.confirm_action.BulkStopSessions",
+        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.confirm_action.KillOtherTmux",
+        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.confirm_action.KillOtherTmuxSessions",
+        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.confirm_action.KillWorkspaceShell",
+        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.confirm_action.McpStopServer",
+        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.confirm_action.StopSession",
+        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.options[].action.BulkDeleteSessions",
+        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.options[].action.BulkStopSessions",
+        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.options[].action.KillOtherTmux",
+        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.options[].action.KillOtherTmuxSessions",
+        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.options[].action.KillWorkspaceShell",
+        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.options[].action.McpStopServer",
+        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
+    ),
+    (
+        "shell.confirmation_dialog.options[].action.StopSession",
+        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
+    ),
+    (
+        "skills.skill_manager_state.banner.Details",
+        "DiscoveryBannerState: the sample never shows this banner state (#1146)",
+    ),
+    (
+        "skills.skill_manager_state.banner.Visible",
+        "DiscoveryBannerState: the sample never shows this banner state (#1146)",
+    ),
 ];
 
 /// Every externally tagged enum variant with a payload, reachable from a
@@ -1712,7 +1866,7 @@ fn every_payload_carrying_variant_reachable_from_a_section_is_seeded() {
             })
     };
 
-    let allowed: BTreeSet<&str> = UNSEEDED_VARIANTS.iter().copied().collect();
+    let allowed: BTreeSet<&str> = UNSEEDED_VARIANTS.iter().map(|(path, _)| *path).collect();
     let missing: Vec<String> = expected
         .keys()
         .filter(|variant| !reached(variant) && !allowed.contains(variant.as_str()))
@@ -1725,8 +1879,9 @@ fn every_payload_carrying_variant_reachable_from_a_section_is_seeded() {
          `wire::shape::sample_state` and regenerate the key-path fixture:\n{missing:#?}"
     );
 
-    let stale: Vec<&&str> = UNSEEDED_VARIANTS
+    let stale: Vec<&str> = UNSEEDED_VARIANTS
         .iter()
+        .map(|(path, _)| *path)
         .filter(|variant| {
             let variant = (*variant).to_string();
             reached(&variant) || !expected.contains_key(&variant)
