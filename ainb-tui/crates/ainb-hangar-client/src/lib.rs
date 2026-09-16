@@ -1045,13 +1045,29 @@ impl DaemonClient {
         let mut reader = BufReader::new(read_half);
 
         write_frame(&mut writer, methods::AUTH_HELLO, self.hello_params(), 1).await?;
-        let hello = read_response(&mut reader).await?;
-        if let Some(error) = hello.error {
+        let hello_reply = read_response(&mut reader).await?;
+        if let Some(error) = hello_reply.error {
             return Err(DaemonError::Rpc {
                 code: error.code,
                 message: error.message,
             });
         }
+        let hello: auth::HelloResult = serde_json::from_value(
+            hello_reply
+                .result
+                .filter(|result| !result.is_null())
+                .unwrap_or_else(|| Value::Object(serde_json::Map::default())),
+        )
+        .map_err(|error| DaemonError::Decode(format!("decoding auth/hello: {error}")))?;
+        if let Some(expected) = daemon_host_id(&self.socket) {
+            if hello.host_id.as_deref() != Some(expected.as_str()) {
+                return Err(DaemonError::Decode(format!(
+                    "daemon host identity mismatch: expected {expected}, got {:?}",
+                    hello.host_id
+                )));
+            }
+        }
+        remember_host_id(&self.socket, hello.host_id.as_deref());
 
         write_frame(
             &mut writer,
