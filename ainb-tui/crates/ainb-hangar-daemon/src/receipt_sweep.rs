@@ -56,7 +56,10 @@ pub struct SweepReport {
 pub async fn run(pool: &SqlitePool) -> Result<SweepReport, sqlx::Error> {
     let now_ms = SystemClock.now_ms();
     let mut rows = Vec::new();
-    for host_id in MutationLedgerRepo::distinct_hosts(pool).await {
+    // Every host the ledger holds rows under. A read fault stops the sweep,
+    // as documented: this runs once, and a fallback would leave the minted
+    // host's receipts in flight for the life of the process.
+    for host_id in MutationLedgerRepo::try_distinct_hosts(pool).await? {
         rows.extend(MutationLedgerRepo::unresolved_at_boot(pool, &host_id).await?);
     }
     let mut report = SweepReport::default();
