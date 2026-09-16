@@ -4792,36 +4792,43 @@ impl AppState {
     /// lazy refresh when the cadence has elapsed. Cheap and non-blocking:
     /// `try_recv` never waits, and no fetch is spawned when one is pending or
     /// the cadence is disabled. Called from the 250ms app tick.
+    ///
+    /// The drain goes through `update`, so a closed overlay or an empty
+    /// channel leaves McpPool's version alone (#1139).
     pub fn check_mcp_overlay(&mut self) {
-        let Some(o) = self.mcp_pool.mcp_overlay.as_mut() else {
-            return;
-        };
-
-        if let Some(rx) = o.fetch_rx.as_mut() {
-            if let Ok(result) = rx.try_recv() {
-                o.fetch_rx = None;
-                o.loading = false;
-                o.daemon_running = result.daemon_running;
-                o.servers = result.servers;
-                // Sticky: only an action (import) sets a message; plain
-                // refreshes carry None and leave the prior summary in place.
-                if result.action_msg.is_some() {
-                    o.last_action = result.action_msg;
-                }
-                o.last_refreshed = Some(std::time::Instant::now());
-                if o.selected >= o.servers.len() {
-                    o.selected = o.servers.len().saturating_sub(1);
-                }
+        self.mcp_pool.update(|pool| {
+            let Some(o) = pool.mcp_overlay.as_mut() else {
+                return false;
+            };
+            let Some(rx) = o.fetch_rx.as_mut() else {
+                return false;
+            };
+            let Ok(result) = rx.try_recv() else {
+                return false;
+            };
+            o.fetch_rx = None;
+            o.loading = false;
+            o.daemon_running = result.daemon_running;
+            o.servers = result.servers;
+            // Sticky: only an action (import) sets a message; plain
+            // refreshes carry None and leave the prior summary in place.
+            if result.action_msg.is_some() {
+                o.last_action = result.action_msg;
             }
-        }
+            o.last_refreshed = Some(std::time::Instant::now());
+            if o.selected >= o.servers.len() {
+                o.selected = o.servers.len().saturating_sub(1);
+            }
+            true
+        });
 
         // Lazy auto-refresh: only while open, only when nothing is pending,
-        // only if a cadence is configured and it has elapsed.
-        let due = o.refresh_secs > 0
-            && o.fetch_rx.is_none()
-            && o.last_refreshed
-                .map(|t| t.elapsed().as_secs() >= o.refresh_secs)
-                .unwrap_or(false);
+        // only if a cadence is configured and it has elapsed. A read.
+        let due = self.mcp_pool.mcp_overlay.as_ref().is_some_and(|o| {
+            o.refresh_secs > 0
+                && o.fetch_rx.is_none()
+                && o.last_refreshed.is_some_and(|t| t.elapsed().as_secs() >= o.refresh_secs)
+        });
         if due {
             self.spawn_mcp_fetch();
         }
