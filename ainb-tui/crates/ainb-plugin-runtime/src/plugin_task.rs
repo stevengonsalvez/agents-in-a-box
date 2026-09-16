@@ -596,6 +596,9 @@ struct ChildState {
     inbound_rx: mpsc::UnboundedReceiver<InboundEvent>,
     stdout_reader: tokio::task::JoinHandle<()>,
     stderr_drain: tokio::task::JoinHandle<()>,
+    /// Set once a frame write outlived `frame_write_timeout`, so the warning
+    /// is logged once per process rather than once per queued write.
+    write_timed_out: bool,
 }
 
 struct PluginTask {
@@ -1058,6 +1061,7 @@ impl PluginTask {
             inbound_rx,
             stdout_reader,
             stderr_drain,
+            write_timed_out: false,
         });
         self.send_init().await?;
         self.set_state(LifecycleState::Running);
@@ -1094,22 +1098,43 @@ impl PluginTask {
         params: Value,
     ) -> Result<(), RuntimeError> {
         let body = build_request(id, method, params)?;
-        let cs = self
-            .child
-            .as_mut()
-            .ok_or_else(|| RuntimeError::ProcessExited(self.plugin.id.clone()))?;
-        write_frame(&mut cs.stdin, &body).await?;
-        Ok(())
+        self.write_to_child(&body).await
     }
 
     async fn send_notification(&mut self, method: &str, params: Value) -> Result<(), RuntimeError> {
         let body = build_notification(method, params)?;
-        let cs = self
-            .child
-            .as_mut()
-            .ok_or_else(|| RuntimeError::ProcessExited(self.plugin.id.clone()))?;
-        write_frame(&mut cs.stdin, &body).await?;
-        Ok(())
+        self.write_to_child(&body).await
+    }
+
+    /// Write one frame to the plugin, bounded by `frame_write_timeout` (#1118).
+    ///
+    /// A plugin that stops reading its stdin fills the pipe, and an unbounded
+    /// write parks this task for good: no render deadline fires, no key is
+    /// drained, and the host keeps forwarding Esc into a plugin that will never
+    /// take it. A write past the bound is a dead plugin. The task flags it
+    /// wedged, so the host takes `q` and Esc at once, and kills the child, so
+    /// the closed pipe drops it through the same `handle_exit` a crash takes.
+    /// The half-written frame goes with the process.
+    async fn write_to_child(&mut self, body: &[u8]) -> Result<(), RuntimeError> {
+        let bound = self.config.frame_write_timeout;
+        let plugin = self.plugin.id.clone();
+        let cs = self.child.as_mut().ok_or_else(|| RuntimeError::ProcessExited(plugin.clone()))?;
+        if let Ok(written) = tokio::time::timeout(bound, write_frame(&mut cs.stdin, body)).await {
+            written?;
+            return Ok(());
+        }
+        if !cs.write_timed_out {
+            cs.write_timed_out = true;
+            warn!(
+                plugin = %plugin,
+                ?bound,
+                "a frame write to the plugin did not finish: it is not reading its stdin, \
+                 so it is treated as dead"
+            );
+        }
+        self.render_wedged.store(true, std::sync::atomic::Ordering::Release);
+        let _ = cs.child.start_kill();
+        Err(RuntimeError::ProcessExited(plugin))
     }
 
     async fn handle_inbound(&mut self, body: &[u8]) {
@@ -1300,9 +1325,9 @@ impl PluginTask {
                 }
             },
         };
-        if let Some(cs) = &mut self.child {
+        if self.child.is_some() {
             debug!(plugin = %self.plugin.id, id, bytes = body.len(), "host->plugin response: writing");
-            match write_frame(&mut cs.stdin, &body).await {
+            match self.write_to_child(&body).await {
                 Ok(()) => {
                     debug!(plugin = %self.plugin.id, id, "host->plugin response: write_frame OK");
                 }
