@@ -3,7 +3,7 @@
 
 use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
-use ainb_app::app::{KEY_ONLY_COMMANDS, RendererHost};
+use ainb_app::app::RendererHost;
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
 use ainb_app::{AppState, Chord, CommandId, Effect, Intent, Keymap};
@@ -180,7 +180,7 @@ impl<S: FrameSink> DesktopHost<S> {
             .commands()
             .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))
             .map(|(id, _)| id)
-            .filter(|id| KEY_ONLY_COMMANDS.contains(&id.as_str()))
+            .filter(|id| self.keymap.is_key_only(id))
     }
 
     /// Layout work for the webview queued since the last call.
