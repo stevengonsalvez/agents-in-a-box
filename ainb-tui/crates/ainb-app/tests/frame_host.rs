@@ -1,16 +1,19 @@
 #![allow(missing_docs)]
 
-// ABOUTME: #1066 part 2. Every frame this host sends, and every fleet row
-// inside one, names the `host_id` the daemon gave in `auth/hello`, and `local`
-// only while no daemon has named one.
+// ABOUTME: #1066 part 2. One mirror across the moment its daemon names a host:
+// frames and fleet rows say `local` before the hello and the ULID after the
+// surface re-pins, and a renderer that re-peers keeps every section, the
+// static ones included.
 //
-// Its own test binary: the observed host id is process-wide (one home per
-// process), so a sibling test completing a different hello would race it.
+// Its own test binary, so no other test shares the process-wide record of what
+// each socket's daemon named.
 
 use std::io::Write as _;
 
+use ainb_app::app::versioned::SectionId;
 use ainb_app::wire::frame::{HostId, Mirror, Subscription};
 use ainb_app::wire::shape;
+use ainb_app::wire::store::MirrorStore;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
@@ -60,54 +63,64 @@ async fn fake_daemon(listener: UnixListener) {
 }
 
 #[tokio::test]
-async fn frames_and_fleet_rows_name_the_host_the_daemon_gave_in_hello() {
+async fn one_mirror_crosses_the_hello_and_the_renderer_keeps_every_section() {
     let dir = tempfile::tempdir().expect("scratch dir");
     let socket = dir.path().join("hangar.sock");
+    let local = HostId::local();
 
-    // Before any hello: the host is `local`, which is what a surface that has
-    // not reached a daemon must keep saying.
-    assert_eq!(HostId::daemon(), HostId::local());
-    let state = shape::sample_state(&mut shape::PlainSeed);
-    let before = Mirror::for_daemon(Subscription::all()).batch(&state);
-    assert!(
-        before.frames.iter().all(|frame| frame.host_id == HostId::local()),
-        "frames before a hello must name local"
-    );
+    // Before any hello the surface pins `local`, and the renderer peers there.
+    assert_eq!(HostId::of_daemon(&socket), local);
+    let mut state = shape::sample_state(&mut shape::PlainSeed);
+    let mut mirror = Mirror::new(HostId::of_daemon(&socket), Subscription::all());
+    let mut store = MirrorStore::new(Subscription::all());
+    let first = mirror.batch(&state);
+    assert!(first.frames.iter().all(|frame| frame.host_id == local));
+    store.apply_drain(&local, [first]);
+    assert!(store.section(&local, SectionId::Config).is_some());
 
+    // The daemon names its host.
     let listener = UnixListener::bind(&socket).expect("bind the fake hangar socket");
     let daemon = tokio::spawn(fake_daemon(listener));
-    ainb_hangar_client::DaemonClient::with_parts(socket, "test-token".to_string())
+    ainb_hangar_client::DaemonClient::with_parts(socket.clone(), "test-token".to_string())
         .hello()
         .await
         .expect("the hello completes");
     daemon.await.expect("the fake daemon served one hello");
+    let ulid = HostId::of_daemon(&socket);
+    assert_eq!(ulid, HostId::new(HOST));
 
-    // After it: every frame, and every fleet row inside one, names the ULID.
-    let batch = Mirror::for_daemon(Subscription::all()).batch(&state);
-    assert!(
-        !batch.frames.is_empty(),
-        "the sample state frames something"
-    );
-    for frame in &batch.frames {
-        assert_eq!(
-            frame.host_id,
-            HostId::new(HOST),
-            "section {}",
-            frame.section
-        );
+    // A live mirror does not drift: until it is re-pinned, it still says local.
+    state.shell.help_visible = !state.shell.help_visible;
+    let unpinned = mirror.batch(&state);
+    assert_eq!(unpinned.frames.len(), 1, "only the changed section");
+    assert_eq!(unpinned.frames[0].host_id, local);
+    store.apply_drain(&local, [unpinned]);
+
+    // The surface re-pins, and tells the renderer first. A renderer still
+    // peered at `local` would drop the whole batch, which is why it must hear
+    // the new id before the batch arrives.
+    assert!(mirror.set_host(ulid.clone()));
+    state.shell.help_visible = !state.shell.help_visible;
+    let pinned = mirror.batch(&state);
+    let mut stale = MirrorStore::new(Subscription::all());
+    stale.apply_drain(&local, [pinned.clone()]);
+    assert_eq!(stale.section(&ulid, SectionId::Config), None);
+    assert!(stale.frames_ignored() > 0, "a stale peer drops the batch");
+
+    // Re-peered, the renderer holds every section under the ULID, static ones
+    // included, and every fleet row names the ULID too.
+    store.apply_drain(&ulid, [pinned]);
+    for id in SectionId::ALL {
+        let section = store
+            .section(&ulid, id)
+            .unwrap_or_else(|| panic!("{id:?} missing after the re-pin"));
+        if id == SectionId::Fleet {
+            let body = serde_json::to_string(&section.body).expect("the body serialises");
+            assert!(body.contains(HOST), "fleet rows must name the ULID: {body}");
+            assert!(
+                !body.contains("\"host_id\":\"local\""),
+                "no fleet row may still say local: {body}"
+            );
+        }
     }
-    let fleet = batch
-        .frames
-        .iter()
-        .find(|frame| frame.section == "fleet")
-        .expect("the fleet section is framed");
-    let body = serde_json::to_string(fleet.body()).expect("the body serialises");
-    assert!(
-        body.contains(HOST),
-        "a fleet row must name the daemon: {body}"
-    );
-    assert!(
-        !body.contains("\"host_id\":\"local\""),
-        "no row may still say local: {body}"
-    );
 }
