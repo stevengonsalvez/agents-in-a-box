@@ -4414,9 +4414,20 @@ impl AppState {
                             // raised each time.
                             self.workspace_load
                                 .set_if_changed(|section| &mut section.workspace_load_error, None);
+                            // Compared on the fields a scan discovers: the
+                            // chips, errors and provider ids the merge sets on
+                            // a live row are the host's, and a fresh scan
+                            // builds them at their defaults every time, so
+                            // comparing those would call every scan a change.
                             if self.host.workspaces_applied
-                                && self.sessions.workspaces == workspaces
-                                && self.ssh.ssh_sessions == ssh_sessions
+                                && crate::models::workspace::same_scan_workspaces(
+                                    &self.sessions.workspaces,
+                                    &workspaces,
+                                )
+                                && crate::models::session::same_scan_rows(
+                                    &self.ssh.ssh_sessions,
+                                    &ssh_sessions,
+                                )
                             {
                                 debug!("background workspace scan found no change");
                                 return false;
