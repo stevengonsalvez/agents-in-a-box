@@ -1638,7 +1638,7 @@ fn a_choice_carrying_a_credential_is_scrubbed_in_the_row_and_the_popup() {
             selected_index: 0,
         };
     }
-    let frame = section_json(&state, SectionId::Config).to_string();
+    let frame = section_json(&state, SectionId::Config, &HostId::local()).to_string();
     assert!(
         !frame.contains(&token),
         "a choice option carried a credential onto the Config frame"
@@ -1751,8 +1751,8 @@ fn frame_only_scrubs_leave_the_saved_config_and_the_dependency_report_alone() {
             "{label} kept verbatim on disk"
         );
     }
-    let frame = section_json(&seeded, SectionId::Config).to_string();
-    let onboarding = section_json(&seeded, SectionId::Onboarding).to_string();
+    let frame = section_json(&seeded, SectionId::Config, &HostId::local()).to_string();
+    let onboarding = section_json(&seeded, SectionId::Onboarding, &HostId::local()).to_string();
     for (label, frame) in [
         ("config.mcp.npm_package", &frame),
         ("config.mcp.npm_version", &frame),
