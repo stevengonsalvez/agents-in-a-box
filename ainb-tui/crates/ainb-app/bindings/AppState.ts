@@ -1032,6 +1032,10 @@ export type ConfigPopupType = ConfigPopupType_Serialize;
 export type ConfigPopupType_Serialize = 
 /**  Selection from a list of choices */
 ({ Choice: {
+	/**
+	 *  Scrubbed like a settings row's choices: a promoted free-form row
+	 *  (the preferred editor command) opens this popup too.
+	 */
 	options: string[],
 	selected_index: number,
 } }) & { Boolean?: never; NumberInput?: never; SecretInput?: never; TextInput?: never } | 
@@ -1354,6 +1358,12 @@ export type ConfigureState_Serialize = {
 	repo_check: RepoCheck_Serialize,
 };
 
+/**
+ *  What a confirmation dialog will do. Every payload reaches a mirror frame
+ *  raw, and each is a name or id the rest of the frame already carries:
+ *  session ids (uuids), tmux session names (the same names the tmux section
+ *  lists), a workspace index, and an MCP server's own key from config.toml.
+ */
 export type ConfirmAction = ({ DeleteSession: string }) & { BulkDeleteSessions?: never; BulkStopSessions?: never; KillOtherTmux?: never; KillOtherTmuxSessions?: never; KillWorkspaceShell?: never; McpStopServer?: never; StopSession?: never } | ({ StopSession: string }) & { BulkDeleteSessions?: never; BulkStopSessions?: never; DeleteSession?: never; KillOtherTmux?: never; KillOtherTmuxSessions?: never; KillWorkspaceShell?: never; McpStopServer?: never } | ({ BulkDeleteSessions: string[] }) & { BulkStopSessions?: never; DeleteSession?: never; KillOtherTmux?: never; KillOtherTmuxSessions?: never; KillWorkspaceShell?: never; McpStopServer?: never; StopSession?: never } | ({ BulkStopSessions: string[] }) & { BulkDeleteSessions?: never; DeleteSession?: never; KillOtherTmux?: never; KillOtherTmuxSessions?: never; KillWorkspaceShell?: never; McpStopServer?: never; StopSession?: never } | ({ KillOtherTmux: string }) & { BulkDeleteSessions?: never; BulkStopSessions?: never; DeleteSession?: never; KillOtherTmuxSessions?: never; KillWorkspaceShell?: never; McpStopServer?: never; StopSession?: never } | ({ KillOtherTmuxSessions: string[] }) & { BulkDeleteSessions?: never; BulkStopSessions?: never; DeleteSession?: never; KillOtherTmux?: never; KillWorkspaceShell?: never; McpStopServer?: never; StopSession?: never } | ({ KillWorkspaceShell: number }) & { BulkDeleteSessions?: never; BulkStopSessions?: never; DeleteSession?: never; KillOtherTmux?: never; KillOtherTmuxSessions?: never; McpStopServer?: never; StopSession?: never } | "InstallNotifyHooks" | "DismissNotifyPrompt" | ({ McpStopServer: string }) & { BulkDeleteSessions?: never; BulkStopSessions?: never; DeleteSession?: never; KillOtherTmux?: never; KillOtherTmuxSessions?: never; KillWorkspaceShell?: never; StopSession?: never } | "McpStopDaemon" | "SetupAbtopRateLimits" | "OpenAbtopSkipSetup" | "DismissAbtopSetup" | "Cancel";
 
 export type ConfirmationDialog = ConfirmationDialog_Serialize;
