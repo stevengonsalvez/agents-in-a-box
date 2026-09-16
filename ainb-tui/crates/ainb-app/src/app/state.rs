@@ -761,6 +761,48 @@ pub enum ConfirmAction {
     Cancel,            // No-op terminator for tri-option dialogs
 }
 
+impl ConfirmAction {
+    /// Whether confirming this action must come from a key press (#1080): it
+    /// writes outside ainb, so a remote surface may not confirm it by name.
+    /// Exhaustive on purpose, so a new action is judged when it is added.
+    #[must_use]
+    pub const fn runs_only_from_key(&self) -> bool {
+        match self {
+            // Kills tmux sessions ainb did not start.
+            Self::KillOtherTmux(_) | Self::KillOtherTmuxSessions(_) => true,
+            // Writes Claude Code and Codex hook config, and runs
+            // `claude plugin install`.
+            Self::InstallNotifyHooks => true,
+            // Runs `abtop --setup`, which edits Claude Code's statusline hook.
+            Self::SetupAbtopRateLimits => true,
+            // ainb's own sessions, shells, pool and preferences, or nothing.
+            Self::DeleteSession(_)
+            | Self::StopSession(_)
+            | Self::BulkDeleteSessions(_)
+            | Self::BulkStopSessions(_)
+            | Self::KillWorkspaceShell(_)
+            | Self::DismissNotifyPrompt
+            | Self::McpStopServer(_)
+            | Self::McpStopDaemon
+            | Self::OpenAbtopSkipSetup
+            | Self::DismissAbtopSetup
+            | Self::Cancel => false,
+        }
+    }
+}
+
+impl ConfirmationDialog {
+    /// The action Confirm would run now: the highlighted option's in
+    /// tri-option mode, the dialog's own when Yes is selected, else none.
+    #[must_use]
+    pub fn selected_action(&self) -> Option<&ConfirmAction> {
+        match self.options.as_ref() {
+            Some(options) => options.get(self.selected_index).map(|option| &option.action),
+            None => self.selected_option.then_some(&self.confirm_action),
+        }
+    }
+}
+
 /// Assemble the shared Stop / Delete / Cancel dialog.
 ///
 /// One builder for the single-row and the bulk path, so a future safety change
