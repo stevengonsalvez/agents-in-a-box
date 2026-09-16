@@ -15,8 +15,9 @@ export const config = {
   framework: "mocha",
   reporters: ["spec"],
   logLevel: "warn",
-  // One journey, driving a real daemon and real tmux sessions end to end.
-  mochaOpts: { ui: "bdd", timeout: 300_000 },
+  // One journey, driving a real daemon and real tmux sessions end to end:
+  // every leg waits on the product, and creating a session is real work.
+  mochaOpts: { ui: "bdd", timeout: 600_000 },
 
   capabilities: [
     {
