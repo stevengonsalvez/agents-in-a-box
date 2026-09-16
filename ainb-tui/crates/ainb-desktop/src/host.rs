@@ -76,14 +76,20 @@ pub struct PaletteEntry {
     pub active: bool,
 }
 
-/// How often the window asks for a fresh workspace scan.
+/// How long after a scan finishes the window asks for the next one.
 ///
 /// A session another process creates reaches the sidebar only because this
 /// runs: the scan is what finds it, and nothing else tells this window it
-/// exists. Each completed scan writes the Sessions section whether or not the
-/// list moved, so the cadence is a frame cost as well as a scan cost; the
-/// wider "write only what changed" audit is #1139.
-pub const WORKSPACE_RESCAN: Duration = Duration::from_secs(10);
+/// exists. A scan that finds the same list writes no Sessions frame, so the
+/// cadence costs a scan rather than a reframe; the WorkspaceLoad flag it does
+/// move is the "write only what changed" audit's, #1139.
+///
+/// Strictly longer than the state's own Docker budget
+/// (`AppState::DOCKER_TIMEOUT_SECS`), and measured from the end of a scan, so
+/// a scan that times out is followed by a gap instead of the next one starting
+/// as it gives up.
+pub const WORKSPACE_RESCAN: Duration =
+    Duration::from_secs(ainb_app::AppState::DOCKER_TIMEOUT_SECS + 5);
 
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
@@ -153,7 +159,14 @@ impl<S: FrameSink> DesktopHost<S> {
     /// the effects that work queued.
     #[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
     pub fn tick(&mut self) -> Vec<Effect> {
+        let was_scanning = self.state.workspace_scan_running();
         self.state.check_workspace_loading_complete();
+        // The cadence runs from the end of a scan, not its start: a scan that
+        // took the whole Docker budget would otherwise be followed by the next
+        // one immediately.
+        if was_scanning && !self.state.workspace_scan_running() {
+            self.scanned_at = Instant::now();
+        }
         // The poller is idempotent by an atomic, so starting it every tick is
         // its documented use. Every read here is by shared reference: a `&mut`
         // path through the `Versioned` Fleet section would bump it each tick.
@@ -170,10 +183,7 @@ impl<S: FrameSink> DesktopHost<S> {
         // A session another process created is found by a scan and by nothing
         // else, so the window keeps asking for one. Never two at once: the
         // reducer owns the load and reports it running.
-        if !self.state.workspace_load.is_loading_workspaces
-            && self.scanned_at.elapsed() >= self.rescan_every
-        {
-            self.scanned_at = Instant::now();
+        if !self.state.workspace_scan_running() && self.scanned_at.elapsed() >= self.rescan_every {
             self.state.start_workspace_load();
         }
         let effects = self.state.take_effects();
@@ -229,8 +239,7 @@ impl<S: FrameSink> DesktopHost<S> {
         let contexts = ainb_app::app::keymap::command_contexts(&self.state);
         self.keymap
             .commands()
-            .filter(|(id, _)| !crate::intent::refused_from_webview(id))
-            .filter(|(id, _)| !ainb_app::app::pointer::ids::ALL.contains(&id.as_str()))
+            .filter(|(id, row)| crate::intent::palette_offers(id, row))
             .map(|(id, row)| PaletteEntry {
                 id,
                 doc: row.doc,
