@@ -5,7 +5,7 @@
 
 use ainb::app::events::{EventHandler, NoRenderer};
 use ainb::app::keymap::{Chord, Key, KeyAction, KeyContext, Mods, SubContext};
-use ainb::app::terminal_keys::chord_from_key_event;
+use ainb::app::screens::builtin::chord_from_key_event;
 use ainb::{AppState, Intent, Keymap};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::sync::Mutex;
