@@ -11185,9 +11185,14 @@ impl AppState {
         self.add_notification(Notification::warning(message));
     }
 
-    /// Remove expired notifications
+    /// Remove expired notifications. Called every tick, so a tick with nothing
+    /// expired leaves Shell's version alone (#1139).
     pub fn cleanup_expired_notifications(&mut self) {
-        self.shell.notifications.retain(|n| !n.is_expired());
+        self.shell.update(|shell| {
+            let before = shell.notifications.len();
+            shell.notifications.retain(|n| !n.is_expired());
+            shell.notifications.len() != before
+        });
     }
 
     /// Retire every notice currently on screen (`Ctrl+X`).
