@@ -10,7 +10,7 @@
 
 use crate::app::AppState;
 use crate::app::versioned::SectionId;
-use crate::wire::{section_json, section_name};
+use crate::wire::{section_json_from, section_name};
 use serde::{Deserialize, Serialize};
 
 /// The host a frame or a row came from. One process-wide id per host; rows
@@ -34,15 +34,16 @@ impl HostId {
         Self(Self::LOCAL.to_string())
     }
 
-    /// The host every frame this process sends names: the `host_id` the daemon
-    /// gave in `auth/hello` (#1066), or [`Self::local`] until one names one.
+    /// The host the daemon at `socket` named in `auth/hello` (#1066), or
+    /// [`Self::local`] while it has named none.
     ///
-    /// Read fresh at each use, because the first hello can land after a
-    /// [`Mirror`] is built. Taken from the daemon's answer only, never from a
-    /// hello's params, so nothing a caller asserts can name this host.
+    /// Taken from the daemon's answer only, never from a hello's params, so
+    /// nothing a caller asserts can name this host. A surface reads it when it
+    /// pins a [`Mirror`] and again when its daemon connects, and re-pins with
+    /// [`Mirror::set_host`]; nothing re-reads it while a mirror is live.
     #[must_use]
-    pub fn daemon() -> Self {
-        ainb_hangar_client::daemon_host_id().map_or_else(Self::local, Self)
+    pub fn of_daemon(socket: &std::path::Path) -> Self {
+        ainb_hangar_client::daemon_host_id(socket).map_or_else(Self::local, Self)
     }
 
     #[must_use]
@@ -107,18 +108,19 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// The frame for one section of `state`: its wire name, version, daemon
-    /// read and redacted body, from this host process ([`HostId::daemon`],
-    /// [`host_epoch`]).
+    /// The frame for one section of `state`, sent as `host_id`: its wire name,
+    /// version, daemon read and redacted body, in this process's
+    /// [`host_epoch`]. The body's own host fields name `host_id` too, so a
+    /// frame and the rows inside it never disagree.
     #[must_use]
-    pub fn new(state: &AppState, id: SectionId) -> Self {
+    pub fn new(state: &AppState, id: SectionId, host_id: HostId) -> Self {
         Self {
             section: section_name(id).to_string(),
             version: state.versions()[id.index()],
             epoch: host_epoch(),
-            host_id: HostId::daemon(),
             daemon_read: crate::wire::daemon_read(state, id),
-            body: section_json(state, id),
+            body: section_json_from(state, id, &host_id),
+            host_id,
         }
     }
 
@@ -269,10 +271,9 @@ pub type DaemonReadSource = fn(&AppState, SectionId) -> Option<DaemonRead>;
 /// never been sent it; unsubscribed sections are never framed, whatever they
 /// do.
 pub struct Mirror {
-    /// The host stamped on every frame, pinned at construction. `None` means
-    /// "whatever the daemon names now" ([`Mirror::for_daemon`]), read per batch
-    /// because the first `auth/hello` can land after the mirror is built.
-    host_id: Option<HostId>,
+    /// The host stamped on every frame and inside every body. Pinned: it moves
+    /// only through [`Mirror::set_host`], never under a live batch.
+    host_id: HostId,
     epoch: u64,
     subscription: Subscription,
     sent: [Option<u64>; SectionId::COUNT],
@@ -299,29 +300,11 @@ impl Mirror {
         Self::with_epoch(host_id, subscription, host_epoch())
     }
 
-    /// A mirror that stamps the host the daemon named in `auth/hello`
-    /// ([`HostId::daemon`]), or `local` until one names one (#1066).
-    ///
-    /// The id is read at each batch, not here: a surface builds its mirror
-    /// before it has dialled the daemon, and a mirror that pinned `local` then
-    /// would name `local` for the life of the process.
-    #[must_use]
-    pub fn for_daemon(subscription: Subscription) -> Self {
-        Self {
-            host_id: None,
-            epoch: host_epoch(),
-            subscription,
-            sent: [None; SectionId::COUNT],
-            daemon_read: crate::wire::daemon_read,
-            max_frame_bytes: MAX_FRAME_BYTES,
-        }
-    }
-
     /// A mirror stamped with an explicit epoch: a host restart in a test.
     #[must_use]
     pub fn with_epoch(host_id: HostId, subscription: Subscription, epoch: u64) -> Self {
         Self {
-            host_id: Some(host_id),
+            host_id,
             epoch,
             subscription,
             sent: [None; SectionId::COUNT],
@@ -340,6 +323,30 @@ impl Mirror {
     #[must_use]
     pub const fn subscription(&self) -> Subscription {
         self.subscription
+    }
+
+    /// The host this mirror's frames name.
+    #[must_use]
+    pub const fn host_id(&self) -> &HostId {
+        &self.host_id
+    }
+
+    /// Re-pin the host every later frame names, as a host restart (#1066).
+    ///
+    /// A renderer holds sections per host, so frames under the new id land in
+    /// an empty slot: the epoch moves forward and everything subscribed is
+    /// framed again, because nothing sent under the old id counts as sent under
+    /// the new one. The caller tells its renderer the new id BEFORE the next
+    /// batch, or the renderer drops that batch as another host's. Returns
+    /// whether the host changed; re-pinning to the same id does nothing.
+    pub fn set_host(&mut self, host_id: HostId) -> bool {
+        if self.host_id == host_id {
+            return false;
+        }
+        self.host_id = host_id;
+        self.epoch = self.epoch.saturating_add(1);
+        self.reframe();
+        true
     }
 
     /// Forget what was sent, so the next batch frames every subscribed section
@@ -376,9 +383,8 @@ impl Mirror {
             self.sent[id.index()] = Some(version);
             let frame = Frame {
                 epoch: self.epoch,
-                host_id: self.host_id.clone().unwrap_or_else(HostId::daemon),
                 daemon_read: (self.daemon_read)(state, id),
-                ..Frame::new(state, id)
+                ..Frame::new(state, id, self.host_id.clone())
             };
             let bytes = serialised_len(frame.body());
             if bytes > self.max_frame_bytes {
@@ -447,6 +453,34 @@ mod tests {
             mirror.batch(&state).frames.into_iter().map(|frame| frame.section).collect();
         sections.sort();
         assert_eq!(sections, vec!["shell", "tmux"]);
+    }
+
+    #[test]
+    fn set_host_re_pins_the_frames_bumps_the_epoch_and_reframes() {
+        let state = crate::wire::shape::sample_state(&mut crate::wire::shape::PlainSeed);
+        let mut mirror = Mirror::with_epoch(
+            HostId::local(),
+            Subscription::only(&[SectionId::Shell, SectionId::Config]),
+            7,
+        );
+        assert_eq!(mirror.batch(&state).frames.len(), 2);
+        assert!(mirror.batch(&state).is_empty());
+
+        assert!(
+            !mirror.set_host(HostId::local()),
+            "the same id changes nothing"
+        );
+        assert!(mirror.batch(&state).is_empty());
+
+        let ulid = HostId::new("01K5A0000000000000000AAAAA");
+        assert!(mirror.set_host(ulid.clone()));
+        assert_eq!(mirror.host_id(), &ulid);
+        let batch = mirror.batch(&state);
+        assert_eq!(batch.frames.len(), 2, "static sections come back");
+        for frame in &batch.frames {
+            assert_eq!(frame.host_id, ulid);
+            assert_eq!(frame.epoch, 8);
+        }
     }
 
     #[test]
