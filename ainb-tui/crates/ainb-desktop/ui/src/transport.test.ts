@@ -30,7 +30,7 @@ function bridge() {
 }
 
 /** Let the acknowledgement's promise chain run. */
-const settle = () => new Promise((resume) => setTimeout(resume, 0));
+const settle = (): Promise<void> => new Promise((resume) => setTimeout(resume, 0));
 
 const buffer = (...bytes: number[]) => new Uint8Array(bytes).buffer;
 
