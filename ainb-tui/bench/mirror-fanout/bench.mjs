@@ -19,6 +19,12 @@
 //   subset-out per-drain, 5 of 19 subscribed, agent_status not among them
 //
 // Run: npm ci && npm run bench   (writes results.json, exits non-zero on a gate)
+//
+// BENCH_APPLY=reconcile swaps the per-path body diff for the desktop store's
+// own apply, `reconcile(body, { key: "id" })` per section
+// (crates/ainb-desktop/ui/src/store.ts), to measure that store against the same
+// burst. It is a measurement, not the gated configuration: CI runs the default,
+// and the numbers it gave are recorded in the D1 goal (#1132).
 
 import { batch, createEffect, createMemo, createRoot } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
@@ -53,6 +59,9 @@ const SECTIONS = [
   "agent_status", "board",
 ];
 const STATUSES = ["idle", "running", "needs_input", "done"];
+
+/** The body apply to measure; see the header. */
+const APPLY = process.env.BENCH_APPLY === "reconcile" ? "reconcile" : "path-diff";
 const STATES = ["starting", "running", "turn_complete", "idle"];
 
 /** Park-Miller LCG: the same stream in every mode and on every machine. */
@@ -184,6 +193,10 @@ function mount(subscribed) {
    * body itself: a whole-body frame drops a field by leaving it out.
    */
   const writeDiff = (section, body) => {
+    if (APPLY === "reconcile") {
+      setStore(section, reconcile(body, { key: "id" }));
+      return;
+    }
     const before = plain[section];
     if (!Array.isArray(body.rows) || !Array.isArray(before.rows) || body.rows.length !== before.rows.length) {
       setStore(section, reconcile(body, { key: "id", merge: true }));
@@ -377,9 +390,10 @@ function main() {
     [`per-send fails the apply-time gate`, send.applyMsPer1kFramesMedian > CEILINGS.applyMsPer1kFrames],
   ];
 
-  const report = { node: process.version, ceilings: CEILINGS, gates: Object.fromEntries(gates), results };
+  const report = { node: process.version, apply: APPLY, ceilings: CEILINGS, gates: Object.fromEntries(gates), results };
   writeFileSync(new URL("./results.json", import.meta.url), `${JSON.stringify(report, null, 2)}\n`);
 
+  console.log(`apply: ${APPLY}`);
   console.log("mode        runs(med/max)   ms/1k(med/max)   longest(med/max)  units  dropped");
   for (const mode of modes) {
     const s = results[mode].summary;
