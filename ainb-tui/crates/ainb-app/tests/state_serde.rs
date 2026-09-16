@@ -1769,7 +1769,9 @@ const BINDINGS: &str = include_str!("../bindings/AppState.ts");
 /// `SessionStatus::Error` was exactly this until #1144 seeded it: it shipped a
 /// raw string past every gate. These are the same class, found when this test
 /// was written; the fix for each is to seed it in `wire::shape::sample_state`
-/// and regenerate the fixture, not to extend this list. A line that is no
+/// and regenerate the fixture, not to extend this list. The one case seeding
+/// cannot fix is a field the bindings still declare but the frame never emits
+/// (behind `omit_in_frame`): name it here with that reason. A line that is no
 /// longer missing fails too, so the list cannot go stale.
 const UNSEEDED_VARIANTS: &[(&str, &str)] = &[];
 
@@ -1790,7 +1792,9 @@ const UNSEEDED_VARIANTS: &[(&str, &str)] = &[];
 /// - a variant with no field besides its tag (`PreInstalled`, `Missing`), since
 ///   the variant name is the tag's value and no key path carries it;
 /// - a variant whose fields are all shared with a seeded one (`Python` beside
-///   `Npm`), since the leaf is already present.
+///   `Npm`), since the leaf is already present;
+/// - a payload field the bindings omit (`specta(skip)`, as on
+///   `McpServerDefinition::Json.config`), since the walk never sees it.
 #[test]
 fn every_payload_carrying_variant_reachable_from_a_section_is_seeded() {
     let bindings = Bindings::parse(BINDINGS);
