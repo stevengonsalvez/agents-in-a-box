@@ -158,6 +158,11 @@ config.app_config.workspace_defaults.scan_max_depth
 config.app_config.workspace_defaults.workspace_scan_paths[]
 config.app_config.workspace_defaults.worktree_collision_behavior
 config.config_popup_state.description
+config.config_popup_state.popup_type.Boolean.value
+config.config_popup_state.popup_type.Choice.options[]
+config.config_popup_state.popup_type.Choice.selected_index
+config.config_popup_state.popup_type.NumberInput.input_buffer
+config.config_popup_state.popup_type.NumberInput.value
 config.config_popup_state.popup_type.SecretInput.cursor_position
 config.config_popup_state.popup_type.SecretInput.value_len
 config.config_popup_state.popup_type.TextInput.cursor_position
@@ -318,6 +323,7 @@ git_view.git_view_state.file_tree_items[].status
 git_view.git_view_state.is_dirty
 git_view.git_view_state.markdown_content[].content
 git_view.git_view_state.markdown_content[].style
+git_view.git_view_state.markdown_content[].style.CodeBlockHeader
 git_view.git_view_state.markdown_scroll_offset
 git_view.git_view_state.review.files[].binary
 git_view.git_view_state.review.files[].collapsed
@@ -537,6 +543,8 @@ onboarding.onboarding_state.auth_completed
 onboarding.onboarding_state.auth_method
 onboarding.onboarding_state.auth_pane.KeyEntry.agent
 onboarding.onboarding_state.auth_pane.KeyEntry.buf_len
+onboarding.onboarding_state.auth_pane.MethodPicker.agent
+onboarding.onboarding_state.auth_pane.MethodPicker.cursor
 onboarding.onboarding_state.auth_statuses[].agent
 onboarding.onboarding_state.auth_statuses[].has_key
 onboarding.onboarding_state.auth_statuses[].method
@@ -550,6 +558,7 @@ onboarding.onboarding_state.dependency_check_running
 onboarding.onboarding_state.dependency_status
 onboarding.onboarding_state.error_message
 onboarding.onboarding_state.focus
+onboarding.onboarding_state.focus.Item
 onboarding.onboarding_state.git_directories_input
 onboarding.onboarding_state.install_states{}.Error
 onboarding.onboarding_state.is_factory_reset
@@ -698,6 +707,14 @@ shell.session_tab
 shell.should_quit
 shell.ui_needs_refresh
 skills.skill_manager_state.banner
+skills.skill_manager_state.banner.Details.conflicts
+skills.skill_manager_state.banner.Details.marketplace_plugins
+skills.skill_manager_state.banner.Details.orphan_units_per_tool[][]
+skills.skill_manager_state.banner.Details.orphan_units_total
+skills.skill_manager_state.banner.Visible.conflicts
+skills.skill_manager_state.banner.Visible.marketplace_plugins
+skills.skill_manager_state.banner.Visible.orphan_units_per_tool[][]
+skills.skill_manager_state.banner.Visible.orphan_units_total
 skills.skill_manager_state.browse.catalog
 skills.skill_manager_state.browse.mode
 skills.skill_manager_state.browse.pending_command_confirm
