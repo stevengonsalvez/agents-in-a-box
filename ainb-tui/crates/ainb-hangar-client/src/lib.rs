@@ -25,8 +25,13 @@
 mod chat;
 /// The one long-lived connection a running surface holds (#963).
 mod presence;
+pub mod reconnect;
 
 pub use presence::{Dialer, PresenceLease, PresenceState, mark_process_as_surface};
+pub use reconnect::{
+    BACKOFF_1S, BACKOFF_4S, BACKOFF_16S, ConnectionState, RECONNECT_SCHEDULE,
+    ReconnectingFleetSubscription, RendererConnectionView, Timing as ReconnectTiming,
+};
 
 /// The `host_id` the daemon at `socket` first named in an `auth/hello` this
 /// process completed there (#1066), or `None` when it has named none or has
@@ -385,6 +390,39 @@ impl DaemonClient {
     #[must_use]
     pub fn socket(&self) -> &std::path::Path {
         &self.socket
+    }
+
+    /// Surface metadata configured on this client.
+    #[must_use]
+    pub const fn surface(&self) -> &SurfaceInfo {
+        &self.surface
+    }
+
+    /// Daemon token configured on this client.
+    #[must_use]
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Open a reconnecting fleet subscription that automatically redials with
+    /// 1s/4s/16s backoff and resyncs on hello using `after_revision`.
+    #[must_use]
+    pub fn reconnecting_fleet_subscription(
+        &self,
+        after_revision: i64,
+    ) -> ReconnectingFleetSubscription {
+        ReconnectingFleetSubscription::spawn(self, after_revision)
+    }
+
+    /// Open a reconnecting fleet subscription with custom dialer and timing.
+    #[must_use]
+    pub fn reconnecting_fleet_subscription_with(
+        &self,
+        dialer: Dialer,
+        after_revision: i64,
+        timing: reconnect::Timing,
+    ) -> ReconnectingFleetSubscription {
+        ReconnectingFleetSubscription::spawn_timed(dialer, after_revision, timing)
     }
 
     /// Snapshot the OPEN fleet-wide attention inbox (`attention/list`,
