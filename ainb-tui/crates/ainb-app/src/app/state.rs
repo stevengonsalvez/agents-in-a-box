@@ -4275,10 +4275,8 @@ impl AppState {
     }
 
     /// Timeout for Docker operations in seconds
-    /// The whole scan's budget. A host that rescans on a cadence keeps its own
-    /// interval longer than this, so a scan that times out is not followed by
-    /// the next one starting as it gives up.
-    pub const DOCKER_TIMEOUT_SECS: u64 = 10;
+    /// The whole scan's budget.
+    const DOCKER_TIMEOUT_SECS: u64 = 10;
 
     /// Load the workspaces in the background and apply them on a later tick
     /// through [`Self::check_workspace_loading_complete`].
@@ -4394,6 +4392,18 @@ impl AppState {
             self.add_warning_notification(notice);
         }
         changed
+    }
+
+    /// The shortest a host's own rescan cadence may be.
+    ///
+    /// A host that asks for a scan on a timer keeps its interval strictly
+    /// longer than this, so a scan that spends the whole budget and times out
+    /// is not followed by the next one starting as it gives up. The desktop
+    /// reads it for its own `WORKSPACE_RESCAN`; the budget itself stays the
+    /// state's.
+    #[must_use]
+    pub const fn workspace_rescan_floor() -> std::time::Duration {
+        std::time::Duration::from_secs(Self::DOCKER_TIMEOUT_SECS)
     }
 
     /// Whether a workspace scan is running.
