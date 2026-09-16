@@ -92,7 +92,11 @@ pub struct ContainerTemplateConfig {
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ImageSource {
     /// Use a pre-built image from registry
-    Image { name: String },
+    Image {
+        #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        name: String,
+    },
 
     /// Build from a Dockerfile
     Dockerfile {
