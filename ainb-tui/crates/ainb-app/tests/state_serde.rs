@@ -288,6 +288,10 @@ const NAME_ALLOW: &[(&str, &str)] = &[
     ),
     ("ActionOutcome.detail", "daemon action output, scrubbed"),
     (
+        "DepState.detail",
+        "a detected dependency's version or alternative, scrubbed on a frame",
+    ),
+    (
         "FleetActionReceipt.detail",
         "a broadcast leg's daemon detail, scrubbed by scrub_receipts",
     ),
@@ -968,6 +972,11 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "OrphanedWorktree.last_commit",
     "Skill.description",
     "Snapshot.hook_health",
+    "DepState.detail",
+    "ImageSource.base_image",
+    "McpInstallation.package",
+    "McpInstallation.script",
+    "McpInstallation.version",
     "BroadcastPhase::Failed.0",
     "BroadcastPhase::Sent.0",
     "ConfigPopupType::NumberInput.input_buffer",
@@ -1139,10 +1148,6 @@ const UNFILLED_WAIVED: &[(&str, &str)] = &[
     (
         "FileTreeItem.status",
         "a GitFileStatus unit enum: filled, and a leaf by shape",
-    ),
-    (
-        "OnboardingState.dependency_status",
-        "detected-dependency report: static catalog labels and install hints, built by probing the machine",
     ),
     (
         "OrphanedWorktree.agent_type",
@@ -1670,17 +1675,14 @@ const UNSEEDED_VARIANTS: &[(&str, &str)] = &[];
 /// each section's view type gives the variants that must appear; the committed
 /// key-path fixture is what the sample actually reached.
 ///
-/// What this does NOT gate: internally tagged enums (`{ type: "Npm", ... }`).
-/// The variant name is a field's value, so no key path carries it, and the
-/// payload fields beside the tag are walked but gated by NOTHING today: the
-/// key-path fixture is built from the sample, so a variant the sample never
-/// seeds is missing from both sides and nothing fails. The sites, 18 members
-/// in all, are recorded against #1146:
-/// - `DepState` at `onboarding.onboarding_state.dependency_status.topics[].deps[].state`
-/// - `HealthFrame` at `agent_status.view.health`
-/// - `ImageSource` at `config.app_config.container_templates{}.config.image_source`
-/// - `McpInstallation` at `config.app_config.mcp_servers{}.installation`
-/// - `McpServerDefinition` at `config.app_config.mcp_servers{}.definition`
+/// Internally tagged enums (`{ type: "Npm", ... }`) are gated by their FIELDS
+/// (#1146): every field beside the tag is a leaf the fixture must hold, named
+/// in a failure by the variants that carry it (`McpInstallation::Npm|Python`).
+/// What that still cannot see:
+/// - a variant with no field besides its tag (`PreInstalled`, `Missing`), since
+///   the variant name is the tag's value and no key path carries it;
+/// - a variant whose fields are all shared with a seeded one (`Python` beside
+///   `Npm`), since the leaf is already present.
 #[test]
 fn every_payload_carrying_variant_reachable_from_a_section_is_seeded() {
     let bindings = Bindings::parse(BINDINGS);
@@ -1702,7 +1704,9 @@ fn every_payload_carrying_variant_reachable_from_a_section_is_seeded() {
     let reached = |variant: &String| {
         committed.contains(variant)
             || committed.iter().any(|path| {
-                path.starts_with(&format!("{variant}.")) || path.starts_with(&format!("{variant}["))
+                path.starts_with(&format!("{variant}."))
+                    || path.starts_with(&format!("{variant}["))
+                    || path.starts_with(&format!("{variant}{{"))
             })
     };
 
@@ -1807,12 +1811,29 @@ impl Bindings {
                     // field's VALUE, which no key path can carry. The tag
                     // itself is already a leaf the fixture locks. Its PAYLOAD
                     // still reaches the wire as ordinary fields beside the
-                    // tag, so those are walked here (#1145).
-                    for (field, field_ty) in struct_fields(member) {
-                        if field == key {
+                    // tag, so those are walked here (#1145), and each one is
+                    // recorded as a leaf the fixture must hold, named by the
+                    // variant that carries it (#1146).
+                    let fields = struct_fields(member);
+                    let tag = fields
+                        .iter()
+                        .find(|(field, _)| *field == key)
+                        .map_or("?", |(_, value)| value.trim().trim_matches('"'))
+                        .to_string();
+                    let owner = chain.last().map_or_else(
+                        || "(inline enum)".to_string(),
+                        |name| name.trim_end_matches("_Serialize").to_string(),
+                    );
+                    for (field, field_ty) in &fields {
+                        if *field == key {
                             continue;
                         }
-                        self.walk(&field_ty, &format!("{path}.{field}"), chain, found);
+                        let field_path = format!("{path}.{field}");
+                        found
+                            .entry(field_path.clone())
+                            .and_modify(|carriers| carriers.push_str(&format!("|{tag}")))
+                            .or_insert_with(|| format!("{owner}::{tag}"));
+                        self.walk(field_ty, &field_path, chain, found);
                     }
                     continue;
                 }
