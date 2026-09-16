@@ -12107,6 +12107,50 @@ impl AppState {
         self.merge_attention(now_ms);
     }
 
+    /// Every host calls this on its tick: the answer machine is folded, the
+    /// session tab is reconciled against what is available, and the composer is
+    /// pointed at the request it is showing.
+    ///
+    /// A reducer step rather than a renderer's, for the reason
+    /// [`Self::refresh_attention`] became one (#1131): the send worker reports
+    /// into the state, not into a frame, and a host that folded it only while
+    /// drawing would leave an answered row reading `SENT` forever on any
+    /// surface whose draw loop does not run this code. The three pieces travel
+    /// together because each is about the request the operator is answering
+    /// right now.
+    ///
+    /// Writes only what moved, so a tick with nothing outstanding bumps no
+    /// version and frames nothing.
+    pub fn tick_answers(&mut self) {
+        use crate::components::session_tabs;
+
+        // A tab can go dead under the operator (the ASK is answered, the cursor
+        // moves off a session row), and a stale pane shows a question they can
+        // no longer act on.
+        let active = session_tabs::resolve(self, self.shell.session_tab);
+        self.shell.set_if_changed(|shell| &mut shell.session_tab, active);
+
+        // Whatever the answer worker reported, on EVERY tick rather than only
+        // while the `ask` surface is open: the row's `SENT` chip is painted by
+        // the session list, so an operator who sends and then looks elsewhere
+        // would otherwise watch that chip stay SENT forever.
+        if self.fleet.update(|fleet| fleet.ask_state.tick()) {
+            self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
+        }
+
+        // Point the composer at the request it is showing BEFORE the first key
+        // press. Without this the focus is only initialised by that key, so a
+        // request with no options opens with the composer unfocused and the
+        // first characters fall through to the screen's shortcuts.
+        //
+        // Not gated on the `ask` tab being the open one: the desktop answers
+        // from a banner beside the board, with no tab strip involved, and the
+        // retarget is a no-op while the request has not changed.
+        if let Some(chip) = session_tabs::selected_blocking(self).cloned() {
+            self.fleet.update(|fleet| fleet.ask_state.retarget(&chip));
+        }
+    }
+
     /// The merge itself, at the caller's clock. See [`Self::refresh_attention`],
     /// which paces it; the reducer tests drive this directly so the cadence
     /// does not hide a merge from them.
