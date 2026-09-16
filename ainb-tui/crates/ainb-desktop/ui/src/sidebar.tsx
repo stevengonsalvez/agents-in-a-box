@@ -34,9 +34,10 @@ export function Sidebar(props: Props) {
       >
         <For each={props.sessions?.workspaces}>
           {(workspace, w) => (
-            <section class="workspace" data-workspace={workspace.name}>
-              <div class="workspace-name">{label(workspace.name)}</div>
-              <ul>
+            <Show when={visibleRows(props.sessions, workspace).length > 0}>
+              <section class="workspace" data-workspace={workspace.name}>
+                <div class="workspace-name">{label(workspace.name)}</div>
+                <ul>
                 {/* The session list's own filter decides which rows are
                     here, so what the sidebar draws and what the reducer's
                     navigation walks are the same set. */}
@@ -67,8 +68,9 @@ export function Sidebar(props: Props) {
                     );
                   }}
                 </For>
-              </ul>
-            </section>
+                </ul>
+              </section>
+            </Show>
           )}
         </For>
       </Show>
