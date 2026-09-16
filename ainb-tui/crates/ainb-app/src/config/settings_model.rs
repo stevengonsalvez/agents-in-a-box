@@ -159,6 +159,17 @@ impl serde::Serialize for ConfigSetting {
                 ConfigValue::Text(crate::fleet::bridge::redact::REDACTED.to_string())
             }
             ConfigValue::Text(text) => ConfigValue::Text(crate::fleet::bridge::redact::scrub(text)),
+            // A choice is not always a closed registry list:
+            // `widen_with_detected_choices` promotes free-form rows such as
+            // `ui_preferences.preferred_editor` (a command string) from Text,
+            // and their options must not leave the scrub the Text arm applies.
+            ConfigValue::Choice(options, selected) => ConfigValue::Choice(
+                options
+                    .iter()
+                    .map(|option| crate::fleet::bridge::redact::scrub(option))
+                    .collect(),
+                *selected,
+            ),
             other => other.clone(),
         };
         let mut row = serializer.serialize_struct("ConfigSetting", 4)?;
