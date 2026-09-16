@@ -81,6 +81,11 @@ describe("the desktop shell", () => {
       timeout: 15_000,
       timeoutMsg: "the palette offered no row for the command",
     });
+    assert.equal(
+      await $(".palette-row .palette-title").getText(),
+      "Select next session",
+      "the query's tightest match is the row Enter runs",
+    );
     await browser.keys("Enter");
     await browser.waitUntil(async () => (await selected()) === second.id, {
       timeout: 30_000,
