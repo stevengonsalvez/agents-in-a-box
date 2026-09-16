@@ -458,6 +458,49 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
         wizard.focus = OnboardingFocus::Item(2);
     }
 
+    // ---- fleet: every answer route on the chips, and a finished broadcast ----
+    {
+        use crate::fleet::attention::{Answerable, Unanswerable};
+        let answerable = match round {
+            0 => Answerable::Daemon {
+                attention_id: "a-1".to_string(),
+            },
+            1 => Answerable::Broker {
+                session_id: "s-1".to_string(),
+            },
+            _ => Answerable::No(Unanswerable::DaemonGone),
+        };
+        let fleet = state.fleet.get_mut();
+        {
+            let mut attention =
+                fleet.daemon_attention.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let crate::fleet::attention::DaemonAttention {
+                by_session_id, all, ..
+            } = &mut *attention;
+            for chip in by_session_id.values_mut().flatten().chain(all.values_mut()) {
+                chip.answerable = answerable.clone();
+            }
+        }
+        fleet.broadcast.publish_outcome(if round == 0 {
+            Ok(vec![ainb_hangar_proto::fleet::FleetActionReceipt {
+                request_id: "r-1".to_string(),
+                session_key: "claude:s-1".to_string(),
+                action_kind: "send_prompt".to_string(),
+                action_fingerprint: "fp-1".to_string(),
+                expected_version: 1,
+                idempotency_key: Some("tui-broadcast:sample".to_string()),
+                status: ainb_hangar_proto::fleet::ActionReceiptStatus::Delivered,
+                detail: Some(seed.text("fleet.broadcast.receipt_detail", Captured)),
+                session_version: Some(2),
+                created_at: 1,
+                updated_at: 2,
+            }])
+        } else {
+            Err(seed.text("fleet.broadcast.failure", Captured))
+        });
+        fleet.broadcast.tick();
+    }
+
     // ---- skills: the discovery banner, collapsed then expanded ---------------
     let counts = DiscoveryBannerCounts {
         marketplace_plugins: 2,
