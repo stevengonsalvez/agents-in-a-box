@@ -585,6 +585,101 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
         }
     }
 
+    // ---- internally tagged payloads (#1146): each variant's own fields ------
+    {
+        let config = state.config.get_mut();
+        let claude_docker: crate::config::ContainerTemplate =
+            serde_json::from_value(serde_json::json!({
+                "name": "claude-docker",
+                "description": "built from the claude-docker Dockerfile",
+                "config": {
+                    "image_source": {
+                        "type": "ClaudeDocker",
+                        "base_image": seed.text("config.container.base_image", Captured),
+                        "build_args": {
+                            "PIP_TOKEN": seed.text("config.container.claude_docker_args", Captured),
+                        },
+                    },
+                },
+            }))
+            .expect("sample claude-docker template parses");
+        config
+            .app_config
+            .container_templates
+            .insert("claude-docker".to_string(), claude_docker);
+        for (name, installation) in [
+            (
+                "from-npm",
+                serde_json::json!({
+                    "type": "Npm",
+                    "package": seed.text("config.mcp.npm_package", Captured),
+                    "version": seed.text("config.mcp.npm_version", Captured),
+                }),
+            ),
+            (
+                "from-script",
+                serde_json::json!({
+                    "type": "Custom",
+                    "script": seed.text("config.mcp.custom_script", Captured),
+                }),
+            ),
+        ] {
+            let server: crate::config::McpServerConfig =
+                serde_json::from_value(serde_json::json!({
+                    "name": name,
+                    "description": "installed by its own installer",
+                    "installation": installation,
+                    "definition": { "type": "Command", "command": "mcp", "args": [] },
+                }))
+                .expect("sample mcp server parses");
+            config.app_config.mcp_servers.insert(name.to_string(), server);
+        }
+    }
+    if let Some(view) = state.agent_status.get_mut().view.as_mut() {
+        view.health = ainb_hangar_proto::status_view::ViewHealth::Stale {
+            read_revision: view.read_revision,
+            head_revision: view.read_revision + 1,
+        };
+    }
+    if let Some(wizard) = state.onboarding.get_mut().onboarding_state.as_mut() {
+        use crate::setup::catalog::{Consumer, DepTier};
+        use crate::setup::detect::{DepReport, DepState, SetupStatus, TopicReport};
+        let report = |id: &'static str, state: DepState| DepReport {
+            id,
+            name: id,
+            why: "sample dependency",
+            tier: DepTier::Recommended,
+            consumers: vec![Consumer::Core],
+            install_hint: format!("brew install {id}"),
+            auto_installable: false,
+            satisfied: state.satisfied(),
+            state,
+        };
+        wizard.dependency_status = Some(SetupStatus {
+            topics: vec![TopicReport {
+                id: "sample",
+                label: "Sample",
+                description: "every detection outcome",
+                deps: vec![
+                    report(
+                        "ok",
+                        DepState::Ok(Some(seed.text("onboarding.dep.version", Captured))),
+                    ),
+                    report(
+                        "alt",
+                        DepState::Alt(seed.text("onboarding.dep.alt", Captured)),
+                    ),
+                    report(
+                        "old",
+                        DepState::TooOld(seed.text("onboarding.dep.too_old", Captured)),
+                    ),
+                    report("missing", DepState::Missing),
+                    report("unknown", DepState::Unknown),
+                ],
+            }],
+        });
+    }
+
     // ---- skills: the discovery banner, collapsed then expanded ---------------
     let counts = DiscoveryBannerCounts {
         marketplace_plugins: 2,
