@@ -2,12 +2,13 @@ import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import type { SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
 import { commandRows, rank, sessionRows, stepRow, type PaletteEntry, type PaletteRow } from "./palette.ts";
+import type { RendererIntent } from "./tabs.ts";
 
 interface Props {
   /** The sessions frame the session rows come from. */
   sessions: SessionsView_Serialize | undefined;
   /** A row was chosen: dispatch its intent. */
-  onChoose(intent: unknown): void;
+  onChoose(intent: RendererIntent): void;
   /** Esc, a click outside, or a chosen row: put focus back where it was. */
   onClose(): void;
 }
