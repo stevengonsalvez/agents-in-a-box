@@ -204,7 +204,10 @@ fn frame_envelope_paths(state: &AppState, id: SectionId, into: &mut BTreeSet<Str
             }
         }
     }
-    let mut envelope = serde_json::to_value(crate::wire::frame::Frame::new(state, id))
+    // A fixed host: the key paths are the contract, and no process-wide state
+    // may decide them (#1066).
+    let host = crate::wire::frame::HostId::local();
+    let mut envelope = serde_json::to_value(crate::wire::frame::Frame::new(state, id, host))
         .expect("a frame serialises");
     if let Some(map) = envelope.as_object_mut() {
         map.remove("body");
@@ -306,7 +309,14 @@ struct SectionFrame<'a> {
 
 impl serde::Serialize for SectionFrame<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serialize_section(self.state, self.id, serializer)
+        // The traced key paths are the contract; a fixed host keeps them from
+        // depending on who sends the section (#1066).
+        serialize_section(
+            self.state,
+            self.id,
+            &crate::wire::frame::HostId::local(),
+            serializer,
+        )
     }
 }
 

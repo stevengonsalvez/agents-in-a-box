@@ -24,6 +24,8 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# Logs a hello whose host id is malformed or changed under one socket (#1066).
+tracing = { workspace = true }
 
 [dev-dependencies]
 # The fake-socket tests bind a `UnixListener` in a temporary directory.

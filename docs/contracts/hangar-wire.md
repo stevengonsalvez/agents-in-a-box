@@ -53,9 +53,20 @@ ships from the static catalogue, so a daemon whose mint failed still advertises
 it, omits `host_id` and serves rows named `local`. The member's presence in the
 hello reply is the only signal that the daemon has one.
 
-Until #1066 part 2, a mirror frame's own `host_id` and its `fleet[].host_id`
-still say `local`, while `cards[].host_id` carries the ULID. No surface may join
-a card to a fleet row by host.
+A client records the id per socket, from the reply only, never from its own
+hello params: the first valid id a socket names holds for the process, and a
+later reply naming a different id or none is logged and ignored. A value that
+is not 26 Crockford base32 characters is treated as naming none.
+
+A mirror frame's `host_id`, its `fleet[].host_id` and its `cards[].host_id` all
+name the daemon's ULID once a surface has pinned it (#1066). A card may be
+joined to a fleet row by host: the daemon read that fills `fleet[]` travels
+over a dial that completes the hello first, so the rows and the id come from
+the same daemon. The one window where they say `local` is before that first
+hello: a surface pins its mirror at start, when no daemon has named a host,
+and re-pins when its daemon connects. The desktop tells its webview the new id
+(a `host` event) before the re-pin, and the re-pin reframes every subscribed
+section under the new id with a larger epoch.
 
 The id is bound to nothing: a copied home gives two daemons that assert one id.
 R1 pairing must authenticate the host's static public key, never the id alone.

@@ -56,8 +56,9 @@ function Shell() {
   const [sidecar, setSidecar] = createSignal<SidecarState>({ state: "starting" });
   const [log, setLog] = createSignal<string | null>(null);
 
-  // The host the channel is connected to, from the `subscribe` answer. Every
-  // drain is applied as that host's.
+  // The host the channel is connected to: the `subscribe` answer, then every
+  // `host` event. The host sends that event before it re-pins its frames to a
+  // new id (#1066), so every drain after it is applied as the new host's.
   const [peer, setPeer] = createSignal<HostId>();
 
   // Registered synchronously: an `onCleanup` after an `await` has left the
@@ -66,6 +67,14 @@ function Shell() {
     listen<SidecarState>("sidecar", (event) => setSidecar(event.payload)),
     listen<TabsView>("terminal_tabs", (event) => showTabs(event.payload)),
     listen<string>("toast", (event) => toast(event.payload)),
+    listen<HostId>("host", (event) => {
+      // The host re-pinned its frames to a new id (#1066). What the old id
+      // left in the store is never framed again: drop it, so it neither shows
+      // nor holds a MAX_HOSTS slot.
+      const stale = peer();
+      setPeer(event.payload);
+      if (stale !== undefined && stale !== event.payload) store.evictHost(stale);
+    }),
   ];
   onCleanup(() => listeners.forEach((unlisten) => void unlisten.then((stop) => stop())));
 
@@ -167,10 +176,13 @@ function Shell() {
     frames.onmessage = (batch) => {
       if (queue.push(batch) === 1) setTimeout(drain, DRAIN_MS);
     };
-    setPeer(await invoke<HostId>("subscribe", { frames, sections: SUBSCRIBED }));
+    const answered = await invoke<HostId>("subscribe", { frames, sections: SUBSCRIBED });
+    // A `host` event that landed while `subscribe` was in flight is newer than
+    // this answer: keep it.
+    if (peer() === undefined) setPeer(answered);
   });
 
-  // In this node the window holds exactly one host, the local one.
+  // In this node the window holds exactly one host: this machine's daemon.
   const host = peer;
   const sessions = () => (host() ? store.section(host()!, "sessions") : undefined);
   const counts = HEADER_COUNTS.map(([select, label]) => ({
