@@ -687,7 +687,8 @@ struct PluginTask {
     render_key_stamps: HashMap<u64, Option<u64>>,
     /// The generation of the last key written to the plugin, `None` before any.
     last_key_written: Option<u64>,
-    /// Set when a render blew its deadline, cleared when one completes.
+    /// Set when a render blew its deadline or a frame write outlived
+    /// `frame_write_timeout` (#1118), cleared when the plugin answers again.
     ///
     /// The host reads this (`RuntimeHandle::render_wedged`) to stop forwarding
     /// `q`/`Esc` into a plugin that cannot service them, so the user can always
