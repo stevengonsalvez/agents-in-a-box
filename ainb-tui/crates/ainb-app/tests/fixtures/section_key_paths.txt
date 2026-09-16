@@ -199,8 +199,10 @@ fleet.ask_state.cursor
 fleet.ask_state.focus
 fleet.ask_state.free_text_len
 fleet.ask_state.phases[][]
+fleet.ask_state.phases[][].Delivered.via
 fleet.ask_state.phases[][].Failed.draft_len
 fleet.ask_state.phases[][].Failed.reason
+fleet.ask_state.phases[][].InFlight.draft_len
 fleet.ask_state.request
 fleet.attention_baseline
 fleet.attention_elsewhere
