@@ -1662,8 +1662,8 @@ const UNSEEDED_VARIANTS: &[&str] = &[
     "skills.skill_manager_state.banner.Visible",
 ];
 
-/// Every payload-carrying enum variant the wire can express is seeded by the
-/// sample, so the leak checks and the key-path fixture see its payload (#1145).
+/// Every externally tagged enum variant with a payload, reachable from a
+/// section's view type, is seeded by the sample (#1145).
 ///
 /// The tracer walks the values `section_json` emits, so an UNSEEDED variant is
 /// invisible to every gate in this file: add `SessionStatus::Failed(String)`
@@ -1671,10 +1671,22 @@ const UNSEEDED_VARIANTS: &[&str] = &[
 /// generated bindings declare what the wire can carry, so walking them from
 /// each section's view type gives the variants that must appear; the committed
 /// key-path fixture is what the sample actually reached.
+///
+/// What this does NOT gate, because no key path can carry it: the NAME of an
+/// internally tagged variant (`{ type: "Npm", ... }`), which is a field's
+/// value. Its payload fields are walked like any other field, so an unseeded
+/// one shows up as a missing leaf in the key-path fixture instead.
 #[test]
-fn every_payload_variant_of_a_wire_enum_is_seeded() {
+fn every_payload_carrying_variant_reachable_from_a_section_is_seeded() {
     let bindings = Bindings::parse(BINDINGS);
     let expected = bindings.payload_variant_paths();
+    let name_of = |path: &String| {
+        format!(
+            "{}::{}",
+            expected[path],
+            path.rsplit('.').next().unwrap_or(path)
+        )
+    };
     assert!(
         expected.len() > 30,
         "the bindings walk found only {} payload variants, so it has drifted \
@@ -1690,9 +1702,10 @@ fn every_payload_variant_of_a_wire_enum_is_seeded() {
     };
 
     let allowed: BTreeSet<&str> = UNSEEDED_VARIANTS.iter().copied().collect();
-    let missing: Vec<&String> = expected
-        .iter()
+    let missing: Vec<String> = expected
+        .keys()
         .filter(|variant| !reached(variant) && !allowed.contains(variant.as_str()))
+        .map(|variant| format!("{} at {variant}", name_of(variant)))
         .collect();
     assert!(
         missing.is_empty(),
@@ -1705,7 +1718,7 @@ fn every_payload_variant_of_a_wire_enum_is_seeded() {
         .iter()
         .filter(|variant| {
             let variant = (*variant).to_string();
-            reached(&variant) || !expected.contains(&variant)
+            reached(&variant) || !expected.contains_key(&variant)
         })
         .collect();
     assert!(
@@ -1739,8 +1752,8 @@ impl Bindings {
 
     /// `"<section>.<path to the enum>.<Variant>"` for every payload-carrying
     /// variant reachable from a section's view type.
-    fn payload_variant_paths(&self) -> BTreeSet<String> {
-        let mut found = BTreeSet::new();
+    fn payload_variant_paths(&self) -> BTreeMap<String, String> {
+        let mut found = BTreeMap::new();
         for id in SectionId::ALL {
             let root = format!("{id:?}View");
             let mut chain = Vec::new();
@@ -1753,7 +1766,13 @@ impl Bindings {
     ///
     /// `chain` holds the named types currently being walked, so a type that
     /// contains itself terminates instead of recursing forever.
-    fn walk(&self, ty: &str, path: &str, chain: &mut Vec<String>, found: &mut BTreeSet<String>) {
+    fn walk(
+        &self,
+        ty: &str,
+        path: &str,
+        chain: &mut Vec<String>,
+        found: &mut BTreeMap<String, String>,
+    ) {
         let ty = strip_comments(ty);
         let ty = ty.trim();
         // `T | null` is an optional `T`, not an enum.
@@ -1792,7 +1811,14 @@ impl Bindings {
                     continue;
                 }
                 let variant_path = format!("{path}.{key}");
-                found.insert(variant_path.clone());
+                // The enum is the named type being walked: `chain` holds the
+                // alias chain, and its last entry is the type this union is
+                // the body of. An inline union has none.
+                let owner = chain.last().map_or_else(
+                    || "(inline enum)".to_string(),
+                    |name| name.trim_end_matches("_Serialize").to_string(),
+                );
+                found.insert(variant_path.clone(), owner);
                 self.walk(&value, &variant_path, chain, found);
             }
             return;
