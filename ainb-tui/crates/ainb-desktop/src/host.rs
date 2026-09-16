@@ -84,12 +84,12 @@ pub struct PaletteEntry {
 /// cadence costs a scan rather than a reframe; the WorkspaceLoad flag it does
 /// move is the "write only what changed" audit's, #1139.
 ///
-/// Strictly longer than the state's own Docker budget
-/// (`AppState::DOCKER_TIMEOUT_SECS`), and measured from the end of a scan, so
-/// a scan that times out is followed by a gap instead of the next one starting
-/// as it gives up.
+/// Strictly longer than the floor the state publishes
+/// (`AppState::workspace_rescan_floor`, its own scan budget), and measured
+/// from the end of a scan, so a scan that times out is followed by a gap
+/// instead of the next one starting as it gives up.
 pub const WORKSPACE_RESCAN: Duration =
-    Duration::from_secs(ainb_app::AppState::DOCKER_TIMEOUT_SECS + 5);
+    Duration::from_secs(ainb_app::AppState::workspace_rescan_floor().as_secs() + 5);
 
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
