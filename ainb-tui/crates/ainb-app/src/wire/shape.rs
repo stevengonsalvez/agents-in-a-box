@@ -453,6 +453,12 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
                 value: 30,
                 input_buffer: seed.text("config.number_popup", Typed),
             },
+            // Captured as well, so the credential tripwire reads the scrub on
+            // the buffer: typed text is only ever checked by the canary.
+            ConfigPopupType::NumberInput {
+                value: 30,
+                input_buffer: seed.text("config.number_popup_pasted", Captured),
+            },
         ],
         round,
     );
