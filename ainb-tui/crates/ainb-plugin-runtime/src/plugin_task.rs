@@ -1134,6 +1134,13 @@ impl PluginTask {
         }
         self.render_wedged.store(true, std::sync::atomic::Ordering::Release);
         let _ = cs.child.start_kill();
+        // Drop the plugin now rather than on stdout EOF: a helper the plugin
+        // spawned can hold the pipe open, and then EOF never comes and every
+        // queued key burns another full bound. The reader owns the only
+        // inbound sender, so aborting it ends the inbound channel and the next
+        // loop turn reads `Eof` into `handle_exit`, which aborts it again
+        // harmlessly.
+        cs.stdout_reader.abort();
         Err(RuntimeError::ProcessExited(plugin))
     }
 
