@@ -141,3 +141,72 @@ fn daemon_news_starts_a_scan_before_the_cadence_would() {
         let _ = host.tick();
     }
 }
+
+/// A session the operator stopped is still theirs: the worktree is on disk and
+/// the row is how they resume it. The full refresh that used to be the only
+/// thing to find one is queued as an action no host is obliged to run, so on
+/// this shell it never ran at all (#1159). The scan finds them now.
+#[test]
+fn a_stopped_session_reaches_the_sidebar() {
+    let home = support::isolated_home();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let _runtime = runtime.enter();
+
+    // A real worktree: a stopped row is only offered for a directory that is
+    // still inside a git repository, which is what makes it resumable.
+    let worktree = home.join("stopped-repo");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let git = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&worktree)
+        .status()
+        .expect("git init");
+    assert!(git.success(), "git init failed");
+
+    // Persisted metadata for a session whose tmux is long gone.
+    let store = home.join(".agents-in-a-box");
+    std::fs::create_dir_all(&store).expect("ainb home");
+    std::fs::write(
+        store.join("sessions.json"),
+        serde_json::json!({
+            "sessions": {
+                "ainb_stopped_main": {
+                    "session_id": "6f1d3d64-0f44-4a1e-9a9e-6f2f7e6a1b11",
+                    "tmux_session_name": "ainb_stopped_main",
+                    "worktree_path": worktree,
+                    "workspace_name": "stopped-repo",
+                    "created_at": "2026-09-16T10:00:00Z",
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("sessions.json");
+
+    let mut host = DesktopHost::new(
+        AppConfig::default(),
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::only(&[SectionId::Sessions]),
+        |_batch: FrameBatch| {},
+    );
+    host.start_workspace_load();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let found = loop {
+        let listed = host
+            .state()
+            .sessions
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.sessions.iter())
+            .any(|session| session.tmux_session_name.as_deref() == Some("ainb_stopped_main"));
+        if listed {
+            break true;
+        }
+        assert!(Instant::now() < deadline, "the stopped session never arrived");
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = host.tick();
+    };
+    assert!(found);
+}
