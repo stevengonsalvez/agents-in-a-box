@@ -733,6 +733,22 @@ impl MutationLedgerRepo {
         Self::set_receipt_on(&mut *tx, key, receipt_state, detail, now_ms).await
     }
 
+    /// Every `host_id` the ledger holds rows under, for the sweeps that walk
+    /// each host (#1066): `local` from a pre-mint daemon, this daemon's minted
+    /// id, and any id a restored database carried in.
+    ///
+    /// Never fails: a read fault is logged and answers [`LOCAL_HOST_ID`] alone,
+    /// so a sweep still covers the rows it always covered.
+    pub async fn distinct_hosts(pool: &SqlitePool) -> Vec<String> {
+        sqlx::query_scalar::<_, String>("SELECT DISTINCT host_id FROM mutation_ledger")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "ledger hosts unreadable; sweeping local only");
+                vec![LOCAL_HOST_ID.to_string()]
+            })
+    }
+
     /// Every row that never reached a terminal outcome, oldest first.
     ///
     /// `status = 'in_flight'` is the whole predicate, and deliberately so. A
