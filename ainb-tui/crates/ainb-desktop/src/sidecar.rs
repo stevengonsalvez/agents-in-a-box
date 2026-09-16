@@ -282,8 +282,13 @@ async fn supervise(config: SidecarConfig, state: watch::Sender<SidecarState>, re
             state.send_replace(SidecarState::Starting);
             continue;
         }
+        let pid = daemon_pid(&config.hangar_home);
+        // Logged, not framed: the webview is told "connected" and nothing
+        // about the process, while the window's own log says which daemon this
+        // is, which is what a proof run compares with the one a CLI finds.
+        tracing::info!(daemon_pid = ?pid, spawned, "attached to the hangar daemon");
         state.send_replace(SidecarState::Connected {
-            daemon_pid: daemon_pid(&config.hangar_home),
+            daemon_pid: pid,
             spawned,
         });
         let connected_at = Instant::now();
