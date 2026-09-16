@@ -248,8 +248,16 @@ jobs:
           set -euo pipefail
           BIN=target/release/ainb-desktop
           test -x "$BIN"
-          ! nm -a "$BIN" 2>/dev/null | grep -i -e wdio_webdriver -e tauri_plugin_wdio
-          ! strings -a "$BIN" | grep -i -e tauri-plugin-wdio -e wdio-webdriver
+          # An `! pipeline` never trips errexit, so each guard fails the job
+          # itself rather than leaning on set -e.
+          if nm -a "$BIN" 2>/dev/null | grep -i -e wdio_webdriver -e tauri_plugin_wdio; then
+            echo "the release binary exports a WebDriver symbol" >&2
+            exit 1
+          fi
+          if strings -a "$BIN" | grep -i -e tauri-plugin-wdio -e wdio-webdriver; then
+            echo "the release binary names the WebDriver plugin" >&2
+            exit 1
+          fi
           echo "the release binary exports no WebDriver symbol and names no driver plugin"
         working-directory: ainb-tui/crates/ainb-desktop
       # The other half of the same claim: nothing listens on the driver port.
@@ -263,7 +271,11 @@ jobs:
             xvfb-run -a "$BIN" &
           app=$!
           sleep 20
-          ! ss -ltn | grep -q '127.0.0.1:4445'
+          if ss -ltn | grep -q '127.0.0.1:4445'; then
+            echo "the release shell bound the WebDriver port" >&2
+            kill "$app"
+            exit 1
+          fi
           kill "$app"
           echo "nothing listened on the WebDriver port"
         working-directory: ainb-tui/crates/ainb-desktop
