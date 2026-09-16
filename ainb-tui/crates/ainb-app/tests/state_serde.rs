@@ -1681,6 +1681,11 @@ fn every_payload_variant_of_a_wire_enum_is_seeded() {
          from the generated shape and proves nothing",
         expected.len()
     );
+    if std::env::var_os("DUMP_VARIANTS").is_some() {
+        for variant in &expected {
+            println!("VARIANT {variant}");
+        }
+    }
     let committed = shape::committed_key_paths();
     let reached = |variant: &String| {
         committed.contains(variant)
@@ -1793,6 +1798,12 @@ impl Bindings {
         let ty = ty.trim_start_matches('(').trim_end_matches(')').trim();
         if let Some(inner) = ty.strip_suffix("[]") {
             self.walk(inner, &format!("{path}[]"), chain, found);
+            return;
+        }
+        // `Partial<T>` only makes T's fields optional: the shape underneath is
+        // what reaches the wire.
+        if let Some(inner) = ty.strip_prefix("Partial<").and_then(|rest| rest.strip_suffix('>')) {
+            self.walk(inner, path, chain, found);
             return;
         }
         if let Some(value) = map_value_type(ty) {
