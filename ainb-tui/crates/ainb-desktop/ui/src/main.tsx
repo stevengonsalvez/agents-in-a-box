@@ -67,7 +67,14 @@ function Shell() {
     listen<SidecarState>("sidecar", (event) => setSidecar(event.payload)),
     listen<TabsView>("terminal_tabs", (event) => showTabs(event.payload)),
     listen<string>("toast", (event) => toast(event.payload)),
-    listen<HostId>("host", (event) => setPeer(event.payload)),
+    listen<HostId>("host", (event) => {
+      // The host re-pinned its frames to a new id (#1066). What the old id
+      // left in the store is never framed again: drop it, so it neither shows
+      // nor holds a MAX_HOSTS slot.
+      const stale = peer();
+      setPeer(event.payload);
+      if (stale !== undefined && stale !== event.payload) store.evictHost(stale);
+    }),
   ];
   onCleanup(() => listeners.forEach((unlisten) => void unlisten.then((stop) => stop())));
 

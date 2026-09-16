@@ -170,6 +170,46 @@ test("the daemon read is held in both the fresh and the in-place write", () => {
   });
 });
 
+test("evicting a host drops its sections and stale marks and no other host's", () => {
+  withStore(["sessions"], (store) => {
+    drain(store, "local", frame("local", "sessions", 5, 1, sessions("a")));
+    store.applyDrain("local", [oversize]);
+    drain(store, "peer", frame("peer", "sessions", 1, 1, sessions("b")));
+    assert.equal(store.hostCount(), 2);
+
+    store.evictHost("local");
+
+    assert.equal("local" in store.state.hosts, false, "the host entry is gone");
+    assert.equal("local" in store.state.stale, false, "its stale marks are gone");
+    assert.equal(store.section("local", "sessions"), undefined);
+    assert.equal(store.hostCount(), 1);
+    assert.deepEqual(names(store, "peer"), ["b"]);
+
+    // Evicting a host the store does not hold changes nothing.
+    store.evictHost("absent");
+    assert.equal(store.hostCount(), 1);
+
+    // A later frame from the evicted host starts it over, even at an epoch
+    // older than the one it was evicted at.
+    drain(store, "local", frame("local", "sessions", 1, 1, sessions("again")));
+    assert.deepEqual(names(store, "local"), ["again"]);
+  });
+});
+
+test("an evicted host does not consume a MAX_HOSTS slot", () => {
+  withStore(["sessions"], (store) => {
+    for (let i = 0; i < MAX_HOSTS; i++) drain(store, `h${i}`, frame(`h${i}`, "sessions", 1, 1, sessions("a")));
+    // `h0` stands in for the stale `local` entry a re-pinned window evicts.
+    store.evictHost("h0");
+    assert.equal(store.hostCount(), MAX_HOSTS - 1);
+
+    drain(store, "ulid", frame("ulid", "sessions", 1, 1, sessions("b")));
+
+    assert.equal(store.hostCount(), MAX_HOSTS);
+    assert.deepEqual(names(store, "ulid"), ["b"], "the freed slot is taken");
+  });
+});
+
 test("an oversize section is stale until the host frames it again, and keeps its body", () => {
   withStore(["sessions"], (store) => {
     drain(store, "local", frame("local", "sessions", 1, 1, sessions("a")));
