@@ -247,7 +247,10 @@ Begin by outputting your plan. Then execute end-to-end without checking in until
 ─ PROGRESS LOG ─
 
 Plan, staged as the four PRs:
-1. P6a: reconnect and resync in `ainb-hangar-client`, with `agent_status_host.rs` converted and the daemon-kill test.
-2. P6b: the web playwright journey in CI as its own job, the net before the swap.
+1. P6a: reconnect and resync in `ainb-hangar-client`, with `agent_status_host.rs` converted and the daemon-kill test. (Complete, PR #1166)
+2. P6b: the web playwright journey in CI as its own job, the net before the swap. (Complete)
 3. P6c: `ainb-web` onto `ainb-hangar-client`, its own transport and presence deleted, projection kept.
 4. P6d: migration `0101` and the sessions table behind RPC, the one-time import, the CLI read path with a fallback, the `p6-concurrent` proof scenario, the programme row.
+
+- 2026-09-16 P6a: Reconnect loop in ainb-hangar-client with 1s/4s/16s backoff, watch-channel ConnectionState, hello resync via after_revision, agent_status_host converted, SIGKILL integration test green. PR #1166 opened against v2.
+- 2026-09-16 P6b: Added web-e2e Playwright journey job to .github/workflows/ci.yml. Committed package-lock.json for ainb-web/e2e and updated .gitignore. Updated run_web_e2e.sh to default CARGO_TARGET_DIR safely and use npm ci. Updated verify-converged-goal.md. Deliberate red run verified: mismatched assertion failed closed with Playwright exit code 1; green run passed with exit code 0.
