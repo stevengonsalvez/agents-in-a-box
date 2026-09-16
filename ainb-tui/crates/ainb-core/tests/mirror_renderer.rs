@@ -96,7 +96,7 @@ fn the_first_batch_frames_every_subscribed_section_and_nothing_else() {
         assert_eq!(held.host_id, HostId::local());
         assert_eq!(
             held.body,
-            section_json(&state, id),
+            section_json(&state, id, &HostId::local()),
             "the body is the redacted section frame"
         );
     }
