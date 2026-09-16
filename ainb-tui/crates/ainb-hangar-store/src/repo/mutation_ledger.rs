@@ -733,6 +733,31 @@ impl MutationLedgerRepo {
         Self::set_receipt_on(&mut *tx, key, receipt_state, detail, now_ms).await
     }
 
+    /// Every `host_id` the ledger holds rows under, for the sweeps that walk
+    /// each host (#1066): `local` from a pre-mint daemon, this daemon's minted
+    /// id, and any id a restored database carried in.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the `SQLite` failure, for a caller that must stop on one:
+    /// the boot receipt sweep, which runs once, would otherwise leave every
+    /// minted-id receipt unswept for the life of the process.
+    pub async fn try_distinct_hosts(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>("SELECT DISTINCT host_id FROM mutation_ledger")
+            .fetch_all(pool)
+            .await
+    }
+
+    /// [`Self::try_distinct_hosts`] for a sweep that runs again: a read fault is
+    /// logged and answers [`LOCAL_HOST_ID`] alone, so the pass still covers the
+    /// rows it always covered and the next pass reads the hosts again.
+    pub async fn distinct_hosts(pool: &SqlitePool) -> Vec<String> {
+        Self::try_distinct_hosts(pool).await.unwrap_or_else(|error| {
+            tracing::warn!(%error, "ledger hosts unreadable; sweeping local only");
+            vec![LOCAL_HOST_ID.to_string()]
+        })
+    }
+
     /// Every row that never reached a terminal outcome, oldest first.
     ///
     /// `status = 'in_flight'` is the whole predicate, and deliberately so. A

@@ -15,8 +15,10 @@ use ainb_hangar_core::idgen::IdGen;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 /// The `host_id` every column held before a daemon minted one, and what a
-/// writer still stamps on a home that has no identity yet.
-pub const UNMINTED_HOST_ID: &str = "local";
+/// writer still stamps on a home that has no identity yet. The ledger's
+/// [`LOCAL_HOST_ID`](crate::repo::mutation_ledger::LOCAL_HOST_ID), so the
+/// string is decided once.
+pub const UNMINTED_HOST_ID: &str = crate::repo::mutation_ledger::LOCAL_HOST_ID;
 
 /// Rows adopted per `fleet_event` batch. Small enough that one batch holds the
 /// write lock for milliseconds, not the minutes a single statement over a

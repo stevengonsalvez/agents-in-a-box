@@ -477,3 +477,46 @@ async fn a_principal_past_its_ceiling_is_refused_and_its_neighbour_is_not() {
         ClaimOutcome::Fresh
     );
 }
+
+/// #1066: the sweeps walk every host the ledger holds rows under, each once,
+/// and a ledger that cannot be read still answers `local`.
+#[tokio::test]
+async fn distinct_hosts_names_every_ledger_host_once_and_falls_back_to_local() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    assert!(MutationLedgerRepo::distinct_hosts(pool).await.is_empty());
+
+    let minted = "01K5A0000000000000000AAAAA";
+    let restored = "01K5A0000000000000000BBBBB";
+    let keys = [
+        LedgerKey::local("op-a"),
+        LedgerKey::local("op-b"),
+        LedgerKey {
+            host_id: minted.to_string(),
+            ..LedgerKey::local("op-c")
+        },
+        LedgerKey {
+            host_id: restored.to_string(),
+            ..LedgerKey::local("op-d")
+        },
+    ];
+    let fp = MutationLedgerRepo::fingerprint("attention/answer", &body());
+    for key in &keys {
+        let outcome =
+            MutationLedgerRepo::claim(pool, key, "attention/answer", &fp, TIER_DEDUPE, NOW)
+                .await
+                .unwrap();
+        assert_eq!(outcome, ClaimOutcome::Fresh, "{key:?}");
+    }
+    let mut hosts = MutationLedgerRepo::distinct_hosts(pool).await;
+    hosts.sort();
+    assert_eq!(hosts, vec![minted, restored, LOCAL_HOST_ID]);
+
+    pool.close().await;
+    assert_eq!(
+        MutationLedgerRepo::distinct_hosts(pool).await,
+        vec![LOCAL_HOST_ID],
+        "an unreadable ledger still sweeps local"
+    );
+}
