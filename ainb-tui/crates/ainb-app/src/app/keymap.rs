@@ -985,6 +985,35 @@ impl KeyAction {
             .or_else(|| crate::app::plugin_action::with_args(event, args))
     }
 
+    /// Whether running this action changes something ainb did not create:
+    /// a file outside `~/.agents-in-a-box` and the session worktree, a tmux
+    /// session ainb did not start, a package install, or a network write.
+    /// `tests/key_only_completeness.rs` derives the same set from the reducer
+    /// source and fails when the two disagree.
+    ///
+    /// A confirmation dialog's Confirm is not listed here: what it does is the
+    /// dialog's pending [`crate::app::state::ConfirmAction`], which
+    /// [`crate::app::state::ConfirmAction::runs_only_from_key`] judges.
+    #[must_use]
+    pub fn writes_outside_ainb(&self) -> bool {
+        use crate::app::events::AppEvent;
+        matches!(
+            self,
+            Self::App(
+                // `claude-code` style dependency installs and `~/.tmux.conf`.
+                AppEvent::OnboardingInstallFocusedDep
+                    | AppEvent::OnboardingInstallConfig
+                    // A catalog install runs its `sh -c` recipe.
+                    | AppEvent::SkillManagerBrowseInstall
+                    // `git commit` and `git push` in the user's repository.
+                    | AppEvent::GitViewCommitConfirm
+                    | AppEvent::QuickCommitConfirm
+                    // `tmux rename-session` on a session ainb did not start.
+                    | AppEvent::OtherTmuxConfirmRename
+            ) | Self::Ui(UiAction::UsageWireStatusline) // ~/.claude/settings.json
+        )
+    }
+
     fn carries_payload(&self) -> bool {
         // A pointer row carries a payload exactly when it refuses to run bare.
         if let Self::App(event) = self {
@@ -1081,6 +1110,18 @@ pub struct Binding {
     pub chord: Option<Chord>,
     pub action: KeyAction,
     pub doc: &'static str,
+}
+
+impl Binding {
+    /// Whether this row runs only from its key, never from
+    /// `Intent::Command` (#1080): its action writes outside ainb, so no other
+    /// surface (a desktop webview, a mirror, a web client) may fire it by
+    /// name. Derived from the action, so no row can carry a writer without
+    /// the flag.
+    #[must_use]
+    pub fn key_only(&self) -> bool {
+        self.action.writes_outside_ainb()
+    }
 }
 
 /// Immutable resolved table. No dispatch code stores a mutable binding map.
@@ -1193,6 +1234,12 @@ impl Keymap {
     /// presses resolve through, overrides included.
     pub fn commands(&self) -> impl Iterator<Item = (CommandId, &Binding)> {
         self.bindings.iter().map(|binding| (CommandId::of(binding), binding))
+    }
+
+    /// Whether the row `id` runs only from its key; see [`Binding::key_only`].
+    #[must_use]
+    pub fn is_key_only(&self, id: &CommandId) -> bool {
+        self.command(id).is_some_and(Binding::key_only)
     }
 
     /// Look a command up by id. `None` for ids no row carries.
