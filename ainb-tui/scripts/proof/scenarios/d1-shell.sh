@@ -48,10 +48,9 @@ scenario() {
     return
   fi
   if ! command -v xvfb-run >/dev/null; then
-    # Named, not silent: a box with no headless X server cannot run this node,
-    # and the result says so rather than passing or failing on the machine.
-    observe "SKIPPED: xvfb-run is not installed, so the window has no display to open on"
-    check "xvfb-run is installed, for a window with no display" false
+    # Not a failure: a box with no headless X server has falsified nothing
+    # about the window, so the result says why the node could not run.
+    skip "xvfb-run is not installed, so the window has no display to open on"
     return
   fi
 
