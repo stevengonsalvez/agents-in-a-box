@@ -77,8 +77,12 @@ export function TerminalView(props: Props) {
           const selection = term.getSelection();
           if (selection) void invoke("clipboard_write", { text: selection });
         } else if (shell.kind === "paste") {
-          void invoke<string>("clipboard_read").then((text) => {
-            if (text) transport.send(text);
+          // Through xterm, not straight to the transport: the terminal wraps a
+          // paste in the bracketed-paste markers the pane asked for, so a
+          // multi-line payload arrives as text rather than as lines the shell
+          // runs one by one. The macOS menu's own paste takes the same path.
+          void invoke<string>("clipboard_read", { key: props.tab.key }).then((text) => {
+            if (text) term.paste(text);
           });
         } else {
           props.onAccelerator(shell);
