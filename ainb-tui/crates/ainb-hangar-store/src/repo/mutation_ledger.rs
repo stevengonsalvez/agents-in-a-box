@@ -257,25 +257,20 @@ const SELECT_COLUMNS: &str = "host_id, principal, op_id, method, body_fingerprin
      status, reason, reply, receipt_state, receipt_detail, expired, created_at, updated_at";
 
 impl MutationLedgerRepo {
-    /// Claim `key` for `method`, or report what already holds it.
+    /// Resolve which host owns `op_id` for `principal` and claim it under that
+    /// key, on one connection (#1066).
     ///
-    /// The foreign check runs FIRST, and that ordering is the point: the key
-    /// includes the principal, so a row minted by a different device would not
-    /// collide on insert and this caller would quietly execute under somebody
-    /// else's op id (amendment 15).
+    /// An op id this principal already holds under [`LOCAL_HOST_ID`], from a
+    /// pre-mint daemon, keeps that key, so a retry across the upgrade replays
+    /// instead of executing a second time. Every other claim is keyed under this
+    /// daemon's minted id, or `local` on a home with no identity. The legacy
+    /// lookup is by the full key, so another principal's `local` row never
+    /// decides this caller's host.
     ///
-    /// # Errors
-    ///
-    /// Propagates the `SQLite` failure.
-    /// Resolve which host owns `op_id` and claim it on that key, on ONE
-    /// connection (#1066).
-    ///
-    /// An op id a pre-mint daemon already holds under [`LOCAL_HOST_ID`] keeps
-    /// that key, so a retry across the upgrade replays instead of executing a
-    /// second time; every other claim is keyed under this daemon's minted id,
-    /// or `local` on a home with no identity. The host read and the holder read
-    /// share the claim's own connection, so no other statement can land between
-    /// deciding the key and taking it.
+    /// What sharing the connection buys is one pool acquisition for every read
+    /// and the insert. It is not a transaction: the statements are
+    /// autocommit, as [`Self::claim_on`] says, and the guarantee against a
+    /// concurrent claim is still the UNIQUE `(host_id, op_id)` index.
     ///
     /// # Errors
     ///
@@ -289,8 +284,12 @@ impl MutationLedgerRepo {
         tier: &str,
         now_ms: i64,
     ) -> Result<(LedgerKey, ClaimOutcome), sqlx::Error> {
-        let legacy = Self::holder_of_on(&mut *conn, LOCAL_HOST_ID, op_id).await?;
-        let host_id = if legacy.is_some() {
+        let legacy = LedgerKey {
+            host_id: LOCAL_HOST_ID.to_string(),
+            principal: principal.to_string(),
+            op_id: op_id.to_string(),
+        };
+        let host_id = if Self::get_on(&mut *conn, &legacy).await?.is_some() {
             LOCAL_HOST_ID.to_string()
         } else {
             crate::repo::daemon_identity::host_id_on(&mut *conn).await?
@@ -305,6 +304,16 @@ impl MutationLedgerRepo {
         Ok((key, outcome))
     }
 
+    /// Claim `key` for `method`, or report what already holds it.
+    ///
+    /// The foreign check runs FIRST, and that ordering is the point: the key
+    /// includes the principal, so a row minted by a different device would not
+    /// collide on insert and this caller would quietly execute under somebody
+    /// else's op id (amendment 15).
+    ///
+    /// # Errors
+    ///
+    /// Propagates the `SQLite` failure.
     pub async fn claim_on(
         conn: &mut SqliteConnection,
         key: &LedgerKey,
