@@ -547,6 +547,44 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
         }
     }
 
+    // ---- new session: every repo source, as row, pending clone and target ---
+    {
+        use crate::components::new_session::pick_repo::{PickRepoRow, RepoRowKind};
+        use crate::git::repo_source::RepoSource;
+        let mut sources = vec![
+            RepoSource::SshUrl(seed.text("new_session.repo_source.ssh_url", Captured)),
+            RepoSource::SshSession(seed.text("new_session.repo_source.ssh_session", Captured)),
+            RepoSource::GithubShorthand {
+                owner: seed.text("new_session.repo_source.owner", Captured),
+                repo: seed.text("new_session.repo_source.repo", Captured),
+            },
+            RepoSource::LocalPath(PathBuf::from("/work/other-repo")),
+        ];
+        let target = sources[round.min(sources.len() - 1)].clone();
+        sources.push(RepoSource::HttpsUrl(
+            seed.text("new_session.repo_source.https_url", Captured),
+        ));
+        if let Some(new_session) = state.new_session.get_mut().new_session_state.as_mut() {
+            if let Some(pick) = new_session.pick_repo_state.as_mut() {
+                pick.rows = sources
+                    .iter()
+                    .enumerate()
+                    .map(|(index, source)| PickRepoRow {
+                        id: format!("row:{index}"),
+                        label: format!("repo {index}"),
+                        source: source.clone(),
+                        kind: RepoRowKind::Local,
+                    })
+                    .collect();
+                pick.filtered_indices = (0..pick.rows.len()).collect();
+                pick.pending_clone_source = Some(target.clone());
+            }
+            if let Some(configure) = new_session.configure_state.as_mut() {
+                configure.repo_source = target;
+            }
+        }
+    }
+
     // ---- skills: the discovery banner, collapsed then expanded ---------------
     let counts = DiscoveryBannerCounts {
         marketplace_plugins: 2,
