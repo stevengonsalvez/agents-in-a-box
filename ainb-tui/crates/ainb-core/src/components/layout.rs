@@ -508,20 +508,12 @@ impl LayoutComponent {
             return;
         }
 
-        // The active tab, reconciled against what is actually available: a tab
-        // can go dead under the operator (the ASK is answered, the cursor moves
-        // off a session row) and leaving them on a stale pane shows a question
-        // they can no longer act on.
-        let active = session_tabs::resolve(state, state.shell.session_tab);
-        state.shell.set_if_changed(|shell| &mut shell.session_tab, active);
-
-        // Fold in whatever the answer worker reported. EVERY frame, not only on
-        // the `ask` tab: the row's `SENT` chip is painted by the session list,
-        // so an operator who sends and then switches tabs would otherwise watch
-        // that chip stay SENT forever.
-        if state.fleet.update(|fleet| fleet.ask_state.tick()) {
-            state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
-        }
+        // The tab reconcile, the answer fold and the composer's retarget, which
+        // the reducer owns: every host ticks them, so an answer lands on a
+        // surface whose draw loop is not this one. Their reasons are on
+        // `AppState::tick_answers`.
+        state.tick_answers();
+        let active = state.shell.session_tab;
 
         // An attached embed owns the right pane outright, and `preview` is a
         // tmux mirror with no state machine of its own.
@@ -530,17 +522,9 @@ impl LayoutComponent {
         }
 
         match active {
-            SessionTab::Preview | SessionTab::Err => {}
-            SessionTab::Ask => {
-                // Point the pane at the request it is showing BEFORE painting.
-                // Without this the focus is only initialised by the first key
-                // press, so a request with no options opens with the composer
-                // unfocused — no cursor, no caret, and the operator's first
-                // characters fall through to the session shortcuts.
-                if let Some(chip) = session_tabs::selected_blocking(state).cloned() {
-                    state.fleet.update(|fleet| fleet.ask_state.retarget(&chip));
-                }
-            }
+            // `ask` needs nothing here: the reducer's tick has already pointed
+            // its composer at the request being shown.
+            SessionTab::Preview | SessionTab::Err | SessionTab::Ask => {}
             SessionTab::Log => {
                 // Started here rather than at construction, for the same reason
                 // the attention poller is: an `ainb` invocation that never opens
