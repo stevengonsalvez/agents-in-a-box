@@ -411,6 +411,21 @@ pub fn sample_states(seed: &mut dyn Seed) -> Vec<AppState> {
 /// variants any one single-valued field has (`ConfirmAction`'s seven).
 const ALTERNATE_ROUNDS: usize = 7;
 
+/// The `round`-th of `variants`, the last one once the rounds outrun them.
+///
+/// Every alternate block picks through here, so which variant repeats is the
+/// same rule everywhere, and a block that grows past [`ALTERNATE_ROUNDS`] fails
+/// in a debug build instead of silently never seeding its tail.
+fn pick<T>(mut variants: Vec<T>, round: usize) -> T {
+    debug_assert!(
+        variants.len() <= ALTERNATE_ROUNDS,
+        "{} variants but only {ALTERNATE_ROUNDS} alternate rounds",
+        variants.len()
+    );
+    let index = round.min(variants.len() - 1);
+    variants.swap_remove(index)
+}
+
 /// A sample whose single-valued enum fields hold the variants
 /// [`sample_state`] does not, one per `round` (#1146).
 ///
@@ -427,17 +442,20 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
     let mut state = sample_state(seed);
 
     // ---- config: the popup types the two popup samples do not open ----------
-    state.config.get_mut().config_popup_state.popup_type = match round {
-        0 => ConfigPopupType::Boolean { value: true },
-        1 => ConfigPopupType::Choice {
-            options: vec!["tmux".to_string(), "docker".to_string()],
-            selected_index: 1,
-        },
-        _ => ConfigPopupType::NumberInput {
-            value: 30,
-            input_buffer: seed.text("config.number_popup", Typed),
-        },
-    };
+    state.config.get_mut().config_popup_state.popup_type = pick(
+        vec![
+            ConfigPopupType::Boolean { value: true },
+            ConfigPopupType::Choice {
+                options: vec!["tmux".to_string(), "docker".to_string()],
+                selected_index: 1,
+            },
+            ConfigPopupType::NumberInput {
+                value: 30,
+                input_buffer: seed.text("config.number_popup", Typed),
+            },
+        ],
+        round,
+    );
 
     // ---- git view: a fenced code block's language line -----------------------
     if let Some(view) = state.git_view.get_mut().git_view_state.as_mut() {
@@ -461,15 +479,18 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
     // ---- fleet: every answer route on the chips, and a finished broadcast ----
     {
         use crate::fleet::attention::{Answerable, Unanswerable};
-        let answerable = match round {
-            0 => Answerable::Daemon {
-                attention_id: "a-1".to_string(),
-            },
-            1 => Answerable::Broker {
-                session_id: "s-1".to_string(),
-            },
-            _ => Answerable::No(Unanswerable::DaemonGone),
-        };
+        let answerable = pick(
+            vec![
+                Answerable::Daemon {
+                    attention_id: "a-1".to_string(),
+                },
+                Answerable::Broker {
+                    session_id: "s-1".to_string(),
+                },
+                Answerable::No(Unanswerable::DaemonGone),
+            ],
+            round,
+        );
         let fleet = state.fleet.get_mut();
         {
             let mut attention =
@@ -481,38 +502,39 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
                 chip.answerable = answerable.clone();
             }
         }
-        fleet.broadcast.publish_outcome(if round == 0 {
-            Ok(vec![ainb_hangar_proto::fleet::FleetActionReceipt {
-                request_id: "r-1".to_string(),
-                session_key: "claude:s-1".to_string(),
-                action_kind: "send_prompt".to_string(),
-                action_fingerprint: "fp-1".to_string(),
-                expected_version: 1,
-                idempotency_key: Some("tui-broadcast:sample".to_string()),
-                status: ainb_hangar_proto::fleet::ActionReceiptStatus::Delivered,
-                detail: Some(seed.text("fleet.broadcast.receipt_detail", Captured)),
-                session_version: Some(2),
-                created_at: 1,
-                updated_at: 2,
-            }])
-        } else {
-            Err(seed.text("fleet.broadcast.failure", Captured))
-        });
+        let sent = Ok(vec![ainb_hangar_proto::fleet::FleetActionReceipt {
+            request_id: "r-1".to_string(),
+            session_key: "claude:s-1".to_string(),
+            action_kind: "send_prompt".to_string(),
+            action_fingerprint: "fp-1".to_string(),
+            expected_version: 1,
+            idempotency_key: Some("tui-broadcast:sample".to_string()),
+            status: ainb_hangar_proto::fleet::ActionReceiptStatus::Delivered,
+            detail: Some(seed.text("fleet.broadcast.receipt_detail", Captured)),
+            session_version: Some(2),
+            created_at: 1,
+            updated_at: 2,
+        }]);
+        let failed = Err(seed.text("fleet.broadcast.failure", Captured));
+        fleet.broadcast.publish_outcome(pick(vec![sent, failed], round));
         fleet.broadcast.tick();
     }
 
     // ---- session labels: every attachable ref, as menu target and rename target
     {
         use crate::app::state::{AttachableRef, SessionContextMenu};
-        let target = match round {
-            0 => AttachableRef::WorkspaceSession {
-                workspace_idx: 0,
-                session_idx: 0,
-            },
-            1 => AttachableRef::WorkspaceShell { workspace_idx: 0 },
-            2 => AttachableRef::SshSession { ssh_idx: 0 },
-            _ => AttachableRef::OtherTmux { other_idx: 0 },
-        };
+        let target = pick(
+            vec![
+                AttachableRef::WorkspaceSession {
+                    workspace_idx: 0,
+                    session_idx: 0,
+                },
+                AttachableRef::WorkspaceShell { workspace_idx: 0 },
+                AttachableRef::SshSession { ssh_idx: 0 },
+                AttachableRef::OtherTmux { other_idx: 0 },
+            ],
+            round,
+        );
         let labels = state.session_labels.get_mut();
         labels.session_context_menu = Some(SessionContextMenu {
             target: target.clone(),
@@ -524,7 +546,7 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
     // ---- shell: every confirmation the delete sample does not ask ------------
     {
         use crate::app::state::{ConfirmAction, DialogOption};
-        let actions = [
+        let actions = vec![
             ConfirmAction::StopSession(uuid::Uuid::nil()),
             ConfirmAction::BulkDeleteSessions(vec![uuid::Uuid::nil()]),
             ConfirmAction::BulkStopSessions(vec![uuid::Uuid::nil()]),
@@ -534,7 +556,7 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
             ConfirmAction::McpStopServer("github".to_string()),
         ];
         if let Some(dialog) = state.shell.get_mut().confirmation_dialog.as_mut() {
-            dialog.confirm_action = actions[round.min(actions.len() - 1)].clone();
+            dialog.confirm_action = pick(actions.clone(), round);
             dialog.options = Some(
                 actions
                     .iter()
@@ -560,7 +582,7 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
             },
             RepoSource::LocalPath(PathBuf::from("/work/other-repo")),
         ];
-        let target = sources[round.min(sources.len() - 1)].clone();
+        let target = pick(sources.clone(), round);
         sources.push(RepoSource::HttpsUrl(
             seed.text("new_session.repo_source.https_url", Captured),
         ));
@@ -687,11 +709,13 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
         orphan_units_per_tool: vec![("claude".to_string(), 3)],
         conflicts: 1,
     };
-    state.skills.get_mut().skill_manager_state.banner = if round == 0 {
-        DiscoveryBannerState::Visible(counts)
-    } else {
-        DiscoveryBannerState::Details(counts)
-    };
+    state.skills.get_mut().skill_manager_state.banner = pick(
+        vec![
+            DiscoveryBannerState::Visible(counts.clone()),
+            DiscoveryBannerState::Details(counts),
+        ],
+        round,
+    );
 
     state
 }
