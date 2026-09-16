@@ -69,7 +69,7 @@ pub struct DesktopHost<S: FrameSink> {
 impl<S: FrameSink> DesktopHost<S> {
     /// Host a state built on `config`, as given: nothing is read from disk for
     /// it. Frames for the sections in `subscription` go to `sink`, stamped with
-    /// `host_id`.
+    /// `host_id` until [`Self::set_host`] re-pins it.
     pub fn new(
         config: AppConfig,
         keymap: Keymap,
@@ -200,6 +200,23 @@ impl<S: FrameSink> DesktopHost<S> {
     pub fn reframe(&mut self) {
         self.mirror.reframe();
         self.pump();
+    }
+
+    /// The host every frame names.
+    pub const fn host_id(&self) -> &HostId {
+        self.mirror.host_id()
+    }
+
+    /// Re-pin the host every frame names (#1066), framing every subscribed
+    /// section again under it; see [`Mirror::set_host`]. The renderer must
+    /// already know `host_id`, or it drops the batch this sends. Returns
+    /// whether the host changed.
+    pub fn set_host(&mut self, host_id: HostId) -> bool {
+        let changed = self.mirror.set_host(host_id);
+        if changed {
+            self.pump();
+        }
+        changed
     }
 
     /// Take a renderer that just attached (or reloaded) wanting

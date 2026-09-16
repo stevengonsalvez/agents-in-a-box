@@ -257,6 +257,56 @@ const SELECT_COLUMNS: &str = "host_id, principal, op_id, method, body_fingerprin
      status, reason, reply, receipt_state, receipt_detail, expired, created_at, updated_at";
 
 impl MutationLedgerRepo {
+    /// Resolve which host owns `op_id` for `principal` and claim it under that
+    /// key, on one connection (#1066).
+    ///
+    /// An op id this principal already holds under [`LOCAL_HOST_ID`], from a
+    /// pre-mint daemon, keeps that key, so a retry across the upgrade replays
+    /// instead of executing a second time. Every other claim is keyed under this
+    /// daemon's minted id, or `local` on a home with no identity. The legacy
+    /// lookup is by the full key, so another principal's `local` row never
+    /// decides this caller's host. That lookup is also what makes the
+    /// non-atomic interleaving safe: once the daemon has minted, nothing writes
+    /// a new `local` row, so no statement landing between the lookup and the
+    /// claim can change which key this op id belongs to.
+    ///
+    /// What sharing the connection buys is one pool acquisition for every read
+    /// and the insert. It is not a transaction: the statements are
+    /// autocommit, as [`Self::claim_on`] says, and the guarantee against a
+    /// concurrent claim is still the UNIQUE `(host_id, op_id)` index.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the `SQLite` failure.
+    pub async fn claim_resolving_host_on(
+        conn: &mut SqliteConnection,
+        principal: &str,
+        op_id: &str,
+        method: &str,
+        body_fingerprint: &str,
+        tier: &str,
+        now_ms: i64,
+    ) -> Result<(LedgerKey, ClaimOutcome), sqlx::Error> {
+        let legacy = LedgerKey {
+            host_id: LOCAL_HOST_ID.to_string(),
+            principal: principal.to_string(),
+            op_id: op_id.to_string(),
+        };
+        let host_id = if Self::get_on(&mut *conn, &legacy).await?.is_some() {
+            LOCAL_HOST_ID.to_string()
+        } else {
+            crate::repo::daemon_identity::host_id_on(&mut *conn).await?
+        };
+        let key = LedgerKey {
+            host_id,
+            principal: principal.to_string(),
+            op_id: op_id.to_string(),
+        };
+        let outcome =
+            Self::claim_on(&mut *conn, &key, method, body_fingerprint, tier, now_ms).await?;
+        Ok((key, outcome))
+    }
+
     /// Claim `key` for `method`, or report what already holds it.
     ///
     /// The foreign check runs FIRST, and that ordering is the point: the key

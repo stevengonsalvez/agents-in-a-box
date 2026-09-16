@@ -193,6 +193,48 @@ fn subscribe_frames_exactly_the_named_sections_in_one_batch() {
     assert_eq!(framed, vec!["frame fleet", "frame sessions"]);
 }
 
+/// #1066: re-pinning the host frames every subscribed section again, static
+/// ones included, under the new id; re-pinning to the same id sends nothing.
+#[test]
+fn set_host_reframes_every_subscribed_section_under_the_new_id() {
+    scratch_home();
+    let hosts = Rc::new(RefCell::new(Vec::<(String, String)>::new()));
+    let seen = Rc::clone(&hosts);
+    let mut host = DesktopHost::new(
+        AppConfig::default(),
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::none(),
+        move |batch: FrameBatch| {
+            for frame in batch.frames {
+                seen.borrow_mut().push((frame.section, frame.host_id.as_str().to_string()));
+            }
+        },
+    );
+    host.subscribe(Subscription::only(&[
+        SectionId::Config,
+        SectionId::Sessions,
+    ]));
+    assert!(hosts.borrow().iter().all(|(_, id)| id == "local"));
+    hosts.borrow_mut().clear();
+
+    assert!(!host.set_host(HostId::local()));
+    assert!(hosts.borrow().is_empty(), "the same id frames nothing");
+
+    let ulid = HostId::new("01K5A0000000000000000AAAAA");
+    assert!(host.set_host(ulid.clone()));
+    assert_eq!(host.host_id(), &ulid);
+    let mut framed = hosts.borrow().clone();
+    framed.sort();
+    assert_eq!(
+        framed,
+        vec![
+            ("config".to_string(), ulid.as_str().to_string()),
+            ("sessions".to_string(), ulid.as_str().to_string()),
+        ]
+    );
+}
+
 /// The desktop's sidebar is the session list, so the host moves the reducer
 /// there through the home sidebar's own rows, and the list's row click is then
 /// in context.

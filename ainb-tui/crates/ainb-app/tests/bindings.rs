@@ -30,6 +30,7 @@ fn app_state_ts_matches_the_rust_types() {
 #[test]
 fn sample_frames_as_typed_typescript() {
     use ainb_app::SectionId;
+    use ainb_app::wire::frame::HostId;
     use ainb_app::wire::{section_json, section_name, shape};
 
     let Some(out) = std::env::var_os("WRITE_BINDINGS_SAMPLE") else {
@@ -44,7 +45,12 @@ fn sample_frames_as_typed_typescript() {
     for (index, state) in shape::sample_states(&mut shape::PlainSeed).iter().enumerate() {
         let bodies: serde_json::Map<String, serde_json::Value> = SectionId::ALL
             .into_iter()
-            .map(|id| (section_name(id).to_string(), section_json(state, id)))
+            .map(|id| {
+                (
+                    section_name(id).to_string(),
+                    section_json(state, id, &HostId::local()),
+                )
+            })
             .collect();
         ts.push_str(&format!(
             "export const sample{index}: SectionBodies = {};\n\n",

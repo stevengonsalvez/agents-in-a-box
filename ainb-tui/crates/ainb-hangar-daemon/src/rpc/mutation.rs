@@ -278,25 +278,6 @@ fn refusal_reason(method: &str, value: &Value) -> Option<&'static str> {
     }
 }
 
-/// The `host_id` a claim is keyed under (#1066).
-///
-/// An op id a pre-#1066 daemon already holds under `local` stays there, so a
-/// client retrying across the upgrade gets the stored reply instead of a
-/// second execution. Every other claim is keyed under this daemon's minted id,
-/// or `local` on a home that has none.
-async fn ledger_host(pool: &SqlitePool, op_id: &str) -> Result<String, RpcError> {
-    use ainb_hangar_store::repo::daemon_identity::{UNMINTED_HOST_ID, host_id_on};
-    if MutationLedgerRepo::holder_of(pool, UNMINTED_HOST_ID, op_id)
-        .await
-        .map_err(|e| store_error(&e))?
-        .is_some()
-    {
-        return Ok(UNMINTED_HOST_ID.to_string());
-    }
-    let mut conn = pool.acquire().await.map_err(|e| store_error(&e))?;
-    host_id_on(&mut conn).await.map_err(|e| store_error(&e))
-}
-
 /// Map a ledger fault onto the wire with a FIXED message.
 ///
 /// The dispatcher's own `store_err` forwards the SQLite text, which is right
@@ -508,17 +489,25 @@ where
         return handler().await;
     };
 
-    let key = LedgerKey {
-        host_id: ledger_host(pool, op_id.as_str()).await?,
-        principal: principal_of(caller),
-        op_id: op_id.as_str().to_string(),
-    };
     let fingerprint = MutationLedgerRepo::fingerprint(&req.method, &req.params);
     let tier = tier_token(entry.tier);
 
-    let outcome = MutationLedgerRepo::claim(pool, &key, &req.method, &fingerprint, tier, now_ms)
-        .await
-        .map_err(|e| store_error(&e))?;
+    // The host the op id belongs to and the claim itself are decided on ONE
+    // connection (#1066): an op id a pre-mint daemon holds under `local` keeps
+    // that key, so a retry across the upgrade replays rather than re-running.
+    let mut conn = pool.acquire().await.map_err(|e| store_error(&e))?;
+    let (key, outcome) = MutationLedgerRepo::claim_resolving_host_on(
+        &mut conn,
+        &principal_of(caller),
+        op_id.as_str(),
+        &req.method,
+        &fingerprint,
+        tier,
+        now_ms,
+    )
+    .await
+    .map_err(|e| store_error(&e))?;
+    drop(conn);
     if let Some(answer) = settled(entry, &outcome) {
         return answer;
     }
