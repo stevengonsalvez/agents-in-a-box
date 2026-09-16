@@ -36,7 +36,13 @@ E2E_DIR="$WORKSPACE/crates/ainb-web/e2e"
 
 # Shared target dir keeps this in step with the rest of the ccc build (avoids a
 # from-scratch rebuild). Override by exporting CARGO_TARGET_DIR before the run.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/stevengonsalvez/.cache/ccc-shared-target}"
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  if [ -d "/Users/stevengonsalvez/.cache/ccc-shared-target" ]; then
+    export CARGO_TARGET_DIR="/Users/stevengonsalvez/.cache/ccc-shared-target"
+  else
+    export CARGO_TARGET_DIR="$WORKSPACE/target"
+  fi
+fi
 TARGET_DIR="$CARGO_TARGET_DIR/debug"
 
 AINB="$TARGET_DIR/ainb"
@@ -84,7 +90,11 @@ done
 
 # ── Playwright deps (idempotent) ─────────────────────────────────────────────
 log "installing e2e npm deps"
-( cd "$E2E_DIR" && npm install --no-audit --no-fund ) || die "npm install failed"
+if [ -f "$E2E_DIR/package-lock.json" ]; then
+  ( cd "$E2E_DIR" && npm ci --no-audit --no-fund ) || die "npm ci failed"
+else
+  ( cd "$E2E_DIR" && npm install --no-audit --no-fund ) || die "npm install failed"
+fi
 log "ensuring the Playwright chromium is installed"
 ( cd "$E2E_DIR" && npx playwright install chromium ) || die "playwright install chromium failed"
 
