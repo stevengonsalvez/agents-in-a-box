@@ -289,7 +289,7 @@ const NAME_ALLOW: &[(&str, &str)] = &[
     ("ActionOutcome.detail", "daemon action output, scrubbed"),
     (
         "DepState.detail",
-        "a detected dependency's version or alternative, scrubbed on a frame",
+        "a probed command's first output line, scrubbed on a frame",
     ),
     (
         "FleetActionReceipt.detail",
@@ -1775,6 +1775,21 @@ const BINDINGS: &str = include_str!("../bindings/AppState.ts");
 /// longer missing fails too, so the list cannot go stale.
 const UNSEEDED_VARIANTS: &[(&str, &str)] = &[];
 
+/// The variants that carry each scrubbed field of an internally tagged enum.
+///
+/// The tracer names those fields by the enum alone (`McpInstallation.package`),
+/// because serde writes the variant as the tag's value. `SERIALIZER_REDACTED`
+/// therefore cannot say WHICH variants its entry was triaged for, and a new
+/// `Pip { package }` would inherit the pass unread. Pinning the carriers makes
+/// that new variant change the set and fail here instead (#1153 review).
+const TAGGED_SCRUB_CARRIERS: &[(&str, &str)] = &[
+    ("DepState.detail", "DepState::ok|alt|too_old"),
+    ("ImageSource.base_image", "ImageSource::ClaudeDocker"),
+    ("McpInstallation.package", "McpInstallation::Npm|Python"),
+    ("McpInstallation.script", "McpInstallation::Custom"),
+    ("McpInstallation.version", "McpInstallation::Npm|Python"),
+];
+
 /// Every externally tagged enum variant with a payload, reachable from a
 /// section's view type, is seeded by the sample (#1145).
 ///
@@ -1821,6 +1836,34 @@ fn every_payload_carrying_variant_reachable_from_a_section_is_seeded() {
                     || path.starts_with(&format!("{variant}{{"))
             })
     };
+
+    // Tagged field -> the variants carrying it, as the walk found them.
+    let mut carriers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (path, owner) in &expected {
+        if let Some((enum_name, _)) = owner.split_once("::") {
+            let field = path.rsplit('.').next().unwrap_or(path);
+            carriers
+                .entry(format!("{enum_name}.{field}"))
+                .or_default()
+                .insert(owner.clone());
+        }
+    }
+    let drifted: Vec<String> = TAGGED_SCRUB_CARRIERS
+        .iter()
+        .filter(|(field, pinned)| {
+            carriers
+                .get(*field)
+                .is_none_or(|found| found.iter().any(|owner| owner != pinned))
+        })
+        .map(|(field, pinned)| {
+            format!("{field}: pinned {pinned}, found {:?}", carriers.get(*field))
+        })
+        .collect();
+    assert!(
+        drifted.is_empty(),
+        "a scrubbed tagged field is carried by other variants than it was triaged \
+         for; re-triage it and update TAGGED_SCRUB_CARRIERS:\n{drifted:#?}"
+    );
 
     let allowed: BTreeSet<&str> = UNSEEDED_VARIANTS.iter().map(|(path, _)| *path).collect();
     let missing: Vec<String> = expected
