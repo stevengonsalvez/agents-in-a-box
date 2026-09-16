@@ -2977,6 +2977,76 @@ pub enum WorkspaceLoadResult {
 
 /// Load workspaces asynchronously (standalone function for use in spawned tasks)
 /// This is called from background task to avoid blocking the main thread
+/// Add the STOPPED sessions to `workspaces`: entries persisted in
+/// `sessions.json` whose tmux session is gone but whose worktree is still on
+/// disk. `live_tmux_names` are the sessions the tmux discovery already found.
+///
+/// Shared by the background scan and the full refresh, so both surface the same
+/// rows. It used to belong to the refresh alone, which the TUI reaches through
+/// a queued `AsyncAction::RefreshWorkspaces` and no other host is obliged to
+/// run, so on the desktop a stopped session never reached the sidebar at all
+/// (#1159). It reads a file and canonicalizes paths, which is why it is a
+/// function on the scan's own thread rather than work on a render path.
+///
+/// A worktree that exists but sits inside NO git repository is skipped: those
+/// are leftovers (a `.vite/` cache keeping the directory alive), and adding
+/// them fabricates a phantom workspace named after the directory. They are
+/// surfaced by `/recover-sessions` instead.
+fn add_stopped_sessions(
+    workspaces: &mut Vec<Workspace>,
+    live_tmux_names: &HashSet<String>,
+    labels: &SessionLabelStore,
+) {
+    let canonical_key =
+        |p: &std::path::Path| -> PathBuf { p.canonicalize().unwrap_or_else(|_| p.to_path_buf()) };
+    let store = crate::interactive::SessionStore::load();
+    for metadata in store.sessions().values() {
+        if live_tmux_names.contains(&metadata.tmux_session_name) {
+            continue;
+        }
+        if !metadata.worktree_path.exists() {
+            continue;
+        }
+
+        let Some(source_repo) =
+            crate::interactive::InteractiveSessionManager::get_source_repository(
+                &metadata.worktree_path,
+            )
+        else {
+            debug!(
+                "Skipping stopped session {}: worktree {:?} is inside no git repository (broken). Use /recover-sessions to clean up.",
+                metadata.session_id, metadata.worktree_path
+            );
+            continue;
+        };
+
+        let stopped = AppState::stopped_session_from_metadata(metadata, labels);
+        // Grouped by the actual source repository, as the live pass groups.
+        // The old `worktree_path.parent()` key was always the shared
+        // `~/.agents-in-a-box/worktrees/` dir, which collapsed every stopped
+        // session into one bucket.
+        let workspace_key = canonical_key(&source_repo);
+
+        if let Some(workspace) = workspaces
+            .iter_mut()
+            .find(|w| canonical_key(std::path::Path::new(&w.path)) == workspace_key)
+        {
+            if !workspace.sessions.iter().any(|s| s.id == metadata.session_id) {
+                workspace.sessions.push(stopped);
+            }
+        } else {
+            let workspace_name =
+                crate::interactive::InteractiveSessionManager::derive_workspace_name(
+                    &metadata.worktree_path,
+                    &source_repo,
+                );
+            let mut workspace = Workspace::new(workspace_name, source_repo);
+            workspace.sessions.push(stopped);
+            workspaces.push(workspace);
+        }
+    }
+}
+
 async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
     info!("load_workspaces_async: Starting");
 
@@ -3011,7 +3081,9 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
         .collect();
 
     let session_label_store = SessionLabelStore::load();
+    let mut live_tmux_names: HashSet<String> = HashSet::new();
     for interactive_session in interactive_sessions {
+        live_tmux_names.insert(interactive_session.tmux_session_name.clone());
         let mut session = interactive_session.to_session_model();
         if let Some(label) = session_label_store.get(&interactive_session.tmux_session_name) {
             session.display_name = Some(label.clone());
@@ -3029,6 +3101,11 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
             workspaces.push(workspace);
         }
     }
+
+    // A session the operator stopped is still theirs: its worktree is on disk
+    // and the row is how they resume it. The scan is the only thing that runs
+    // on every host, so the pass belongs here (#1159).
+    add_stopped_sessions(&mut workspaces, &live_tmux_names, &session_label_store);
 
     info!(
         "load_workspaces_async: Complete with {} workspaces",
@@ -5331,58 +5408,11 @@ impl AppState {
         // Plain checkouts and subdirectories of a checkout resolve fine (see
         // `get_source_repository`), so a stopped session created with
         // `ainb run --repo <clone>` stays visible here instead of vanishing.
-        let store = SessionStore::load();
-        for metadata in store.sessions().values() {
-            if live_tmux_names.contains(&metadata.tmux_session_name) {
-                continue;
-            }
-            if !metadata.worktree_path.exists() {
-                continue;
-            }
-
-            let Some(source_repo) =
-                crate::interactive::InteractiveSessionManager::get_source_repository(
-                    &metadata.worktree_path,
-                )
-            else {
-                debug!(
-                    "Skipping stopped session {}: worktree {:?} is inside no git repository (broken). Use /recover-sessions to clean up.",
-                    metadata.session_id, metadata.worktree_path
-                );
-                continue;
-            };
-
-            let stopped = Self::stopped_session_from_metadata(
-                metadata,
-                &self.session_labels.session_label_store,
-            );
-            // Group by the actual source repository (matches Phase 1's
-            // grouping above). The previous `worktree_path.parent()` key was
-            // always the shared `~/.agents-in-a-box/worktrees/` dir, which
-            // collapsed every stopped session into one bucket.
-            let workspace_path = source_repo.clone();
-            let workspace_key = canonical_key(&workspace_path);
-
-            if let Some(workspace) = self
-                .sessions
-                .workspaces
-                .iter_mut()
-                .find(|w| canonical_key(std::path::Path::new(&w.path)) == workspace_key)
-            {
-                if !workspace.sessions.iter().any(|s| s.id == metadata.session_id) {
-                    workspace.sessions.push(stopped);
-                }
-            } else {
-                let workspace_name =
-                    crate::interactive::InteractiveSessionManager::derive_workspace_name(
-                        &metadata.worktree_path,
-                        &source_repo,
-                    );
-                let mut workspace = crate::models::Workspace::new(workspace_name, workspace_path);
-                workspace.sessions.push(stopped);
-                self.sessions.workspaces.push(workspace);
-            }
-        }
+        add_stopped_sessions(
+            &mut self.sessions.workspaces,
+            &live_tmux_names,
+            &self.session_labels.session_label_store,
+        );
     }
 
     /// Build a `Session` model in `Stopped` state from persisted metadata.
