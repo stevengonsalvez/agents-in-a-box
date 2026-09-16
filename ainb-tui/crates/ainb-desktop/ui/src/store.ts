@@ -172,8 +172,8 @@ export function createFrameStore(subscribed: readonly SectionName[]): FrameStore
     batch(() => {
       // Setting a key to `undefined` deletes it from a Solid store, so the
       // host leaves the key sets `applyDrain` counts against `MAX_HOSTS`.
-      if (host in state.hosts) setState("hosts", host, undefined as never);
-      if (host in state.stale) setState("stale", host, undefined as never);
+      setState("hosts", host, undefined as never);
+      setState("stale", host, undefined as never);
     });
   }
 
