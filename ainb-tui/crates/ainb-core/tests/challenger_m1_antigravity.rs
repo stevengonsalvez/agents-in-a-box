@@ -29,7 +29,7 @@ use ainb::models::session::{AntigravityModel, SessionAgentType};
 use ainb::providers::{AntigravityProvider, ProviderRegistry};
 
 fn make_dummy_key(code: KeyCode) -> ainb::app::keymap::Chord {
-    ainb::app::terminal_keys::chord_from_key_event(&KeyEvent::new(code, KeyModifiers::empty()))
+    ainb::app::screens::builtin::chord_from_key_event(&KeyEvent::new(code, KeyModifiers::empty()))
         .expect("mapped key")
 }
 
