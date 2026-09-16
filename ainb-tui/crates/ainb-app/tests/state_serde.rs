@@ -1681,11 +1681,6 @@ fn every_payload_variant_of_a_wire_enum_is_seeded() {
          from the generated shape and proves nothing",
         expected.len()
     );
-    if std::env::var_os("DUMP_VARIANTS").is_some() {
-        for variant in &expected {
-            println!("VARIANT {variant}");
-        }
-    }
     let committed = shape::committed_key_paths();
     let reached = |variant: &String| {
         committed.contains(variant)
@@ -1785,7 +1780,15 @@ impl Bindings {
                     // An internally tagged enum: every member leads with the
                     // same tag field (`kind`), and the variant name is that
                     // field's VALUE, which no key path can carry. The tag
-                    // itself is already a leaf the fixture locks.
+                    // itself is already a leaf the fixture locks. Its PAYLOAD
+                    // still reaches the wire as ordinary fields beside the
+                    // tag, so those are walked here (#1145).
+                    for (field, field_ty) in struct_fields(member) {
+                        if field == key {
+                            continue;
+                        }
+                        self.walk(&field_ty, &format!("{path}.{field}"), chain, found);
+                    }
                     continue;
                 }
                 let variant_path = format!("{path}.{key}");
@@ -1854,6 +1857,18 @@ fn end_of_declaration(text: &str, from: usize) -> Option<usize> {
     None
 }
 
+/// Split an object body into its entries. specta writes a struct's fields
+/// `a: A, b: B` but an internally tagged variant's `type: "Npm"; package: P`,
+/// so both separators end an entry.
+fn split_entries(body: &str) -> Vec<String> {
+    split_top_level(body, ',')
+        .iter()
+        .flat_map(|part| split_top_level(part, ';'))
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
 /// Split on `separator` at nesting depth zero, outside string literals.
 fn split_top_level(text: &str, separator: char) -> Vec<String> {
     let mut parts = Vec::new();
@@ -1886,7 +1901,7 @@ fn split_top_level(text: &str, separator: char) -> Vec<String> {
 /// `({ Sent: FleetActionReceipt[] }) & { Failed?: never }`, so everything from
 /// the `&` on belongs to the exclusion, not to the payload.
 fn first_entry(inner: &str) -> Option<(String, String)> {
-    let entry = split_top_level(inner, ',').into_iter().next()?;
+    let entry = split_entries(inner).into_iter().next()?;
     let colon = split_top_level(&entry, ':');
     if colon.len() < 2 {
         return None;
@@ -1924,7 +1939,7 @@ fn balanced_end(value: &str) -> usize {
 /// Every `(field, type)` of an object type, optional markers stripped.
 fn struct_fields(ty: &str) -> Vec<(String, String)> {
     let inner = ty.trim().trim_start_matches('{').trim_end().trim_end_matches('}');
-    split_top_level(inner, ',')
+    split_entries(inner)
         .into_iter()
         .filter_map(|entry| {
             let parts = split_top_level(&entry, ':');
