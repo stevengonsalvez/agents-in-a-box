@@ -18,7 +18,7 @@ fn chord_normalises_terminal_spellings() {
 fn shifted_printable_terminal_keys_use_the_printed_character() {
     let event = KeyEvent::new(KeyCode::Char(':'), KeyModifiers::SHIFT);
     assert_eq!(
-        ainb::app::terminal_keys::chord_from_key_event(&event)
+        ainb::app::screens::builtin::chord_from_key_event(&event)
             .expect("mapped key")
             .as_str(),
         ":"
@@ -26,7 +26,7 @@ fn shifted_printable_terminal_keys_use_the_printed_character() {
 
     let event = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
     assert_eq!(
-        ainb::app::terminal_keys::chord_from_key_event(&event)
+        ainb::app::screens::builtin::chord_from_key_event(&event)
             .expect("mapped key")
             .as_str(),
         "G"
