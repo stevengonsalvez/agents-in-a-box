@@ -51,10 +51,11 @@ impl<T> Versioned<T> {
     ///
     /// This is the ONE place the coarse-bump rule is relaxed, so the contract
     /// is narrow: `f` must return true whenever it wrote anything an observer
-    /// could see. Use it for calls that already answer that question, the
-    /// `tick()` family whose bool means exactly "I changed something", and
-    /// nothing else. Everywhere else `DerefMut` is the right tool precisely
-    /// because it cannot be forgotten.
+    /// could see. Use it for calls that already answer that question: the
+    /// `tick()` family whose bool means exactly "I changed something", and the
+    /// per-tick polls that need `&mut` only to drain a channel and write a
+    /// section only when something arrived (#1139). Everywhere else `DerefMut`
+    /// is the right tool precisely because it cannot be forgotten.
     pub fn update(&mut self, f: impl FnOnce(&mut T) -> bool) -> bool {
         let changed = f(&mut self.data);
         if changed {
