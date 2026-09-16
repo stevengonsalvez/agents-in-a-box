@@ -88,14 +88,14 @@ describe("the desktop shell", () => {
       timeoutMsg: `the typed line never reached the agent in ${first.tmux}`,
     });
 
-    // The palette opens on the shell accelerator and runs a named command:
-    // `session_list.next` moves the session list's selection. The selection is
-    // put back on the sidebar's first row immediately before, so the row the
-    // command moves from is never the last one, whatever a scan in between
-    // did to the order.
+    // The palette opens on the shell accelerator, offers the command rows the
+    // host built, and runs what Enter lands on. Two rows are run here: a
+    // command, whose effect is the session list's own selection moving, and a
+    // live session, whose effect is a tab.
     const selected = async () => await $(".session-row.selected").getAttribute("data-session");
     await (await $$(".session-row"))[0].click();
     const wasSelected = await selected();
+
     await browser.keys([...MOD, "k"]);
     await $(".palette-query").waitForExist({ timeout: 30_000 });
     await browser.keys("Select next session");
@@ -109,10 +109,32 @@ describe("the desktop shell", () => {
       "the query's tightest match is the row Enter runs",
     );
     await browser.keys("Enter");
-    // Which row is next is the reducer's own order, not the seeding order.
     await browser.waitUntil(async () => (await selected()) !== wasSelected, {
       timeout: 30_000,
       timeoutMsg: `the palette's command did not move the selection from ${wasSelected}`,
+    });
+
+    // The palette's other half: a live session, which opens its terminal tab.
+    const other = sessions.find((session) => session.id !== first.id);
+    assert.ok(other, "the world seeded a second session");
+    const tabsNow = (await $$(".tab")).length;
+    await browser.keys([...MOD, "k"]);
+    await $(".palette-query").waitForExist({ timeout: 30_000 });
+    await browser.execute((text) => {
+      const query = document.querySelector(".palette-query");
+      query.value = text;
+      query.dispatchEvent(new Event("input", { bubbles: true }));
+    }, other.branch);
+    await browser.waitUntil(
+      async () =>
+        (await $$(".palette-row")).length > 0 &&
+        (await $(".palette-row").getAttribute("data-row")).startsWith("session:"),
+      { timeout: 15_000, timeoutMsg: `the palette offered no session row for ${other.id}` },
+    );
+    await browser.keys("Enter");
+    await browser.waitUntil(async () => (await $$(".tab")).length > tabsNow, {
+      timeout: 60_000,
+      timeoutMsg: "the palette's session row opened no tab",
     });
 
     // A session another process creates arrives on the open window.
