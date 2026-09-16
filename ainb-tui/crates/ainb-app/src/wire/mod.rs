@@ -47,7 +47,22 @@ use std::sync::Mutex;
 /// without a non-string map key, which `state_serde.rs` proves per section.
 #[must_use]
 pub fn section_json(state: &AppState, id: SectionId) -> serde_json::Value {
-    serialize_section(state, id, serde_json::value::Serializer)
+    section_json_from(state, id, &frame::HostId::local())
+}
+
+/// [`section_json`] as `host` sends it: every host field inside the body names
+/// `host`, the same id the frame carrying it names (#1066).
+///
+/// # Panics
+///
+/// As [`section_json`].
+#[must_use]
+pub fn section_json_from(
+    state: &AppState,
+    id: SectionId,
+    host: &frame::HostId,
+) -> serde_json::Value {
+    serialize_section_from(state, id, host, serde_json::value::Serializer)
         .expect("a section view always serialises to JSON")
 }
 
@@ -134,9 +149,24 @@ pub fn serialize_section<S: Serializer>(
     id: SectionId,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
+    serialize_section_from(state, id, &frame::HostId::local(), serializer)
+}
+
+/// [`serialize_section`] as `host` sends it; see [`section_json_from`].
+///
+/// # Errors
+///
+/// Whatever `serializer` reports.
+pub fn serialize_section_from<S: Serializer>(
+    state: &AppState,
+    id: SectionId,
+    host: &frame::HostId,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
     // Frame-only redaction on persisted types (see `fields`) is live for
-    // exactly this call.
+    // exactly this call, and so is the sending host the fleet rows name.
     let _frame = fields::FrameScope::enter();
+    let _host = SendingHost::enter(host);
     match id {
         SectionId::Sessions => SessionsView::from(&*state.sessions).serialize(serializer),
         SectionId::SessionLabels => {
@@ -165,6 +195,40 @@ pub fn serialize_section<S: Serializer>(
     }
 }
 
+/// The host the section being serialised is sent as, for the view fields that
+/// name a host (#1066). Serde gives a `serialize_with` function only the field,
+/// so the host rides a scope on this thread for exactly one
+/// [`serialize_section_from`] call; serialisation never leaves the thread.
+struct SendingHost {
+    previous: Option<frame::HostId>,
+}
+
+thread_local! {
+    static SENDING_HOST: std::cell::RefCell<Option<frame::HostId>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+impl SendingHost {
+    fn enter(host: &frame::HostId) -> Self {
+        let previous = SENDING_HOST.with(|cell| cell.replace(Some(host.clone())));
+        Self { previous }
+    }
+
+    /// The host of the section being serialised; `local` outside one.
+    fn current() -> frame::HostId {
+        SENDING_HOST
+            .with(|cell| cell.borrow().clone())
+            .unwrap_or_else(frame::HostId::local)
+    }
+}
+
+impl Drop for SendingHost {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        SENDING_HOST.with(|cell| *cell.borrow_mut() = previous);
+    }
+}
+
 /// Serialise the value behind a shared cell the poller threads write through.
 /// A poisoned lock still holds the last complete value, so it is read anyway.
 // serde's `serialize_with` hands the view's `&&T`, so the double reference is its signature.
@@ -181,18 +245,17 @@ fn locked<T: Serialize, S: Serializer>(cell: &&Mutex<T>, serializer: S) -> Resul
 /// `current_request` (the complete tool input of a pending approval, unbounded
 /// and shaped by the agent; the fingerprint stays), `cwd` and `display_name`
 /// (the operator's paths and labels, #983 M19, as section 20 does). On goes
-/// `host_id`: these rows are the daemon's, named with the `host_id` it gave in
-/// `auth/hello` (#1066), so a row stays addressable once it is mirrored next to
-/// another host's. A daemon that names none leaves them `local`, as before.
+/// `host_id`: these rows are the daemon's, named with the host the section is
+/// sent as ([`serialize_section_from`], #1066), so a row and the frame
+/// carrying it name one host, and a row stays addressable once it is mirrored
+/// next to another host's.
 // serde's `serialize_with` hands the view's `&&T`, so the double reference is its signature.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn fleet_rows<S: Serializer>(
     cell: &&Mutex<Vec<ainb_hangar_proto::fleet::FleetSession>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    // One read of the host for the whole section, so every row in one frame
-    // names the same daemon even if a hello lands mid-serialisation.
-    let host_id = crate::wire::frame::HostId::daemon();
+    let host_id = SendingHost::current();
     let rows: Vec<FleetRowFrame> = cell
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
