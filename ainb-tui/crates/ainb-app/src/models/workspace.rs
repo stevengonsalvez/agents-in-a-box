@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use super::{Session, ShellSession};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Workspace {
     pub name: String,
