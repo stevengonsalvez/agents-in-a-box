@@ -240,9 +240,16 @@ test("framesIgnored counts every frame that applied nothing, and nothing else", 
 test("framesIgnored wakes its reader once per drain", () => {
   withStore(["sessions"], (store) => {
     const seen: number[] = [];
-    createRoot(() => createEffect(() => seen.push(store.framesIgnored())));
-    drain(store, "local", frame("local", "shell", 1, 1, {}), frame("peer", "sessions", 1, 1, sessions("a")));
-    assert.deepEqual(seen, [0, 2]);
+    const dispose = createRoot((dispose) => {
+      createEffect(() => seen.push(store.framesIgnored()));
+      return dispose;
+    });
+    try {
+      drain(store, "local", frame("local", "shell", 1, 1, {}), frame("peer", "sessions", 1, 1, sessions("a")));
+      assert.deepEqual(seen, [0, 2]);
+    } finally {
+      dispose();
+    }
   });
 });
 
