@@ -19,7 +19,7 @@ use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::{DesktopHost, FrameSink};
 use ainb_desktop::intent::RendererIntent;
 use ainb_desktop::shell::Shell;
-use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarView};
+use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarState, SidecarView};
 use ainb_desktop::terminal::{TabEvents, TabsView, Terminals, Tmux};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Emitter, Manager};
@@ -139,9 +139,10 @@ fn terminal_close(window: tauri::State<'_, Window>, key: String) {
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
 
 /// Attach the webview's frame channel, send it every section it names, and
-/// answer with the host id its frames are held under: the id the daemon gave
-/// in `auth/hello`, or `local` until it names one (#1066). The webview owns the
-/// one subscription list; unknown section names are dropped.
+/// answer with the host id those frames name: the id the mirror is pinned to,
+/// `local` until the daemon names one (#1066). A later re-pin reaches the
+/// webview as a `host` event before its frames. The webview owns the one
+/// subscription list; unknown section names are dropped.
 #[tauri::command]
 fn subscribe(
     window: tauri::State<'_, Window>,
@@ -149,8 +150,7 @@ fn subscribe(
     sections: Subscription,
 ) -> HostId {
     *window.frames.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frames);
-    window.shell.subscribe(sections);
-    HostId::daemon()
+    window.shell.subscribe(sections)
 }
 
 /// Apply an intent from the webview: a key, a command, pasted text. A
@@ -267,9 +267,13 @@ fn main() {
             // dispatch: the same `ui.app_tick_ms` the terminal host paces by.
             let tick = Duration::from_millis(config.ui.app_tick_ms.max(1));
             let frames = ChannelSink::default();
+            let socket = ainb_hangar_client::socket_path_in(&hangar_home);
             let mut host = DesktopHost::new(
                 config,
                 Keymap::defaults(),
+                // `local` until this home's daemon names its host; the sidecar
+                // task below re-pins once it has.
+                HostId::of_daemon(&socket),
                 // Nothing is framed until the webview subscribes.
                 Subscription::none(),
                 frames.clone(),
@@ -313,7 +317,28 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    let view = states.borrow_and_update().view();
+                    let (view, connected) = {
+                        let state = states.borrow_and_update();
+                        (
+                            state.view(),
+                            matches!(*state, SidecarState::Connected { .. }),
+                        )
+                    };
+                    // A connected sidecar has completed a hello, so the daemon
+                    // may now have named its host (#1066). The webview hears the
+                    // new id first, then the mirror re-pins and reframes under
+                    // it; the other order would have the webview drop the
+                    // reframe as another host's.
+                    if connected {
+                        let host_id = HostId::of_daemon(&socket);
+                        let window = handle.state::<Window>();
+                        if host_id != window.shell.host_id() {
+                            if let Err(error) = handle.emit("host", &host_id) {
+                                tracing::warn!(%error, "host id not delivered to the webview");
+                            }
+                            window.shell.set_host(host_id);
+                        }
+                    }
                     if let Err(error) = handle.emit("sidecar", view) {
                         tracing::warn!(%error, "sidecar state not delivered to the webview");
                     }
