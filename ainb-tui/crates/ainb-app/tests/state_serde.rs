@@ -1748,14 +1748,6 @@ const UNSEEDED_VARIANTS: &[(&str, &str)] = &[
         "AttachableRef: the sample never renames this ref (#1146)",
     ),
     (
-        "sessions.workspaces[].sessions[].status.Error",
-        "SessionStatus::Error: seeding it trips the credential tripwire, the payload is unredacted (#1146)",
-    ),
-    (
-        "ssh.ssh_sessions[].status.Error",
-        "SessionStatus::Error: seeding it trips the credential tripwire, the payload is unredacted (#1146)",
-    ),
-    (
         "shell.confirmation_dialog.confirm_action.BulkDeleteSessions",
         "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
     ),
