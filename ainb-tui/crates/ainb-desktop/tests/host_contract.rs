@@ -59,6 +59,21 @@ impl Executor for Recorder {
 }
 
 #[test]
+fn an_answer_from_this_window_is_recorded_as_the_desktops() {
+    // The daemon stamps `answered_by` from the kind the connection declares,
+    // and the answer path dials with the kind the state carries. A shell that
+    // left it at the default would record every answer as the TUI's, and the
+    // concurrency gate would read a surface nobody sat at.
+    let log = Log::default();
+    let host = host(&[SectionId::Shell], &log);
+
+    assert_eq!(
+        host.state().host.surface,
+        ainb_hangar_proto::connections::SurfaceKind::Desktop
+    );
+}
+
+#[test]
 fn the_first_batch_frames_every_subscribed_section_and_nothing_else() {
     let log = Log::default();
     let mut host = host(&[SectionId::Sessions, SectionId::Shell], &log);
