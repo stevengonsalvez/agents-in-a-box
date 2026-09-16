@@ -1862,7 +1862,10 @@ export type DepInstall_Serialize =
 { Error: string };
 
 /**  A dependency spec joined with its detected state. */
-export type DepReport = {
+export type DepReport = DepReport_Serialize;
+
+/**  A dependency spec joined with its detected state. */
+export type DepReport_Serialize = {
 	id: string,
 	name: string,
 	why: string,
@@ -1872,22 +1875,28 @@ export type DepReport = {
 	install_hint: string,
 	/**  Whether ainb can run the installer automatically (after consent). */
 	auto_installable: boolean,
-	state: DepState,
+	state: DepState_Serialize,
 	satisfied: boolean,
 };
 
 /**  Detected state of a single dependency. */
-export type DepState = 
-/**  Present and satisfies any version/variant requirement. */
+export type DepState = DepState_Serialize;
+
+/**  Detected state of a single dependency. */
+export type DepState_Serialize = 
+/**
+ *  Present and satisfies any version/variant requirement. The detail is a
+ *  probed binary's own output, so a frame carries it scrubbed (#1146).
+ */
 { kind: "ok"; detail: string | null } | 
 /**  Satisfied by an alternative binary (e.g. `gtimeout` for `timeout`). */
 { kind: "alt"; detail: string } | 
 /**  Present but too old (e.g. bash 3.2 < 4). */
 { kind: "too_old"; detail: string } | 
 /**  Not found. */
-{ kind: "missing" } | 
+({ kind: "missing" }) & { detail?: never } | 
 /**  Cannot be detected programmatically (e.g. marketplace plugin presence). */
-{ kind: "unknown" };
+({ kind: "unknown" }) & { detail?: never };
 
 /**
  *  Importance tier of a dependency within its topic. Drives whether onboarding
@@ -2607,7 +2616,7 @@ export type ImageSource_Serialize =
 ({ type: "Dockerfile"; path: string; build_args: { [key in string]: string } }) & { base_image?: never; name?: never } | 
 /**  Use claude-docker Dockerfile with modifications */
 ({ type: "ClaudeDocker"; 
-/**  Override base image */
+/**  Override base image, scrubbed on a frame only (#1146). */
 base_image: string | null; 
 /**  Additional build args */
 build_args: { [key in string]: string } }) & { name?: never; path?: never };
@@ -2860,9 +2869,12 @@ export type MascotFrame = "Neutral" | "Blink" | "Bounce" | "Happy";
 export type McpInstallation = McpInstallation_Serialize;
 
 export type McpInstallation_Serialize = 
-/**  NPM package */
+/**
+ *  NPM package. Package and version are scrubbed on a frame only, like
+ *  the git variant's URL (#1146).
+ */
 ({ type: "Npm"; package: string; version: string | null }) & { branch?: never; install_command?: never; script?: never; url?: never } | 
-/**  Python package */
+/**  Python package, scrubbed on a frame like the npm one. */
 ({ type: "Python"; package: string; version: string | null }) & { branch?: never; install_command?: never; script?: never; url?: never } | 
 /**  Git repository */
 ({ type: "Git"; url: string; branch: string | null; install_command: string | null }) & { package?: never; script?: never; version?: never } | 
@@ -3095,7 +3107,7 @@ export type OnboardingState_Serialize = {
 	/**  Current focus area */
 	focus: OnboardingFocus,
 	/**  Dependency check results (populated after check) */
-	dependency_status: SetupStatus | null,
+	dependency_status: SetupStatus_Serialize | null,
 	/**  Whether dependency check is in progress */
 	dependency_check_running: boolean,
 	/**  Raw input for git directories (comma-separated) */
@@ -4035,8 +4047,11 @@ export type SetupMenuState = {
 };
 
 /**  Overall detection result across the whole catalog. */
-export type SetupStatus = {
-	topics: TopicReport[],
+export type SetupStatus = SetupStatus_Serialize;
+
+/**  Overall detection result across the whole catalog. */
+export type SetupStatus_Serialize = {
+	topics: TopicReport_Serialize[],
 };
 
 /**  A plain shell session (no AI agent) tied to a workspace */
@@ -4537,11 +4552,14 @@ export type TmuxView = {
 };
 
 /**  A topic joined with its per-dependency reports. */
-export type TopicReport = {
+export type TopicReport = TopicReport_Serialize;
+
+/**  A topic joined with its per-dependency reports. */
+export type TopicReport_Serialize = {
 	id: string,
 	label: string,
 	description: string,
-	deps: DepReport[],
+	deps: DepReport_Serialize[],
 };
 
 /**  Health of the preferred provider transport. */
