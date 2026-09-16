@@ -84,3 +84,16 @@ test("the list is capped and the selection wraps over what is left", () => {
   assert.equal(stepRow(3, 0, -1), 2);
   assert.equal(stepRow(0, 0, 1), 0);
 });
+
+test("a row the reducer would refuse is offered but not ranked above a live one", () => {
+  const rows = commandRows([
+    entry("a.go", "Go somewhere", { active: false }),
+    entry("b.go", "Go somewhere", { active: true }),
+  ]);
+  const ranked = rank(rows, "go somewhere");
+  assert.deepEqual(
+    ranked.map((row) => row.active),
+    [true, false],
+    "the row that runs now is offered first, and the other is still offered",
+  );
+});
