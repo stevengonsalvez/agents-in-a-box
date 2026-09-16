@@ -1032,6 +1032,10 @@ export type ConfigPopupType = ConfigPopupType_Serialize;
 export type ConfigPopupType_Serialize = 
 /**  Selection from a list of choices */
 ({ Choice: {
+	/**
+	 *  Scrubbed like a settings row's choices: a promoted free-form row
+	 *  (the preferred editor command) opens this popup too.
+	 */
 	options: string[],
 	selected_index: number,
 } }) & { Boolean?: never; NumberInput?: never; SecretInput?: never; TextInput?: never } | 
@@ -1060,6 +1064,11 @@ export type ConfigPopupType_Serialize =
 /**  Number input */
 ({ NumberInput: {
 	value: number,
+	/**
+	 *  The digits being typed. The popup draws them, so a frame carries
+	 *  them, scrubbed in case something other than digits was pasted
+	 *  (#1146).
+	 */
 	input_buffer: string,
 } }) & { Boolean?: never; Choice?: never; SecretInput?: never; TextInput?: never };
 
@@ -1349,6 +1358,12 @@ export type ConfigureState_Serialize = {
 	repo_check: RepoCheck_Serialize,
 };
 
+/**
+ *  What a confirmation dialog will do. Every payload reaches a mirror frame
+ *  raw, and each is a name or id the rest of the frame already carries:
+ *  session ids (uuids), tmux session names (the same names the tmux section
+ *  lists), a workspace index, and an MCP server's own key from config.toml.
+ */
 export type ConfirmAction = ({ DeleteSession: string }) & { BulkDeleteSessions?: never; BulkStopSessions?: never; KillOtherTmux?: never; KillOtherTmuxSessions?: never; KillWorkspaceShell?: never; McpStopServer?: never; StopSession?: never } | ({ StopSession: string }) & { BulkDeleteSessions?: never; BulkStopSessions?: never; DeleteSession?: never; KillOtherTmux?: never; KillOtherTmuxSessions?: never; KillWorkspaceShell?: never; McpStopServer?: never } | ({ BulkDeleteSessions: string[] }) & { BulkStopSessions?: never; DeleteSession?: never; KillOtherTmux?: never; KillOtherTmuxSessions?: never; KillWorkspaceShell?: never; McpStopServer?: never; StopSession?: never } | ({ BulkStopSessions: string[] }) & { BulkDeleteSessions?: never; DeleteSession?: never; KillOtherTmux?: never; KillOtherTmuxSessions?: never; KillWorkspaceShell?: never; McpStopServer?: never; StopSession?: never } | ({ KillOtherTmux: string }) & { BulkDeleteSessions?: never; BulkStopSessions?: never; DeleteSession?: never; KillOtherTmuxSessions?: never; KillWorkspaceShell?: never; McpStopServer?: never; StopSession?: never } | ({ KillOtherTmuxSessions: string[] }) & { BulkDeleteSessions?: never; BulkStopSessions?: never; DeleteSession?: never; KillOtherTmux?: never; KillWorkspaceShell?: never; McpStopServer?: never; StopSession?: never } | ({ KillWorkspaceShell: number }) & { BulkDeleteSessions?: never; BulkStopSessions?: never; DeleteSession?: never; KillOtherTmux?: never; KillOtherTmuxSessions?: never; McpStopServer?: never; StopSession?: never } | "InstallNotifyHooks" | "DismissNotifyPrompt" | ({ McpStopServer: string }) & { BulkDeleteSessions?: never; BulkStopSessions?: never; DeleteSession?: never; KillOtherTmux?: never; KillOtherTmuxSessions?: never; KillWorkspaceShell?: never; StopSession?: never } | "McpStopDaemon" | "SetupAbtopRateLimits" | "OpenAbtopSkipSetup" | "DismissAbtopSetup" | "Cancel";
 
 export type ConfirmationDialog = ConfirmationDialog_Serialize;
@@ -1857,7 +1872,10 @@ export type DepInstall_Serialize =
 { Error: string };
 
 /**  A dependency spec joined with its detected state. */
-export type DepReport = {
+export type DepReport = DepReport_Serialize;
+
+/**  A dependency spec joined with its detected state. */
+export type DepReport_Serialize = {
 	id: string,
 	name: string,
 	why: string,
@@ -1867,22 +1885,28 @@ export type DepReport = {
 	install_hint: string,
 	/**  Whether ainb can run the installer automatically (after consent). */
 	auto_installable: boolean,
-	state: DepState,
+	state: DepState_Serialize,
 	satisfied: boolean,
 };
 
 /**  Detected state of a single dependency. */
-export type DepState = 
-/**  Present and satisfies any version/variant requirement. */
+export type DepState = DepState_Serialize;
+
+/**  Detected state of a single dependency. */
+export type DepState_Serialize = 
+/**
+ *  Present and satisfies any version/variant requirement. The detail is a
+ *  probed binary's own output, so a frame carries it scrubbed (#1146).
+ */
 { kind: "ok"; detail: string | null } | 
 /**  Satisfied by an alternative binary (e.g. `gtimeout` for `timeout`). */
 { kind: "alt"; detail: string } | 
 /**  Present but too old (e.g. bash 3.2 < 4). */
 { kind: "too_old"; detail: string } | 
 /**  Not found. */
-{ kind: "missing" } | 
+({ kind: "missing" }) & { detail?: never } | 
 /**  Cannot be detected programmatically (e.g. marketplace plugin presence). */
-{ kind: "unknown" };
+({ kind: "unknown" }) & { detail?: never };
 
 /**
  *  Importance tier of a dependency within its topic. Drives whether onboarding
@@ -2602,7 +2626,7 @@ export type ImageSource_Serialize =
 ({ type: "Dockerfile"; path: string; build_args: { [key in string]: string } }) & { base_image?: never; name?: never } | 
 /**  Use claude-docker Dockerfile with modifications */
 ({ type: "ClaudeDocker"; 
-/**  Override base image */
+/**  Override base image, scrubbed on a frame only (#1146). */
 base_image: string | null; 
 /**  Additional build args */
 build_args: { [key in string]: string } }) & { name?: never; path?: never };
@@ -2827,11 +2851,19 @@ export type MarkdownLine = MarkdownLine_Serialize;
 export type MarkdownLine_Serialize = {
 	/**  Arbitrary repo file content, so a frame carries it scrubbed. */
 	content: string,
-	style: MarkdownStyle,
+	style: MarkdownStyle_Serialize,
 };
 
 /**  Styling categories for markdown content */
-export type MarkdownStyle = "Heading1" | "Heading2" | "Heading3" | "Paragraph" | "CodeBlock" | { CodeBlockHeader: string } | "ListItem" | "Bold" | "Italic" | "InlineCode" | "Link" | "BlockQuote";
+export type MarkdownStyle = MarkdownStyle_Serialize;
+
+/**  Styling categories for markdown content */
+export type MarkdownStyle_Serialize = "Heading1" | "Heading2" | "Heading3" | "Paragraph" | "CodeBlock" | 
+/**
+ *  A fenced block's language line, straight out of a repo file, so a frame
+ *  carries it scrubbed (#1146).
+ */
+{ CodeBlockHeader: string } | "ListItem" | "Bold" | "Italic" | "InlineCode" | "Link" | "BlockQuote";
 
 /**  Mascot animation controller */
 export type MascotAnimation = {
@@ -2847,9 +2879,12 @@ export type MascotFrame = "Neutral" | "Blink" | "Bounce" | "Happy";
 export type McpInstallation = McpInstallation_Serialize;
 
 export type McpInstallation_Serialize = 
-/**  NPM package */
+/**
+ *  NPM package. Package and version are scrubbed on a frame only, like
+ *  the git variant's URL (#1146).
+ */
 ({ type: "Npm"; package: string; version: string | null }) & { branch?: never; install_command?: never; script?: never; url?: never } | 
-/**  Python package */
+/**  Python package, scrubbed on a frame like the npm one. */
 ({ type: "Python"; package: string; version: string | null }) & { branch?: never; install_command?: never; script?: never; url?: never } | 
 /**  Git repository */
 ({ type: "Git"; url: string; branch: string | null; install_command: string | null }) & { package?: never; script?: never; version?: never } | 
@@ -3082,7 +3117,7 @@ export type OnboardingState_Serialize = {
 	/**  Current focus area */
 	focus: OnboardingFocus,
 	/**  Dependency check results (populated after check) */
-	dependency_status: SetupStatus | null,
+	dependency_status: SetupStatus_Serialize | null,
 	/**  Whether dependency check is in progress */
 	dependency_check_running: boolean,
 	/**  Raw input for git directories (comma-separated) */
@@ -3553,17 +3588,24 @@ export type RepoSource = RepoSource_Serialize;
 export type RepoSource_Serialize = 
 /**  HTTPS URL (https://github.com/user/repo) */
 ({ HttpsUrl: string }) & { Filter?: never; GithubShorthand?: never; LocalPath?: never; SshSession?: never; SshUrl?: never } | 
-/**  SSH URL for clone (git@github.com:user/repo.git) */
+/**
+ *  SSH URL for clone (git@github.com:user/repo.git). Typed or pasted, so a
+ *  frame carries it scrubbed, like `HttpsUrl` (#1146).
+ */
 ({ SshUrl: string }) & { Filter?: never; GithubShorthand?: never; HttpsUrl?: never; LocalPath?: never; SshSession?: never } | 
 /**
  *  `ssh://user@host[:port]` with no repo segment — opens an interactive SSH
  *  session, NOT a clone. New-session screen 1 (smart-parse v2) introduces
- *  this variant to distinguish from `SshUrl`.
+ *  this variant to distinguish from `SshUrl`. Scrubbed on a frame for the
+ *  same reason.
  */
 ({ SshSession: string }) & { Filter?: never; GithubShorthand?: never; HttpsUrl?: never; LocalPath?: never; SshUrl?: never } | 
 /**  Local filesystem path */
 ({ LocalPath: string }) & { Filter?: never; GithubShorthand?: never; HttpsUrl?: never; SshSession?: never; SshUrl?: never } | 
-/**  GitHub shorthand (user/repo) - expands to HTTPS */
+/**
+ *  GitHub shorthand (user/repo) - expands to HTTPS. Both halves are typed
+ *  text, scrubbed on a frame.
+ */
 ({ GithubShorthand: {
 	owner: string,
 	repo: string,
@@ -4015,8 +4057,11 @@ export type SetupMenuState = {
 };
 
 /**  Overall detection result across the whole catalog. */
-export type SetupStatus = {
-	topics: TopicReport[],
+export type SetupStatus = SetupStatus_Serialize;
+
+/**  Overall detection result across the whole catalog. */
+export type SetupStatus_Serialize = {
+	topics: TopicReport_Serialize[],
 };
 
 /**  A plain shell session (no AI agent) tied to a workspace */
@@ -4517,11 +4562,14 @@ export type TmuxView = {
 };
 
 /**  A topic joined with its per-dependency reports. */
-export type TopicReport = {
+export type TopicReport = TopicReport_Serialize;
+
+/**  A topic joined with its per-dependency reports. */
+export type TopicReport_Serialize = {
 	id: string,
 	label: string,
 	description: string,
-	deps: DepReport[],
+	deps: DepReport_Serialize[],
 };
 
 /**  Health of the preferred provider transport. */

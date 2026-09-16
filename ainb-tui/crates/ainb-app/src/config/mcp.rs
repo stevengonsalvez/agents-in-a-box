@@ -40,15 +40,24 @@ pub struct McpServerConfig {
 #[serde(tag = "type")]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum McpInstallation {
-    /// NPM package
+    /// NPM package. Package and version are scrubbed on a frame only, like
+    /// the git variant's URL (#1146).
     Npm {
+        #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
         package: String,
+        #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
         version: Option<String>,
     },
 
-    /// Python package
+    /// Python package, scrubbed on a frame like the npm one.
     Python {
+        #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
         package: String,
+        #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
         version: Option<String>,
     },
 
@@ -57,6 +66,8 @@ pub enum McpInstallation {
         #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
         #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
         url: String,
+        #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
         branch: Option<String>,
         #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
         #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]

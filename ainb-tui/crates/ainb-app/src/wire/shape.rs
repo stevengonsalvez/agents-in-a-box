@@ -353,6 +353,7 @@ pub const TYPED_LABELS: &[&str] = &[
     "session_labels.rename_buffer",
     // The plain-text popup variant from `sample_states`.
     "config.text_popup",
+    "config.number_popup",
     // Name editors on the Configure form.
     "new_session.configure.branch_prefix_edit",
     "new_session.configure.session_prefix_edit",
@@ -409,7 +410,330 @@ pub fn sample_states(seed: &mut dyn Seed) -> Vec<AppState> {
         ),
         "Enter on a plain text row opens a TextInput"
     );
-    vec![secret_popup, text_popup]
+    let mut states = vec![secret_popup, text_popup];
+    for round in 0..ALTERNATE_ROUNDS {
+        states.push(alternate_state(seed, round));
+    }
+    states
+}
+
+/// How many [`alternate_state`]s [`sample_states`] builds: the most unseeded
+/// variants any one single-valued field has (`ConfirmAction`'s seven).
+const ALTERNATE_ROUNDS: usize = 7;
+
+/// The `round`-th of `variants`, the last one once the rounds outrun them.
+///
+/// Every alternate block picks through here, so which variant repeats is the
+/// same rule everywhere, and a block that grows past [`ALTERNATE_ROUNDS`] fails
+/// in a debug build instead of silently never seeding its tail.
+fn pick<T>(mut variants: Vec<T>, round: usize) -> T {
+    debug_assert!(
+        variants.len() <= ALTERNATE_ROUNDS,
+        "{} variants but only {ALTERNATE_ROUNDS} alternate rounds",
+        variants.len()
+    );
+    let index = round.min(variants.len() - 1);
+    variants.swap_remove(index)
+}
+
+/// A sample whose single-valued enum fields hold the variants
+/// [`sample_state`] does not, one per `round` (#1146).
+///
+/// The tracer only sees the variant a value holds, so every payload-carrying
+/// variant needs some sample that holds it, or no leak check ever reads its
+/// payload. A field with fewer variants than rounds repeats its last one.
+fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
+    use crate::components::config_popup::ConfigPopupType;
+    use crate::components::git_view::{MarkdownLine, MarkdownStyle};
+    use crate::components::onboarding::state::{AuthAgent, AuthPane, OnboardingFocus};
+    use crate::components::skill_manager_screen::{DiscoveryBannerCounts, DiscoveryBannerState};
+    use TextKind::{Captured, Typed};
+
+    let mut state = sample_state(seed);
+
+    // ---- config: the popup types the two popup samples do not open ----------
+    state.config.get_mut().config_popup_state.popup_type = pick(
+        vec![
+            ConfigPopupType::Boolean { value: true },
+            ConfigPopupType::Choice {
+                options: vec!["tmux".to_string(), "docker".to_string()],
+                selected_index: 1,
+            },
+            ConfigPopupType::NumberInput {
+                value: 30,
+                input_buffer: seed.text("config.number_popup", Typed),
+            },
+            // Captured as well, so the credential tripwire reads the scrub on
+            // the buffer: typed text is only ever checked by the canary.
+            ConfigPopupType::NumberInput {
+                value: 30,
+                input_buffer: seed.text("config.number_popup_pasted", Captured),
+            },
+        ],
+        round,
+    );
+
+    // ---- git view: a fenced code block's language line -----------------------
+    if let Some(view) = state.git_view.get_mut().git_view_state.as_mut() {
+        view.markdown_content.push(MarkdownLine {
+            content: "fn main() {}".to_string(),
+            style: MarkdownStyle::CodeBlockHeader(
+                seed.text("git_view.code_block_language", Captured),
+            ),
+        });
+    }
+
+    // ---- onboarding: the method picker, and focus on a list item -------------
+    if let Some(wizard) = state.onboarding.get_mut().onboarding_state.as_mut() {
+        wizard.auth_pane = AuthPane::MethodPicker {
+            agent: AuthAgent::Claude,
+            cursor: 1,
+        };
+        wizard.focus = OnboardingFocus::Item(2);
+    }
+
+    // ---- fleet: every answer route on the chips, and a finished broadcast ----
+    {
+        use crate::fleet::attention::{Answerable, Unanswerable};
+        let answerable = pick(
+            vec![
+                Answerable::Daemon {
+                    attention_id: "a-1".to_string(),
+                },
+                Answerable::Broker {
+                    session_id: "s-1".to_string(),
+                },
+                Answerable::No(Unanswerable::DaemonGone),
+            ],
+            round,
+        );
+        let fleet = state.fleet.get_mut();
+        {
+            let mut attention =
+                fleet.daemon_attention.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let crate::fleet::attention::DaemonAttention {
+                by_session_id, all, ..
+            } = &mut *attention;
+            for chip in by_session_id.values_mut().flatten().chain(all.values_mut()) {
+                chip.answerable = answerable.clone();
+            }
+        }
+        let sent = Ok(vec![ainb_hangar_proto::fleet::FleetActionReceipt {
+            request_id: "r-1".to_string(),
+            session_key: "claude:s-1".to_string(),
+            action_kind: "send_prompt".to_string(),
+            action_fingerprint: "fp-1".to_string(),
+            expected_version: 1,
+            idempotency_key: Some("tui-broadcast:sample".to_string()),
+            status: ainb_hangar_proto::fleet::ActionReceiptStatus::Delivered,
+            detail: Some(seed.text("fleet.broadcast.receipt_detail", Captured)),
+            session_version: Some(2),
+            created_at: 1,
+            updated_at: 2,
+        }]);
+        let failed = Err(seed.text("fleet.broadcast.failure", Captured));
+        fleet.broadcast.publish_outcome(pick(vec![sent, failed], round));
+        fleet.broadcast.tick();
+    }
+
+    // ---- session labels: every attachable ref, as menu target and rename target
+    {
+        use crate::app::state::{AttachableRef, SessionContextMenu};
+        let target = pick(
+            vec![
+                AttachableRef::WorkspaceSession {
+                    workspace_idx: 0,
+                    session_idx: 0,
+                },
+                AttachableRef::WorkspaceShell { workspace_idx: 0 },
+                AttachableRef::SshSession { ssh_idx: 0 },
+                AttachableRef::OtherTmux { other_idx: 0 },
+            ],
+            round,
+        );
+        let labels = state.session_labels.get_mut();
+        labels.session_context_menu = Some(SessionContextMenu {
+            target: target.clone(),
+            selected: 0,
+        });
+        labels.session_label_rename_target = Some(target);
+    }
+
+    // ---- shell: every confirmation the delete sample does not ask ------------
+    {
+        use crate::app::state::{ConfirmAction, DialogOption};
+        let actions = vec![
+            ConfirmAction::StopSession(uuid::Uuid::nil()),
+            ConfirmAction::BulkDeleteSessions(vec![uuid::Uuid::nil()]),
+            ConfirmAction::BulkStopSessions(vec![uuid::Uuid::nil()]),
+            ConfirmAction::KillOtherTmux("scratch".to_string()),
+            ConfirmAction::KillOtherTmuxSessions(vec!["scratch".to_string()]),
+            ConfirmAction::KillWorkspaceShell(0),
+            ConfirmAction::McpStopServer("github".to_string()),
+        ];
+        if let Some(dialog) = state.shell.get_mut().confirmation_dialog.as_mut() {
+            dialog.confirm_action = pick(actions.clone(), round);
+            dialog.options = Some(
+                actions
+                    .iter()
+                    .map(|action| DialogOption {
+                        label: "Confirm".to_string(),
+                        action: action.clone(),
+                    })
+                    .collect(),
+            );
+        }
+    }
+
+    // ---- new session: every repo source, as row, pending clone and target ---
+    {
+        use crate::components::new_session::pick_repo::{PickRepoRow, RepoRowKind};
+        use crate::git::repo_source::RepoSource;
+        let mut sources = vec![
+            RepoSource::SshUrl(seed.text("new_session.repo_source.ssh_url", Captured)),
+            RepoSource::SshSession(seed.text("new_session.repo_source.ssh_session", Captured)),
+            RepoSource::GithubShorthand {
+                owner: seed.text("new_session.repo_source.owner", Captured),
+                repo: seed.text("new_session.repo_source.repo", Captured),
+            },
+            RepoSource::LocalPath(PathBuf::from("/work/other-repo")),
+        ];
+        let target = pick(sources.clone(), round);
+        sources.push(RepoSource::HttpsUrl(
+            seed.text("new_session.repo_source.https_url", Captured),
+        ));
+        if let Some(new_session) = state.new_session.get_mut().new_session_state.as_mut() {
+            if let Some(pick) = new_session.pick_repo_state.as_mut() {
+                pick.rows = sources
+                    .iter()
+                    .enumerate()
+                    .map(|(index, source)| PickRepoRow {
+                        id: format!("row:{index}"),
+                        label: format!("repo {index}"),
+                        source: source.clone(),
+                        kind: RepoRowKind::Local,
+                    })
+                    .collect();
+                pick.filtered_indices = (0..pick.rows.len()).collect();
+                pick.pending_clone_source = Some(target.clone());
+            }
+            if let Some(configure) = new_session.configure_state.as_mut() {
+                configure.repo_source = target;
+            }
+        }
+    }
+
+    // ---- internally tagged payloads (#1146): each variant's own fields ------
+    {
+        let config = state.config.get_mut();
+        let claude_docker: crate::config::ContainerTemplate =
+            serde_json::from_value(serde_json::json!({
+                "name": "claude-docker",
+                "description": "built from the claude-docker Dockerfile",
+                "config": {
+                    "image_source": {
+                        "type": "ClaudeDocker",
+                        "base_image": seed.text("config.container.base_image", Captured),
+                        "build_args": {
+                            "PIP_TOKEN": seed.text("config.container.claude_docker_args", Captured),
+                        },
+                    },
+                },
+            }))
+            .expect("sample claude-docker template parses");
+        config
+            .app_config
+            .container_templates
+            .insert("claude-docker".to_string(), claude_docker);
+        for (name, installation) in [
+            (
+                "from-npm",
+                serde_json::json!({
+                    "type": "Npm",
+                    "package": seed.text("config.mcp.npm_package", Captured),
+                    "version": seed.text("config.mcp.npm_version", Captured),
+                }),
+            ),
+            (
+                "from-script",
+                serde_json::json!({
+                    "type": "Custom",
+                    "script": seed.text("config.mcp.custom_script", Captured),
+                }),
+            ),
+        ] {
+            let server: crate::config::McpServerConfig =
+                serde_json::from_value(serde_json::json!({
+                    "name": name,
+                    "description": "installed by its own installer",
+                    "installation": installation,
+                    "definition": { "type": "Command", "command": "mcp", "args": [] },
+                }))
+                .expect("sample mcp server parses");
+            config.app_config.mcp_servers.insert(name.to_string(), server);
+        }
+    }
+    if let Some(view) = state.agent_status.get_mut().view.as_mut() {
+        view.health = ainb_hangar_proto::status_view::ViewHealth::Stale {
+            read_revision: view.read_revision,
+            head_revision: view.read_revision + 1,
+        };
+    }
+    if let Some(wizard) = state.onboarding.get_mut().onboarding_state.as_mut() {
+        use crate::setup::catalog::{Consumer, DepTier};
+        use crate::setup::detect::{DepReport, DepState, SetupStatus, TopicReport};
+        let report = |id: &'static str, state: DepState| DepReport {
+            id,
+            name: id,
+            why: "sample dependency",
+            tier: DepTier::Recommended,
+            consumers: vec![Consumer::Core],
+            install_hint: format!("brew install {id}"),
+            auto_installable: false,
+            satisfied: state.satisfied(),
+            state,
+        };
+        wizard.dependency_status = Some(SetupStatus {
+            topics: vec![TopicReport {
+                id: "sample",
+                label: "Sample",
+                description: "every detection outcome",
+                deps: vec![
+                    report(
+                        "ok",
+                        DepState::Ok(Some(seed.text("onboarding.dep.version", Captured))),
+                    ),
+                    report(
+                        "alt",
+                        DepState::Alt(seed.text("onboarding.dep.alt", Captured)),
+                    ),
+                    report(
+                        "old",
+                        DepState::TooOld(seed.text("onboarding.dep.too_old", Captured)),
+                    ),
+                    report("missing", DepState::Missing),
+                    report("unknown", DepState::Unknown),
+                ],
+            }],
+        });
+    }
+
+    // ---- skills: the discovery banner, collapsed then expanded ---------------
+    let counts = DiscoveryBannerCounts {
+        marketplace_plugins: 2,
+        orphan_units_total: 3,
+        orphan_units_per_tool: vec![("claude".to_string(), 3)],
+        conflicts: 1,
+    };
+    state.skills.get_mut().skill_manager_state.banner = pick(
+        vec![
+            DiscoveryBannerState::Visible(counts.clone()),
+            DiscoveryBannerState::Details(counts),
+        ],
+        round,
+    );
+
+    state
 }
 
 /// Build the sample state. Every optional screen is open and every field the
