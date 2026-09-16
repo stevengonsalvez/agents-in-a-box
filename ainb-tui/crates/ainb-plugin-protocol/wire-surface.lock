@@ -5,7 +5,7 @@
 #
 # The regenerator REFUSES to write while the surface has changed but
 # ainb-plugin-protocol's version has not. Bump the version first.
-protocol_version = "0.2.1"
+protocol_version = "0.3.0"
 
 [lib]
 reexport errors :: { ProtocolError , RpcError }
@@ -187,6 +187,7 @@ enum KeyCode [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserializ
   variant Esc
   variant Backspace
   variant Delete
+  variant Insert
   variant Up
   variant Down
   variant Left
