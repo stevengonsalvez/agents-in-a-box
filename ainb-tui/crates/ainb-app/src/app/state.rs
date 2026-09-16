@@ -4616,29 +4616,38 @@ impl AppState {
     }
 
     /// Poll the background scan. Returns true if data was applied this tick.
+    ///
+    /// Polled every tick, so the poll itself goes through `update`: an idle or
+    /// empty channel leaves Skills' version alone (#1139).
     pub fn check_skills_load_complete(&mut self) -> bool {
-        if let Some(ref mut receiver) = self.skills.skills_load_receiver {
+        let mut dropped = false;
+        let applied = self.skills.update(|skills| {
+            let Some(receiver) = skills.skills_load_receiver.as_mut() else {
+                return false;
+            };
             match receiver.try_recv() {
                 Ok(data) => {
-                    self.skills.skills_state.data = Some(data);
-                    self.skills.skills_state.loading = false;
-                    self.skills.skills_load_receiver = None;
+                    skills.skills_state.data = Some(data);
+                    skills.skills_state.loading = false;
+                    skills.skills_load_receiver = None;
                     true
                 }
                 Err(mpsc::error::TryRecvError::Empty) => false,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.skills.skills_state.loading = false;
-                    self.skills.skills_load_receiver = None;
-                    warn!("Skills parse task dropped its sender without delivering data");
-                    self.add_warning_notification(
-                        "Failed to parse skills; keeping cached data".to_string(),
-                    );
+                    skills.skills_state.loading = false;
+                    skills.skills_load_receiver = None;
+                    dropped = true;
                     true
                 }
             }
-        } else {
-            false
+        });
+        if dropped {
+            warn!("Skills parse task dropped its sender without delivering data");
+            self.add_warning_notification(
+                "Failed to parse skills; keeping cached data".to_string(),
+            );
         }
+        applied
     }
 
     /// Kick off a background drift scan against `home` (the ainb data
