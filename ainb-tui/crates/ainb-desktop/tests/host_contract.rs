@@ -7,7 +7,7 @@ use std::rc::Rc;
 use ainb_app::app::Effect;
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
-use ainb_app::{Chord, Intent, Keymap, SectionId};
+use ainb_app::{Chord, CommandId, Intent, Keymap, SectionId};
 use ainb_desktop::host::{DesktopHost, Executor};
 
 mod support;
@@ -289,9 +289,24 @@ fn every_palette_entry_passes_the_seam_and_no_refused_row_is_offered() {
         .iter()
         .chain(ainb_app::app::plugin_action::ids::ALL)
         .chain(ainb_app::app::KEY_ONLY_COMMANDS)
-        .chain(ainb_app::app::pointer::ids::ALL)
     {
         assert!(!offered.contains(refused), "the palette offers `{refused}`");
+    }
+
+    // A palette names a row with no payload, so a pointer row that refuses
+    // `Args::Null` has nothing to run with and is not offered; one that runs
+    // without a payload is an ordinary row and is.
+    let keymap = Keymap::defaults();
+    for pointer in ainb_app::app::pointer::ids::ALL {
+        let Some(row) = keymap.command(&CommandId::new(*pointer)) else {
+            continue;
+        };
+        if row.action.with_args(&serde_json::Value::Null).is_none() {
+            assert!(
+                !offered.contains(pointer),
+                "the palette offers `{pointer}`, which needs a payload"
+            );
+        }
     }
 
     // A row that is not active is still offered, so the list does not shift
