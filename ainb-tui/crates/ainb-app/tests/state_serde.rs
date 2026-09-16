@@ -979,6 +979,7 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "McpInstallation.version",
     "BroadcastPhase::Failed.0",
     "BroadcastPhase::Sent.0",
+    "ConfigPopupType::Choice.options",
     "ConfigPopupType::NumberInput.input_buffer",
     "ConfigPopupType::TextInput.value",
     "MarkdownStyle::CodeBlockHeader.0",
@@ -1599,6 +1600,44 @@ fn deny_word_matching_is_word_aware() {
 /// The frame-only redaction must not reach config.toml, presets.toml or the
 /// session store: those writes go through the same `Serialize` impls, outside
 /// a frame, and have to keep the real values or a save wipes the bot tokens.
+/// A choice row is not always a closed registry list: a free-form row such as
+/// the preferred editor command is promoted from Text to Choice. Its options
+/// are scrubbed on the Config frame, in the settings row and in the popup it
+/// opens, the same as a Text row's value (#1153 review).
+#[test]
+fn a_choice_carrying_a_credential_is_scrubbed_in_the_row_and_the_popup() {
+    use ainb_app::app::state::ConfigValue;
+    use ainb_app::components::config_popup::ConfigPopupType;
+    isolated_home();
+    let token = credential_samples()[2].clone();
+    let option = format!("code --token {token}");
+    let mut state = shape::sample_state(&mut shape::PlainSeed);
+    {
+        let config = &mut *state.config;
+        let row = config
+            .config_screen_state
+            .settings
+            .values_mut()
+            .flatten()
+            .next()
+            .expect("the sample has a settings row");
+        row.value = ConfigValue::Choice(vec!["vim".to_string(), option.clone()], 1);
+        config.config_popup_state.popup_type = ConfigPopupType::Choice {
+            options: vec![option.clone()],
+            selected_index: 0,
+        };
+    }
+    let frame = section_json(&state, SectionId::Config).to_string();
+    assert!(
+        !frame.contains(&token),
+        "a choice option carried a credential onto the Config frame"
+    );
+    assert!(
+        frame.contains("code --token"),
+        "the option's harmless text is kept"
+    );
+}
+
 #[test]
 fn saves_outside_a_frame_keep_what_the_frame_withholds() {
     isolated_home();
