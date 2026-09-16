@@ -10,7 +10,7 @@
 
 use crate::app::AppState;
 use crate::app::versioned::SectionId;
-use crate::wire::{section_json_from, section_name};
+use crate::wire::{section_json, section_name};
 use serde::{Deserialize, Serialize};
 
 /// The host a frame or a row came from. One process-wide id per host; rows
@@ -119,7 +119,7 @@ impl Frame {
             version: state.versions()[id.index()],
             epoch: host_epoch(),
             daemon_read: crate::wire::daemon_read(state, id),
-            body: section_json_from(state, id, &host_id),
+            body: section_json(state, id, &host_id),
             host_id,
         }
     }
