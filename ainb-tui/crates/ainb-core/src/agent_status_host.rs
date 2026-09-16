@@ -30,7 +30,9 @@ use std::time::Duration;
 
 use ainb_app::app::sections::AgentStatusSection;
 use ainb_app::app::state::AppState;
-use ainb_app::fleet::bridge::daemon::{DaemonClient, DaemonError, FleetStreamEvent};
+use ainb_app::fleet::bridge::daemon::{
+    ConnectionState, DaemonClient, DaemonError, FleetStreamEvent,
+};
 use ainb_hangar_proto::agent_status::{RosterStatusResult, join};
 use ainb_hangar_proto::fleet::FLEET_CAPABILITY_ROSTER_STATUS_READ;
 use ainb_hangar_proto::status_topic::{
@@ -381,26 +383,62 @@ async fn serve(
         Err(ended) => return (ended, false),
     };
     let mut subscription = client.reconnecting_fleet_subscription(covered);
+    let mut state_rx = subscription.state();
+    let mut was_reconnecting = false;
     loop {
-        match subscription.next_event().await {
-            Ok(FleetStreamEvent::Revision(event)) => {
-                if tx.send(AgentStatusUpdate::Head(event.revision)).is_err() {
+        tokio::select! {
+            state_changed = state_rx.changed() => {
+                if state_changed.is_err() {
                     return (Ended::Closed, true);
                 }
-                // A burst: the last read already describes this revision.
-                if event.revision <= covered {
-                    continue;
+                let current_state = state_rx.borrow().clone();
+                match current_state {
+                    ConnectionState::Reconnecting { error, .. } => {
+                        was_reconnecting = true;
+                        let reason = error.unwrap_or_else(|| "daemon not reachable".to_string());
+                        if tx.send(AgentStatusUpdate::Failed(reason, now_ms())).is_err() {
+                            return (Ended::Closed, true);
+                        }
+                    }
+                    ConnectionState::Connected => {
+                        if was_reconnecting {
+                            was_reconnecting = false;
+                            match read(client, tx, true, &mut path).await {
+                                Ok(read_revision) => {
+                                    covered = read_revision;
+                                    subscription.set_after_revision(covered);
+                                }
+                                Err(ended) => return (ended, true),
+                            }
+                        }
+                    }
+                    ConnectionState::Closed => {
+                        return (Ended::Closed, true);
+                    }
                 }
             }
-            Ok(FleetStreamEvent::ResyncRequired) => {}
-            Err(error) => return (report(tx, &error), true),
-        }
-        match read(client, tx, false, &mut path).await {
-            Ok(read_revision) => {
-                covered = read_revision;
-                subscription.set_after_revision(covered);
+            event_res = subscription.next_event() => {
+                match event_res {
+                    Ok(FleetStreamEvent::Revision(event)) => {
+                        if tx.send(AgentStatusUpdate::Head(event.revision)).is_err() {
+                            return (Ended::Closed, true);
+                        }
+                        // A burst: the last read already describes this revision.
+                        if event.revision <= covered {
+                            continue;
+                        }
+                    }
+                    Ok(FleetStreamEvent::ResyncRequired) => {}
+                    Err(error) => return (report(tx, &error), true),
+                }
+                match read(client, tx, false, &mut path).await {
+                    Ok(read_revision) => {
+                        covered = read_revision;
+                        subscription.set_after_revision(covered);
+                    }
+                    Err(ended) => return (ended, true),
+                }
             }
-            Err(ended) => return (ended, true),
         }
     }
 }
