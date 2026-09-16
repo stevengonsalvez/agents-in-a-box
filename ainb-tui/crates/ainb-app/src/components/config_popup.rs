@@ -8,6 +8,10 @@
 pub enum ConfigPopupType {
     /// Selection from a list of choices
     Choice {
+        /// Scrubbed like a settings row's choices: a promoted free-form row
+        /// (the preferred editor command) opens this popup too.
+        #[serde(serialize_with = "crate::wire::fields::scrub_lines")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<String>))]
         options: Vec<String>,
         selected_index: usize,
     },
