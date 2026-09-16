@@ -3572,6 +3572,17 @@ mod tests {
         // is read and cleared, so a second write would be visible.
         state.sessions.selected_session_index = Some(1);
         state.shell.notifications.clear();
+
+        // What a live row picks up after a scan: the merge runs, and the row
+        // carries a chip and a learned provider id. A scan builds neither, so
+        // comparing them would call every scan a change.
+        state.merge_attention(crate::fleet::daemons::heartbeat::now_ms());
+        state.sessions.workspaces[0].sessions[0].provider_session_id = Some("agent-1".to_string());
+        state.sessions.workspaces[0].sessions[0].live_attention =
+            vec![crate::fleet::attention::SessionAttention::local(
+                crate::fleet::attention::AttentionKind::Ask,
+                crate::fleet::daemons::heartbeat::now_ms(),
+            )];
         let version = state.sessions.version();
 
         let tx = state.start_background_workspace_loading();
