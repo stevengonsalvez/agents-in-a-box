@@ -35,7 +35,10 @@ use crate::app::versioned::SectionId;
 use serde::{Serialize, Serializer};
 use std::sync::Mutex;
 
-/// The JSON a mirror host receives for one section.
+/// The JSON a mirror host receives for one section, sent as `host`: every host
+/// field inside the body names `host`, the same id the frame carrying it names
+/// (#1066). There is no default host, so no caller can send rows that disagree
+/// with their frame.
 ///
 /// Reads the poller-published cells (`FleetSection.daemon_attention`,
 /// `fleet_snapshot`, the Daemons snapshot) under their locks, so a caller must
@@ -46,8 +49,8 @@ use std::sync::Mutex;
 /// Never in practice: every type reachable from a view serialises to JSON
 /// without a non-string map key, which `state_serde.rs` proves per section.
 #[must_use]
-pub fn section_json(state: &AppState, id: SectionId) -> serde_json::Value {
-    serialize_section(state, id, serde_json::value::Serializer)
+pub fn section_json(state: &AppState, id: SectionId, host: &frame::HostId) -> serde_json::Value {
+    serialize_section(state, id, host, serde_json::value::Serializer)
         .expect("a section view always serialises to JSON")
 }
 
@@ -121,7 +124,8 @@ pub const fn section_name(id: SectionId) -> &'static str {
     }
 }
 
-/// Serialise one section's view into any serde `Serializer`.
+/// Serialise one section's view, sent as `host`, into any serde `Serializer`;
+/// see [`section_json`].
 ///
 /// Generic so the type tracer in [`trace`] walks the same values `section_json`
 /// emits, with the declared Rust type of every field in hand.
@@ -132,11 +136,13 @@ pub const fn section_name(id: SectionId) -> &'static str {
 pub fn serialize_section<S: Serializer>(
     state: &AppState,
     id: SectionId,
+    host: &frame::HostId,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     // Frame-only redaction on persisted types (see `fields`) is live for
-    // exactly this call.
+    // exactly this call, and so is the sending host the fleet rows name.
     let _frame = fields::FrameScope::enter();
+    let _host = SendingHost::enter(host);
     match id {
         SectionId::Sessions => SessionsView::from(&*state.sessions).serialize(serializer),
         SectionId::SessionLabels => {
@@ -165,6 +171,40 @@ pub fn serialize_section<S: Serializer>(
     }
 }
 
+/// The host the section being serialised is sent as, for the view fields that
+/// name a host (#1066). Serde gives a `serialize_with` function only the field,
+/// so the host rides a scope on this thread for exactly one
+/// [`serialize_section`] call; serialisation never leaves the thread.
+struct SendingHost {
+    previous: Option<frame::HostId>,
+}
+
+thread_local! {
+    static SENDING_HOST: std::cell::RefCell<Option<frame::HostId>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+impl SendingHost {
+    fn enter(host: &frame::HostId) -> Self {
+        let previous = SENDING_HOST.with(|cell| cell.replace(Some(host.clone())));
+        Self { previous }
+    }
+
+    /// The host of the section being serialised; `local` outside one.
+    fn current() -> frame::HostId {
+        SENDING_HOST
+            .with(|cell| cell.borrow().clone())
+            .unwrap_or_else(frame::HostId::local)
+    }
+}
+
+impl Drop for SendingHost {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        SENDING_HOST.with(|cell| *cell.borrow_mut() = previous);
+    }
+}
+
 /// Serialise the value behind a shared cell the poller threads write through.
 /// A poisoned lock still holds the last complete value, so it is read anyway.
 // serde's `serialize_with` hands the view's `&&T`, so the double reference is its signature.
@@ -181,20 +221,22 @@ fn locked<T: Serialize, S: Serializer>(cell: &&Mutex<T>, serializer: S) -> Resul
 /// `current_request` (the complete tool input of a pending approval, unbounded
 /// and shaped by the agent; the fingerprint stays), `cwd` and `display_name`
 /// (the operator's paths and labels, #983 M19, as section 20 does). On goes
-/// `host_id`: these rows are the local daemon's, which names itself
-/// `LOCAL_HOST_ID` until R1 pairs hosts, so a row stays addressable once it is
-/// mirrored next to another host's.
+/// `host_id`: these rows are the daemon's, named with the host the section is
+/// sent as ([`serialize_section`], #1066), so a row and the frame
+/// carrying it name one host, and a row stays addressable once it is mirrored
+/// next to another host's.
 // serde's `serialize_with` hands the view's `&&T`, so the double reference is its signature.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn fleet_rows<S: Serializer>(
     cell: &&Mutex<Vec<ainb_hangar_proto::fleet::FleetSession>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
+    let host_id = SendingHost::current();
     let rows: Vec<FleetRowFrame> = cell
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .map(FleetRowFrame::from)
+        .map(|row| FleetRowFrame::from_row(row, host_id.as_str()))
         .collect();
     rows.serialize(serializer)
 }
@@ -202,8 +244,8 @@ fn fleet_rows<S: Serializer>(
 /// One fleet row on the wire; see [`fleet_rows`].
 #[derive(Serialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
-struct FleetRowFrame {
-    host_id: &'static str,
+struct FleetRowFrame<'a> {
+    host_id: &'a str,
     session_key: String,
     provider: ainb_hangar_proto::fleet::FleetProvider,
     provider_session_id: Option<String>,
@@ -230,8 +272,9 @@ struct FleetRowFrame {
     updated_revision: i64,
 }
 
-impl From<&ainb_hangar_proto::fleet::FleetSession> for FleetRowFrame {
-    fn from(row: &ainb_hangar_proto::fleet::FleetSession) -> Self {
+impl<'a> FleetRowFrame<'a> {
+    /// One row, named with the host the daemon gave in `auth/hello` (#1066).
+    fn from_row(row: &ainb_hangar_proto::fleet::FleetSession, host_id: &'a str) -> Self {
         // Destructured, so a field added to the protocol row fails to compile
         // here until someone decides whether a frame carries it.
         let ainb_hangar_proto::fleet::FleetSession {
@@ -264,7 +307,7 @@ impl From<&ainb_hangar_proto::fleet::FleetSession> for FleetRowFrame {
             updated_revision,
         } = row;
         Self {
-            host_id: ainb_hangar_proto::agent_status::LOCAL_HOST_ID,
+            host_id,
             session_key: session_key.clone(),
             provider: *provider,
             provider_session_id: provider_session_id.clone(),
@@ -657,7 +700,7 @@ mod tests {
                 crate::models::Workspace::new("w".to_string(), std::path::PathBuf::from("/work/s"));
             workspace.add_session(session.clone());
             state.sessions.get_mut().workspaces = vec![workspace];
-            section_json(&state, SectionId::Sessions)
+            section_json(&state, SectionId::Sessions, &frame::HostId::local())
         });
 
         let attention = &body["workspaces"][0]["sessions"][0]["attention"];
@@ -680,7 +723,9 @@ mod tests {
     /// so the Config frame names no changelog state and carries none of its text.
     #[test]
     fn the_config_frame_carries_no_changelog_state_or_text() {
-        let body = with_scratch_home(|| section_json(&AppState::new(), SectionId::Config));
+        let body = with_scratch_home(|| {
+            section_json(&AppState::new(), SectionId::Config, &frame::HostId::local())
+        });
         let keys: Vec<&String> = body.as_object().expect("an object body").keys().collect();
         assert!(
             !keys.iter().any(|key| key.as_str() == "changelog_state"),
@@ -724,7 +769,8 @@ mod tests {
                 state.config.config_popup_state.popup_type,
                 ConfigPopupType::SecretInput { .. }
             ));
-            let frame = section_json(&state, SectionId::Config).to_string();
+            let frame =
+                section_json(&state, SectionId::Config, &frame::HostId::local()).to_string();
             assert!(!frame.contains("env-value-marker"), "{frame}");
         });
     }
@@ -733,7 +779,7 @@ mod tests {
     fn a_failed_answer_does_not_carry_the_typed_draft() {
         let frame = with_scratch_home(|| {
             let state = shape::sample_state(&mut shape::PlainSeed);
-            section_json(&state, SectionId::Fleet).to_string()
+            section_json(&state, SectionId::Fleet, &frame::HostId::local()).to_string()
         });
         assert!(frame.contains("draft_len"), "{frame}");
         assert!(!frame.contains("typed answer"), "{frame}");

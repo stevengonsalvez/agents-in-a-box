@@ -14,7 +14,7 @@
 
 use crate::app::AppState;
 use crate::app::versioned::SectionId;
-use crate::wire::frame::Frame;
+use crate::wire::frame::{Frame, HostId};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -39,7 +39,8 @@ pub struct WebSessionRow {
 /// The web rows for every session of `state`, read from its Sessions frame.
 #[must_use]
 pub fn session_rows(state: &AppState) -> Vec<WebSessionRow> {
-    rows_from_frame(&Frame::new(state, SectionId::Sessions))
+    // The web rows carry no host field, so the frame's host is never read.
+    rows_from_frame(&Frame::new(state, SectionId::Sessions, HostId::local()))
 }
 
 /// The web rows a Sessions frame describes. Any other section's frame has no

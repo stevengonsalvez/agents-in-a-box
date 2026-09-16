@@ -204,7 +204,10 @@ fn frame_envelope_paths(state: &AppState, id: SectionId, into: &mut BTreeSet<Str
             }
         }
     }
-    let mut envelope = serde_json::to_value(crate::wire::frame::Frame::new(state, id))
+    // A fixed host: the key paths are the contract, and no process-wide state
+    // may decide them (#1066).
+    let host = crate::wire::frame::HostId::local();
+    let mut envelope = serde_json::to_value(crate::wire::frame::Frame::new(state, id, host))
         .expect("a frame serialises");
     if let Some(map) = envelope.as_object_mut() {
         map.remove("body");
@@ -306,7 +309,14 @@ struct SectionFrame<'a> {
 
 impl serde::Serialize for SectionFrame<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serialize_section(self.state, self.id, serializer)
+        // The traced key paths are the contract; a fixed host keeps them from
+        // depending on who sends the section (#1066).
+        serialize_section(
+            self.state,
+            self.id,
+            &crate::wire::frame::HostId::local(),
+            serializer,
+        )
     }
 }
 
@@ -324,6 +334,8 @@ pub const TYPED_LABELS: &[&str] = &[
     "onboarding.git_directories_input",
     "claude_chat.input_buffer",
     "fleet.ask.free_text",
+    "fleet.ask.in_flight_draft",
+    "fleet.ask.delivered_via",
     "fleet.broadcast.text",
     "git_view.commit_message_input",
     "git_view.quick_commit_message",
@@ -559,6 +571,8 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
         session.tmux_session_name = Some(format!("ainb-{name}"));
         session.display_name = Some(format!("{name} label"));
         session.model = Some("claude-sonnet-4-5".to_string());
+        session.status =
+            crate::models::SessionStatus::Error(seed.text("session.status.error", Captured));
         session.live_attention = vec![
             crate::fleet::attention::SessionAttention::local(
                 crate::fleet::attention::AttentionKind::Ask,
@@ -1004,6 +1018,21 @@ fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
             crate::fleet::answer::AnswerPhase::Failed {
                 reason: seed.text("fleet.ask.failure_reason", Captured),
                 draft: Some("typed answer".to_string()),
+            },
+        );
+        // Every phase, not just the failed one (#1145): a payload no sample
+        // reaches is a payload no leak check has ever seen.
+        fleet.ask_state.set_phase(
+            "request-2",
+            crate::fleet::answer::AnswerPhase::InFlight {
+                since: std::time::Instant::now(),
+                draft: Some(seed.text("fleet.ask.in_flight_draft", TextKind::Typed)),
+            },
+        );
+        fleet.ask_state.set_phase(
+            "request-3",
+            crate::fleet::answer::AnswerPhase::Delivered {
+                via: seed.text("fleet.ask.delivered_via", TextKind::Typed),
             },
         );
         let mut attention =

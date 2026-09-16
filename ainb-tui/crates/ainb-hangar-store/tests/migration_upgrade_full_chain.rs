@@ -382,6 +382,37 @@ async fn seed_tokens(pool: &SqlitePool) {
     .expect("insert beads_mapping");
 }
 
+/// The host id the minted-identity row carries through the replay.
+const SEEDED_HOST_ID: &str = "01K5A0000000000000000AAAAA";
+
+/// Populate `daemon_identity` (0100) the way the first boot after the upgrade
+/// does: one row, singleton 1. The table does not exist at the seed schema, so
+/// this runs after the chain has been applied (#1066).
+async fn seed_daemon_identity(pool: &SqlitePool) {
+    sqlx::query("INSERT INTO daemon_identity (singleton, host_id, created_at) VALUES (1, ?, ?)")
+        .bind(SEEDED_HOST_ID)
+        .bind(8_000_i64)
+        .execute(pool)
+        .await
+        .expect("insert daemon_identity");
+}
+
+/// The minted identity is still one row, with the id it was minted under, after
+/// the chain is replayed (#1066).
+async fn assert_daemon_identity_survives(pool: &SqlitePool) {
+    assert_eq!(
+        count(pool, "daemon_identity").await,
+        1,
+        "one identity, always"
+    );
+    let host_id: String =
+        sqlx::query_scalar("SELECT host_id FROM daemon_identity WHERE singleton = 1")
+            .fetch_one(pool)
+            .await
+            .expect("daemon_identity row survives");
+    assert_eq!(host_id, SEEDED_HOST_ID);
+}
+
 /// Count rows in `table`.
 async fn count(pool: &SqlitePool, table: &str) -> i64 {
     sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
@@ -944,6 +975,12 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
     assert_legacy_issue_state_remapped_forward(&pool).await;
     assert_notify_atc_defaults_folded(&pool).await;
 
+    // The newest table is created BY the chain, so it cannot be part of the
+    // seed at the seed schema. It is populated here instead, exactly as the
+    // daemon's first boot after the upgrade populates it, so the replay below
+    // covers it too (#1066).
+    seed_daemon_identity(&pool).await;
+
     // (c) Idempotency: a SECOND apply re-runs nothing and changes no row.
     let recorded_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
         .fetch_one(&pool)
@@ -963,6 +1000,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         after,
         "double-apply must not change any seeded row"
     );
+    assert_daemon_identity_survives(&pool).await;
 
     pool.close().await;
 }

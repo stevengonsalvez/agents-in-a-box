@@ -70,6 +70,57 @@ fn the_first_batch_frames_every_subscribed_section_and_nothing_else() {
     assert_eq!(framed, vec!["frame sessions", "frame shell"]);
 }
 
+/// Daemon news makes the tick merge attention: a blocking daemon row no session
+/// claims is counted elsewhere, and the merge frames neither Sessions nor Shell.
+/// A tick right after, with no news, does not merge again inside the throttle.
+#[test]
+fn daemon_news_merges_attention_on_the_tick_and_frames_only_what_moved() {
+    use ainb_app::fleet::attention::{AttentionKind, DaemonAttention, SessionAttention};
+    use std::sync::atomic::Ordering;
+
+    let log = Log::default();
+    let mut host = host(&[SectionId::Sessions, SectionId::Shell], &log);
+    // Held off, so no poller thread overwrites the rows this test installs.
+    host.state().host.attention_poll_running.store(true, Ordering::Release);
+    let _ = host.tick();
+    log.borrow_mut().clear();
+
+    let row = SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-unclaimed".into());
+    *host.state().fleet.daemon_attention.lock().unwrap() = DaemonAttention::up(
+        std::collections::HashMap::from([("/nowhere".to_string(), vec![row])]),
+    );
+    host.state().host.daemon_attention_generation.fetch_add(1, Ordering::Release);
+    let _ = host.tick();
+
+    assert_eq!(
+        host.state().fleet.attention_elsewhere,
+        1,
+        "the tick merged the daemon row"
+    );
+    let framed = log.borrow().clone();
+    assert!(
+        !framed.iter().any(|frame| frame == "frame sessions"),
+        "no session row moved: {framed:?}"
+    );
+    // Shell moves once and once only: a merge that changed something sets the
+    // refresh latch the terminal host reads, and nothing here clears it.
+    assert_eq!(
+        framed.iter().filter(|frame| *frame == "frame shell").count(),
+        1,
+        "{framed:?}"
+    );
+
+    // No news: the row goes, but the next merge is not due yet.
+    *host.state().fleet.daemon_attention.lock().unwrap() =
+        DaemonAttention::up(std::collections::HashMap::new());
+    let _ = host.tick();
+    assert_eq!(
+        host.state().fleet.attention_elsewhere,
+        1,
+        "no merge inside the throttle"
+    );
+}
+
 #[test]
 fn a_section_that_did_not_move_frames_nothing() {
     let log = Log::default();
@@ -140,6 +191,48 @@ fn subscribe_frames_exactly_the_named_sections_in_one_batch() {
     let mut framed = log.borrow().clone();
     framed.sort();
     assert_eq!(framed, vec!["frame fleet", "frame sessions"]);
+}
+
+/// #1066: re-pinning the host frames every subscribed section again, static
+/// ones included, under the new id; re-pinning to the same id sends nothing.
+#[test]
+fn set_host_reframes_every_subscribed_section_under_the_new_id() {
+    scratch_home();
+    let hosts = Rc::new(RefCell::new(Vec::<(String, String)>::new()));
+    let seen = Rc::clone(&hosts);
+    let mut host = DesktopHost::new(
+        AppConfig::default(),
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::none(),
+        move |batch: FrameBatch| {
+            for frame in batch.frames {
+                seen.borrow_mut().push((frame.section, frame.host_id.as_str().to_string()));
+            }
+        },
+    );
+    host.subscribe(Subscription::only(&[
+        SectionId::Config,
+        SectionId::Sessions,
+    ]));
+    assert!(hosts.borrow().iter().all(|(_, id)| id == "local"));
+    hosts.borrow_mut().clear();
+
+    assert!(!host.set_host(HostId::local()));
+    assert!(hosts.borrow().is_empty(), "the same id frames nothing");
+
+    let ulid = HostId::new("01K5A0000000000000000AAAAA");
+    assert!(host.set_host(ulid.clone()));
+    assert_eq!(host.host_id(), &ulid);
+    let mut framed = hosts.borrow().clone();
+    framed.sort();
+    assert_eq!(
+        framed,
+        vec![
+            ("config".to_string(), ulid.as_str().to_string()),
+            ("sessions".to_string(), ulid.as_str().to_string()),
+        ]
+    );
 }
 
 /// The desktop's sidebar is the session list, so the host moves the reducer

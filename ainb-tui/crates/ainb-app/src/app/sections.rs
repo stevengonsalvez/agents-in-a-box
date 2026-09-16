@@ -1035,6 +1035,11 @@ pub struct HostOnlyState {
     pub last_snapshot_time: Option<Instant>,
     // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
     pub last_preview_update: Option<Instant>,
+    /// When attention was last merged. Every host calls
+    /// `AppState::refresh_attention` on its tick and the throttle lives there:
+    /// a merge reads the notifications store, so it runs on daemon news at
+    /// once and otherwise on this cadence.
+    pub last_attention_refresh: Option<Instant>,
     // Throttle for the cheaper non-selected-session status sweep. Status
     // (running/idle) is not time-critical, so it polls on a longer cadence than
     // the selected session's live preview: one `capture-pane` subprocess per
@@ -1143,6 +1148,7 @@ impl Default for HostOnlyState {
             workspace_load_receiver: None,
             last_snapshot_time: None,
             last_preview_update: None,
+            last_attention_refresh: None,
             last_status_check: None,
             branch_refresh_receiver: None,
             repo_check_receiver: None,

@@ -489,17 +489,25 @@ where
         return handler().await;
     };
 
-    let key = LedgerKey {
-        host_id: ainb_hangar_store::repo::mutation_ledger::LOCAL_HOST_ID.to_string(),
-        principal: principal_of(caller),
-        op_id: op_id.as_str().to_string(),
-    };
     let fingerprint = MutationLedgerRepo::fingerprint(&req.method, &req.params);
     let tier = tier_token(entry.tier);
 
-    let outcome = MutationLedgerRepo::claim(pool, &key, &req.method, &fingerprint, tier, now_ms)
-        .await
-        .map_err(|e| store_error(&e))?;
+    // The host the op id belongs to and the claim itself are decided on ONE
+    // connection (#1066): an op id a pre-mint daemon holds under `local` keeps
+    // that key, so a retry across the upgrade replays rather than re-running.
+    let mut conn = pool.acquire().await.map_err(|e| store_error(&e))?;
+    let (key, outcome) = MutationLedgerRepo::claim_resolving_host_on(
+        &mut conn,
+        &principal_of(caller),
+        op_id.as_str(),
+        &req.method,
+        &fingerprint,
+        tier,
+        now_ms,
+    )
+    .await
+    .map_err(|e| store_error(&e))?;
+    drop(conn);
     if let Some(answer) = settled(entry, &outcome) {
         return answer;
     }

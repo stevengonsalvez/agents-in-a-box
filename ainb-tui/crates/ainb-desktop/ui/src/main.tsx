@@ -14,10 +14,10 @@ import "./shell.css";
 
 /**
  * The one list of sections this window subscribes to; `subscribe` hands it to
- * the host. Sessions and Fleet feed the sidebar and the header counts, and
- * WorkspaceLoad the sidebar's loading state. Shell, Tmux, Config and
- * AgentStatus are subscribed ahead of their readers (settings in D3, agent
- * cards in D2).
+ * the host. Sessions feeds the sidebar and the header counts (its rows carry
+ * the merged attention), and WorkspaceLoad the sidebar's loading state. Shell,
+ * Tmux, Fleet, Config and AgentStatus are subscribed ahead of their readers
+ * (the attention list and agent cards in D2, settings in D3).
  */
 const SUBSCRIBED: SectionName[] = [
   "sessions",
@@ -57,8 +57,9 @@ function Shell() {
   const [sidecar, setSidecar] = createSignal<SidecarState>({ state: "starting" });
   const [log, setLog] = createSignal<string | null>(null);
 
-  // The host the channel is connected to, from the `subscribe` answer. Every
-  // drain is applied as that host's.
+  // The host the channel is connected to: the `subscribe` answer, then every
+  // `host` event. The host sends that event before it re-pins its frames to a
+  // new id (#1066), so every drain after it is applied as the new host's.
   const [peer, setPeer] = createSignal<HostId>();
 
   // Registered synchronously: an `onCleanup` after an `await` has left the
@@ -67,6 +68,7 @@ function Shell() {
     listen<SidecarState>("sidecar", (event) => setSidecar(event.payload)),
     listen<TabsView>("terminal_tabs", (event) => showTabs(event.payload)),
     listen<string>("toast", (event) => toast(event.payload)),
+    listen<HostId>("host", (event) => setPeer(event.payload)),
   ];
   onCleanup(() => listeners.forEach((unlisten) => void unlisten.then((stop) => stop())));
 
@@ -196,13 +198,15 @@ function Shell() {
     frames.onmessage = (batch) => {
       if (queue.push(batch) === 1) setTimeout(drain, DRAIN_MS);
     };
-    setPeer(await invoke<HostId>("subscribe", { frames, sections: SUBSCRIBED }));
+    const answered = await invoke<HostId>("subscribe", { frames, sections: SUBSCRIBED });
+    // A `host` event that landed while `subscribe` was in flight is newer than
+    // this answer: keep it.
+    if (peer() === undefined) setPeer(answered);
   });
 
-  // In this node the window holds exactly one host, the local one.
+  // In this node the window holds exactly one host: this machine's daemon.
   const host = peer;
   const sessions = () => (host() ? store.section(host()!, "sessions") : undefined);
-  const fleet = () => (host() ? store.section(host()!, "fleet") : undefined);
   const counts = HEADER_COUNTS.map(([select, label]) => ({
     label,
     count: createMemo(() => select(store, host())),
@@ -289,7 +293,6 @@ function Shell() {
       <div class="body">
         <Sidebar
           sessions={sessions()}
-          fleet={fleet()}
           stale={sessionsStale()}
           loading={loading()}
           onOpen={openSession}

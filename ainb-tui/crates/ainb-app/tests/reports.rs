@@ -537,7 +537,12 @@ fn a_pairing_code_never_leaves_the_process_in_the_serialised_report() {
     // The redeemed code is on the row, and a mirror frame of that row still
     // never carries it.
     assert!(outcome.local_only);
-    let frame = ainb_app::wire::section_json(&state, SectionId::Hangar).to_string();
+    let frame = ainb_app::wire::section_json(
+        &state,
+        SectionId::Hangar,
+        &ainb_app::wire::frame::HostId::local(),
+    )
+    .to_string();
     assert!(
         !frame.contains(CODE),
         "the redeemed code reached a frame: {frame}"

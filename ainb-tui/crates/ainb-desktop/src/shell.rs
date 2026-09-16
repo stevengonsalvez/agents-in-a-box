@@ -9,7 +9,7 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use ainb_app::Intent;
-use ainb_app::wire::frame::Subscription;
+use ainb_app::wire::frame::{HostId, Subscription};
 
 use crate::executor::DesktopExecutor;
 use crate::host::{DesktopHost, Executor, FrameSink};
@@ -90,8 +90,21 @@ impl<S: FrameSink> Shell<S> {
     }
 
     /// Frame every section in `subscription`, and only those, for a renderer
-    /// that just attached.
-    pub fn subscribe(&self, subscription: Subscription) {
-        self.core().host.subscribe(subscription);
+    /// that just attached, and answer the host those frames name. One lock, so
+    /// the answer is the host of the frames this call sent.
+    pub fn subscribe(&self, subscription: Subscription) -> HostId {
+        let mut core = self.core();
+        core.host.subscribe(subscription);
+        core.host.host_id().clone()
+    }
+
+    /// The host every frame names.
+    pub fn host_id(&self) -> HostId {
+        self.core().host.host_id().clone()
+    }
+
+    /// Re-pin the host every frame names; see [`DesktopHost::set_host`].
+    pub fn set_host(&self, host_id: HostId) -> bool {
+        self.core().host.set_host(host_id)
     }
 }

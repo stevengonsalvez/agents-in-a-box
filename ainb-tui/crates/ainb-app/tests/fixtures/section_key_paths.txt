@@ -199,8 +199,10 @@ fleet.ask_state.cursor
 fleet.ask_state.focus
 fleet.ask_state.free_text_len
 fleet.ask_state.phases[][]
+fleet.ask_state.phases[][].Delivered.via
 fleet.ask_state.phases[][].Failed.draft_len
 fleet.ask_state.phases[][].Failed.reason
+fleet.ask_state.phases[][].InFlight.draft_len
 fleet.ask_state.request
 fleet.attention_baseline
 fleet.attention_elsewhere
@@ -644,7 +646,7 @@ sessions.workspaces[].sessions[].skip_permissions
 sessions.workspaces[].sessions[].ssh_target.host
 sessions.workspaces[].sessions[].ssh_target.port
 sessions.workspaces[].sessions[].ssh_target.user
-sessions.workspaces[].sessions[].status
+sessions.workspaces[].sessions[].status.Error
 sessions.workspaces[].sessions[].tmux_session_name
 sessions.workspaces[].sessions[].workspace_path
 sessions.workspaces[].shell_session.created_at
@@ -792,7 +794,7 @@ ssh.ssh_sessions[].skip_permissions
 ssh.ssh_sessions[].ssh_target.host
 ssh.ssh_sessions[].ssh_target.port
 ssh.ssh_sessions[].ssh_target.user
-ssh.ssh_sessions[].status
+ssh.ssh_sessions[].status.Error
 ssh.ssh_sessions[].tmux_session_name
 ssh.ssh_sessions[].workspace_path
 ssh.ssh_sessions_expanded

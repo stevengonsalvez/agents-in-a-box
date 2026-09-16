@@ -28,6 +28,74 @@ mod presence;
 
 pub use presence::{Dialer, PresenceLease, PresenceState, mark_process_as_surface};
 
+/// The `host_id` the daemon at `socket` first named in an `auth/hello` this
+/// process completed there (#1066), or `None` when it has named none or has
+/// not been dialled.
+///
+/// Recorded in the one place the handshake is decoded, and never taken from a
+/// hello's own params: the id is the daemon's answer about itself, not
+/// something a caller can assert. Keyed by socket, so a second home, or a peer
+/// daemon, never renames the host another socket answers for.
+#[must_use]
+pub fn daemon_host_id(socket: &std::path::Path) -> Option<String> {
+    OBSERVED_HOST_IDS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(socket)
+        .cloned()
+}
+
+/// Record the host the daemon at `socket` named, keeping the FIRST id that
+/// socket gave for the life of the process (#1066).
+///
+/// A reply whose `host_id` is not a ULID (26 Crockford base32 characters) is
+/// treated as naming none: the value reaches renderer stores as a key, so a
+/// string like `__proto__` must never get that far. A later reply that names
+/// a different id, or none, does not replace the first; it is logged, because
+/// the host behind one socket should never change under a running surface.
+fn remember_host_id(socket: &std::path::Path, host_id: Option<&str>) {
+    let observed = match host_id {
+        Some(id) if is_host_id(id) => Some(id),
+        Some(_) => {
+            tracing::warn!(
+                socket = %socket.display(),
+                "hello named a host id that is not a ULID; ignored"
+            );
+            None
+        }
+        None => None,
+    };
+    let mut held = OBSERVED_HOST_IDS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match (held.get(socket), observed) {
+        (None, Some(id)) => {
+            held.insert(socket.to_path_buf(), id.to_string());
+        }
+        (Some(first), current) if Some(first.as_str()) != current => {
+            tracing::warn!(
+                socket = %socket.display(),
+                first = %first,
+                current = ?current,
+                "the daemon behind this socket named a different host; keeping the first"
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Whether `id` is a ULID: 26 characters of Crockford base32, upper case, the
+/// same alphabet migration 0100 checks.
+fn is_host_id(id: &str) -> bool {
+    id.len() == 26
+        && id
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'))
+}
+
+/// The first host id each socket named. A socket is only ever added, and a
+/// process dials a handful, so the map stays small.
+static OBSERVED_HOST_IDS: std::sync::RwLock<std::collections::BTreeMap<PathBuf, String>> =
+    std::sync::RwLock::new(std::collections::BTreeMap::new());
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -767,13 +835,14 @@ impl DaemonClient {
                 message: error.message,
             });
         }
-        let hello = serde_json::from_value(
+        let hello: auth::HelloResult = serde_json::from_value(
             reply
                 .result
                 .filter(|result| !result.is_null())
                 .unwrap_or_else(|| Value::Object(serde_json::Map::default())),
         )
         .map_err(|error| DaemonError::Decode(format!("decoding auth/hello: {error}")))?;
+        remember_host_id(&self.socket, hello.host_id.as_deref());
         Ok((reader, writer, hello))
     }
 
@@ -1113,6 +1182,99 @@ mod tests {
         let client = DaemonClient::with_parts(socket, "test-token".into());
         assert!(client.hello().await.expect("hello").advertises("fleet.roster_status.read"));
         assert!(client.hello().await.expect("hello").capabilities.is_empty());
+    }
+
+    /// A fake daemon at a fresh socket that answers one hello per result, in
+    /// order, asserting the client never sends a host id of its own.
+    fn serve_hellos(results: Vec<Value>) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temp.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake hangar socket");
+        tokio::spawn(async move {
+            for result in results {
+                let (stream, _) = listener.accept().await.expect("accept client");
+                let (read_half, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let hello = read_frame(&mut reader).await.expect("read auth request");
+                assert_eq!(hello["method"], methods::AUTH_HELLO);
+                assert!(hello["params"].get("host_id").is_none());
+                write_test_frame(
+                    &mut writer,
+                    &json!({"jsonrpc": "2.0", "id": 1, "result": result}),
+                )
+                .await;
+            }
+        });
+        (temp, socket)
+    }
+
+    /// #1066: the host id comes from the daemon's hello reply, and the first
+    /// id a socket names holds for the process: a later reply naming none, or
+    /// another id, does not replace it.
+    ///
+    /// The observed ids are process-wide but keyed by socket, and each test
+    /// here dials its own tempdir socket, so sibling tests cannot race it.
+    #[tokio::test]
+    async fn the_first_host_id_a_socket_names_holds_for_the_process() {
+        const HOST: &str = "01K5A0000000000000000AAAAA";
+        const OTHER: &str = "01K5A0000000000000000BBBBB";
+        let (_temp, socket) = serve_hellos(vec![
+            json!({}),
+            json!({"host_id": HOST}),
+            json!({}),
+            json!({"host_id": OTHER}),
+        ]);
+        let client = DaemonClient::with_parts(socket.clone(), "test-token".into());
+
+        client.hello().await.expect("hello");
+        assert_eq!(daemon_host_id(&socket), None, "nothing named yet");
+
+        let named = client.hello().await.expect("hello");
+        assert_eq!(named.host_id.as_deref(), Some(HOST));
+        assert_eq!(daemon_host_id(&socket).as_deref(), Some(HOST));
+
+        client.hello().await.expect("hello");
+        client.hello().await.expect("hello");
+        assert_eq!(
+            daemon_host_id(&socket).as_deref(),
+            Some(HOST),
+            "a later reply must not replace the first id"
+        );
+    }
+
+    /// #1066 security: a reply whose host id is not a ULID is ignored, so a
+    /// string like `__proto__` never reaches a renderer store as a key.
+    #[tokio::test]
+    async fn a_host_id_that_is_not_a_ulid_is_ignored() {
+        let (_temp, socket) = serve_hellos(vec![
+            json!({"host_id": "__proto__"}),
+            json!({"host_id": "01K5A0000000000000000AAAAI"}),
+            json!({"host_id": "01k5a0000000000000000aaaaa"}),
+        ]);
+        let client = DaemonClient::with_parts(socket.clone(), "test-token".into());
+        for _ in 0..3 {
+            client.hello().await.expect("hello");
+            assert_eq!(daemon_host_id(&socket), None);
+        }
+    }
+
+    #[test]
+    fn only_crockford_base32_ulids_are_host_ids() {
+        assert!(is_host_id("01K5A0000000000000000AAAAA"));
+        for bad in [
+            "",
+            "local",
+            "__proto__",
+            "01K5A0000000000000000AAAA",
+            "01K5A0000000000000000AAAAAA",
+            "01K5A0000000000000000AAAAI",
+            "01K5A0000000000000000AAAAL",
+            "01K5A0000000000000000AAAAO",
+            "01K5A0000000000000000AAAAU",
+            "01k5a0000000000000000aaaaa",
+        ] {
+            assert!(!is_host_id(bad), "{bad}");
+        }
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@ type RootSelector = (store: FrameStore, host: HostId | undefined) => number | bo
 const ring =
   (kind: AttentionKind) =>
   (store: FrameStore, host: HostId | undefined): number =>
-  host === undefined ? 0 : ringCount(store.section(host, "sessions"), store.section(host, "fleet"), kind);
+  host === undefined ? 0 : ringCount(store.section(host, "sessions"), kind);
 
 export const ROOT_SELECTORS = {
   askCount: ring("Ask"),
