@@ -1010,13 +1010,14 @@ fn a_plugin_that_stops_reading_stdin_releases_esc_within_the_write_bound() {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    if let Some(full) = pipe_full_at {
-        assert!(
-            full.elapsed() < BOUND + Duration::from_secs(2),
-            "Esc was released {:?} after the task stopped draining, past the {BOUND:?} bound",
-            full.elapsed()
-        );
-    }
+    // The inbox stays at capacity once the task is parked in its write, so
+    // the loop above always saw it full before the plugin was flagged.
+    let full = pipe_full_at.expect("the key inbox filled before the plugin was flagged");
+    assert!(
+        full.elapsed() < BOUND + Duration::from_secs(2),
+        "Esc was released {:?} after the task stopped draining, past the {BOUND:?} bound",
+        full.elapsed()
+    );
     // An Esc now: delivered to the runtime, but not serviced, so the host
     // takes it (the `delivered && !render_wedged` rule in `effect_host`).
     let esc = ainb_plugin_protocol::params::KeyEvent {
@@ -1030,7 +1031,9 @@ fn a_plugin_that_stops_reading_stdin_releases_esc_within_the_write_bound() {
         "the host takes the back key from a wedged plugin"
     );
 
-    // And the plugin is gone, the way a closed pipe drops it.
+    // And the plugin is gone, the way a closed pipe drops it. A deadline of its
+    // own: the one above may be nearly spent by the typing loop.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while handle.lifecycle_state(&id) == Some(LifecycleState::Running) {
         assert!(
             std::time::Instant::now() < deadline,
