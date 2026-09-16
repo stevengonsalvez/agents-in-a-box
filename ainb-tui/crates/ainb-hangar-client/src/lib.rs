@@ -1146,6 +1146,46 @@ mod tests {
         assert!(client.hello().await.expect("hello").capabilities.is_empty());
     }
 
+    /// #1066: the host id comes from the daemon's hello reply, and a later
+    /// reply that names none leaves the known id in place.
+    #[tokio::test]
+    async fn the_daemon_host_id_comes_from_the_hello_reply_and_is_not_unnamed() {
+        const HOST: &str = "01K5A0000000000000000AAAAA";
+        let temp = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temp.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake hangar socket");
+        tokio::spawn(async move {
+            for result in [json!({"host_id": HOST}), json!({})] {
+                let (stream, _) = listener.accept().await.expect("accept client");
+                let (read_half, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let hello = read_frame(&mut reader).await.expect("read auth request");
+                assert_eq!(hello["method"], methods::AUTH_HELLO);
+                // The id is never something the client asserts about itself.
+                assert!(hello["params"].get("host_id").is_none());
+                write_test_frame(
+                    &mut writer,
+                    &json!({"jsonrpc": "2.0", "id": 1, "result": result}),
+                )
+                .await;
+            }
+        });
+        let client = DaemonClient::with_parts(socket, "test-token".into());
+
+        assert_eq!(
+            client.hello().await.expect("hello").host_id.as_deref(),
+            Some(HOST)
+        );
+        assert_eq!(daemon_host_id().as_deref(), Some(HOST));
+
+        assert_eq!(client.hello().await.expect("hello").host_id, None);
+        assert_eq!(
+            daemon_host_id().as_deref(),
+            Some(HOST),
+            "an older daemon's reply must not unname the host"
+        );
+    }
+
     #[tokio::test]
     async fn fleet_subscription_keeps_socket_open_for_live_revisions() {
         let temp = tempfile::tempdir().expect("temporary socket directory");
