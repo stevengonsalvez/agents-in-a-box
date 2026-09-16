@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use ainb_app::config::AppConfig;
-use ainb_app::wire::frame::{FrameBatch, Subscription};
+use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
 use ainb_app::{Chord, Intent, Keymap, SectionId};
 use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::DesktopHost;
@@ -23,6 +23,7 @@ fn a_dispatch_during_ticks_returns() {
     let host = DesktopHost::new(
         AppConfig::default(),
         Keymap::defaults(),
+        HostId::local(),
         Subscription::only(&[SectionId::Shell]),
         move |batch: FrameBatch| {
             let _ = frames.send(batch);
