@@ -1207,6 +1207,8 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   web-e2e:
     name: web-e2e
+    permissions:
+      contents: read
     needs: changes
     if: >-
       !cancelled() && (github.event_name != 'pull_request' ||
