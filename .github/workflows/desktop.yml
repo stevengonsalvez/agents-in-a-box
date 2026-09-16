@@ -142,6 +142,11 @@ jobs:
       - name: Build the ainb CLI and the hangar daemon
         run: cargo build --bin ainb --bin ainb-hangar-daemon
         working-directory: ainb-tui
+      # The window build reads `bundle.externalBin`, so the sidecar has to be
+      # staged beside it first, exactly as the other two jobs do.
+      - name: Stage the hangar daemon sidecar
+        run: cargo xtask stage-desktop-sidecar
+        working-directory: ainb-tui
       - name: Build the shell with the embedded WebDriver
         run: cargo build --features wdio
         working-directory: ainb-tui/crates/ainb-desktop
