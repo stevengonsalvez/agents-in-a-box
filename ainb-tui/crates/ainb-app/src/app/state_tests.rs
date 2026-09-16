@@ -3608,6 +3608,54 @@ mod tests {
         );
     }
 
+    /// A scan that keeps failing says so once. A host that rescans on a cadence
+    /// would otherwise raise the same warning and write the same section every
+    /// time Docker stays slow.
+    #[test]
+    fn a_repeated_scan_timeout_bumps_nothing_and_warns_once() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        // A window that has shown its sessions, which is when a repeat matters.
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
+        assert!(
+            state.check_workspace_loading_complete(),
+            "the first scan applies"
+        );
+        state.shell.notifications.clear();
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Timeout).expect("send load result");
+        assert!(
+            state.check_workspace_loading_complete(),
+            "the first timeout is news"
+        );
+        assert_eq!(
+            state.shell.notifications.len(),
+            1,
+            "the first timeout warns"
+        );
+        let version = state.workspace_load.version();
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Timeout).expect("send load result");
+        assert!(
+            !state.check_workspace_loading_complete(),
+            "the same timeout again reports no update"
+        );
+        assert_eq!(
+            state.workspace_load.version(),
+            version,
+            "the same timeout again wrote the WorkspaceLoad section"
+        );
+        assert_eq!(
+            state.shell.notifications.len(),
+            1,
+            "the same timeout warned twice"
+        );
+    }
+
     // ========================================================================
     // Onboarding completion: State -> Config mapping
     // ========================================================================
