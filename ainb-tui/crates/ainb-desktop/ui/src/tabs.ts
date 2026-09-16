@@ -28,10 +28,21 @@ export function rowOf(target: TabTarget): RowId {
 }
 
 /**
+ * What the window's `dispatch` command takes, as
+ * `ainb_desktop::intent::RendererIntent` spells it: a key, a named command
+ * with its arguments, or pasted text. There is no pointer variant; the webview
+ * hit-tests its own DOM and sends the command a press means.
+ */
+export type RendererIntent =
+  | { Key: string }
+  | { Command: [string, unknown] }
+  | { Text: string };
+
+/**
  * The intent that selects `row` and attaches it. Opening goes through the
  * session list's own row, so the reducer marks the session attached each time.
  */
-export function openRowIntent(row: RowId) {
+export function openRowIntent(row: RowId): RendererIntent {
   return { Command: ["session_list.select_row", { target: row, open: true }] };
 }
 
