@@ -177,7 +177,9 @@ pub fn route_key_to_focused_plugin(
     };
     // Insert joined the wire in protocol 0.3.0, and a plugin built against an
     // older one cannot decode it. The screen still claims it, as it claimed
-    // every key the wire had no shape for.
+    // every key the wire had no shape for. Lift this when the runtime's
+    // `ABI_VERSION` passes 2 (`ainb-plugin-runtime/src/plugin_task.rs:64`), so
+    // every plugin that loads can decode Insert (#1171).
     if matches!(key.code, KeyCode::Insert) {
         return PluginRoute::Consumed;
     }
