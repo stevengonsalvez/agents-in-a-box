@@ -309,7 +309,14 @@ struct SectionFrame<'a> {
 
 impl serde::Serialize for SectionFrame<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serialize_section(self.state, self.id, serializer)
+        // The traced key paths are the contract; a fixed host keeps them from
+        // depending on who sends the section (#1066).
+        serialize_section(
+            self.state,
+            self.id,
+            &crate::wire::frame::HostId::local(),
+            serializer,
+        )
     }
 }
 
