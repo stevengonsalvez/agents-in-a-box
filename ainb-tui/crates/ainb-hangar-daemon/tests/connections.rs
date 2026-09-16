@@ -259,15 +259,14 @@ async fn web_server_presence_lives_for_server_task() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let listed = observer.connections().await;
-        if listed["connections"]
-            .as_array()
-            .is_some_and(|rows| rows.iter().any(|row| row["surface"]["kind"] == "web"))
-        {
+        if listed["connections"].as_array().is_some_and(|rows| {
+            rows.iter().filter(|row| row["surface"]["kind"] == "web").count() == 1
+        }) {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "web presence never appeared in connections_list: {listed}"
+            "web presence never appeared in connections_list as exactly one row: {listed}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -753,8 +752,19 @@ async fn web_one_shot_calls_beside_its_presence_never_list_a_second_row() {
 
     // The web server's presence socket, at this process's pid, as `serve`
     // holds it.
-    let mut presence = Client::connect(&socket).await;
-    presence.hello_with(home.path(), "web", std::process::id(), false).await;
+    let lease = ainb_hangar_client::PresenceLease::spawn_with(
+        ainb_hangar_proto::connections::SurfaceInfo {
+            kind: ainb_hangar_proto::connections::SurfaceKind::Web,
+            pid: std::process::id(),
+        },
+        lease_dialer(home.path()),
+    );
+    wait_for_state(
+        &lease,
+        &ainb_hangar_client::PresenceState::Connected,
+        Duration::from_secs(5),
+    )
+    .await;
 
     let mut watcher = Client::connect(&socket).await;
     watcher.hello(home.path(), Some("tui")).await;
@@ -762,7 +772,12 @@ async fn web_one_shot_calls_beside_its_presence_never_list_a_second_row() {
 
     let token = std::fs::read_to_string(ainb_hangar_proto::auth::token_file_in(home.path()))
         .expect("daemon token");
-    let web = ainb_web::daemon::DaemonClient::with_parts(socket.clone(), token.trim().to_string());
+    let mut web =
+        ainb_web::daemon::DaemonClient::with_parts(socket.clone(), token.trim().to_string());
+    web.set_surface(ainb_hangar_proto::connections::SurfaceInfo {
+        kind: ainb_hangar_proto::connections::SurfaceKind::Web,
+        pid: std::process::id(),
+    });
     for _ in 0..3 {
         web.attention_list_fleet().await.expect("one-shot web read is served");
     }
@@ -780,7 +795,7 @@ async fn web_one_shot_calls_beside_its_presence_never_list_a_second_row() {
         rows.iter().filter(|row| row["surface"]["kind"] == "web").count()
     });
     assert_eq!(web_rows, 1, "only the presence socket is listed: {listed}");
-    drop(presence);
+    lease.close().await;
 }
 
 /// Review finding on #998: the daemon, not the client, decides transient. A
