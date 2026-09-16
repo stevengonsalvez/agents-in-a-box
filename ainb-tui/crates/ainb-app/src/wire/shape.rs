@@ -408,8 +408,8 @@ pub fn sample_states(seed: &mut dyn Seed) -> Vec<AppState> {
 }
 
 /// How many [`alternate_state`]s [`sample_states`] builds: the most unseeded
-/// variants any one single-valued field has.
-const ALTERNATE_ROUNDS: usize = 3;
+/// variants any one single-valued field has (`ConfirmAction`'s seven).
+const ALTERNATE_ROUNDS: usize = 7;
 
 /// A sample whose single-valued enum fields hold the variants
 /// [`sample_state`] does not, one per `round` (#1146).
@@ -499,6 +499,52 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
             Err(seed.text("fleet.broadcast.failure", Captured))
         });
         fleet.broadcast.tick();
+    }
+
+    // ---- session labels: every attachable ref, as menu target and rename target
+    {
+        use crate::app::state::{AttachableRef, SessionContextMenu};
+        let target = match round {
+            0 => AttachableRef::WorkspaceSession {
+                workspace_idx: 0,
+                session_idx: 0,
+            },
+            1 => AttachableRef::WorkspaceShell { workspace_idx: 0 },
+            2 => AttachableRef::SshSession { ssh_idx: 0 },
+            _ => AttachableRef::OtherTmux { other_idx: 0 },
+        };
+        let labels = state.session_labels.get_mut();
+        labels.session_context_menu = Some(SessionContextMenu {
+            target: target.clone(),
+            selected: 0,
+        });
+        labels.session_label_rename_target = Some(target);
+    }
+
+    // ---- shell: every confirmation the delete sample does not ask ------------
+    {
+        use crate::app::state::{ConfirmAction, DialogOption};
+        let actions = [
+            ConfirmAction::StopSession(uuid::Uuid::nil()),
+            ConfirmAction::BulkDeleteSessions(vec![uuid::Uuid::nil()]),
+            ConfirmAction::BulkStopSessions(vec![uuid::Uuid::nil()]),
+            ConfirmAction::KillOtherTmux("scratch".to_string()),
+            ConfirmAction::KillOtherTmuxSessions(vec!["scratch".to_string()]),
+            ConfirmAction::KillWorkspaceShell(0),
+            ConfirmAction::McpStopServer("github".to_string()),
+        ];
+        if let Some(dialog) = state.shell.get_mut().confirmation_dialog.as_mut() {
+            dialog.confirm_action = actions[round.min(actions.len() - 1)].clone();
+            dialog.options = Some(
+                actions
+                    .iter()
+                    .map(|action| DialogOption {
+                        label: "Confirm".to_string(),
+                        action: action.clone(),
+                    })
+                    .collect(),
+            );
+        }
     }
 
     // ---- skills: the discovery banner, collapsed then expanded ---------------
