@@ -10124,7 +10124,15 @@ impl AppState {
             let edits = std::mem::take(&mut self.hangar.pending_daemon_config_edits);
             self.set_hangar_daemon_config(edits).await;
         }
-        if let Some(action) = self.shell.pending_async_action.take() {
+        // Read before taking: this runs every tick, and a `take()` through
+        // Shell's `DerefMut` would bump it on every tick with nothing queued
+        // (#1139).
+        let queued = if self.shell.pending_async_action.is_some() {
+            self.shell.pending_async_action.take()
+        } else {
+            None
+        };
+        if let Some(action) = queued {
             info!(
                 ">>> process_async_action() called with action: {:?}",
                 action
