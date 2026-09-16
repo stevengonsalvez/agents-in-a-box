@@ -324,6 +324,8 @@ pub const TYPED_LABELS: &[&str] = &[
     "onboarding.git_directories_input",
     "claude_chat.input_buffer",
     "fleet.ask.free_text",
+    "fleet.ask.in_flight_draft",
+    "fleet.ask.delivered_via",
     "fleet.broadcast.text",
     "git_view.commit_message_input",
     "git_view.quick_commit_message",
@@ -1006,6 +1008,21 @@ fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
             crate::fleet::answer::AnswerPhase::Failed {
                 reason: seed.text("fleet.ask.failure_reason", Captured),
                 draft: Some("typed answer".to_string()),
+            },
+        );
+        // Every phase, not just the failed one (#1145): a payload no sample
+        // reaches is a payload no leak check has ever seen.
+        fleet.ask_state.set_phase(
+            "request-2",
+            crate::fleet::answer::AnswerPhase::InFlight {
+                since: std::time::Instant::now(),
+                draft: Some(seed.text("fleet.ask.in_flight_draft", TextKind::Typed)),
+            },
+        );
+        fleet.ask_state.set_phase(
+            "request-3",
+            crate::fleet::answer::AnswerPhase::Delivered {
+                via: seed.text("fleet.ask.delivered_via", TextKind::Typed),
             },
         );
         let mut attention =
