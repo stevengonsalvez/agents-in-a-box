@@ -4406,9 +4406,25 @@ impl AppState {
                                 workspaces.len()
                             );
 
+                            // A scan that found nothing new writes nothing.
+                            // The desktop asks for one every ten seconds, so
+                            // this is the difference between a quiet window
+                            // and the whole Sessions section reframed on a
+                            // timer, with the selection reset and a notice
+                            // raised each time.
+                            self.workspace_load
+                                .set_if_changed(|section| &mut section.workspace_load_error, None);
+                            if self.host.workspaces_applied
+                                && self.sessions.workspaces == workspaces
+                                && self.ssh.ssh_sessions == ssh_sessions
+                            {
+                                debug!("background workspace scan found no change");
+                                return false;
+                            }
+
+                            self.host.workspaces_applied = true;
                             self.sessions.workspaces = workspaces;
                             self.ssh.ssh_sessions = ssh_sessions;
-                            self.workspace_load.workspace_load_error = None;
 
                             // Resolve favorite status once per workspace now
                             // that the list changed, so the session-list render
