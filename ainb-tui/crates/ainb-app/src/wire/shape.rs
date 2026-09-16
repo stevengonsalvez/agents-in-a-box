@@ -343,6 +343,7 @@ pub const TYPED_LABELS: &[&str] = &[
     "session_labels.rename_buffer",
     // The plain-text popup variant from `sample_states`.
     "config.text_popup",
+    "config.number_popup",
     // Name editors on the Configure form.
     "new_session.configure.branch_prefix_edit",
     "new_session.configure.session_prefix_edit",
@@ -399,7 +400,78 @@ pub fn sample_states(seed: &mut dyn Seed) -> Vec<AppState> {
         ),
         "Enter on a plain text row opens a TextInput"
     );
-    vec![secret_popup, text_popup]
+    let mut states = vec![secret_popup, text_popup];
+    for round in 0..ALTERNATE_ROUNDS {
+        states.push(alternate_state(seed, round));
+    }
+    states
+}
+
+/// How many [`alternate_state`]s [`sample_states`] builds: the most unseeded
+/// variants any one single-valued field has.
+const ALTERNATE_ROUNDS: usize = 3;
+
+/// A sample whose single-valued enum fields hold the variants
+/// [`sample_state`] does not, one per `round` (#1146).
+///
+/// The tracer only sees the variant a value holds, so every payload-carrying
+/// variant needs some sample that holds it, or no leak check ever reads its
+/// payload. A field with fewer variants than rounds repeats its last one.
+fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
+    use crate::components::config_popup::ConfigPopupType;
+    use crate::components::git_view::{MarkdownLine, MarkdownStyle};
+    use crate::components::onboarding::state::{AuthAgent, AuthPane, OnboardingFocus};
+    use crate::components::skill_manager_screen::{DiscoveryBannerCounts, DiscoveryBannerState};
+    use TextKind::{Captured, Typed};
+
+    let mut state = sample_state(seed);
+
+    // ---- config: the popup types the two popup samples do not open ----------
+    state.config.get_mut().config_popup_state.popup_type = match round {
+        0 => ConfigPopupType::Boolean { value: true },
+        1 => ConfigPopupType::Choice {
+            options: vec!["tmux".to_string(), "docker".to_string()],
+            selected_index: 1,
+        },
+        _ => ConfigPopupType::NumberInput {
+            value: 30,
+            input_buffer: seed.text("config.number_popup", Typed),
+        },
+    };
+
+    // ---- git view: a fenced code block's language line -----------------------
+    if let Some(view) = state.git_view.get_mut().git_view_state.as_mut() {
+        view.markdown_content.push(MarkdownLine {
+            content: "fn main() {}".to_string(),
+            style: MarkdownStyle::CodeBlockHeader(
+                seed.text("git_view.code_block_language", Captured),
+            ),
+        });
+    }
+
+    // ---- onboarding: the method picker, and focus on a list item -------------
+    if let Some(wizard) = state.onboarding.get_mut().onboarding_state.as_mut() {
+        wizard.auth_pane = AuthPane::MethodPicker {
+            agent: AuthAgent::Claude,
+            cursor: 1,
+        };
+        wizard.focus = OnboardingFocus::Item(2);
+    }
+
+    // ---- skills: the discovery banner, collapsed then expanded ---------------
+    let counts = DiscoveryBannerCounts {
+        marketplace_plugins: 2,
+        orphan_units_total: 3,
+        orphan_units_per_tool: vec![("claude".to_string(), 3)],
+        conflicts: 1,
+    };
+    state.skills.get_mut().skill_manager_state.banner = if round == 0 {
+        DiscoveryBannerState::Visible(counts)
+    } else {
+        DiscoveryBannerState::Details(counts)
+    };
+
+    state
 }
 
 /// Build the sample state. Every optional screen is open and every field the
