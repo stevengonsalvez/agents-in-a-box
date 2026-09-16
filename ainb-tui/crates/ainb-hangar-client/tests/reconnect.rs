@@ -271,10 +271,9 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
     };
     assert_eq!(delay2, BACKOFF_4S);
     let elapsed1 = t1.elapsed();
-    // 1s delay with tolerance
     assert!(
-        elapsed1 >= Duration::from_millis(800) && elapsed1 <= Duration::from_millis(3000),
-        "elapsed between attempt 1 and 2 was {elapsed1:?}, expected ~1s"
+        elapsed1 >= Duration::from_millis(900) && elapsed1 <= Duration::from_millis(1600),
+        "elapsed between attempt 1 and 2 was {elapsed1:?}, expected 900-1600ms"
     );
     let t2 = Instant::now();
 
@@ -290,10 +289,9 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
     };
     assert_eq!(delay3, BACKOFF_16S);
     let elapsed2 = t2.elapsed();
-    // 4s delay with tolerance
     assert!(
-        elapsed2 >= Duration::from_millis(3500) && elapsed2 <= Duration::from_millis(7000),
-        "elapsed between attempt 2 and 3 was {elapsed2:?}, expected ~4s"
+        elapsed2 >= Duration::from_millis(3600) && elapsed2 <= Duration::from_millis(5200),
+        "elapsed between attempt 2 and 3 was {elapsed2:?}, expected 3600-5200ms"
     );
 
     // Verify banner and stale badge during reconnect
@@ -303,6 +301,25 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
     assert_eq!(view.banner, Some("reconnecting"));
     assert!(view.stale_badge);
     assert!(view.frozen);
+
+    let t3 = Instant::now();
+
+    // Observe 4th reconnect attempt (16s backoff leg)
+    let s4 = wait_for_condition(&mut state_rx, Duration::from_secs(22), |s| {
+        matches!(s1_attempt(s), Some(4))
+    })
+    .await;
+
+    let delay4 = match s4 {
+        ConnectionState::Reconnecting { delay, .. } => delay,
+        _ => unreachable!(),
+    };
+    assert_eq!(delay4, BACKOFF_16S);
+    let elapsed3 = t3.elapsed();
+    assert!(
+        elapsed3 >= Duration::from_millis(14_000) && elapsed3 <= Duration::from_millis(20_000),
+        "elapsed for 16s leg was {elapsed3:?}, expected 14-20s"
+    );
 
     // 6. Restart daemon in same home
     let _daemon2 = match DaemonProcess::spawn(&home) {
