@@ -289,6 +289,17 @@ impl AskState {
         matches!(self.phase(), Some(AnswerPhase::InFlight { .. }))
     }
 
+    /// The channel a send worker reports its outcome through.
+    ///
+    /// Shared by design: the worker outlives the pane that started it, and
+    /// [`Self::tick`] is what drains this. A host test holds it to stand in for
+    /// a worker, which is how "the outcome lands with no renderer in the
+    /// process" is provable without a daemon on the box.
+    #[must_use]
+    pub fn reports(&self) -> Arc<Mutex<Vec<(String, AnswerPhase)>>> {
+        Arc::clone(&self.inbox)
+    }
+
     /// Move the option cursor, wrapping. A free-text row sits after the last
     /// option, which is how the operator reaches the composer with the arrows
     /// alone.
