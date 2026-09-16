@@ -95,3 +95,49 @@ fn the_tick_starts_another_scan_once_the_cadence_has_passed() {
         running = now;
     }
 }
+
+/// The daemon already knows when something happened, so its publish counter
+/// starts a scan rather than the window waiting out the cadence (#1156).
+#[test]
+fn daemon_news_starts_a_scan_before_the_cadence_would() {
+    use std::sync::atomic::Ordering;
+
+    support::isolated_home();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let _runtime = runtime.enter();
+
+    let mut host = DesktopHost::new(
+        AppConfig::default(),
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::only(&[SectionId::WorkspaceLoad]),
+        |_batch: FrameBatch| {},
+    )
+    // Far longer than this test runs: a scan here is the news's, not the
+    // cadence's.
+    .rescanning_every(Duration::from_secs(600));
+    // Held off, so the poller thread does not move the counter under the test.
+    host.state().host.attention_poll_running.store(true, Ordering::Release);
+
+    let _ = host.tick();
+    assert!(
+        !host.state().workspace_scan_running(),
+        "nothing has happened yet, and the cadence is 10 minutes away"
+    );
+
+    host.state().host.daemon_attention_generation.fetch_add(1, Ordering::Release);
+    let _ = host.tick();
+
+    assert!(
+        host.state().workspace_scan_running(),
+        "the daemon reported news, so the window looked at once"
+    );
+
+    // Wait the scan out, so the test leaves no loader thread behind.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while host.state().workspace_scan_running() {
+        assert!(Instant::now() < deadline, "the scan never finished");
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = host.tick();
+    }
+}
