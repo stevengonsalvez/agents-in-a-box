@@ -31,14 +31,24 @@ export const AINB_BIN = process.env.AINB_BIN ?? resolve(HERE, "../../../target/d
 export const DAEMON_BIN =
   process.env.AINB_DESKTOP_DAEMON_BIN ?? resolve(HERE, "../../../target-desktop/debug/ainb-hangar-daemon");
 
-/** An agent that prints a tick a second, so a seeded pane has live output. */
+/**
+ * The agent a seeded session runs: it prints a tick a second, echoes back
+ * anything typed at it, and reads a file on request. That makes the pane's own
+ * capture the proof that a line typed in the window reached the process, and
+ * gives the recorded read an end the harness can see.
+ */
 const FIXTURE_AGENT = `#!/usr/bin/env bash
 trap 'echo "AGENT GOT SIGINT"' INT
 n=0
 while :; do
   n=$((n + 1))
   echo "agent tick $n"
-  sleep 1
+  if IFS= read -r -t 1 line; then
+    case "$line" in
+      bulk\\ *) cat "\${line#bulk }"; echo "BULK DONE" ;;
+      *) echo "agent read: $line" ;;
+    esac
+  fi
 done
 `;
 
@@ -165,26 +175,11 @@ export function down() {
       // A session that ended between the listing and here.
     }
   }
-  rmSync(world().root, { recursive: true, force: true });
-  delete process.env[WORLD_ENV];
-}
-
-/**
- * Wait until the session's current window is running a shell that has drawn
- * its prompt. A window is created before its shell has a pty to read, and
- * keys sent into that gap are lost.
- */
-export async function shellReady(tmux, timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    let command = "";
-    try {
-      command = run("tmux", ["display-message", "-p", "-t", `=${tmux}:`, "#{pane_current_command}"]).trim();
-    } catch {
-      // The window is not there yet.
-    }
-    if (/^(bash|zsh|sh|fish)$/.test(command) && paneText(tmux).trim() !== "") return;
-    await new Promise((settle) => setTimeout(settle, 500));
+  // A daemon still writing can hold a directory open for a moment.
+  try {
+    rmSync(world().root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch (error) {
+    console.warn(`the world at ${world().root} was left behind: ${error.message}`);
   }
-  throw new Error(`no shell drew a prompt in ${tmux} within ${timeoutMs} ms`);
+  delete process.env[WORLD_ENV];
 }
