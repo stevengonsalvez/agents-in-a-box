@@ -59,8 +59,6 @@ scenario() {
     [[ -s "$PROOF_WORLD/desktop.stderr" ]] && observe "window stderr: $(tail -3 "$PROOF_WORLD/desktop.stderr")"
     return
   fi
-  cp "$DESKTOP_LOG" "$NODE_DIR/desktop-log.txt" 2>/dev/null && CAPTURES+=("desktop-log.txt")
-
   observe "sections in the first batch the renderer applied: $(applied_sections)"
   check "the renderer applied the sessions section" \
     grep -q '"sessions"' <<<"$(applied_sections)"
@@ -74,6 +72,9 @@ scenario() {
   observe "daemon pid from a CLI process: ${daemon_pid:-none}"
   check "a separate CLI call finds a running daemon" test -n "$daemon_pid"
 
+  # The window registers its connection once its sidecar has said hello, which
+  # is not done the moment the first frame is drawn.
+  wait_for 60 rows_is desktop "" ge 1
   local json desktop_rows
   json="$(connections_json)"
   printf '%s\n' "$json" | redact_host >"$NODE_DIR/connections.json"
@@ -100,4 +101,11 @@ scenario() {
   after="$(connections_json | jq '[.connections[].surface | select(.kind == "desktop")] | length')"
   observe "desktop rows after the window closed: $after"
   check "no desktop row after the window closed" test "$after" -eq 0
+
+  # Taken at the end, so the capture holds the whole run rather than the first
+  # seconds of it.
+  if [[ -s "$DESKTOP_LOG" ]]; then
+    tail -n 400 "$DESKTOP_LOG" | redact_host >"$NODE_DIR/desktop-log.txt"
+    CAPTURES+=("desktop-log.txt")
+  fi
 }
