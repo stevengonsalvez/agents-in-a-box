@@ -1060,6 +1060,11 @@ export type ConfigPopupType_Serialize =
 /**  Number input */
 ({ NumberInput: {
 	value: number,
+	/**
+	 *  The digits being typed. The popup draws them, so a frame carries
+	 *  them, scrubbed in case something other than digits was pasted
+	 *  (#1146).
+	 */
 	input_buffer: string,
 } }) & { Boolean?: never; Choice?: never; SecretInput?: never; TextInput?: never };
 
@@ -2827,11 +2832,19 @@ export type MarkdownLine = MarkdownLine_Serialize;
 export type MarkdownLine_Serialize = {
 	/**  Arbitrary repo file content, so a frame carries it scrubbed. */
 	content: string,
-	style: MarkdownStyle,
+	style: MarkdownStyle_Serialize,
 };
 
 /**  Styling categories for markdown content */
-export type MarkdownStyle = "Heading1" | "Heading2" | "Heading3" | "Paragraph" | "CodeBlock" | { CodeBlockHeader: string } | "ListItem" | "Bold" | "Italic" | "InlineCode" | "Link" | "BlockQuote";
+export type MarkdownStyle = MarkdownStyle_Serialize;
+
+/**  Styling categories for markdown content */
+export type MarkdownStyle_Serialize = "Heading1" | "Heading2" | "Heading3" | "Paragraph" | "CodeBlock" | 
+/**
+ *  A fenced block's language line, straight out of a repo file, so a frame
+ *  carries it scrubbed (#1146).
+ */
+{ CodeBlockHeader: string } | "ListItem" | "Bold" | "Italic" | "InlineCode" | "Link" | "BlockQuote";
 
 /**  Mascot animation controller */
 export type MascotAnimation = {
