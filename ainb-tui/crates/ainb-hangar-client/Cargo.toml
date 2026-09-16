@@ -30,7 +30,6 @@ tracing = { workspace = true }
 [dev-dependencies]
 # The fake-socket tests bind a `UnixListener` in a temporary directory.
 tempfile = { workspace = true }
-nix = { workspace = true }
 
 [lints]
 workspace = true
