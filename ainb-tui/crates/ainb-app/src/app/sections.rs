@@ -1009,6 +1009,18 @@ pub type BranchRefreshPayload = (
 /// `tests/host_side_effects.rs`.
 #[derive(Debug)]
 pub struct HostOnlyState {
+    /// What kind of surface this process is, as it names itself to the daemon.
+    ///
+    /// The answer path carries it to `attention/answer`, and the daemon
+    /// records the winning row under it (base spec `:307`, `answered_by =
+    /// "<kind>@<host>"`), so this is how a second surface learns whether the
+    /// person who answered sat at a terminal or at the desktop shell.
+    ///
+    /// `Tui` unless a host says otherwise: the terminal is the reducer's
+    /// original surface, so no existing host changes its provenance by the
+    /// field arriving, and a new host that forgets is recorded as the one it
+    /// was a copy of rather than as `unknown`.
+    pub surface: ainb_hangar_proto::connections::SurfaceKind,
     // Tmux integration
     pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,
     /// Whether a workspace scan has ever been applied. A later scan that finds
@@ -1142,6 +1154,7 @@ pub struct HostOnlyState {
 impl Default for HostOnlyState {
     fn default() -> Self {
         Self {
+            surface: ainb_hangar_proto::connections::SurfaceKind::Tui,
             tmux_sessions: HashMap::new(),
             workspaces_applied: false,
             preview_update_task: None,
