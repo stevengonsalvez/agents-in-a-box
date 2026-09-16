@@ -4696,24 +4696,28 @@ impl AppState {
     /// Poll the background drift scan. Returns true if results were
     /// applied this tick. Drains a single message — backend returns
     /// the whole map in one go so a single drain is enough.
+    ///
+    /// Polled every tick, so an idle or empty channel leaves Skills' version
+    /// alone (#1139).
     pub fn check_drift_load_complete(&mut self) -> bool {
-        if let Some(ref mut receiver) = self.skills.drift_load_receiver {
+        self.skills.update(|skills| {
+            let Some(receiver) = skills.drift_load_receiver.as_mut() else {
+                return false;
+            };
             match receiver.try_recv() {
                 Ok(map) => {
-                    self.skills.skill_manager_state.drift_cache = map;
-                    self.skills.drift_load_receiver = None;
+                    skills.skill_manager_state.drift_cache = map;
+                    skills.drift_load_receiver = None;
                     true
                 }
                 Err(mpsc::error::TryRecvError::Empty) => false,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.skills.drift_load_receiver = None;
+                    skills.drift_load_receiver = None;
                     warn!("Drift detect task dropped its sender without delivering data");
                     true
                 }
             }
-        } else {
-            false
-        }
+        })
     }
 
     // ── Shared MCP pool overlay ────────────────────────────────────────────
