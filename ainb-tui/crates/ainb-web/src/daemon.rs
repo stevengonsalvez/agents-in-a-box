@@ -1,436 +1,17 @@
-//! Daemon control-plane client — the web surface's read + answer path onto the
-//! hangar daemon (spec P8 / D18).
+//! Daemon control-plane integration for the web surface (spec P8 / D18).
 //!
-//! Before P8 the dashboard's `needs` came from shelling `ainb fleet needs`
-//! (which cold-booted a plugin runtime and capture-paned every session). The
-//! converged control plane makes the daemon the single source of truth: `needs`
-//! now reads the `attention/list` RPC, and ASK cards are answered by routing an
-//! `attention/answer` RPC back through the daemon's ONE verified send path
-//! (INV-2) rather than the web process ever touching tmux.
-//!
-//! This module owns the socket transport: dial `{hangar_home}/hangar.sock`,
-//! send the mandatory `auth/hello` first frame, then one request/response over
-//! the Content-Length-framed JSON-RPC the daemon speaks. Individual read and
-//! answer RPCs stay deliberately stateless (a fresh connection per call), so
-//! they recover independently of a daemon restart. Separately, [`WebPresence`]
-//! owns one authenticated socket for the web server lifetime, making the live
-//! surface registry truthful while the process is running. The frame shapes
-//! come from the pure `ainb-hangar-proto` crate so the wire contract can never
-//! drift from the daemon.
+//! Re-exports the shared client and wire error from `ainb-hangar-client`, and
+//! owns the web-specific projection from daemon inbox rows onto the JSON `needs`
+//! cards the dashboard renders, plus the [`Answerer`] route dependency seam.
 
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
-use std::time::Duration;
 
-use ainb_hangar_proto::auth;
+pub use ainb_hangar_client::{DaemonClient, DaemonError, socket_path};
+use ainb_hangar_proto::connections::{SurfaceInfo, SurfaceKind};
 use ainb_hangar_proto::events::AttentionRow;
-use ainb_hangar_proto::snapshots::{
-    AnswerParams, AnswerResult, AttentionListParams, AttentionListResult,
-};
-use ainb_hangar_proto::{RpcId, RpcRequest, RpcResponse, methods};
+use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::task::JoinHandle;
-
-/// How long a single dial + round-trip may take before the web surface gives up
-/// and degrades (needs → empty, answer → error). The daemon is a local unix
-/// socket, so this is generous; it only guards against a wedged daemon.
-const RPC_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Interval between presence pings. This stays well inside the daemon's
-/// request/response idle timeout, so a quiet dashboard retains its truthful
-/// connection row without needing an unrelated event subscription.
-const PRESENCE_HEARTBEAT: Duration = Duration::from_secs(60);
-/// First retry delay for a daemon that is absent or rotating its token.
-const PRESENCE_RETRY_INITIAL: Duration = Duration::from_millis(100);
-/// Bounded retry ceiling, avoiding both a restart hot loop and a long
-/// undiscoverable gap after the daemon returns.
-const PRESENCE_RETRY_MAX: Duration = Duration::from_secs(5);
-
-/// A failure talking to the hangar daemon. Every variant is non-fatal to the
-/// web surface: `needs` degrades to an empty list and `/api/answer` returns a
-/// JSON error envelope, so a down daemon never takes the dashboard down.
-#[derive(Debug, thiserror::Error)]
-pub enum DaemonError {
-    /// The hangar home / socket path could not be resolved from the environment.
-    #[error("hangar home not resolvable (is $AINB_HANGAR_HOME / $HOME set?)")]
-    NoHome,
-    /// The daemon token file is missing or unreadable (daemon not running yet).
-    #[error("daemon token unreadable: {0}")]
-    Token(String),
-    /// Connecting to the socket failed (daemon not listening).
-    #[error("connect {path}: {source}")]
-    Connect {
-        /// The socket path we tried to dial.
-        path: String,
-        /// The underlying I/O error.
-        #[source]
-        source: std::io::Error,
-    },
-    /// A socket read/write failed mid-exchange.
-    #[error("daemon io: {0}")]
-    Io(String),
-    /// The exchange did not complete within [`RPC_TIMEOUT`].
-    #[error("daemon timed out after {0:?}")]
-    Timeout(Duration),
-    /// The daemon answered with a JSON-RPC error (e.g. `auth/hello` rejected).
-    #[error("daemon rpc error {code}: {message}")]
-    Rpc {
-        /// The JSON-RPC error code.
-        code: i32,
-        /// The human-readable message.
-        message: String,
-    },
-    /// The daemon's result payload did not match the expected shape.
-    #[error("decoding daemon reply: {0}")]
-    Decode(String),
-}
-
-/// The daemon unix socket path, the same target the TUI plugin dials. `None`
-/// when the home cannot be resolved.
-///
-/// D17: the versioned alias when the daemon published one AND it verifiably
-/// points at `hangar.sock`; otherwise the plain path. The check is shared with
-/// `ainb-hangar-client` rather than copied, because the first frame here is the
-/// daemon token.
-#[must_use]
-pub fn socket_path() -> Option<PathBuf> {
-    let home = ainb_hangar_core::hangar_home()?;
-    Some(ainb_hangar_core::socket::dial_path_in(
-        &home,
-        ainb_hangar_proto::protocol::PROTOCOL_VERSION,
-    ))
-}
-
-/// A stateless client for the daemon control plane. Cheap to clone (just a path
-/// + the plaintext token); every call opens a fresh connection.
-#[derive(Debug, Clone)]
-pub struct DaemonClient {
-    socket: PathBuf,
-    token: String,
-}
-
-impl DaemonClient {
-    /// Resolve the socket + token from the environment (the daemon writes the
-    /// plaintext token to `{hangar_home}/hangar/daemon.token` at boot). Returns
-    /// an error when the home is unresolvable or the token file is absent — both
-    /// of which the caller treats as "daemon not available" and degrades.
-    pub fn from_env() -> Result<Self, DaemonError> {
-        let socket = socket_path().ok_or(DaemonError::NoHome)?;
-        let token_path = auth::default_token_file().ok_or(DaemonError::NoHome)?;
-        let token = read_token(&token_path)?;
-        Ok(Self { socket, token })
-    }
-
-    /// Construct from explicit parts (the test seam — point it at a fake socket
-    /// server with a known token).
-    #[must_use]
-    pub fn with_parts(socket: PathBuf, token: String) -> Self {
-        Self { socket, token }
-    }
-
-    /// Snapshot the OPEN fleet-wide attention inbox (`attention/list`,
-    /// `fleet = true`) — every session's open input request across every
-    /// workspace plus the no-workspace host sessions, oldest-first.
-    pub async fn attention_list_fleet(&self) -> Result<Vec<AttentionRow>, DaemonError> {
-        let params = serde_json::to_value(AttentionListParams {
-            workspace_id: None,
-            fleet: true,
-        })
-        .expect("AttentionListParams serializes");
-        let result = self.call(methods::ATTENTION_LIST, params).await?;
-        let parsed: AttentionListResult =
-            serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))?;
-        Ok(parsed.attention)
-    }
-
-    /// Read one status row per agent (`fleet/status`): the D14 "one truth"
-    /// read.
-    ///
-    /// The dashboard stamps every card with this rather than deriving state
-    /// from the inbox alone, so `/api/needs`, `ainb fleet needs` and the TUI
-    /// fleet panel print the same `(session_key, state, provenance, tier,
-    /// evidence_observed_at)` for the same agent.
-    pub async fn fleet_status(
-        &self,
-    ) -> Result<ainb_hangar_proto::agent_status::AgentStatusResult, DaemonError> {
-        let result = self.call(methods::FLEET_STATUS, Value::Object(Default::default())).await?;
-        serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
-    }
-
-    /// Answer one open attention row (`attention/answer`). The daemon runs the
-    /// first-answer-wins + C1 ambiguity guards and performs the verified
-    /// last-mile send; the tagged [`AnswerResult`] says what happened.
-    pub async fn answer(&self, mut params: AnswerParams) -> Result<AnswerResult, DaemonError> {
-        // D18, same reasoning as the TUI client: no op id means no ledger row,
-        // no receipt, and nothing to surface if the daemon dies mid-delivery.
-        // Fresh per call so a re-answer of a reopened row really re-delivers.
-        if params.mutation.op_id.is_none() {
-            params.mutation.op_id = Some(ainb_hangar_proto::mutation::OpId::from_bytes(
-                ainb_hangar_core::opid::mint_bytes(),
-            ));
-        }
-        let value = serde_json::to_value(params).expect("AnswerParams serializes");
-        let result = self.call(methods::ATTENTION_ANSWER, value).await?;
-        serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
-    }
-
-    /// Dial, authenticate, issue one RPC, and return its `result` value. Wraps
-    /// the whole exchange in [`RPC_TIMEOUT`].
-    async fn call(&self, method: &str, params: Value) -> Result<Value, DaemonError> {
-        tokio::time::timeout(RPC_TIMEOUT, self.call_inner(method, params))
-            .await
-            .map_err(|_| DaemonError::Timeout(RPC_TIMEOUT))?
-    }
-
-    async fn call_inner(&self, method: &str, params: Value) -> Result<Value, DaemonError> {
-        // Transient (#963): the presence socket is this surface's one row, so a
-        // one-shot call must not list a second `web` for its few milliseconds.
-        let (mut reader, mut writer) = self.open_authenticated(true).await?;
-
-        // The real call.
-        write_frame(&mut writer, method, params, 2).await?;
-        let resp = read_response(&mut reader).await?;
-        if let Some(err) = resp.error {
-            return Err(DaemonError::Rpc {
-                code: err.code,
-                message: err.message,
-            });
-        }
-        Ok(resp.result.unwrap_or(Value::Null))
-    }
-
-    /// Dial and complete the mandatory `auth/hello` frame, leaving the stream
-    /// available to either a one-shot RPC or the web server's lifetime owner.
-    ///
-    /// `transient` is true for a one-shot RPC: the daemon serves it and stamps
-    /// provenance from it, but only the presence socket is listed.
-    async fn open_authenticated(
-        &self,
-        transient: bool,
-    ) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
-        let stream =
-            UnixStream::connect(&self.socket).await.map_err(|source| DaemonError::Connect {
-                path: self.socket.display().to_string(),
-                source,
-            })?;
-        let (read_half, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-
-        // First frame MUST be auth/hello or the daemon closes the connection.
-        let mut hello = json!({
-            "token": self.token,
-            "surface": { "kind": "web", "pid": std::process::id() },
-            // D17: declared, never assumed. An older daemon ignores both.
-            "protocol": ainb_hangar_proto::protocol::ProtocolRange::supported(),
-            "capabilities": ainb_hangar_proto::protocol::catalogue_strings(),
-        });
-        if transient {
-            hello["transient"] = Value::Bool(true);
-        }
-        write_frame(&mut writer, methods::AUTH_HELLO, hello, 1).await?;
-        let hello = read_response(&mut reader).await?;
-        if let Some(err) = hello.error {
-            return Err(DaemonError::Rpc {
-                code: err.code,
-                message: err.message,
-            });
-        }
-        Ok((reader, writer))
-    }
-}
-
-/// An authenticated connection held for the complete web-server lifetime.
-///
-/// This guard owns a task rather than an artificial registry lease. Each task
-/// connection completes a real `auth/hello`, sends bounded pings while idle,
-/// and is dropped on guard destruction, so daemon EOF remains the sole source
-/// of truth for row removal.
-#[derive(Debug)]
-pub(crate) struct WebPresence {
-    task: JoinHandle<()>,
-}
-
-impl WebPresence {
-    /// Begin the web server's reconnecting daemon-presence task.
-    ///
-    /// Home, socket, and token locations are resolved again for every attempt.
-    /// A server may therefore start before the daemon, then recover through a
-    /// daemon restart or token rotation without affecting one-shot web RPCs.
-    #[must_use]
-    pub(crate) fn spawn() -> Self {
-        Self::spawn_with_connector(|| Some((socket_path()?, auth::default_token_file()?)))
-    }
-
-    fn spawn_with_connector<F>(connector: F) -> Self
-    where
-        F: FnMut() -> Option<(PathBuf, PathBuf)> + Send + 'static,
-    {
-        Self {
-            task: tokio::spawn(maintain_web_presence(connector)),
-        }
-    }
-}
-
-impl Drop for WebPresence {
-    fn drop(&mut self) {
-        // A JoinHandle drop detaches by default. Aborting here makes the guard
-        // exactly match the web server lifetime and drops its UnixStream now.
-        self.task.abort();
-    }
-}
-
-/// Reconnect a real authenticated web socket until its owner drops the task.
-async fn maintain_web_presence<F>(mut connector: F)
-where
-    F: FnMut() -> Option<(PathBuf, PathBuf)> + Send + 'static,
-{
-    let mut backoff = PRESENCE_RETRY_INITIAL;
-    loop {
-        let Some((socket, token_file)) = connector() else {
-            tracing::debug!("web presence has no resolvable Hangar home; retrying");
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(PRESENCE_RETRY_MAX);
-            continue;
-        };
-        let client = match read_token(&token_file) {
-            Ok(token) => DaemonClient::with_parts(socket, token),
-            Err(error) => {
-                tracing::debug!(error = %error, "web presence token unavailable; retrying");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(PRESENCE_RETRY_MAX);
-                continue;
-            }
-        };
-        match PresenceConnection::connect(&client).await {
-            Ok(connection) => {
-                // One successful hello proves this retry sequence recovered.
-                // A later EOF starts from the short delay again.
-                backoff = PRESENCE_RETRY_INITIAL;
-                if let Err(error) = connection.heartbeat_until_closed().await {
-                    tracing::debug!(error = %error, "web presence disconnected; reconnecting");
-                }
-            }
-            Err(error) => {
-                tracing::debug!(error = %error, "web presence connect failed; retrying");
-            }
-        }
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(PRESENCE_RETRY_MAX);
-    }
-}
-
-/// One authenticated presence socket, held until EOF or one failed heartbeat.
-struct PresenceConnection {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
-    next_id: i64,
-}
-
-impl PresenceConnection {
-    async fn connect(client: &DaemonClient) -> Result<Self, DaemonError> {
-        let (reader, writer) = client.open_authenticated(false).await?;
-        Ok(Self {
-            reader,
-            writer,
-            next_id: 2,
-        })
-    }
-
-    async fn heartbeat_until_closed(mut self) -> Result<(), DaemonError> {
-        let mut heartbeat = tokio::time::interval(PRESENCE_HEARTBEAT);
-        // `interval` fires immediately. Consume that tick: the hello already
-        // established presence, and pings start only after one quiet interval.
-        heartbeat.tick().await;
-        loop {
-            heartbeat.tick().await;
-            write_frame(&mut self.writer, methods::PING, json!({}), self.next_id).await?;
-            self.next_id = self.next_id.saturating_add(1);
-            let response = tokio::time::timeout(RPC_TIMEOUT, read_response(&mut self.reader))
-                .await
-                .map_err(|_| DaemonError::Timeout(RPC_TIMEOUT))??;
-            if let Some(error) = response.error {
-                return Err(DaemonError::Rpc {
-                    code: error.code,
-                    message: error.message,
-                });
-            }
-        }
-    }
-}
-
-/// Read a trimmed plaintext token from its `0600` daemon token file.
-fn read_token(token_path: &std::path::Path) -> Result<String, DaemonError> {
-    std::fs::read_to_string(token_path)
-        .map_err(|e| DaemonError::Token(e.to_string()))
-        .map(|token| token.trim().to_string())
-}
-
-/// Write one Content-Length-framed JSON-RPC request.
-async fn write_frame(
-    writer: &mut (impl AsyncWriteExt + Unpin),
-    method: &str,
-    params: Value,
-    id: i64,
-) -> Result<(), DaemonError> {
-    let req = RpcRequest {
-        jsonrpc: ainb_hangar_proto::jsonrpc_version(),
-        id: RpcId::Number(id),
-        method: method.to_string(),
-        params,
-    };
-    let body = serde_json::to_vec(&req).map_err(|e| DaemonError::Io(e.to_string()))?;
-    let mut out = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
-    out.extend_from_slice(&body);
-    writer.write_all(&out).await.map_err(|e| DaemonError::Io(e.to_string()))?;
-    writer.flush().await.map_err(|e| DaemonError::Io(e.to_string()))?;
-    Ok(())
-}
-
-/// Read the next id-bearing [`RpcResponse`], skipping any interleaved
-/// notification frames (event pushes carry no `id`).
-async fn read_response(reader: &mut BufReader<OwnedReadHalf>) -> Result<RpcResponse, DaemonError> {
-    loop {
-        let frame = read_frame(reader).await?;
-        // A notification (no `id`) is an event push; skip it and keep reading
-        // for the response to our request.
-        if frame.get("id").is_some() {
-            return serde_json::from_value(frame).map_err(|e| DaemonError::Decode(e.to_string()));
-        }
-    }
-}
-
-/// Read one Content-Length-framed JSON object off the socket.
-async fn read_frame(reader: &mut BufReader<OwnedReadHalf>) -> Result<Value, DaemonError> {
-    let mut len: Option<usize> = None;
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await.map_err(|e| DaemonError::Io(e.to_string()))?;
-        if n == 0 {
-            return Err(DaemonError::Io(
-                "connection closed while awaiting a frame".to_string(),
-            ));
-        }
-        let trimmed = line.trim_end_matches("\r\n");
-        if trimmed.is_empty() {
-            // End of headers — read the body.
-            let content_len = len.ok_or_else(|| {
-                DaemonError::Decode("frame missing Content-Length header".to_string())
-            })?;
-            let mut body = vec![0u8; content_len];
-            reader.read_exact(&mut body).await.map_err(|e| DaemonError::Io(e.to_string()))?;
-            return serde_json::from_slice(&body).map_err(|e| DaemonError::Decode(e.to_string()));
-        }
-        if let Some((name, v)) = trimmed.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("Content-Length") {
-                len = v.trim().parse().ok();
-            }
-        }
-    }
-}
 
 // ── needs mapping ────────────────────────────────────────────────────────────
 
@@ -459,7 +40,7 @@ pub fn display_kind(wire_kind: &str) -> &'static str {
 /// The `payload` field is best-effort JSON: the daemon stores it as a serialised
 /// string, so a parseable payload is normalised (see [`normalize_payload`]) into
 /// the flat shape the dashboard renders and an unparseable one falls back to the
-/// raw string — the card always has something to show.
+/// raw string, so the card always has something to show.
 #[must_use]
 pub fn attention_to_needs(rows: &[AttentionRow]) -> Value {
     attention_to_needs_with_status(rows, &[])
@@ -574,14 +155,14 @@ fn stamp_status(card: &mut Value, status: &ainb_hangar_proto::agent_status::Agen
 /// acceptance fixtures use). The dashboard's card renderer, by contrast, reads
 /// the detail fields (`question`, `marker`, …) and the option *strings* at the
 /// TOP level. Without this bridge a real ASK card renders its title but no
-/// question and — fatally — no answer buttons, because `payload.options` is
+/// question and, fatally, no answer buttons, because `payload.options` is
 /// absent. So the mapping boundary flattens a `context` wrapper up one level and
 /// converts each option to its label string, while leaving an already-flat
 /// payload (or a raw non-object string) untouched.
 fn normalize_payload(raw: &str) -> Value {
     let parsed = match serde_json::from_str::<Value>(raw) {
         Ok(v) => v,
-        // Not JSON — surface the raw string so the card still shows something.
+        // Not JSON: surface the raw string so the card still shows something.
         Err(_) => return json!(raw),
     };
 
@@ -638,7 +219,11 @@ impl Answerer for DaemonAnswerer {
         params: AnswerParams,
     ) -> Pin<Box<dyn Future<Output = Result<AnswerResult, DaemonError>> + Send + '_>> {
         Box::pin(async move {
-            let client = DaemonClient::from_env()?;
+            let mut client = DaemonClient::from_env()?;
+            client.set_surface(SurfaceInfo {
+                kind: SurfaceKind::Web,
+                pid: std::process::id(),
+            });
             client.answer(params).await
         })
     }
@@ -706,7 +291,7 @@ mod tests {
         // The canonical stored shape (real ingest + acceptance fixtures): the
         // request fields nested under `context`, with options as `{label}`
         // objects. The card renderer reads the detail + option STRINGS at the top
-        // level, so the mapping must flatten the wrapper and unwrap the labels —
+        // level, so the mapping must flatten the wrapper and unwrap the labels:
         // otherwise the ASK renders no question and no answer buttons.
         let payload = r#"{"kind":"ASK","context":{"question":"Ship to which env?","options":[{"label":"staging"},{"label":"prod"},{"label":"canary"}]}}"#;
         let rows = vec![row("att-ask-1", "ask_user_question", payload)];
@@ -716,7 +301,7 @@ mod tests {
         assert_eq!(card["kind"], "ASK");
         // Detail is lifted out of the `context` wrapper to the top level.
         assert_eq!(card["payload"]["question"], "Ship to which env?");
-        // Options are flattened to their label strings, in order — this is what
+        // Options are flattened to their label strings, in order; this is what
         // the frontend turns into the "1. staging" / "2. prod" answer buttons.
         assert_eq!(card["payload"]["options"][0], "staging");
         assert_eq!(card["payload"]["options"][1], "prod");
