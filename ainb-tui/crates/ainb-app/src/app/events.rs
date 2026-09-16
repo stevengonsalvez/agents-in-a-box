@@ -3234,8 +3234,7 @@ impl EventHandler {
             // The surface already folded the key in; nothing left to reduce.
             AppEvent::Consumed => {}
             AppEvent::SessionTabNext | AppEvent::SessionTabPrev => {
-                use crate::app::state::FocusedPane;
-                use crate::components::session_tabs::{SessionTab, cycle, resolve};
+                use crate::components::session_tabs::{cycle, resolve};
                 let forward = matches!(event, AppEvent::SessionTabNext);
                 let from = resolve(state, state.shell.session_tab);
                 state.shell.session_tab = cycle(state, from, forward);
@@ -3275,8 +3274,12 @@ impl EventHandler {
                         )
                     },
                 );
+                // Read before the send borrows the Fleet section: the answer is
+                // recorded under the surface this process is, whichever that is.
+                let surface = state.host.surface;
                 state.fleet.ask_state.retarget(&chip);
-                if let Err(refusal) = state.fleet.ask_state.send(&chip, &session_id, &cwd) {
+                if let Err(refusal) = state.fleet.ask_state.send(&chip, &session_id, &cwd, surface)
+                {
                     // Refusals are shown, never swallowed: a send that silently
                     // does nothing is the failure mode this screen exists to
                     // remove.
