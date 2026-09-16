@@ -8,7 +8,7 @@
 
 import type { Session_Serialize, SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
 import { allSessions, label, rowStatus } from "./sessions.ts";
-import { openRowIntent } from "./tabs.ts";
+import { openRowIntent, type RendererIntent } from "./tabs.ts";
 
 /** `ainb_desktop::host::PaletteEntry`. */
 export interface PaletteEntry {
@@ -31,7 +31,7 @@ export interface PaletteRow {
   chord: string | null;
   /** A row the reducer would refuse now is still offered, greyed. */
   active: boolean;
-  intent: unknown;
+  intent: RendererIntent;
 }
 
 /** The most rows the palette lists at once. */
@@ -83,7 +83,7 @@ export function commandRows(entries: readonly PaletteEntry[]): PaletteRow[] {
     detail: label(`${entry.context} · ${entry.id}`),
     chord: entry.chord === null ? null : label(entry.chord),
     active: entry.active,
-    intent: { Command: [entry.id, null] },
+    intent: { Command: [entry.id, null] } as RendererIntent,
   }));
 }
 
