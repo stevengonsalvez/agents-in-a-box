@@ -1676,10 +1676,17 @@ const UNSEEDED_VARIANTS: &[&str] = &[
 /// each section's view type gives the variants that must appear; the committed
 /// key-path fixture is what the sample actually reached.
 ///
-/// What this does NOT gate, because no key path can carry it: the NAME of an
-/// internally tagged variant (`{ type: "Npm", ... }`), which is a field's
-/// value. Its payload fields are walked like any other field, so an unseeded
-/// one shows up as a missing leaf in the key-path fixture instead.
+/// What this does NOT gate: internally tagged enums (`{ type: "Npm", ... }`).
+/// The variant name is a field's value, so no key path carries it, and the
+/// payload fields beside the tag are walked but gated by NOTHING today: the
+/// key-path fixture is built from the sample, so a variant the sample never
+/// seeds is missing from both sides and nothing fails. The sites, 18 members
+/// in all, are recorded against #1146:
+/// - `DepState` at `onboarding.onboarding_state.dependency_status.topics[].deps[].state`
+/// - `HealthFrame` at `agent_status.view.health`
+/// - `ImageSource` at `config.app_config.container_templates{}.config.image_source`
+/// - `McpInstallation` at `config.app_config.mcp_servers{}.installation`
+/// - `McpServerDefinition` at `config.app_config.mcp_servers{}.definition`
 #[test]
 fn every_payload_carrying_variant_reachable_from_a_section_is_seeded() {
     let bindings = Bindings::parse(BINDINGS);
