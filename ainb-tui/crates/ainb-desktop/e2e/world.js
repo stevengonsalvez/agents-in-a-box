@@ -144,7 +144,12 @@ export function seed() {
   const repo = join(world().root, "repo");
   const out = run(AINB_BIN, ["run", "--repo", repo, "--worktree", "--format", "json"], { cwd: repo });
   const field = (label) => out.split("\n").find((line) => line.trim().startsWith(label))?.split(":").slice(1).join(":").trim();
-  const session = { id: field("Session ID"), tmux: field("Tmux Session"), cwd: field("Working Dir") };
+  const session = {
+    id: field("Session ID"),
+    tmux: field("Tmux Session"),
+    cwd: field("Working Dir"),
+    branch: field("Branch"),
+  };
   if (!session.tmux) throw new Error(`ainb run created no session:\n${out}`);
   return session;
 }
