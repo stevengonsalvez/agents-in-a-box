@@ -1002,6 +1002,7 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "Session.preview_content",
     "Session.recent_logs",
     "SessionAttention.detail",
+    "SessionStatus::Error.0",
     "SessionRecoveryState.action_result",
     "SessionRecoveryState.last_error",
     "SessionRecoveryState.search_query_len",
