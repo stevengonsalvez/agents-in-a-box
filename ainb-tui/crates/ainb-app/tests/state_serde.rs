@@ -1284,6 +1284,10 @@ fn the_sample_fills_every_string_field() {
 /// other typed label's marker must not.
 const CANARY_SHOWN: &[(&str, &str)] = &[
     (
+        "fleet.ask.delivered_via",
+        "how an answer was delivered, built from the tmux session name; the chip draws it",
+    ),
+    (
         "new_session.configure.branch_prefix_edit",
         "a branch prefix being typed; a name the Configure form draws",
     ),
