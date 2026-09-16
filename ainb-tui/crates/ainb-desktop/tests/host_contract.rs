@@ -59,6 +59,37 @@ impl Executor for Recorder {
 }
 
 #[test]
+fn a_host_that_never_draws_still_lands_an_answer_outcome() {
+    // The send worker reports into the state. This shell has none of the
+    // terminal's draw loop, so unless its tick folds the report, an answer sent
+    // from this window leaves the row reading SENT for as long as it is open.
+    use ainb_app::fleet::answer::{AnswerPhase, request_id};
+    use ainb_app::fleet::attention::{AttentionKind, SessionAttention};
+
+    let log = Log::default();
+    let mut host = host(&[SectionId::Shell], &log);
+    let _ = host.tick();
+    let chip = SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into());
+
+    // Exactly what a worker does when the daemon has answered.
+    host.state().fleet.ask_state.reports().lock().expect("inbox").push((
+        request_id(&chip),
+        AnswerPhase::Delivered {
+            via: "tmux (feat-login)".to_string(),
+        },
+    ));
+    let _ = host.tick();
+
+    assert!(
+        matches!(
+            host.state().fleet.ask_state.phase_for(&chip),
+            Some(AnswerPhase::Delivered { .. })
+        ),
+        "the desktop's own tick folded the outcome"
+    );
+}
+
+#[test]
 fn an_answer_from_this_window_is_recorded_as_the_desktops() {
     // The daemon stamps `answered_by` from the kind the connection declares,
     // and the answer path dials with the kind the state carries. A shell that
