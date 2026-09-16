@@ -14,6 +14,7 @@
 
 use ainb_app::app::SectionId;
 use ainb_app::fleet::bridge::redact::{REDACTED, find_secret};
+use ainb_app::wire::frame::HostId;
 use ainb_app::wire::shape::{self, Seed, TextKind};
 use ainb_app::wire::{section_json, section_name};
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,7 +31,10 @@ fn isolated_home() {
 }
 
 fn all_frames(state: &ainb_app::AppState) -> Vec<(SectionId, serde_json::Value)> {
-    SectionId::ALL.into_iter().map(|id| (id, section_json(state, id))).collect()
+    SectionId::ALL
+        .into_iter()
+        .map(|id| (id, section_json(state, id, &HostId::local())))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -55,14 +59,19 @@ fn every_section_has_one_object_frame() {
 /// receives, not only what the seam returns.
 #[test]
 fn mirror_frames_carry_exactly_the_checked_section_json() {
-    use ainb_app::wire::frame::{HostId, Mirror, Subscription};
+    use ainb_app::wire::frame::{Mirror, Subscription};
     isolated_home();
     for state in shape::sample_states(&mut shape::PlainSeed) {
         let batch = Mirror::new(HostId::local(), Subscription::all()).batch(&state);
         assert_eq!(batch.frames.len(), SectionId::COUNT);
         for frame in batch.frames {
             let id = frame.section_id().expect("a known section");
-            assert_eq!(*frame.body(), section_json(&state, id), "{}", frame.section);
+            assert_eq!(
+                *frame.body(),
+                section_json(&state, id, &HostId::local()),
+                "{}",
+                frame.section
+            );
         }
     }
 }
@@ -1568,7 +1577,7 @@ fn saves_outside_a_frame_keep_what_the_frame_withholds() {
     assert!(session.contains("sample session.preview_content"));
     assert!(session.contains("id_ed25519"), "identity file kept on disk");
 
-    let frame = section_json(&state, SectionId::Config).to_string();
+    let frame = section_json(&state, SectionId::Config, &HostId::local()).to_string();
     assert!(!frame.contains("sample config.fleet.bridge.telegram.token"));
     assert!(!frame.contains("sample config.mcp.env"));
     assert!(!frame.contains("sample config.mcp.json"));
@@ -1582,7 +1591,7 @@ fn saves_outside_a_frame_keep_what_the_frame_withholds() {
         config.contains("sample config.plugins.values"),
         "plugin table kept on disk"
     );
-    let sessions = section_json(&state, SectionId::Sessions).to_string();
+    let sessions = section_json(&state, SectionId::Sessions, &HostId::local()).to_string();
     assert!(
         !sessions.contains("id_ed25519"),
         "identity file left out of the frame"
