@@ -325,6 +325,7 @@ pub const TYPED_LABELS: &[&str] = &[
     "claude_chat.input_buffer",
     "fleet.ask.free_text",
     "fleet.ask.in_flight_draft",
+    "fleet.ask.delivered_via",
     "fleet.broadcast.text",
     "git_view.commit_message_input",
     "git_view.quick_commit_message",
@@ -1019,10 +1020,7 @@ fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
         fleet.ask_state.set_phase(
             "request-3",
             crate::fleet::answer::AnswerPhase::Delivered {
-                // A literal: `via` is the host's own description of the
-                // transport ("tmux (<session>)"), not text from anywhere the
-                // canary or the tripwire should be looking.
-                via: "tmux (sample-session)".to_string(),
+                via: seed.text("fleet.ask.delivered_via", TextKind::Typed),
             },
         );
         let mut attention =
