@@ -1,9 +1,9 @@
 //! The desktop's embedded host: one `AppState`, driven through `dispatch`, with
 //! every change framed for the webview.
 
+use ainb_app::app::RendererHost;
 use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
-use ainb_app::app::RendererHost;
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
 use ainb_app::{AppState, Chord, CommandId, Effect, Intent, Keymap};
