@@ -227,5 +227,5 @@ test("web dashboard answers a seeded ASK: render → click ② → delivered + a
     row = attentionRow();
     return row.startsWith("answered|");
   });
-  expect(row).toMatch(new RegExp(`^answered\\|web(@[^|]+)?\\|${PICK_ANSWER}$`));
+  expect(row).toMatch(new RegExp(`^answered\\|web@[^|]+\\|${PICK_ANSWER}$`));
 });
