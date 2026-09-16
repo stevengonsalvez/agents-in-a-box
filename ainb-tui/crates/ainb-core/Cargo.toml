@@ -83,7 +83,7 @@ blake3 = { workspace = true }
 
 # Plugin runtime (Phase 7 — subprocess + JSON-RPC, replaces wasmi host).
 ainb-plugin-runtime = { path = "../ainb-plugin-runtime", version = "0.1.0" }
-ainb-plugin-protocol = { path = "../ainb-plugin-protocol", version = "0.2.0" }
+ainb-plugin-protocol = { path = "../ainb-plugin-protocol", version = "0.3.0" }
 ainb-plugin-hangar = { path = "../ainb-plugin-hangar" }
 
 # Skill manager CLI surface (source/search/skill/migrate/doctor — spec §10.1).
