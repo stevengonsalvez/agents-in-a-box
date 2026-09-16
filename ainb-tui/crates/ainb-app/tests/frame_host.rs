@@ -75,7 +75,7 @@ async fn one_mirror_crosses_the_hello_and_the_renderer_keeps_every_section() {
     let mut store = MirrorStore::new(Subscription::all());
     let first = mirror.batch(&state);
     assert!(first.frames.iter().all(|frame| frame.host_id == local));
-    store.apply_drain(&local, [first]);
+    store.apply_drain(&local, [first.clone()]);
     assert!(store.section(&local, SectionId::Config).is_some());
 
     // The daemon names its host.
@@ -102,10 +102,19 @@ async fn one_mirror_crosses_the_hello_and_the_renderer_keeps_every_section() {
     assert!(mirror.set_host(ulid.clone()));
     state.shell.help_visible = !state.shell.help_visible;
     let pinned = mirror.batch(&state);
+    // The freeze: a renderer that held the first batch under `local` and never
+    // heard the new id keeps the old sections and drops everything after.
     let mut stale = MirrorStore::new(Subscription::all());
+    stale.apply_drain(&local, [first]);
+    let held = stale.section(&local, SectionId::Shell).expect("local shell held").version;
     stale.apply_drain(&local, [pinned.clone()]);
     assert_eq!(stale.section(&ulid, SectionId::Config), None);
     assert!(stale.frames_ignored() > 0, "a stale peer drops the batch");
+    assert_eq!(
+        stale.section(&local, SectionId::Shell).map(|section| section.version),
+        Some(held),
+        "the stale renderer is frozen on the first batch"
+    );
 
     // Re-peered, the renderer holds every section under the ULID, static ones
     // included, and every fleet row names the ULID too.
