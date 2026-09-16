@@ -791,6 +791,46 @@ impl ConfirmAction {
     }
 }
 
+impl AppState {
+    /// Why a command whose row is not key-only must still not run from a
+    /// remote surface right now, or `None` (#1080).
+    ///
+    /// Two actions do something different depending on state:
+    /// - Confirm runs whatever the open dialog holds, so it is judged by that
+    ///   action ([`ConfirmAction::runs_only_from_key`]);
+    /// - Next and Finish on the onboarding wizard complete it, and completing
+    ///   with OpenTelemetry opted into writes Claude Code's settings and the
+    ///   user's shell rc.
+    #[must_use]
+    pub fn remote_command_refusal(
+        &self,
+        action: &crate::app::keymap::KeyAction,
+    ) -> Option<&'static str> {
+        use crate::app::events::AppEvent;
+        use crate::app::keymap::KeyAction;
+        match action {
+            KeyAction::App(AppEvent::ConfirmationConfirm)
+                if self
+                    .shell
+                    .confirmation_dialog
+                    .as_ref()
+                    .and_then(ConfirmationDialog::selected_action)
+                    .is_some_and(ConfirmAction::runs_only_from_key) =>
+            {
+                Some("it would confirm an action that runs only from its key")
+            }
+            KeyAction::App(AppEvent::OnboardingNext | AppEvent::OnboardingFinish)
+                if self.onboarding.onboarding_state.as_ref().is_some_and(
+                    crate::components::onboarding::OnboardingState::otel_should_setup,
+                ) =>
+            {
+                Some("it could finish onboarding with telemetry set up outside ainb")
+            }
+            _ => None,
+        }
+    }
+}
+
 impl ConfirmationDialog {
     /// The action Confirm would run now: the highlighted option's in
     /// tri-option mode, the dialog's own when Yes is selected, else none.
