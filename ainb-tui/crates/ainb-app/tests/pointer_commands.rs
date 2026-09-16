@@ -159,6 +159,31 @@ fn row_identities_round_trip_through_the_list() {
 }
 
 #[test]
+fn a_click_on_the_strip_shows_the_tab_it_names_unless_that_tab_is_dead() {
+    use ainb_app::components::session_tabs::SessionTab;
+    let keymap = Keymap::defaults();
+    let mut state = two_workspaces();
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        pointer::select_session_tab(SessionTab::Pal),
+    );
+    assert_eq!(state.shell.session_tab, SessionTab::Pal);
+
+    // Nothing is selected, so `log` is disabled; the click lands where the key
+    // would have put it rather than on a pane that cannot draw.
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        pointer::select_session_tab(SessionTab::Log),
+    );
+    assert_eq!(state.shell.session_tab, SessionTab::Preview);
+}
+
+#[test]
 fn a_command_scoped_to_another_screen_changes_nothing() {
     let keymap = Keymap::defaults();
     let mut state = AppState::new();
