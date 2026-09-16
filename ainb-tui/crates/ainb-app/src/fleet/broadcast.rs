@@ -137,13 +137,7 @@ impl Broadcast {
     /// fold in. `Ok` is the receipts, `Err` the call's failure. The wire sample
     /// uses it to put each phase on a frame without a daemon (#1146).
     pub(crate) fn publish_outcome(&self, outcome: Result<Vec<FleetActionReceipt>, String>) {
-        let outcome = match outcome {
-            Ok(receipts) => BroadcastOutcome::Sent(receipts),
-            Err(detail) => BroadcastOutcome::Failed(detail),
-        };
-        if let Ok(mut inbox) = self.inbox.lock() {
-            inbox.push(outcome);
-        }
+        publish(&self.inbox, outcome);
     }
 
     /// Send to `targets`, if there is anything to send and anyone to send it to.
@@ -162,25 +156,32 @@ impl Broadcast {
         let idempotency_key = format!("tui-broadcast:{}", uuid::Uuid::new_v4().simple());
         let publish_inbox = Arc::clone(&inbox);
         let spawned = std::thread::Builder::new().name("ainb-broadcast".into()).spawn(move || {
-            let outcome =
-                match crate::fleet::control::broadcast_blocking(targets, text, idempotency_key) {
-                    Ok(receipts) => BroadcastOutcome::Sent(receipts),
-                    Err(detail) => BroadcastOutcome::Failed(detail),
-                };
-            if let Ok(mut inbox) = publish_inbox.lock() {
-                inbox.push(outcome);
-            }
+            publish(
+                &publish_inbox,
+                crate::fleet::control::broadcast_blocking(targets, text, idempotency_key),
+            );
         });
         if let Err(error) = spawned {
             // Published rather than set directly: `tick` owns the phase, and a
             // second writer is how a surface ends up latched on `Sending`.
-            if let Ok(mut inbox) = inbox.lock() {
-                inbox.push(BroadcastOutcome::Failed(format!(
-                    "the broadcast worker did not start: {error}"
-                )));
-            }
+            publish(
+                &inbox,
+                Err(format!("the broadcast worker did not start: {error}")),
+            );
         }
         true
+    }
+}
+
+/// Land a finished call on `inbox` for `tick` to fold in: `Ok` is the
+/// receipts, `Err` the call's failure. The one place that mapping lives.
+fn publish(inbox: &Mutex<Vec<BroadcastOutcome>>, outcome: Result<Vec<FleetActionReceipt>, String>) {
+    let outcome = match outcome {
+        Ok(receipts) => BroadcastOutcome::Sent(receipts),
+        Err(detail) => BroadcastOutcome::Failed(detail),
+    };
+    if let Ok(mut inbox) = inbox.lock() {
+        inbox.push(outcome);
     }
 }
 
