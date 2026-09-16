@@ -204,7 +204,10 @@ fn frame_envelope_paths(state: &AppState, id: SectionId, into: &mut BTreeSet<Str
             }
         }
     }
-    let mut envelope = serde_json::to_value(crate::wire::frame::Frame::new(state, id))
+    // A fixed host: the key paths are the contract, and no process-wide state
+    // may decide them (#1066).
+    let host = crate::wire::frame::HostId::local();
+    let mut envelope = serde_json::to_value(crate::wire::frame::Frame::new(state, id, host))
         .expect("a frame serialises");
     if let Some(map) = envelope.as_object_mut() {
         map.remove("body");
