@@ -4374,8 +4374,9 @@ impl AppState {
                 .set_if_changed(|section| &mut section.is_loading_workspaces, true);
         }
         self.host.workspace_load_started = Some(Instant::now());
-        self.workspace_load
-            .set_if_changed(|section| &mut section.workspace_load_error, None);
+        // The last failure stays up while scans keep failing: a scan that
+        // succeeds clears it, and clearing it here would make every repeat of
+        // the same failure look like news to a host that rescans on a cadence.
         tx
     }
 
@@ -4536,11 +4537,15 @@ impl AppState {
                             // session, delete one, press `f`). Enqueue exactly one
                             // full refresh so the complete picture (stopped
                             // sessions included) appears right after first paint.
-                            // Fires once per launch: this branch runs a single
-                            // time (the receiver is cleared above), and
-                            // `load_real_workspaces` doesn't re-arm it — no loop.
-                            // Guard on `None` so a user-queued action is never
-                            // clobbered.
+                            // Queued on every scan that changed the list, not
+                            // once per launch: a host that rescans on a cadence
+                            // reaches this branch again whenever the list moves.
+                            // `load_real_workspaces` does not re-arm it, so
+                            // there is still no loop. Guard on `None` so a
+                            // user-queued action is never clobbered, and note
+                            // that a host which never drains
+                            // `pending_async_action` (the desktop today) never
+                            // runs the full refresh at all.
                             if self.shell.pending_async_action.is_none() {
                                 self.shell.pending_async_action =
                                     Some(AsyncAction::RefreshWorkspaces);
