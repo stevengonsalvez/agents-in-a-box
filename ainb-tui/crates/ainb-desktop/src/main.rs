@@ -328,7 +328,10 @@ fn main() {
                     // may now have named its host (#1066). The webview hears the
                     // new id first, then the mirror re-pins and reframes under
                     // it; the other order would have the webview drop the
-                    // reframe as another host's.
+                    // reframe as another host's. Ordering dependency: the id is
+                    // there to read because the sidecar publishes Connected only
+                    // after its presence lease's `dial_presence`
+                    // (ainb-hangar-client) completed the hello that recorded it.
                     if connected {
                         let host_id = HostId::of_daemon(&socket);
                         let window = handle.state::<Window>();
