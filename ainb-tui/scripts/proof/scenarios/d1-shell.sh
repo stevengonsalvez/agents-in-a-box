@@ -48,6 +48,9 @@ scenario() {
     return
   fi
   if ! command -v xvfb-run >/dev/null; then
+    # Named, not silent: a box with no headless X server cannot run this node,
+    # and the result says so rather than passing or failing on the machine.
+    observe "SKIPPED: xvfb-run is not installed, so the window has no display to open on"
     check "xvfb-run is installed, for a window with no display" false
     return
   fi
@@ -71,6 +74,14 @@ scenario() {
   daemon_pid="$(sed -n 's/.*running (pid \([0-9]*\).*/\1/p' "$NODE_DIR/daemon-status.txt")"
   observe "daemon pid from a CLI process: ${daemon_pid:-none}"
   check "a separate CLI call finds a running daemon" test -n "$daemon_pid"
+  # The window's own sidecar names the daemon it attached to, so the two are
+  # compared rather than each being asserted alive on its own.
+  local window_pid
+  window_pid="$(sed -n 's/.*attached to the hangar daemon.*daemon_pid=Some(\([0-9][0-9]*\)).*/\1/p' "$DESKTOP_LOG" 2>/dev/null | tail -1)"
+  observe "daemon pid the window attached to: ${window_pid:-not logged}"
+  if [[ -n "$window_pid" ]]; then
+    check "the window and the CLI found the same daemon" test "$window_pid" = "$daemon_pid"
+  fi
 
   # The window registers its connection once its sidecar has said hello, which
   # is not done the moment the first frame is drawn.
