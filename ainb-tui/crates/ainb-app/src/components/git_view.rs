@@ -79,7 +79,13 @@ pub enum MarkdownStyle {
     Heading3,
     Paragraph,
     CodeBlock,
-    CodeBlockHeader(String), // Language name
+    /// A fenced block's language line, straight out of a repo file, so a frame
+    /// carries it scrubbed (#1146).
+    CodeBlockHeader(
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        String,
+    ),
     ListItem,
     Bold,
     Italic,
