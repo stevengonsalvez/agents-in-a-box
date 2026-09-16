@@ -35,7 +35,7 @@ async fn app_on_picker_from_session_list() -> App {
 
     let key_event = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
     if let Some(event) = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&key_event).expect("mapped key"),
+        ainb::app::screens::builtin::chord_from_key_event(&key_event).expect("mapped key"),
         &mut app.state,
     ) {
         EventHandler::process_event(event, &mut app.state);
