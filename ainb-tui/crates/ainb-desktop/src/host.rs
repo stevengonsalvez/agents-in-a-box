@@ -114,8 +114,13 @@ impl<S: FrameSink> DesktopHost<S> {
         subscription: Subscription,
         sink: S,
     ) -> Self {
+        let mut state = AppState::with_config(config);
+        // This shell is the surface a person sits at, so an answer sent from
+        // this window is recorded as the desktop's. The sidecar already tells
+        // the daemon the same thing about this process (`sidecar::surface`).
+        state.host.surface = ainb_hangar_proto::connections::SurfaceKind::Desktop;
         Self {
-            state: AppState::with_config(config),
+            state,
             keymap,
             layout: DesktopLayout::default(),
             mirror: Mirror::new(host_id, subscription),
