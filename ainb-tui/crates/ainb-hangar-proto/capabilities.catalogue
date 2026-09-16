@@ -72,3 +72,4 @@ hangar.attention.fence
 fleet.status.read
 hangar.connections.transient
 fleet.roster_status.read
+hangar.host_identity

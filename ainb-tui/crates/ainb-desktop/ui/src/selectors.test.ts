@@ -8,7 +8,7 @@ import type { Frame_Serialize } from "../../../ainb-app/bindings/AppState";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { createFrameStore, type SectionName } from "./store.ts";
 
-const SECTIONS: SectionName[] = ["sessions", "fleet", "workspace_load"];
+const SECTIONS: SectionName[] = ["sessions", "workspace_load"];
 
 function frame(section: SectionName, version: number, body: unknown): Frame_Serialize {
   return { section, version, epoch: 1, host_id: "local", body };
@@ -29,7 +29,6 @@ test("every root selector returns a scalar, with and without a host", () => {
       {
         frames: [
           frame("sessions", 1, sessions("Idle", "Running")),
-          frame("fleet", 1, { fleet_metadata: {}, daemon_attention: { by_session_id: {} } }),
           frame("workspace_load", 1, { is_loading_workspaces: true, workspace_load_error: null }),
         ],
       },

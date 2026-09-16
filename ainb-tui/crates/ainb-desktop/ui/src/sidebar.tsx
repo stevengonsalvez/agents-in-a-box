@@ -1,10 +1,9 @@
 import { For, Show } from "solid-js";
-import type { FleetView_Serialize, SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
+import type { SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
 import { label, ringFor, rowStatus } from "./sessions.ts";
 
 interface Props {
   sessions: SessionsView_Serialize | undefined;
-  fleet: FleetView_Serialize | undefined;
   stale: boolean;
   /** The host is loading workspaces (the WorkspaceLoad section). */
   loading: boolean;
@@ -43,7 +42,7 @@ export function Sidebar(props: Props) {
                     const selected = () =>
                       props.sessions?.selected_workspace_index === w() &&
                       props.sessions?.selected_session_index === s();
-                    const ring = () => ringFor(session, props.fleet);
+                    const ring = () => ringFor(session);
                     return (
                       <li>
                         <button
