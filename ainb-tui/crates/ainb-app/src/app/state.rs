@@ -12245,6 +12245,38 @@ impl AppState {
         if let Some(chip) = session_tabs::selected_blocking(self).cloned() {
             self.fleet.update(|fleet| fleet.ask_state.retarget(&chip));
         }
+
+        self.project_conversation();
+    }
+
+    /// Write the open conversation's bounded, scrubbed window onto the Fleet
+    /// section, so a renderer in another process draws the thread without
+    /// holding the chat host.
+    ///
+    /// The host stays in `HostOnlyState`: it owns a poll loop, an inbox shared
+    /// with workers and the operator's unsent draft. What crosses is this
+    /// projection, written here for the reason the attention merge is (#1131),
+    /// and written only when it changed, so an idle conversation frames
+    /// nothing.
+    ///
+    /// Only what is already open is projected. Opening a conversation dials the
+    /// daemon, and a tick that opened one would page a thread nobody asked for.
+    fn project_conversation(&mut self) {
+        use crate::components::session_tabs::SessionTab;
+
+        let open = match self.shell.session_tab {
+            SessionTab::Pal => self.host.pal_chat.as_ref(),
+            SessionTab::Thread => self.host.session_chat.as_ref().map(|(_, chat)| chat),
+            _ => None,
+        };
+        let projected = open.map(crate::fleet::conversation::project).unwrap_or_default();
+        self.fleet.update(|fleet| {
+            if fleet.conversation == projected {
+                return false;
+            }
+            fleet.conversation = projected;
+            true
+        });
     }
 
     /// The merge itself, at the caller's clock. See [`Self::refresh_attention`],
