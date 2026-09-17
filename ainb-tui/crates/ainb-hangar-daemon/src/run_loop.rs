@@ -1809,6 +1809,24 @@ async fn run_interactive(
         cwd.to_path_buf(),
         ws_slug.to_string(),
     );
+    let session_row = ainb_hangar_store::repo::sessions::SessionRow {
+        session_id: record.session_id.to_string(),
+        tmux_session_name: record.tmux_session_name.clone(),
+        worktree_path: record.worktree_path.to_string_lossy().to_string(),
+        workspace_name: record.workspace_name.clone(),
+        created_at: record.created_at.timestamp_millis(),
+        agent_type: "Claude".to_string(),
+        headroom_enabled: false,
+        rtk_enabled: false,
+        skip_permissions: None,
+        model: None,
+        model_source: "LegacyTyped".to_string(),
+        codex_model: None,
+        codex_thread_id: None,
+    };
+    if let Err(e) = ainb_hangar_store::repo::sessions::SessionsRepo::upsert(pool, &session_row).await {
+        tracing::warn!(task_id = %task.id, error = %e, "sessions table write failed");
+    }
     if let Err(e) = ainb_fleet_core::session_registry::register_session(&record) {
         tracing::warn!(task_id = %task.id, error = %e, "session registry write failed");
     }
