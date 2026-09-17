@@ -250,19 +250,35 @@ impl<S: FrameSink> DesktopHost<S> {
             .collect()
     }
 
-    /// The key-only row `chord` runs in the current state, if it runs one.
+    /// The row `intent` would run now and why the webview may not run it, or
+    /// `None` when it may (or when the intent names no row).
     ///
-    /// Those rows write outside ainb (`global.wire_statusline` edits Claude
-    /// Code's settings), so the reducer runs them only from a key. A chord the
-    /// webview sends is script-reachable, so the shell refuses it there.
+    /// A key or a name the webview sends is script-reachable, so one judgement
+    /// covers both: a row that writes outside ainb runs only from a key the
+    /// host reads ([`Keymap::is_key_only`]), and a row whose effect depends on
+    /// state is refused while that state makes it write outside ainb
+    /// ([`AppState::remote_command_refusal`]): Enter on a dialog holding the
+    /// hook install or the abtop setup, Next on onboarding with telemetry set
+    /// up.
     #[must_use]
-    pub fn key_only_command(&self, chord: &Chord) -> Option<CommandId> {
-        let (ctx, _) = self.keymap.resolve_with_context(&active_contexts(&self.state), chord)?;
-        self.keymap
-            .commands()
-            .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))
-            .map(|(id, _)| id)
-            .filter(|id| self.keymap.is_key_only(id))
+    pub fn refused_from_renderer(&self, intent: &Intent) -> Option<(CommandId, &'static str)> {
+        let (id, row) = match intent {
+            Intent::Key(chord) => {
+                let (ctx, _) =
+                    self.keymap.resolve_with_context(&active_contexts(&self.state), chord)?;
+                self.keymap
+                    .commands()
+                    .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))?
+            }
+            Intent::Command(id, _) => (id.clone(), self.keymap.command(id)?),
+            _ => return None,
+        };
+        let why = if self.keymap.is_key_only(&id) {
+            Some("it writes outside ainb, so it runs only from its key")
+        } else {
+            self.state.remote_command_refusal(&row.action)
+        };
+        why.map(|why| (id, why))
     }
 
     /// Layout work for the webview queued since the last call.
