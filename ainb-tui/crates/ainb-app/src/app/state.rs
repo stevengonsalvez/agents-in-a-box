@@ -773,12 +773,13 @@ impl ConfirmAction {
     pub const fn runs_only_from_key(&self) -> bool {
         match self {
             // Kills tmux sessions ainb did not start.
-            Self::KillOtherTmux(_) | Self::KillOtherTmuxSessions(_) => true,
+            Self::KillOtherTmux(_)
+            | Self::KillOtherTmuxSessions(_)
             // Writes Claude Code and Codex hook config, and runs
             // `claude plugin install`.
-            Self::InstallNotifyHooks => true,
+            | Self::InstallNotifyHooks
             // Runs `abtop --setup`, which edits Claude Code's statusline hook.
-            Self::SetupAbtopRateLimits => true,
+            | Self::SetupAbtopRateLimits => true,
             // ainb's own sessions, shells, pool and preferences, or nothing.
             Self::DeleteSession(_)
             | Self::StopSession(_)
@@ -796,15 +797,18 @@ impl ConfirmAction {
 }
 
 impl AppState {
-    /// Why a command whose row is not key-only must still not run from a
-    /// remote surface right now, or `None` (#1080).
+    /// Why `action` must not run from a remote surface right now, or `None`
+    /// (#1080). The reason is for the surface to show, not only to log.
     ///
-    /// Two actions do something different depending on state:
+    /// An action that writes outside ainb ([`KeyAction::writes_outside_ainb`])
+    /// is always refused. Two more do something different depending on state:
     /// - Confirm runs whatever the open dialog holds, so it is judged by that
     ///   action ([`ConfirmAction::runs_only_from_key`]);
     /// - Next and Finish on the onboarding wizard complete it, and completing
     ///   with OpenTelemetry opted into writes Claude Code's settings and the
     ///   user's shell rc.
+    ///
+    /// [`KeyAction::writes_outside_ainb`]: crate::app::keymap::KeyAction::writes_outside_ainb
     #[must_use]
     pub fn remote_command_refusal(
         &self,
@@ -813,6 +817,9 @@ impl AppState {
         use crate::app::events::AppEvent;
         use crate::app::keymap::KeyAction;
         match action {
+            action if action.writes_outside_ainb() => {
+                Some("it writes outside ainb, so it runs only from its key")
+            }
             KeyAction::App(AppEvent::ConfirmationConfirm)
                 if self
                     .shell
@@ -840,10 +847,10 @@ impl ConfirmationDialog {
     /// tri-option mode, the dialog's own when Yes is selected, else none.
     #[must_use]
     pub fn selected_action(&self) -> Option<&ConfirmAction> {
-        match self.options.as_ref() {
-            Some(options) => options.get(self.selected_index).map(|option| &option.action),
-            None => self.selected_option.then_some(&self.confirm_action),
-        }
+        self.options.as_ref().map_or_else(
+            || self.selected_option.then_some(&self.confirm_action),
+            |options| options.get(self.selected_index).map(|option| &option.action),
+        )
     }
 }
 
