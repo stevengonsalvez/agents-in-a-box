@@ -62,7 +62,9 @@ const MAX_REPORT_ROUNDS: usize = 32;
 
 /// One row the palette offers: a command the webview may send by name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct PaletteEntry {
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub id: CommandId,
     /// What the row does, as the keymap documents it.
     pub doc: &'static str,
