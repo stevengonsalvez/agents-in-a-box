@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-pub use ainb_hangar_client::{DaemonClient, DaemonError, socket_path};
+pub use ainb_hangar_client::{DaemonClient, DaemonError};
 use ainb_hangar_proto::connections::{SurfaceInfo, SurfaceKind};
 use ainb_hangar_proto::events::AttentionRow;
 use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
@@ -207,6 +207,25 @@ pub trait Answerer: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<AnswerResult, DaemonError>> + Send + '_>>;
 }
 
+/// The [`SurfaceInfo`] describing this process as the web dashboard.
+#[must_use]
+pub fn web_surface() -> SurfaceInfo {
+    SurfaceInfo {
+        kind: SurfaceKind::Web,
+        pid: std::process::id(),
+    }
+}
+
+/// A [`DaemonClient`] configured with [`SurfaceKind::Web`] at this process PID.
+///
+/// Resolves a fresh client from the environment and stamps its surface metadata
+/// so "the web is Web at this pid" lives in one place.
+pub fn web_client() -> Result<DaemonClient, DaemonError> {
+    let mut client = DaemonClient::from_env()?;
+    client.set_surface(web_surface());
+    Ok(client)
+}
+
 /// Production [`Answerer`]: resolves a fresh [`DaemonClient`] from the
 /// environment per call (so it picks up a daemon that started after the web
 /// server did) and forwards the answer.
@@ -219,11 +238,7 @@ impl Answerer for DaemonAnswerer {
         params: AnswerParams,
     ) -> Pin<Box<dyn Future<Output = Result<AnswerResult, DaemonError>> + Send + '_>> {
         Box::pin(async move {
-            let mut client = DaemonClient::from_env()?;
-            client.set_surface(SurfaceInfo {
-                kind: SurfaceKind::Web,
-                pid: std::process::id(),
-            });
+            let client = web_client()?;
             client.answer(params).await
         })
     }
