@@ -119,10 +119,18 @@ fn daemon_news_starts_a_scan_before_the_cadence_would() {
     // Held off, so the poller thread does not move the counter under the test.
     host.state().host.attention_poll_running.store(true, Ordering::Release);
 
+    // News is a reason to look AGAIN, so the window has to have looked once.
+    host.start_workspace_load();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while host.state().workspace_scan_running() {
+        assert!(Instant::now() < deadline, "the first scan never finished");
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = host.tick();
+    }
     let _ = host.tick();
     assert!(
         !host.state().workspace_scan_running(),
-        "nothing has happened yet, and the cadence is 10 minutes away"
+        "nothing has happened since, and the cadence is 10 minutes away"
     );
 
     host.state().host.daemon_attention_generation.fetch_add(1, Ordering::Release);
