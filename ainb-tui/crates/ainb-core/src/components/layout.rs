@@ -511,8 +511,8 @@ impl LayoutComponent {
         // The tab reconcile, the answer fold and the composer's retarget, which
         // the reducer owns: every host ticks them, so an answer lands on a
         // surface whose draw loop is not this one. Their reasons are on
-        // `AppState::tick_answers`.
-        state.tick_answers();
+        // `AppState::tick_surfaces`.
+        state.tick_surfaces();
         let active = state.shell.session_tab;
 
         // An attached embed owns the right pane outright, and `preview` is a
