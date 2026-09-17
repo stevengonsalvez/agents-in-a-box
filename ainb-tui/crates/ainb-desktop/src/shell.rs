@@ -43,20 +43,16 @@ impl<S: FrameSink> Shell<S> {
         host.run(intent, executor);
     }
 
-    /// Apply an intent the webview sent. A key landing on a key-only row is
-    /// refused, checked under the same lock that would apply it, so the state
-    /// cannot move between the check and the dispatch.
+    /// Apply an intent the webview sent, unless
+    /// [`DesktopHost::refused_from_renderer`] refuses what it would run. The
+    /// check runs under the same lock that would apply the intent, so the
+    /// state cannot move between the check and the dispatch.
     pub fn dispatch_renderer(&self, intent: Intent) {
         let mut core = self.core();
         let Core { host, executor } = &mut *core;
-        if let Intent::Key(chord) = &intent {
-            if let Some(id) = host.key_only_command(chord) {
-                tracing::warn!(
-                    "key `{}` runs `{id}`, which runs only from a key the host reads; refused from the webview",
-                    chord.as_str()
-                );
-                return;
-            }
+        if let Some((id, why)) = host.refused_from_renderer(&intent) {
+            tracing::warn!("`{id}` refused from the webview: {why}");
+            return;
         }
         host.run(intent, executor);
     }
