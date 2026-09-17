@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ainb_hangar_client::{DaemonClient, FleetStreamEvent};
 use ainb_hangar_client::reconnect::{BACKOFF_1S, BACKOFF_4S, BACKOFF_16S, ConnectionState, Timing};
+use ainb_hangar_client::{DaemonClient, FleetStreamEvent};
 use tokio::sync::watch;
 
 fn daemon_bin() -> Option<PathBuf> {
@@ -15,12 +15,10 @@ fn daemon_bin() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-            manifest_dir.join("../../target")
-        });
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir.join("../../target")
+    });
     let bin = target_dir.join("debug/ainb-hangar-daemon");
     if bin.is_file() {
         Some(bin)
@@ -263,7 +261,11 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
         .arg(init_sql)
         .output()
         .expect("init baseline fleet_event");
-    assert!(init_res.status.success(), "init sqlite3 failed: {:?}", init_res);
+    assert!(
+        init_res.status.success(),
+        "init sqlite3 failed: {:?}",
+        init_res
+    );
 
     let output = Command::new("sqlite3")
         .arg(&db_path)
@@ -291,7 +293,11 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
         .arg(&seed_sql)
         .output()
         .expect("seed fleet_event into sqlite3");
-    assert!(seed_res.status.success(), "seed sqlite3 failed: {:?}", seed_res);
+    assert!(
+        seed_res.status.success(),
+        "seed sqlite3 failed: {:?}",
+        seed_res
+    );
 
     // 3. Observe 1st reconnect attempt (1s backoff)
     let s1 = wait_for_condition(&mut state_rx, Duration::from_secs(5), |s| {
