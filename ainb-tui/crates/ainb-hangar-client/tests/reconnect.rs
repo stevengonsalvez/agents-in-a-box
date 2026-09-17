@@ -31,6 +31,16 @@ fn daemon_bin() -> Option<PathBuf> {
     }
 }
 
+fn has_sqlite3() -> bool {
+    match Command::new("sqlite3").arg("--version").output() {
+        Ok(out) if out.status.success() => true,
+        _ => {
+            eprintln!("sqlite3 binary not found: skipping test");
+            false
+        }
+    }
+}
+
 struct DaemonProcess {
     child: Child,
 }
@@ -225,6 +235,10 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
     let dir = tempfile::tempdir().expect("tempdir");
     let home = dir.path().join(".agents-in-a-box");
     std::fs::create_dir_all(&home).expect("create home");
+
+    if !has_sqlite3() {
+        return;
+    }
 
     let mut daemon = match DaemonProcess::spawn(&home) {
         Some(d) => d,
