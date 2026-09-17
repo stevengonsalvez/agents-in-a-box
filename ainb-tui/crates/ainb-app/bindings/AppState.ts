@@ -4190,6 +4190,7 @@ export type SessionsView_Serialize = {
 	session_filter: SessionFilter,
 	attached_session_id: string | null,
 	favorite_workspace_paths: string[],
+	hidden_sessions: string[],
 };
 
 /**  Menu items in the setup menu */

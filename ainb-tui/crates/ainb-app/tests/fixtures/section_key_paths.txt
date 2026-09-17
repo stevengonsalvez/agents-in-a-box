@@ -709,6 +709,7 @@ session_labels.session_label_store{}
 sessions.attached_session_id
 sessions.expand_all_workspaces
 sessions.favorite_workspace_paths[]
+sessions.hidden_sessions
 sessions.selected_session_index
 sessions.selected_sessions
 sessions.selected_workspace_index
