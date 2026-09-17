@@ -512,6 +512,7 @@ view!(SessionsView<'a> for SessionsSection {
     session_filter: crate::app::state::SessionFilter,
     attached_session_id: Option<uuid::Uuid>,
     favorite_workspace_paths: std::collections::HashSet<std::path::PathBuf>,
+    hidden_sessions: std::collections::HashSet<uuid::Uuid>,
 });
 
 view!(SessionLabelsView<'a> for SessionLabelsSection {
