@@ -26,6 +26,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use ainb_app::AppState;
 use ainb_app::app::keymap::{KeyAction, Keymap};
 use ainb_app::app::state::ConfirmAction;
 
@@ -404,8 +405,15 @@ const WRITE_SPELLINGS: &[&str] = &[
 ];
 
 /// Actions whose remote refusal depends on state, judged by
-/// `AppState::remote_command_refusal` rather than by the row flag.
+/// `AppState::remote_command_refusal` rather than by the row flag. Each must
+/// write outside ainb by the walk, and be refused in a state that arms it
+/// ([`armed`]), so this list cannot outlive the gate.
 const STATE_GATED: &[&str] = &["ConfirmationConfirm", "OnboardingNext", "OnboardingFinish"];
+
+/// Rows whose `AppEvent` has no arm in `process_event` (handled elsewhere, or
+/// nowhere), so the walk has nothing to follow from them. A row joining or
+/// leaving this set fails until it is looked at.
+const SKIPPED_ROWS: &[&str] = &[];
 
 /// Functions the walk never enters: the dispatchers themselves, which reach
 /// every arm by name and would make every row reach every sink.
@@ -617,6 +625,16 @@ impl Source {
         let mut current: Vec<String> = Vec::new();
         let mut names: Vec<String> = Vec::new();
         for line in &lines[start + 1..end] {
+            // A continued or-pattern (`| Enum::Y =>`) names the same arm.
+            if indent(line) == arm_indent && line.trim_start().starts_with("| ") {
+                let head = line.trim_start();
+                names.extend(variant_names(
+                    head.split("=>").next().unwrap_or(head),
+                    enumeration,
+                ));
+                current.push(line.clone());
+                continue;
+            }
             let starts = if indent(line) == arm_indent {
                 let head = line.trim_start();
                 let pattern = head.split("=>").next().unwrap_or(head);
@@ -954,6 +972,8 @@ fn every_row_that_writes_outside_ainb_runs_only_from_its_key() {
     let mut reached: BTreeMap<String, String> = BTreeMap::new();
     let mut outside_rows: BTreeSet<String> = BTreeSet::new();
     let mut key_only_rows: BTreeSet<String> = BTreeSet::new();
+    let mut skipped: BTreeSet<String> = BTreeSet::new();
+    let mut gated_outside: BTreeSet<String> = BTreeSet::new();
     for (id, binding) in keymap.commands() {
         let (kind, variant) = action_variant(&binding.action);
         let arms = match kind {
@@ -962,6 +982,7 @@ fn every_row_that_writes_outside_ainb_runs_only_from_its_key() {
             _ => continue,
         };
         let Some(lines) = arms.get(&variant) else {
+            skipped.insert(id.as_str().to_string());
             continue;
         };
         let arm_key = format!(
@@ -974,7 +995,9 @@ fn every_row_that_writes_outside_ainb_runs_only_from_its_key() {
         );
         let sinks = sinks_from(&source, &dispatch, &arm_key, EVENTS, lines);
         let writes_outside = sinks.keys().any(|sink| reach_of(sink) == Some(Reach::Outside));
-        if writes_outside && !STATE_GATED.contains(&variant.as_str()) {
+        if writes_outside && STATE_GATED.contains(&variant.as_str()) {
+            gated_outside.insert(variant.clone());
+        } else if writes_outside {
             outside_rows.insert(id.as_str().to_string());
         }
         if binding.key_only() {
@@ -1017,6 +1040,22 @@ fn every_row_that_writes_outside_ainb_runs_only_from_its_key() {
          ConfirmAction::runs_only_from_key accepts"
     );
 
+    assert_sinks_classified(&reached);
+    assert_walk_baselines(&skipped, &gated_outside);
+
+    let unflagged: Vec<&String> = outside_rows.difference(&key_only_rows).collect();
+    let overflagged: Vec<&String> = key_only_rows.difference(&outside_rows).collect();
+    assert!(
+        unflagged.is_empty() && overflagged.is_empty(),
+        "rows that write outside ainb must be exactly the key-only rows \
+         (KeyAction::writes_outside_ainb):\nwrite outside but not key-only: \
+         {unflagged:#?}\nkey-only but reach nothing outside: {overflagged:#?}"
+    );
+}
+
+/// Every sink the walk reached is in [`SINKS`], and every entry there is
+/// still reached.
+fn assert_sinks_classified(reached: &BTreeMap<String, String>) {
     let unclassified: Vec<String> = reached
         .iter()
         .filter(|(sink, _)| reach_of(sink).is_none())
@@ -1033,15 +1072,91 @@ fn every_row_that_writes_outside_ainb_runs_only_from_its_key() {
          command reaches:\nunclassified:\n  {}\nstale: {stale:#?}",
         unclassified.join("\n  ")
     );
+}
 
-    let unflagged: Vec<&String> = outside_rows.difference(&key_only_rows).collect();
-    let overflagged: Vec<&String> = key_only_rows.difference(&outside_rows).collect();
-    assert!(
-        unflagged.is_empty() && overflagged.is_empty(),
-        "rows that write outside ainb must be exactly the key-only rows \
-         (KeyAction::writes_outside_ainb):\nwrite outside but not key-only: \
-         {unflagged:#?}\nkey-only but reach nothing outside: {overflagged:#?}"
+/// The rows the walk skipped match [`SKIPPED_ROWS`], and the state-gated
+/// actions it found writing outside ainb match [`STATE_GATED`].
+fn assert_walk_baselines(skipped: &BTreeSet<String>, gated_outside: &BTreeSet<String>) {
+    let baseline: BTreeSet<String> = SKIPPED_ROWS.iter().map(|id| (*id).to_string()).collect();
+    assert_eq!(
+        *skipped, baseline,
+        "rows the walk cannot follow (no arm for their action) changed; check each \
+         new one by hand, then update SKIPPED_ROWS"
     );
+    let gated: BTreeSet<String> = STATE_GATED.iter().map(|name| (*name).to_string()).collect();
+    assert_eq!(
+        *gated_outside, gated,
+        "every STATE_GATED action must write outside ainb by the walk; drop one \
+         that no longer does"
+    );
+}
+
+/// Each [`STATE_GATED`] action is refused from a remote surface in a state
+/// that makes it write outside ainb, and allowed in a fresh state.
+#[test]
+fn every_state_gated_action_is_refused_in_the_state_that_arms_it() {
+    for name in STATE_GATED {
+        let (action, state) = armed(name);
+        assert!(
+            state.remote_command_refusal(&action).is_some(),
+            "{name} runs from a remote surface in the state that arms it"
+        );
+        assert_eq!(
+            AppState::new().remote_command_refusal(&action),
+            None,
+            "{name} is refused even in a fresh state"
+        );
+    }
+}
+
+/// The action a [`STATE_GATED`] name spells, with a state in which it would
+/// write outside ainb.
+fn armed(name: &str) -> (KeyAction, AppState) {
+    use ainb_app::app::state::{ConfirmationDialog, DialogOption};
+    use ainb_app::components::onboarding::OnboardingState;
+
+    let mut state = AppState::new();
+    match name {
+        "ConfirmationConfirm" => {
+            // The hook install dialog, "Install" selected.
+            state.shell.confirmation_dialog = Some(ConfirmationDialog {
+                title: "Get notified when a session needs you?".to_string(),
+                message: String::new(),
+                confirm_action: ConfirmAction::InstallNotifyHooks,
+                selected_option: false,
+                warning: None,
+                options: Some(vec![
+                    DialogOption {
+                        label: "Install".to_string(),
+                        action: ConfirmAction::InstallNotifyHooks,
+                    },
+                    DialogOption {
+                        label: "Not now".to_string(),
+                        action: ConfirmAction::Cancel,
+                    },
+                ]),
+                selected_index: 0,
+            });
+        }
+        "OnboardingNext" | "OnboardingFinish" => {
+            // Telemetry opted into, with every credential typed.
+            state.onboarding.onboarding_state = Some(OnboardingState {
+                otel_skip: false,
+                otel_otlp_endpoint: "https://otlp.example.test".to_string(),
+                otel_instance_id: "123".to_string(),
+                otel_api_token: "token".to_string(),
+                ..OnboardingState::default()
+            });
+        }
+        other => panic!("STATE_GATED names {other}; give it an arming state here"),
+    }
+    // The action as a keymap row spells it.
+    let action = Keymap::defaults()
+        .commands()
+        .map(|(_, row)| row.action.clone())
+        .find(|action| action_variant(action) == ("App", name.to_string()))
+        .unwrap_or_else(|| panic!("no keymap row runs {name}"));
+    (action, state)
 }
 
 /// One of every `ConfirmAction`, for the dialog check.
