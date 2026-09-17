@@ -593,6 +593,15 @@ pub struct FleetSection {
     /// Survives a change of checkbox set on purpose: an operator who ticks a
     /// fifth session halfway through typing must not lose what they typed.
     pub broadcast: crate::fleet::broadcast::Broadcast,
+    /// The open conversation, as a frame carries it: bounded and scrubbed,
+    /// written by the reducer's tick from the chat host in `HostOnlyState`.
+    ///
+    /// Here rather than in a section of its own (there is no twenty-first,
+    /// #1076) and rather than on `ClaudeChatSection`, which is the Docker
+    /// claude-chat pane: an ACP transcript under that name would put two
+    /// unrelated things in one place. It belongs with `ask_state` and
+    /// `broadcast` because it is the same attention-and-answer family.
+    pub conversation: crate::fleet::conversation::Conversation,
     /// The daemon's half of the attention picture, refreshed by
     /// [`crate::fleet::attention_poll`] on its own thread.
     ///
@@ -656,6 +665,7 @@ impl Default for FleetSection {
             live_window: crate::models::live_window::LiveWindow::default(),
             ask_state: crate::fleet::answer::AskState::default(),
             broadcast: crate::fleet::broadcast::Broadcast::default(),
+            conversation: crate::fleet::conversation::Conversation::default(),
             daemon_attention: Arc::new(Mutex::new(
                 crate::fleet::attention::DaemonAttention::default(),
             )),
