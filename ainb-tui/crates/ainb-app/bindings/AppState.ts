@@ -1445,6 +1445,154 @@ export type ContainerTemplate_Serialize = {
 	default_mcp_servers: string[],
 };
 
+/**  The open conversation, as a frame carries it. */
+export type Conversation = Conversation_Serialize;
+
+/**
+ *  Who wrote one row. The session key rides with the actor rather than in the
+ *  body, so a renderer attributes a row without parsing text.
+ */
+export type ConversationActor = 
+/**  A person at a surface. */
+"Operator" | 
+/**  Pal writing through its own tools. */
+"Pal" | 
+/**  An agent session replying in its own name, by session key. */
+{ Session: string } | 
+/**
+ *  A row whose sender was blank. Never rendered as a person: the daemon
+ *  refuses a blank actor, and a row that cannot say who wrote it must not
+ *  claim a human did.
+ */
+"Unattributed";
+
+/**  One held tool call: what Pal wants to run, and what it would run it with. */
+export type ConversationCard = ConversationCard_Serialize;
+
+/**  What a guardrail confirm card is waiting for. */
+export type ConversationCardState = "Open" | "Approved" | "Denied" | "Expired" | 
+/**
+ *  The frame carried a card this build could not decode. Rendered, never
+ *  answerable: an unknown state that offers an approve key is the failure
+ *  the tolerant decode exists to avoid.
+ */
+"Unrecognised";
+
+/**  One held tool call: what Pal wants to run, and what it would run it with. */
+export type ConversationCard_Serialize = {
+	confirm_id: string,
+	/**  The tool as the provider names it. An identifier, not prose. */
+	tool: string,
+	/**
+	 *  The call's arguments, every string scrubbed and the structure kept: the
+	 *  shape is what an operator decides on. Replaced by `null` when the call
+	 *  is larger than [`MAX_ARGUMENT_BYTES`], with `arguments_bytes` saying how
+	 *  much was withheld.
+	 */
+	arguments: unknown,
+	/**  The compact size of the arguments as they were, whether or not they fit. */
+	arguments_bytes: number,
+	state: ConversationCardState,
+	/**  Why a card could not be decoded, when that is what happened. */
+	detail: string,
+};
+
+/**  What one row is: a prompt, a reply, or a lifecycle marker the daemon minted. */
+export type ConversationKind = "User" | "Agent" | "Marker";
+
+/**  One timeline row, attributed and cut to [`MAX_BODY_CHARS`]. */
+export type ConversationRow = ConversationRow_Serialize;
+
+/**  One timeline row, attributed and cut to [`MAX_BODY_CHARS`]. */
+export type ConversationRow_Serialize = {
+	/**  The daemon's own message identity, so a surface can key and thread rows. */
+	id: string,
+	actor: ConversationActor,
+	kind: ConversationKind,
+	/**  Whether this row answers another one. */
+	reply: boolean,
+	/**
+	 *  What was written, scrubbed. A conversation is where a pasted credential
+	 *  ends up, so this never reaches a frame verbatim.
+	 */
+	body: string,
+	/**
+	 *  Whether the body was cut, so a surface can say so rather than implying
+	 *  the agent stopped mid-sentence.
+	 */
+	truncated: boolean,
+};
+
+/**
+ *  Where the conversation stands: still opening, live, or unavailable with the
+ *  daemon's own reason.
+ */
+export type ConversationStatus = ConversationStatus_Serialize;
+
+/**
+ *  Where the conversation stands: still opening, live, or unavailable with the
+ *  daemon's own reason.
+ */
+export type ConversationStatus_Serialize = 
+/**  Nothing has been opened. */
+"Closed" | 
+/**
+ *  The open sequence is walking; `call` is the RPC it is on, as the daemon
+ *  logs it, so a slow step is nameable rather than a spinner.
+ */
+({ Opening: {
+	call: string,
+} }) & { Unavailable?: never } | 
+/**  The daemon answered and the timeline is live. */
+"Live" | 
+/**  The daemon could not answer. The detail is its own words, scrubbed. */
+({ Unavailable: {
+	detail: string,
+} }) & { Opening?: never };
+
+/**  Which conversation the window is showing. */
+export type ConversationTopic = 
+/**  Nothing is open. */
+"None" | 
+/**  Pal, the fleet's own assistant. */
+"Pal" | 
+/**  One session's own thread. */
+"Session";
+
+/**  The open conversation, as a frame carries it. */
+export type Conversation_Serialize = {
+	topic: ConversationTopic,
+	/**
+	 *  The daemon's scope for this conversation (`session:<key>`,
+	 *  `channel:<id>`): an identifier a second surface reads the same thread by.
+	 */
+	scope_key: string | null,
+	/**  The session this conversation reaches, when it reaches one. */
+	target_session_key: string | null,
+	status: ConversationStatus_Serialize,
+	/**  The tail of the timeline, oldest first, at most [`MAX_ROWS`]. */
+	rows: ConversationRow_Serialize[],
+	/**
+	 *  How many rows the host holds, so a surface can say the window is a tail
+	 *  rather than the whole conversation.
+	 */
+	rows_held: number,
+	/**  Held tool calls, at most [`MAX_CARDS`]. */
+	cards: ConversationCard_Serialize[],
+	/**
+	 *  Why a send would be refused right now, in the refusing surface's own
+	 *  words, or empty when it would not. A composer over a conversation that
+	 *  cannot send is the advertisement that makes a surface a lie.
+	 */
+	send_block: string,
+	/**
+	 *  The operator's unsent draft, as its length. The text itself is theirs
+	 *  and has not been sent anywhere yet, so it never leaves the process that
+	 *  is typing it.
+	 */
+	composer_len: number,
+};
+
 /**
  *  Spend ceilings consumed by `ainb fleet cost`.
  * 
@@ -2292,6 +2440,7 @@ export type FleetView_Serialize = {
 	live_window: LiveWindow,
 	ask_state: AskState_Serialize,
 	broadcast: Broadcast_Serialize,
+	conversation: Conversation_Serialize,
 	daemon_attention: DaemonAttention_Serialize,
 	fleet_snapshot: FleetRowFrame[],
 	fleet_metadata: { [key in string]: SessionFleetMetadata },
