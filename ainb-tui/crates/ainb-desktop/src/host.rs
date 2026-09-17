@@ -103,7 +103,11 @@ pub struct DesktopHost<S: FrameSink> {
     rescan_every: Duration,
     /// The daemon's publish counter as it stood when the last scan started, so
     /// news the poller brings can start one before the cadence would (#1156).
-    scanned_generation: u64,
+    ///
+    /// `None` until this window has scanned at all: news is a reason to look
+    /// AGAIN, and a host that has never asked for a list has nothing to
+    /// refresh.
+    scanned_generation: Option<u64>,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -130,7 +134,7 @@ impl<S: FrameSink> DesktopHost<S> {
             sink,
             scanned_at: Instant::now(),
             rescan_every: WORKSPACE_RESCAN,
-            scanned_generation: 0,
+            scanned_generation: None,
         }
     }
 
@@ -160,7 +164,16 @@ impl<S: FrameSink> DesktopHost<S> {
     /// policy; a later [`Self::tick`] applies the result. Must be called inside
     /// a tokio runtime.
     pub fn start_workspace_load(&mut self) {
+        self.scanned_generation = Some(self.daemon_generation());
         self.state.start_workspace_load();
+    }
+
+    /// The attention poller's publish counter as it stands.
+    fn daemon_generation(&self) -> u64 {
+        self.state
+            .host
+            .daemon_attention_generation
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Apply background work that finished (a workspace load, a daemon
@@ -204,16 +217,12 @@ impl<S: FrameSink> DesktopHost<S> {
         // (#1156): a box whose sessions never touch the daemon still gets one
         // on the timer. The counter is recorded at the START of the scan, so
         // news that arrives while it runs is still news when it finishes.
-        let generation = self
-            .state
-            .host
-            .daemon_attention_generation
-            .load(std::sync::atomic::Ordering::Acquire);
-        let news = generation != self.scanned_generation;
+        let generation = self.daemon_generation();
+        let news = self.scanned_generation.is_some_and(|seen| seen != generation);
         if !self.state.workspace_scan_running()
             && (news || self.scanned_at.elapsed() >= self.rescan_every)
         {
-            self.scanned_generation = generation;
+            self.scanned_generation = Some(generation);
             self.state.start_workspace_load();
         }
         let effects = self.state.take_effects();
