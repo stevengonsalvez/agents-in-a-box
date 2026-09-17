@@ -27,6 +27,11 @@ mod chat;
 mod presence;
 pub mod reconnect;
 
+pub use ainb_hangar_proto::sessions::{
+    WorkspaceSessionDeleteParams, WorkspaceSessionDeleteResult, WorkspaceSessionEntry,
+    WorkspaceSessionListParams, WorkspaceSessionListResult, WorkspaceSessionUpsertParams,
+    WorkspaceSessionUpsertResult,
+};
 pub use presence::{Dialer, PresenceLease, PresenceState, mark_process_as_surface};
 pub use reconnect::{
     BACKOFF_1S, BACKOFF_4S, BACKOFF_16S, ConnectionState, RECONNECT_SCHEDULE,
@@ -712,6 +717,30 @@ impl DaemonClient {
         let value = serde_json::to_value(params).expect("FleetTranscriptPruneParams serializes");
         let result = self.call(methods::FLEET_TRANSCRIPT_PRUNE, value).await?;
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
+    /// List workspace sessions across all workspaces, or filtered by workspace_path.
+    pub async fn workspace_session_list(
+        &self,
+        params: WorkspaceSessionListParams,
+    ) -> Result<WorkspaceSessionListResult, DaemonError> {
+        self.call_typed(methods::WORKSPACE_SESSION_LIST, &params).await
+    }
+
+    /// Upsert one workspace session into the daemon store.
+    pub async fn workspace_session_upsert(
+        &self,
+        params: WorkspaceSessionUpsertParams,
+    ) -> Result<WorkspaceSessionUpsertResult, DaemonError> {
+        self.call_typed(methods::WORKSPACE_SESSION_UPSERT, &params).await
+    }
+
+    /// Delete one workspace session from the daemon store by ID.
+    pub async fn workspace_session_delete(
+        &self,
+        params: WorkspaceSessionDeleteParams,
+    ) -> Result<WorkspaceSessionDeleteResult, DaemonError> {
+        self.call_typed(methods::WORKSPACE_SESSION_DELETE, &params).await
     }
 
     /// Open a persistent transcript subscription and retain its live stream.
@@ -1610,5 +1639,124 @@ mod tests {
             matches!(err, DaemonError::Decode(_)),
             "expected Decode error, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_session_client_rpc_calls() {
+        let temp = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temp.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake hangar socket");
+        let server = tokio::spawn(async move {
+            // Call 1: list
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let (read_half, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let _hello = read_frame(&mut reader).await.expect("read hello");
+            write_test_frame(
+                &mut writer,
+                &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            )
+            .await;
+            let req = read_frame(&mut reader).await.expect("read list");
+            assert_eq!(req["method"], methods::WORKSPACE_SESSION_LIST);
+            write_test_frame(
+                &mut writer,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": req["id"],
+                    "result": {
+                        "sessions": [{
+                            "session_id": "00000000-0000-0000-0000-000000000001",
+                            "tmux_session_name": "test-alpha",
+                            "worktree_path": "/tmp/test",
+                            "workspace_name": "test",
+                            "created_at": 1000,
+                            "agent_type": "Claude",
+                            "model_source": "LegacyTyped"
+                        }]
+                    }
+                }),
+            )
+            .await;
+
+            // Call 2: upsert
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let (read_half, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let _hello = read_frame(&mut reader).await.expect("read hello");
+            write_test_frame(
+                &mut writer,
+                &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            )
+            .await;
+            let req = read_frame(&mut reader).await.expect("read upsert");
+            assert_eq!(req["method"], methods::WORKSPACE_SESSION_UPSERT);
+            write_test_frame(
+                &mut writer,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": req["id"],
+                    "result": {
+                        "ok": true
+                    }
+                }),
+            )
+            .await;
+
+            // Call 3: delete
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let (read_half, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let _hello = read_frame(&mut reader).await.expect("read hello");
+            write_test_frame(
+                &mut writer,
+                &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            )
+            .await;
+            let req = read_frame(&mut reader).await.expect("read delete");
+            assert_eq!(req["method"], methods::WORKSPACE_SESSION_DELETE);
+            write_test_frame(
+                &mut writer,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": req["id"],
+                    "result": { "deleted": true }
+                }),
+            )
+            .await;
+        });
+
+        let client = DaemonClient::with_parts(socket, "test-token".into());
+
+        // 1. list
+        let list_res = client
+            .workspace_session_list(WorkspaceSessionListParams {
+                workspace_name: Some("test".into()),
+            })
+            .await
+            .expect("list sessions");
+        assert_eq!(list_res.sessions.len(), 1);
+        assert_eq!(list_res.sessions[0].tmux_session_name, "test-alpha");
+
+        // 2. upsert
+        let upsert_res = client
+            .workspace_session_upsert(WorkspaceSessionUpsertParams {
+                session: list_res.sessions[0].clone(),
+            })
+            .await
+            .expect("upsert session");
+        assert!(upsert_res.ok);
+
+        // 3. delete
+        let delete_res = client
+            .workspace_session_delete(WorkspaceSessionDeleteParams {
+                session_id: Some("00000000-0000-0000-0000-000000000001".into()),
+                tmux_session_name: None,
+            })
+            .await
+            .expect("delete session");
+        assert!(delete_res.deleted);
+
+        server.await.expect("fake server completes");
     }
 }
