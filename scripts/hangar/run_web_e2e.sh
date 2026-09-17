@@ -35,15 +35,24 @@ WORKSPACE="$REPO_ROOT/ainb-tui"
 E2E_DIR="$WORKSPACE/crates/ainb-web/e2e"
 
 # Shared target dir keeps this in step with the rest of the ccc build (avoids a
-# from-scratch rebuild). Override by exporting CARGO_TARGET_DIR before the run.
-if [ -z "${CARGO_TARGET_DIR:-}" ]; then
-  if [ -d "/Users/stevengonsalvez/.cache/ccc-shared-target" ]; then
-    export CARGO_TARGET_DIR="/Users/stevengonsalvez/.cache/ccc-shared-target"
-  else
-    export CARGO_TARGET_DIR="$WORKSPACE/target"
+# from-scratch rebuild). Resolve from CARGO_TARGET_DIR, cargo metadata, or local cache.
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  TARGET_ROOT="$CARGO_TARGET_DIR"
+elif [ -d "/Users/stevengonsalvez/.cache/ccc-shared-target" ]; then
+  TARGET_ROOT="/Users/stevengonsalvez/.cache/ccc-shared-target"
+  export CARGO_TARGET_DIR="$TARGET_ROOT"
+else
+  # Query cargo itself for target_directory (honours .cargo/config.toml, rust-cache layout, etc.)
+  TARGET_ROOT=$(cargo metadata --manifest-path "$WORKSPACE/Cargo.toml" --format-version 1 --no-deps 2>/dev/null | jq -r .target_directory 2>/dev/null)
+  if [ -z "$TARGET_ROOT" ] || [ "$TARGET_ROOT" = "null" ]; then
+    TARGET_ROOT=$(cargo metadata --manifest-path "$WORKSPACE/Cargo.toml" --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
   fi
+  if [ -z "$TARGET_ROOT" ]; then
+    TARGET_ROOT="$WORKSPACE/target"
+  fi
+  export CARGO_TARGET_DIR="$TARGET_ROOT"
 fi
-TARGET_DIR="$CARGO_TARGET_DIR/debug"
+TARGET_DIR="$TARGET_ROOT/debug"
 
 AINB="$TARGET_DIR/ainb"
 DAEMON="$TARGET_DIR/ainb-hangar-daemon"
@@ -81,8 +90,8 @@ command -v node    >/dev/null 2>&1 || die "node not found (required for Playwrig
 command -v npm     >/dev/null 2>&1 || die "npm not found (required for Playwright)"
 
 # ── build ────────────────────────────────────────────────────────────────────
-log "building ainb + daemon + seed_control_center (shared target: $CARGO_TARGET_DIR)"
-( cd "$WORKSPACE" && cargo build -p ainb -p ainb-hangar-daemon --example seed_control_center ) \
+log "building ainb + daemon + seed_control_center (shared target: $TARGET_ROOT)"
+( cd "$WORKSPACE" && cargo build --target-dir "$TARGET_ROOT" -p ainb -p ainb-hangar-daemon --example seed_control_center ) \
   || die "cargo build failed"
 for b in "$AINB" "$DAEMON" "$SEEDER"; do
   [ -x "$b" ] || die "expected binary missing after build: $b"
