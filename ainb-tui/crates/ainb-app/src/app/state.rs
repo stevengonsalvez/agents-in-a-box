@@ -12204,8 +12204,9 @@ impl AppState {
     }
 
     /// Every host calls this on its tick: the answer machine is folded, the
-    /// session tab is reconciled against what is available, and the composer is
-    /// pointed at the request it is showing.
+    /// session tab is reconciled against what is available, the composer is
+    /// pointed at the request it is showing, the open conversation is projected
+    /// onto the wire and the filter's verdict on each row is recomputed.
     ///
     /// A reducer step rather than a renderer's, for the reason
     /// [`Self::refresh_attention`] became one (#1131): the send worker reports
@@ -12217,7 +12218,7 @@ impl AppState {
     ///
     /// Writes only what moved, so a tick with nothing outstanding bumps no
     /// version and frames nothing.
-    pub fn tick_answers(&mut self) {
+    pub fn tick_surfaces(&mut self) {
         use crate::components::session_tabs;
 
         // A tab can go dead under the operator (the ASK is answered, the cursor
@@ -12247,6 +12248,31 @@ impl AppState {
         }
 
         self.project_conversation();
+        self.refresh_row_visibility();
+    }
+
+    /// Recompute which session rows the filter hides, as a set of ids beside
+    /// the list (#1157).
+    ///
+    /// The rule lives here, where the reducer's own navigation reads it, rather
+    /// than in each renderer: a filter that grows a case in Rust was silently
+    /// wrong in a window carrying its own copy. The list keeps its order and
+    /// its indices, because the selection is expressed in them.
+    ///
+    /// Written only when the set changed, so a tick over a steady list frames
+    /// nothing.
+    fn refresh_row_visibility(&mut self) {
+        let hidden: std::collections::HashSet<Uuid> = self
+            .sessions
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.sessions.iter())
+            .filter(|session| !self.session_passes_filter(session))
+            .map(|session| session.id)
+            .collect();
+        if self.sessions.hidden_sessions != hidden {
+            self.sessions.hidden_sessions = hidden;
+        }
     }
 
     /// Write the open conversation's bounded, scrubbed window onto the Fleet
