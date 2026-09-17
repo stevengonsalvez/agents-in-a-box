@@ -11,6 +11,8 @@ use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
 use ainb_app::{AppState, CommandId, Effect, Intent, Keymap};
 use serde::Serialize;
 
+use crate::intent::Refusal;
+
 /// Where framed state goes: the Tauri channel in the app, a recorder in tests.
 pub trait FrameSink {
     fn send(&mut self, batch: FrameBatch);
@@ -250,8 +252,9 @@ impl<S: FrameSink> DesktopHost<S> {
             .collect()
     }
 
-    /// The row `intent` would run now and why the webview may not run it, or
-    /// `None` when it may (or when the intent names no row).
+    /// The row `intent` would run now and why the webview may not run it, for
+    /// the webview to show, or `None` when it may (or when the intent names no
+    /// row).
     ///
     /// A key or a name the webview sends is script-reachable, so one judgement
     /// covers both: a row that writes outside ainb runs only from a key the
@@ -261,7 +264,7 @@ impl<S: FrameSink> DesktopHost<S> {
     /// hook install or the abtop setup, Next on onboarding with telemetry set
     /// up.
     #[must_use]
-    pub fn refused_from_renderer(&self, intent: &Intent) -> Option<(CommandId, &'static str)> {
+    pub fn refused_from_renderer(&self, intent: &Intent) -> Option<Refusal> {
         let (id, row) = match intent {
             Intent::Key(chord) => {
                 let (ctx, _) =
@@ -278,7 +281,10 @@ impl<S: FrameSink> DesktopHost<S> {
         } else {
             self.state.remote_command_refusal(&row.action)
         };
-        why.map(|why| (id, why))
+        why.map(|reason| Refusal {
+            command: id,
+            reason,
+        })
     }
 
     /// Layout work for the webview queued since the last call.
