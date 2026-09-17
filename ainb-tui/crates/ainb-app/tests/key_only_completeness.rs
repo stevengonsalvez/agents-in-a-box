@@ -134,6 +134,16 @@ const SINKS: &[(&str, Reach, &str)] = &[
         Reach::Outside,
         "the host kills tmux sessions ainb did not start",
     ),
+    (
+        "app/events.rs::run_skill_cli",
+        Reach::Outside,
+        "ainb_cli skill commands write the tools' own skill dirs (~/.claude, ~/.codex, ~/.cursor)",
+    ),
+    (
+        "app/events.rs::run_skill_cli_full",
+        Reach::Outside,
+        "ainb_cli skill commands write the tools' own skill dirs (~/.claude, ~/.codex, ~/.cursor)",
+    ),
     // ainb's own state.
     (
         "components/log_history_viewer.rs::delete_all_logs",
@@ -194,16 +204,6 @@ const SINKS: &[(&str, Reach, &str)] = &[
         "host:AsyncAction::KillWorkspaceShell",
         Reach::Owned,
         "the host kills a workspace shell ainb started",
-    ),
-    (
-        "app/events.rs::run_skill_cli",
-        Reach::Owned,
-        "the skill library ainb manages, through ainb_cli",
-    ),
-    (
-        "app/events.rs::run_skill_cli_full",
-        Reach::Owned,
-        "the skill library ainb manages, through ainb_cli",
     ),
     (
         "app/state.rs::cleanup_orphaned_containers",
