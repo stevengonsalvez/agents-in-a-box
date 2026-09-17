@@ -332,14 +332,11 @@ fn a_chord_or_a_name_on_a_key_only_row_is_refused() {
     let log = Log::default();
     let host = host(&[SectionId::Shell], &log);
 
-    let (id, why) = host.refused_from_renderer(&key("W")).expect("W is key-only");
-    assert_eq!(id.as_str(), "global.wire_statusline");
-    assert!(why.contains("only from its key"), "{why}");
-    let named = Intent::Command(id.clone(), serde_json::Value::Null);
-    assert_eq!(
-        host.refused_from_renderer(&named).map(|(id, _)| id),
-        Some(id)
-    );
+    let refusal = host.refused_from_renderer(&key("W")).expect("W is key-only");
+    assert_eq!(refusal.command.as_str(), "global.wire_statusline");
+    assert!(refusal.reason.contains("only from its key"), "{refusal:?}");
+    let named = Intent::Command(refusal.command.clone(), serde_json::Value::Null);
+    assert_eq!(host.refused_from_renderer(&named), Some(refusal));
     assert_eq!(host.refused_from_renderer(&key("s")), None);
 }
 
@@ -364,11 +361,17 @@ fn enter_on_a_dialog_holding_a_key_only_action_is_refused() {
         Some(ainb_app::app::state::ConfirmAction::SetupAbtopRateLimits)
     ));
 
-    let (id, why) = host
+    let refusal = host
         .refused_from_renderer(&key("enter"))
         .expect("Enter would run the abtop setup");
-    assert!(id.as_str().ends_with(".confirm"), "{id}");
-    assert!(why.contains("runs only from its key"), "{why}");
+    assert!(
+        refusal.command.as_str().ends_with(".confirm"),
+        "{refusal:?}"
+    );
+    assert!(
+        refusal.reason.contains("runs only from its key"),
+        "{refusal:?}"
+    );
 }
 
 #[test]
