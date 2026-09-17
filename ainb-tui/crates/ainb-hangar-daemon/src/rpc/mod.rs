@@ -1624,6 +1624,9 @@ async fn handle(
             })?;
             to_value(&registry.list().await)
         }
+        methods::WORKSPACE_SESSION_LIST => handle_session_list(pool, req).await,
+        methods::WORKSPACE_SESSION_UPSERT => handle_session_upsert(pool, req).await,
+        methods::WORKSPACE_SESSION_DELETE => handle_session_delete(pool, req).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -13405,6 +13408,106 @@ async fn daemon_health_snapshot(
     })
 }
 
+fn session_row_to_entry(
+    row: ainb_hangar_store::repo::sessions::SessionRow,
+) -> ainb_hangar_proto::sessions::WorkspaceSessionEntry {
+    ainb_hangar_proto::sessions::WorkspaceSessionEntry {
+        session_id: row.session_id,
+        tmux_session_name: row.tmux_session_name,
+        worktree_path: row.worktree_path,
+        workspace_name: row.workspace_name,
+        created_at: row.created_at,
+        agent_type: row.agent_type,
+        headroom_enabled: row.headroom_enabled,
+        rtk_enabled: row.rtk_enabled,
+        skip_permissions: row.skip_permissions,
+        model: row.model,
+        model_source: row.model_source,
+        codex_model: row.codex_model,
+        codex_thread_id: row.codex_thread_id,
+    }
+}
+
+fn session_entry_to_row(
+    entry: ainb_hangar_proto::sessions::WorkspaceSessionEntry,
+) -> ainb_hangar_store::repo::sessions::SessionRow {
+    ainb_hangar_store::repo::sessions::SessionRow {
+        session_id: entry.session_id,
+        tmux_session_name: entry.tmux_session_name,
+        worktree_path: entry.worktree_path,
+        workspace_name: entry.workspace_name,
+        created_at: entry.created_at,
+        agent_type: entry.agent_type,
+        headroom_enabled: entry.headroom_enabled,
+        rtk_enabled: entry.rtk_enabled,
+        skip_permissions: entry.skip_permissions,
+        model: entry.model,
+        model_source: entry.model_source,
+        codex_model: entry.codex_model,
+        codex_thread_id: entry.codex_thread_id,
+    }
+}
+
+/// List persistent sessions matching the optional workspace filter.
+async fn handle_session_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::sessions::WorkspaceSessionListParams = if req.params.is_null() {
+        Default::default()
+    } else {
+        parse_params(req, "{ workspace_name? }")?
+    };
+    let rows = ainb_hangar_store::repo::sessions::SessionsRepo::list(
+        pool,
+        params.workspace_name.as_deref(),
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
+
+    let sessions = rows.into_iter().map(session_row_to_entry).collect();
+    to_value(&ainb_hangar_proto::sessions::WorkspaceSessionListResult { sessions })
+}
+
+/// Upsert a session into the persistent store.
+async fn handle_session_upsert(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::sessions::WorkspaceSessionUpsertParams =
+        parse_params(req, "{ session }")?;
+    let row = session_entry_to_row(params.session);
+    ainb_hangar_store::repo::sessions::SessionsRepo::upsert(pool, &row)
+        .await
+        .map_err(|e| store_err(&e))?;
+
+    to_value(&ainb_hangar_proto::sessions::WorkspaceSessionUpsertResult { ok: true })
+}
+
+/// Delete a session by ID or tmux name.
+async fn handle_session_delete(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::sessions::WorkspaceSessionDeleteParams =
+        parse_params(req, "{ session_id?, tmux_session_name? }")?;
+    let deleted = if let Some(id) = params.session_id.as_deref() {
+        ainb_hangar_store::repo::sessions::SessionsRepo::delete_by_id(pool, id)
+            .await
+            .map_err(|e| store_err(&e))?
+    } else if let Some(tmux) = params.tmux_session_name.as_deref() {
+        ainb_hangar_store::repo::sessions::SessionsRepo::delete_by_tmux_name(pool, tmux)
+            .await
+            .map_err(|e| store_err(&e))?
+    } else {
+        return Err(invalid_params(
+            "either session_id or tmux_session_name is required",
+        ));
+    };
+
+    to_value(&ainb_hangar_proto::sessions::WorkspaceSessionDeleteResult { deleted })
+}
+
 /// Resolve a wire workspace id, rejecting an unknown workspace with an
 /// `INVALID_PARAMS` error (the mutating autopilot handlers must not silently
 /// no-op on a typo'd workspace).
@@ -16455,6 +16558,101 @@ mod tests {
         .await;
         assert!(ok.error.is_none(), "{ok:?}");
         assert_eq!(ok.result.unwrap()["value"], serde_json::json!("codex"));
+    }
+
+    /// Workspace session RPC CRUD round-trip: list empty, upsert, list filtered/unfiltered, delete.
+    #[tokio::test]
+    async fn workspace_session_rpc_crud_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        // 1. Initially empty list
+        let empty_list = dispatch(
+            pool,
+            &req(methods::WORKSPACE_SESSION_LIST, serde_json::json!({})),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(empty_list.error.is_none(), "{empty_list:?}");
+        let sessions = empty_list.result.unwrap()["sessions"].as_array().unwrap().clone();
+        assert!(sessions.is_empty());
+
+        // 2. Upsert a session with all 13 fields
+        let upsert_res = dispatch(
+            pool,
+            &req(
+                methods::WORKSPACE_SESSION_UPSERT,
+                serde_json::json!({
+                    "session": {
+                        "session_id": "sess-test-uuid-1",
+                        "tmux_session_name": "ainb-test-sess-1",
+                        "worktree_path": "/path/to/worktree",
+                        "workspace_name": "ws-test",
+                        "created_at": 1700000000000i64,
+                        "agent_type": "Claude",
+                        "headroom_enabled": true,
+                        "rtk_enabled": false,
+                        "skip_permissions": true,
+                        "model": "claude-3-5-sonnet",
+                        "model_source": "LegacyTyped",
+                        "codex_model": null,
+                        "codex_thread_id": null
+                    }
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(upsert_res.error.is_none(), "{upsert_res:?}");
+        assert_eq!(upsert_res.result.unwrap()["ok"], serde_json::json!(true));
+
+        // 3. List matches
+        let list_res = dispatch(
+            pool,
+            &req(
+                methods::WORKSPACE_SESSION_LIST,
+                serde_json::json!({"workspace_name": "ws-test"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(list_res.error.is_none(), "{list_res:?}");
+        let sessions = list_res.result.unwrap()["sessions"].as_array().unwrap().clone();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["session_id"], "sess-test-uuid-1");
+        assert_eq!(sessions[0]["tmux_session_name"], "ainb-test-sess-1");
+        assert_eq!(sessions[0]["headroom_enabled"], true);
+        assert_eq!(sessions[0]["rtk_enabled"], false);
+        assert_eq!(sessions[0]["skip_permissions"], true);
+
+        // 4. Delete by tmux session name
+        let del_res = dispatch(
+            pool,
+            &req(
+                methods::WORKSPACE_SESSION_DELETE,
+                serde_json::json!({"tmux_session_name": "ainb-test-sess-1"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(del_res.error.is_none(), "{del_res:?}");
+        assert_eq!(del_res.result.unwrap()["deleted"], serde_json::json!(true));
+
+        // 5. List is empty again
+        let list_res2 = dispatch(
+            pool,
+            &req(methods::WORKSPACE_SESSION_LIST, serde_json::json!({})),
+            &health(),
+            &sink(),
+        )
+        .await;
+        let sessions2 = list_res2.result.unwrap()["sessions"].as_array().unwrap().clone();
+        assert!(sessions2.is_empty());
     }
 
     /// The set RPC and the CLI are meant to be ONE gate, so they must agree on
