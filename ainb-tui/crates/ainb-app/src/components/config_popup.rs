@@ -8,6 +8,10 @@
 pub enum ConfigPopupType {
     /// Selection from a list of choices
     Choice {
+        /// Scrubbed like a settings row's choices: a promoted free-form row
+        /// (the preferred editor command) opens this popup too.
+        #[serde(serialize_with = "crate::wire::fields::scrub_lines")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<String>))]
         options: Vec<String>,
         selected_index: usize,
     },
@@ -35,7 +39,15 @@ pub enum ConfigPopupType {
     /// Boolean toggle (shows Yes/No options)
     Boolean { value: bool },
     /// Number input
-    NumberInput { value: i64, input_buffer: String },
+    NumberInput {
+        value: i64,
+        /// The digits being typed. The popup draws them, so a frame carries
+        /// them, scrubbed in case something other than digits was pasted
+        /// (#1146).
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        input_buffer: String,
+    },
 }
 
 /// State for the config popup

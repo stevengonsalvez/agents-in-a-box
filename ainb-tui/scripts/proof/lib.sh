@@ -40,6 +40,7 @@ CAPTURES=()
 OBSERVED=()
 FAILED_CHECKS=()
 KNOWN_ISSUE=""
+SKIPPED=""
 PROOF_STARTED_AT=""
 
 # ---------------------------------------------------------------------------
@@ -68,6 +69,17 @@ check() {
 # known_issue <number>: this node's failure is a filed product defect.
 known_issue() { KNOWN_ISSUE="$1"; }
 
+# skip <reason>: this node cannot run on this machine.
+#
+# Recorded as skipped rather than failed: a box with no headless X server, say,
+# has not falsified anything, so the reason travels with the result and the run
+# does not count it against `pass`. A scenario that skips returns straight
+# after; anything it checks after this is a check it could not have made.
+skip() {
+  SKIPPED="$1"
+  observe "SKIPPED: $1"
+}
+
 # The internal hostname is not something to publish in a PR comment.
 PROOF_HOST_FQDN="$(hostname -f 2>/dev/null || hostname)"
 PROOF_HOST_SHORT="$(hostname -s 2>/dev/null || hostname)"
@@ -76,7 +88,8 @@ redact_host() {
 }
 
 # write_result: proof-out/<node>/result.json from what the scenario recorded.
-# A scenario that recorded no check at all has proven nothing and fails.
+# A scenario that recorded no check at all has proven nothing and fails; one
+# that skipped says why and is not counted as a failure.
 write_result() {
   local pass=true
   if ((${#FAILED_CHECKS[@]} > 0 || ${#OBSERVED[@]} == 0)); then pass=false; fi
@@ -85,6 +98,7 @@ write_result() {
     --arg expected "$EXPECT" \
     --argjson pass "$pass" \
     --arg issue "$KNOWN_ISSUE" \
+    --arg skipped "$SKIPPED" \
     --arg binary "$BINARY_LINE" \
     --arg started_at "$PROOF_STARTED_AT" \
     --args '{
@@ -92,6 +106,7 @@ write_result() {
       expected: $expected,
       observed: $ARGS.positional[0] | fromjson,
       pass: $pass,
+      skipped: (if $skipped == "" then null else $skipped end),
       issue: (if $pass or $issue == "" then null else ($issue | tonumber) end),
       capture: $ARGS.positional[1] | fromjson,
       binary: $binary,
@@ -111,7 +126,7 @@ world_up() {
   NODE_DIR="$PROOF_OUT/$NODE"
   rm -rf "$NODE_DIR"
   mkdir -p "$NODE_DIR"
-  CAPTURES=(); OBSERVED=(); FAILED_CHECKS=(); KNOWN_ISSUE=""
+  CAPTURES=(); OBSERVED=(); FAILED_CHECKS=(); KNOWN_ISSUE=""; SKIPPED=""
   PROOF_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   # Without a world every path below would land under / (HOME=/home), so a

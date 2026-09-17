@@ -1,4 +1,4 @@
-import { onCleanup, onMount, Show } from "solid-js";
+import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -26,6 +26,10 @@ interface Props {
 export function TerminalView(props: Props) {
   let host!: HTMLDivElement;
   const attempt = () => (props.tab.state === "reconnecting" ? props.tab.attempt : 0);
+  // Bytes this pane has painted, kept on the element. It says the pane is
+  // live without reaching into the renderer's canvas, and it is what the
+  // journey times a large read by.
+  const [painted, setPainted] = createSignal(0);
 
   onMount(() => {
     const term = new Terminal({
@@ -47,7 +51,15 @@ export function TerminalView(props: Props) {
     }
 
     const transport = tauriTransport(props.tab.key);
-    transport.onBytes((bytes) => new Promise<void>((painted) => term.write(bytes, painted)));
+    transport.onBytes(
+      (bytes) =>
+        new Promise<void>((done) =>
+          term.write(bytes, () => {
+            setPainted((total) => total + bytes.byteLength);
+            done();
+          }),
+        ),
+    );
     term.onData((data) => transport.send(data));
 
     // Focus rules: the shell accelerators stay with the shell, Esc Esc leaves,
@@ -59,7 +71,22 @@ export function TerminalView(props: Props) {
       if (shell) {
         // Marked handled, so the window's own listener does not act twice.
         event.preventDefault();
-        props.onAccelerator(shell);
+        // Copy and paste act on this pane, so they are answered here; the rest
+        // is the shell's.
+        if (shell.kind === "copy") {
+          const selection = term.getSelection();
+          if (selection) void invoke("clipboard_write", { text: selection });
+        } else if (shell.kind === "paste") {
+          // Through xterm, not straight to the transport: the terminal wraps a
+          // paste in the bracketed-paste markers the pane asked for, so a
+          // multi-line payload arrives as text rather than as lines the shell
+          // runs one by one. The macOS menu's own paste takes the same path.
+          void invoke<string>("clipboard_read", { key: props.tab.key }).then((text) => {
+            if (text) term.paste(text);
+          });
+        } else {
+          props.onAccelerator(shell);
+        }
         return false;
       }
       if (event.key === "Escape" && leave(event.timeStamp)) {
@@ -90,7 +117,7 @@ export function TerminalView(props: Props) {
   });
 
   return (
-    <div class="terminal" hidden={!props.active} data-tab={props.tab.key}>
+    <div class="terminal" hidden={!props.active} data-tab={props.tab.key} data-painted={painted()}>
       <div class="xterm-host" ref={host} />
       <Show when={props.tab.state !== "attached"}>
         <div class="terminal-overlay" role="status">

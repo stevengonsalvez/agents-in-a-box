@@ -34,6 +34,7 @@ def load_results(out: Path) -> list[dict]:
                 "expected": "",
                 "observed": [f"no readable result.json: {err}"],
                 "pass": False,
+                "skipped": None,
                 "issue": None,
                 "capture": [],
                 "binary": "",
@@ -47,7 +48,8 @@ def md_cell(text: str) -> str:
 
 
 def render_md(results: list[dict], binary: str, source: str) -> str:
-    passed = sum(1 for r in results if r["pass"])
+    passed = sum(1 for r in results if r["pass"] and not r.get("skipped"))
+    skipped = sum(1 for r in results if r.get("skipped"))
     lines = [
         "# Proof run",
         "",
@@ -57,13 +59,14 @@ def render_md(results: list[dict], binary: str, source: str) -> str:
     if source:
         lines += [f"**Source:** `{source}` (the checkout run.sh ran from)", ""]
     lines += [
-        f"**Result:** {passed} of {len(results)} nodes pass.",
+        f"**Result:** {passed} of {len(results)} nodes pass"
+        + (f", {skipped} skipped." if skipped else "."),
         "",
         "| node | result | expected | observed | captures |",
         "|---|---|---|---|---|",
     ]
     for r in results:
-        verdict = "PASS" if r["pass"] else "**FAIL**"
+        verdict = "SKIP" if r.get("skipped") else "PASS" if r["pass"] else "**FAIL**"
         if not r["pass"] and r.get("issue"):
             verdict += f" #{r['issue']}"
         failed = [o for o in r["observed"] if o.startswith("FAILED")]
@@ -88,14 +91,16 @@ def main() -> int:
         "binary": binary,
         "source": source,
         "nodes": len(results),
-        "passed": sum(1 for r in results if r["pass"]),
+        "passed": sum(1 for r in results if r["pass"] and not r.get("skipped")),
+        "skipped": [r["node"] for r in results if r.get("skipped")],
         "failed": [r["node"] for r in results if not r["pass"]],
         "results": results,
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     (out / "summary.md").write_text(render_md(results, binary, source))
+    skipped = f"; skipped: {', '.join(summary['skipped'])}" if summary["skipped"] else ""
     print(f"proof: {summary['passed']} of {summary['nodes']} nodes pass; "
-          f"failed: {', '.join(summary['failed']) or 'none'}")
+          f"failed: {', '.join(summary['failed']) or 'none'}{skipped}")
     print(f"proof: {out / 'summary.md'}")
     return 0 if not summary["failed"] and results else 1
 

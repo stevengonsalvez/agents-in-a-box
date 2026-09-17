@@ -12,12 +12,25 @@ use crate::setup::catalog::{Consumer, DepTier, Detect, Topic, catalog};
 #[serde(rename_all = "snake_case", tag = "kind", content = "detail")]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum DepState {
-    /// Present and satisfies any version/variant requirement.
-    Ok(Option<String>),
+    /// Present and satisfies any version/variant requirement. The detail is a
+    /// probed binary's own output, so a frame carries it scrubbed (#1146).
+    Ok(
+        #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
+        Option<String>,
+    ),
     /// Satisfied by an alternative binary (e.g. `gtimeout` for `timeout`).
-    Alt(String),
+    Alt(
+        #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        String,
+    ),
     /// Present but too old (e.g. bash 3.2 < 4).
-    TooOld(String),
+    TooOld(
+        #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        String,
+    ),
     /// Not found.
     Missing,
     /// Cannot be detected programmatically (e.g. marketplace plugin presence).

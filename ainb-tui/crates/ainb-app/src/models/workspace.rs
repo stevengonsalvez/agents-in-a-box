@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use super::{Session, ShellSession};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Workspace {
     pub name: String,
@@ -101,4 +101,24 @@ impl Workspace {
         }
         self.shell_sessions.clear();
     }
+}
+
+impl Workspace {
+    /// Whether a scan that rebuilt this workspace would have found nothing
+    /// new: the same shell row and the same sessions, by
+    /// [`Session::same_scan_fields`].
+    #[must_use]
+    pub fn same_scan_fields(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.path == other.path
+            && self.shell_session == other.shell_session
+            && super::session::same_scan_rows(&self.sessions, &other.sessions)
+    }
+}
+
+/// Whether a scan found the same workspaces it is holding, in the same order.
+#[must_use]
+pub fn same_scan_workspaces(held: &[Workspace], found: &[Workspace]) -> bool {
+    held.len() == found.len()
+        && held.iter().zip(found).all(|(held, found)| held.same_scan_fields(found))
 }

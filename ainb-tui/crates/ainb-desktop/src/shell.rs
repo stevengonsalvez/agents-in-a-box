@@ -76,6 +76,12 @@ impl<S: FrameSink> Shell<S> {
         }
     }
 
+    /// Every command the palette may offer; see [`DesktopHost::palette`].
+    #[must_use]
+    pub fn palette(&self) -> Vec<crate::host::PaletteEntry> {
+        self.core().host.palette()
+    }
+
     /// Put the reducer on the session list; see [`DesktopHost::open_sessions`].
     pub fn open_sessions(&self) {
         let mut core = self.core();

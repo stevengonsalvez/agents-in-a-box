@@ -16,16 +16,34 @@ pub enum RepoSource {
         #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
         String,
     ),
-    /// SSH URL for clone (git@github.com:user/repo.git)
-    SshUrl(String),
+    /// SSH URL for clone (git@github.com:user/repo.git). Typed or pasted, so a
+    /// frame carries it scrubbed, like `HttpsUrl` (#1146).
+    SshUrl(
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        String,
+    ),
     /// `ssh://user@host[:port]` with no repo segment — opens an interactive SSH
     /// session, NOT a clone. New-session screen 1 (smart-parse v2) introduces
-    /// this variant to distinguish from `SshUrl`.
-    SshSession(String),
+    /// this variant to distinguish from `SshUrl`. Scrubbed on a frame for the
+    /// same reason.
+    SshSession(
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        String,
+    ),
     /// Local filesystem path
     LocalPath(PathBuf),
-    /// GitHub shorthand (user/repo) - expands to HTTPS
-    GithubShorthand { owner: String, repo: String },
+    /// GitHub shorthand (user/repo) - expands to HTTPS. Both halves are typed
+    /// text, scrubbed on a frame.
+    GithubShorthand {
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        owner: String,
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        repo: String,
+    },
     /// Unparseable input — pass through to the fuzzy filter on the picker list.
     /// New-session screen 1 (smart-parse v2) sink variant; never produced by
     /// the legacy `from_input` parser.

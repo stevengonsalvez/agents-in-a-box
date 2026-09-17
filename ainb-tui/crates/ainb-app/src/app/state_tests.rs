@@ -3541,6 +3541,121 @@ mod tests {
         );
     }
 
+    /// A host that rescans on a timer must not reframe the world every time.
+    /// A scan whose result matches what the state holds writes nothing: the
+    /// Sessions section keeps its version, the operator's selection stays put,
+    /// and no notice is raised.
+    #[test]
+    fn a_scan_that_found_no_change_writes_nothing() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        let mut workspace = Workspace::new("repo".to_string(), "/tmp/repo".into());
+        workspace.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+        workspace.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(vec![workspace.clone()]))
+            .expect("send load result");
+        assert!(
+            state.check_workspace_loading_complete(),
+            "the first scan applies"
+        );
+
+        // The operator moves the selection, and the notice from the first load
+        // is read and cleared, so a second write would be visible.
+        state.sessions.selected_session_index = Some(1);
+        state.shell.notifications.clear();
+
+        // What a live row picks up after a scan: the merge runs, and the row
+        // carries a chip and a learned provider id. A scan builds neither, so
+        // comparing them would call every scan a change.
+        state.merge_attention(crate::fleet::daemons::heartbeat::now_ms());
+        state.sessions.workspaces[0].sessions[0].provider_session_id = Some("agent-1".to_string());
+        state.sessions.workspaces[0].sessions[0].live_attention =
+            vec![crate::fleet::attention::SessionAttention::local(
+                crate::fleet::attention::AttentionKind::Ask,
+                crate::fleet::daemons::heartbeat::now_ms(),
+            )];
+        let version = state.sessions.version();
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(vec![workspace]))
+            .expect("send load result");
+        assert!(
+            !state.check_workspace_loading_complete(),
+            "a scan that found the same list reports no update"
+        );
+        assert_eq!(
+            state.sessions.version(),
+            version,
+            "the Sessions section was written"
+        );
+        assert_eq!(
+            state.sessions.selected_session_index,
+            Some(1),
+            "the selection was reset by a scan that changed nothing"
+        );
+        assert!(
+            state.shell.notifications.is_empty(),
+            "a scan that changed nothing raised a notice"
+        );
+    }
+
+    /// A scan that keeps failing says so once. A host that rescans on a cadence
+    /// would otherwise raise the same warning and write the same section every
+    /// time Docker stays slow.
+    #[test]
+    fn a_repeated_scan_timeout_bumps_nothing_and_warns_once() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        // A window that has shown its sessions, which is when a repeat matters.
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
+        assert!(
+            state.check_workspace_loading_complete(),
+            "the first scan applies"
+        );
+        state.shell.notifications.clear();
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Timeout).expect("send load result");
+        assert!(
+            state.check_workspace_loading_complete(),
+            "the first timeout is news"
+        );
+        assert_eq!(
+            state.shell.notifications.len(),
+            1,
+            "the first timeout warns"
+        );
+        let version = state.workspace_load.version();
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Timeout).expect("send load result");
+        assert!(
+            !state.check_workspace_loading_complete(),
+            "the same timeout again reports no update"
+        );
+        assert_eq!(
+            state.workspace_load.version(),
+            version,
+            "the same timeout again wrote the WorkspaceLoad section"
+        );
+        assert_eq!(
+            state.shell.notifications.len(),
+            1,
+            "the same timeout warned twice"
+        );
+    }
+
     // ========================================================================
     // Onboarding completion: State -> Config mapping
     // ========================================================================
@@ -4833,5 +4948,233 @@ mod config_keys_to_save_tests {
 
         assert!(!screen.dirty.contains(key), "back to the startup value");
         assert!(screen.keys_to_save(&AppliedEdits::default()).is_empty());
+    }
+}
+
+/// #1139: the tick and refresh paths that run with no user input bump a
+/// section only when they change a value in it.
+#[cfg(test)]
+mod quiet_ticks {
+    use crate::app::state::{AppState, McpFetchResult, McpOverlayState, Notification};
+    use crate::app::versioned::SectionId;
+    use crate::models::{Session, SessionStatus, ShellSession, Workspace};
+    use std::path::PathBuf;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    /// Run `tick` twice with no new input and fail if any section's version
+    /// moved on the second run. The first run may legitimately settle state.
+    fn assert_quiet(state: &mut AppState, name: &str, mut tick: impl FnMut(&mut AppState)) {
+        tick(state);
+        let settled = state.versions();
+        tick(state);
+        let after = state.versions();
+        let moved: Vec<_> = SectionId::ALL
+            .into_iter()
+            .filter(|id| after[id.index()] != settled[id.index()])
+            .collect();
+        assert!(
+            moved.is_empty(),
+            "{name} with no new input bumped {moved:?}"
+        );
+    }
+
+    fn version(state: &AppState, id: SectionId) -> u64 {
+        state.versions()[id.index()]
+    }
+
+    fn state_with_one_session() -> (AppState, uuid::Uuid) {
+        let mut state = AppState::new();
+        state.sessions.workspaces.clear();
+        let mut workspace = Workspace::new("proj".to_string(), PathBuf::from("/work/proj"));
+        let mut session = Session::new("proj".to_string(), "/work/proj".to_string());
+        session.status = SessionStatus::Idle;
+        let id = session.id;
+        workspace.add_session(session);
+        workspace.shell_session = Some(ShellSession::new(
+            PathBuf::from("/work/proj"),
+            PathBuf::from("/work/proj"),
+            None,
+        ));
+        state.sessions.workspaces.push(workspace);
+        (state, id)
+    }
+
+    #[test]
+    fn notification_cleanup_bumps_shell_only_when_one_expires() {
+        let mut state = AppState::new();
+        assert_quiet(
+            &mut state,
+            "cleanup with no notices",
+            AppState::cleanup_expired_notifications,
+        );
+
+        let mut live = Notification::info("still showing".to_string());
+        live.duration = Duration::from_secs(3600);
+        state.shell.notifications.push(live);
+        assert_quiet(
+            &mut state,
+            "cleanup with a live notice",
+            AppState::cleanup_expired_notifications,
+        );
+
+        let mut expired = Notification::info("gone".to_string());
+        expired.duration = Duration::ZERO;
+        state.shell.notifications.push(expired);
+        std::thread::sleep(Duration::from_millis(2));
+        let before = version(&state, SectionId::Shell);
+        state.cleanup_expired_notifications();
+        assert_eq!(
+            version(&state, SectionId::Shell),
+            before + 1,
+            "an expiry bumps Shell"
+        );
+        assert_eq!(state.shell.notifications.len(), 1);
+    }
+
+    #[test]
+    fn skills_and_drift_polls_bump_skills_only_when_a_result_arrives() {
+        let mut state = AppState::new();
+        let poll = |state: &mut AppState| {
+            state.check_skills_load_complete();
+            state.check_drift_load_complete();
+        };
+        assert_quiet(&mut state, "skills polls with no scan", poll);
+
+        let (skills_tx, skills_rx) = mpsc::unbounded_channel();
+        let (drift_tx, drift_rx) = mpsc::unbounded_channel();
+        state.skills.skills_load_receiver = Some(skills_rx);
+        state.skills.drift_load_receiver = Some(drift_rx);
+        assert_quiet(&mut state, "skills polls with scans in flight", poll);
+
+        let before = version(&state, SectionId::Skills);
+        skills_tx.send(crate::models::SkillsData::default()).unwrap();
+        assert!(state.check_skills_load_complete());
+        drift_tx.send(std::collections::BTreeMap::new()).unwrap();
+        assert!(state.check_drift_load_complete());
+        assert_eq!(
+            version(&state, SectionId::Skills),
+            before + 2,
+            "each result bumps once"
+        );
+        assert_quiet(&mut state, "skills polls after the scans landed", poll);
+    }
+
+    #[test]
+    fn mcp_overlay_poll_bumps_mcp_pool_only_when_a_fetch_lands() {
+        let mut state = AppState::new();
+        assert_quiet(
+            &mut state,
+            "overlay poll while closed",
+            AppState::check_mcp_overlay,
+        );
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        state.mcp_pool.mcp_overlay = Some(McpOverlayState {
+            pool_enabled: true,
+            daemon_running: false,
+            servers: Vec::new(),
+            selected: 0,
+            loading: true,
+            last_refreshed: None,
+            refresh_secs: 0,
+            fetch_rx: Some(rx),
+            last_action: None,
+        });
+        assert_quiet(
+            &mut state,
+            "overlay poll with a fetch pending",
+            AppState::check_mcp_overlay,
+        );
+
+        let before = version(&state, SectionId::McpPool);
+        tx.send(McpFetchResult {
+            daemon_running: true,
+            servers: Vec::new(),
+            error: None,
+            action_msg: None,
+        })
+        .unwrap();
+        state.check_mcp_overlay();
+        assert_eq!(version(&state, SectionId::McpPool), before + 1);
+        assert!(!state.mcp_pool.mcp_overlay.as_ref().unwrap().loading);
+        assert_quiet(
+            &mut state,
+            "overlay poll after the fetch",
+            AppState::check_mcp_overlay,
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_async_action_pass_bumps_nothing() {
+        let mut state = AppState::new();
+        // The one-time daemon config load is not what this pins.
+        state.hangar.hangar_daemon_config_loaded = true;
+        state.process_async_action().await.unwrap();
+        let settled = state.versions();
+        state.process_async_action().await.unwrap();
+        assert_eq!(state.versions(), settled, "nothing queued, nothing bumped");
+    }
+
+    #[test]
+    fn repeated_pane_captures_bump_only_on_a_changed_preview_or_status() {
+        let (mut state, id) = state_with_one_session();
+        let capture = |content: &str, running: bool| {
+            let content = content.to_string();
+            move |state: &mut AppState| {
+                state.apply_pane_captures(vec![(id, content.clone(), running)], Vec::new());
+            }
+        };
+        assert_quiet(
+            &mut state,
+            "the same selected capture",
+            capture("prompt> ", false),
+        );
+        assert_quiet(
+            &mut state,
+            "the same status sweep",
+            move |state: &mut AppState| state.apply_pane_captures(Vec::new(), vec![(id, false)]),
+        );
+
+        let before = version(&state, SectionId::Sessions);
+        state.apply_pane_captures(vec![(id, "prompt> ls".to_string(), false)], Vec::new());
+        assert_eq!(
+            version(&state, SectionId::Sessions),
+            before + 1,
+            "a new preview bumps"
+        );
+        let before = version(&state, SectionId::Sessions);
+        state.apply_pane_captures(Vec::new(), vec![(id, true)]);
+        assert_eq!(
+            version(&state, SectionId::Sessions),
+            before + 1,
+            "a new status bumps"
+        );
+        assert_eq!(
+            state.sessions.workspaces[0].sessions[0].status,
+            SessionStatus::Running
+        );
+    }
+
+    #[test]
+    fn a_repeated_shell_preview_bumps_nothing() {
+        let (mut state, _) = state_with_one_session();
+        assert_quiet(
+            &mut state,
+            "the same shell preview",
+            |state: &mut AppState| {
+                state.apply_shell_preview(0, "$ ".to_string());
+            },
+        );
+        let before = version(&state, SectionId::Sessions);
+        state.apply_shell_preview(0, "$ ls".to_string());
+        assert_eq!(version(&state, SectionId::Sessions), before + 1);
+        assert_quiet(
+            &mut state,
+            "a preview for a missing workspace",
+            |state: &mut AppState| {
+                state.apply_shell_preview(9, "$ ".to_string());
+            },
+        );
     }
 }

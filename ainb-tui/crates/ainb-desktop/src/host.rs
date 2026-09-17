@@ -1,12 +1,15 @@
 //! The desktop's embedded host: one `AppState`, driven through `dispatch`, with
 //! every change framed for the webview.
 
+use std::time::{Duration, Instant};
+
 use ainb_app::app::RendererHost;
 use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
 use ainb_app::{AppState, Chord, CommandId, Effect, Intent, Keymap};
+use serde::Serialize;
 
 /// Where framed state goes: the Tauri channel in the app, a recorder in tests.
 pub trait FrameSink {
@@ -57,6 +60,37 @@ impl RendererHost for DesktopLayout {
 /// and a bounded chain keeps it from wedging the shell.
 const MAX_REPORT_ROUNDS: usize = 32;
 
+/// One row the palette offers: a command the webview may send by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PaletteEntry {
+    pub id: CommandId,
+    /// What the row does, as the keymap documents it.
+    pub doc: &'static str,
+    /// The context the row belongs to, for the palette to group by.
+    pub context: String,
+    /// The key that runs it, when it has one.
+    pub chord: Option<String>,
+    /// Whether the reducer would run it in the state as it stands. A row that
+    /// is not active is still offered, greyed, rather than vanishing as the
+    /// user moves around.
+    pub active: bool,
+}
+
+/// How long after a scan finishes the window asks for the next one.
+///
+/// A session another process creates reaches the sidebar only because this
+/// runs: the scan is what finds it, and nothing else tells this window it
+/// exists. A scan that finds the same list writes no Sessions frame, so the
+/// cadence costs a scan rather than a reframe; the WorkspaceLoad flag it does
+/// move is the "write only what changed" audit's, #1139.
+///
+/// Strictly longer than the floor the state publishes
+/// (`AppState::workspace_rescan_floor`, its own scan budget), and measured
+/// from the end of a scan, so a scan that times out is followed by a gap
+/// instead of the next one starting as it gives up.
+pub const WORKSPACE_RESCAN: Duration =
+    Duration::from_secs(ainb_app::AppState::workspace_rescan_floor().as_secs() + 5);
+
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
     state: AppState,
@@ -64,6 +98,9 @@ pub struct DesktopHost<S: FrameSink> {
     layout: DesktopLayout,
     mirror: Mirror,
     sink: S,
+    /// When the last scan was asked for, so the tick can pace the next.
+    scanned_at: Instant,
+    rescan_every: Duration,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -83,7 +120,17 @@ impl<S: FrameSink> DesktopHost<S> {
             layout: DesktopLayout::default(),
             mirror: Mirror::new(host_id, subscription),
             sink,
+            scanned_at: Instant::now(),
+            rescan_every: WORKSPACE_RESCAN,
         }
+    }
+
+    /// Rescan on `every` instead of [`WORKSPACE_RESCAN`]. For tests, which
+    /// cannot wait ten seconds to see the second scan.
+    #[must_use]
+    pub const fn rescanning_every(mut self, every: Duration) -> Self {
+        self.rescan_every = every;
+        self
     }
 
     /// The hosted state, read-only: the host never writes it outside dispatch.
@@ -112,7 +159,14 @@ impl<S: FrameSink> DesktopHost<S> {
     /// the effects that work queued.
     #[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
     pub fn tick(&mut self) -> Vec<Effect> {
+        let was_scanning = self.state.workspace_scan_running();
         self.state.check_workspace_loading_complete();
+        // The cadence runs from the end of a scan, not its start: a scan that
+        // took the whole Docker budget would otherwise be followed by the next
+        // one immediately.
+        if was_scanning && !self.state.workspace_scan_running() {
+            self.scanned_at = Instant::now();
+        }
         // The poller is idempotent by an atomic, so starting it every tick is
         // its documented use. Every read here is by shared reference: a `&mut`
         // path through the `Versioned` Fleet section would bump it each tick.
@@ -126,6 +180,12 @@ impl<S: FrameSink> DesktopHost<S> {
         // reducer paces it: at once on daemon news, otherwise on its own
         // cadence, and a merge that finds nothing new bumps nothing.
         self.state.refresh_attention(ainb_app::fleet::daemons::heartbeat::now_ms());
+        // A session another process created is found by a scan and by nothing
+        // else, so the window keeps asking for one. Never two at once: the
+        // reducer owns the load and reports it running.
+        if !self.state.workspace_scan_running() && self.scanned_at.elapsed() >= self.rescan_every {
+            self.state.start_workspace_load();
+        }
         let effects = self.state.take_effects();
         self.pump();
         effects
@@ -166,6 +226,28 @@ impl<S: FrameSink> DesktopHost<S> {
         for _ in 0..2 {
             self.run(click_home_sidebar_item(SidebarItem::Sessions), executor);
         }
+    }
+
+    /// Every command the palette may offer, in the keymap's own order.
+    ///
+    /// Built from [`crate::intent::refused_from_webview`], the list the
+    /// dispatch seam refuses by, plus the pointer rows: those carry a payload
+    /// only a hit test can supply, so a palette that named them would offer a
+    /// row that cannot run. Each entry says whether it is active now.
+    #[must_use]
+    pub fn palette(&self) -> Vec<PaletteEntry> {
+        let contexts = ainb_app::app::keymap::command_contexts(&self.state);
+        self.keymap
+            .commands()
+            .filter(|(id, row)| crate::intent::palette_offers(&self.keymap, id, row))
+            .map(|(id, row)| PaletteEntry {
+                id,
+                doc: row.doc,
+                context: row.ctx.name(),
+                chord: row.chord.as_ref().map(|chord| chord.as_str().to_string()),
+                active: contexts.contains(&row.ctx),
+            })
+            .collect()
     }
 
     /// The key-only row `chord` runs in the current state, if it runs one.

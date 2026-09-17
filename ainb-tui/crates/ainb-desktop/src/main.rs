@@ -8,6 +8,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod menu;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -66,6 +68,79 @@ struct Window {
     sidecar_config: SidecarConfig,
 }
 
+/// What the renderer applied, for the proof harness to read from the log: the
+/// sections of a batch and how many session rows the sidebar holds. Names and
+/// counts only, never a body.
+///
+/// The names arrive as a `Subscription`, which deserializes from the wire
+/// names and drops anything else, so the line is bounded by the sections that
+/// exist and a renderer cannot name one it never applied.
+#[tauri::command]
+fn renderer_applied(sections: Subscription, sessions: usize) {
+    let named: Vec<&str> = sections.sections().map(ainb_app::wire::section_name).collect();
+    tracing::info!(sections = ?named, sessions, "renderer applied");
+}
+
+/// The terminal's copy: put the selection on the platform clipboard.
+///
+/// A webview cannot reach the clipboard under this CSP, and the pane's own
+/// ctrl+shift+c never leaves the PTY, so the shell does it. Bounded by the
+/// same limit as typed input.
+#[tauri::command]
+fn clipboard_write(text: String) {
+    // Checked before the platform call: an oversized selection never reaches
+    // the clipboard, and a box with no display refuses it the same way.
+    let bytes = text.len();
+    let Some(text) = ainb_desktop::clipboard::within_limit(text) else {
+        tracing::warn!(bytes, "clipboard write over 1 MiB refused");
+        return;
+    };
+    if let Err(error) = arboard::Clipboard::new().and_then(|mut board| board.set_text(text)) {
+        tracing::warn!(%error, "the selection did not reach the clipboard");
+    }
+}
+
+/// The terminal's paste: the clipboard's text for the pane `key` is showing.
+///
+/// Answered only for the tab the window has in front of the operator, which is
+/// the only caller: paste is a pane's own accelerator, so no other renderer
+/// path, and no driver on a `wdio` build, reads what was last copied. Empty
+/// when the clipboard holds no text, cannot be read, or holds more than a
+/// pane's input limit, and an oversized clipboard says so on a toast rather
+/// than pasting nothing in silence.
+#[tauri::command]
+fn clipboard_read(app: tauri::AppHandle, window: tauri::State<'_, Window>, key: String) -> String {
+    let showing = window.terminals.as_ref().is_some_and(|terminals| terminals.showing(&key));
+    if !showing {
+        tracing::warn!(
+            tab = key,
+            "clipboard read for a tab that is not in view; refused"
+        );
+        return String::new();
+    }
+    match arboard::Clipboard::new().and_then(|mut board| board.get_text()) {
+        Ok(text) => {
+            let bytes = text.len();
+            ainb_desktop::clipboard::within_limit(text).unwrap_or_else(|| {
+                tracing::warn!(bytes, "clipboard read over 1 MiB refused");
+                WebviewTabs(app)
+                    .toast("what was copied is over 1 MiB; it was not pasted".to_string());
+                String::new()
+            })
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the clipboard was not read");
+            String::new()
+        }
+    }
+}
+
+/// Every command the palette may offer, with whether each is active now.
+#[tauri::command]
+fn palette(window: tauri::State<'_, Window>) -> Vec<ainb_desktop::host::PaletteEntry> {
+    window.shell.palette()
+}
+
 /// The tab strip, for the webview's first paint.
 #[tauri::command]
 fn terminal_tabs(window: tauri::State<'_, Window>) -> TabsView {
@@ -103,7 +178,7 @@ fn terminal_ack(window: tauri::State<'_, Window>, key: String, bytes: usize) {
 
 /// The most text one input call may carry. The input queue bounds how many
 /// calls wait, so this bounds the bytes they hold; a larger paste is refused.
-const MAX_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_INPUT_BYTES: usize = ainb_desktop::clipboard::MAX_CLIPBOARD_BYTES;
 
 /// Typed or pasted text for the tab's pane.
 #[tauri::command]
@@ -251,8 +326,24 @@ fn init_logging(hangar_home: &std::path::Path) {
     }
 }
 
+// The WebDriver the journey drives serves unauthenticated commands on
+// 127.0.0.1, so it exists in debug builds only. `--all-features` (the clippy
+// step uses it) would otherwise reach a release binary.
+#[cfg(all(feature = "wdio", not(debug_assertions)))]
+compile_error!("the wdio WebDriver must never be built into a release binary");
+
+// A release window has to serve its own frontend: without `bundled` the
+// context embeds no assets and the window loads `build.devUrl`, which is a
+// dev server nobody is running.
+#[cfg(all(feature = "app", not(feature = "bundled"), not(debug_assertions)))]
+compile_error!("a release build must carry `bundled`, or the window loads build.devUrl");
+
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Only a `wdio` build carries the embedded WebDriver the journey drives.
+    #[cfg(feature = "wdio")]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+    builder
         .setup(|app| {
             let hangar_home = ainb_hangar_core::hangar_home()
                 .ok_or("the hangar home cannot be resolved: set AINB_HANGAR_HOME")?;
@@ -314,6 +405,8 @@ fn main() {
                 sidecar_config,
             });
 
+            menu::install(app.handle());
+
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -367,6 +460,10 @@ fn main() {
             sidecar_state,
             show_log,
             retry_sidecar,
+            palette,
+            renderer_applied,
+            clipboard_read,
+            clipboard_write,
             terminal_tabs,
             terminal_output,
             terminal_ack,
