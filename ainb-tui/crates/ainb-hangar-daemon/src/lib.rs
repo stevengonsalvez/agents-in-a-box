@@ -258,6 +258,8 @@ pub mod rpc;
 /// to this daemon's runtime and walks it through the FSM via the provider
 /// [`runner`]. Driven by [`run_loop::DaemonConfig::from_env`].
 pub mod run_loop;
+/// One-time idempotent boot import of sessions.json (spec P6d, #1166).
+pub mod session_import;
 /// Agent CLI subprocess execution — the `claude` provider (P1.7).
 ///
 /// Spawns the provider binary in a task's isolated [`execenv::ExecEnv`] with a
@@ -932,6 +934,18 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // sweep + serve — so it is logged and swallowed here.
         if let Err(e) = crate::default_home::ensure_default_home(store.pool()).await {
             tracing::warn!(error = %e, "fresh-home boot seed failed (daemon continues)");
+        }
+
+        // One-time idempotent boot import of sessions.json (spec P6d, #1166).
+        let sessions_path = ainb_fleet_core::session_registry::sessions_json_path();
+        match crate::session_import::import_sessions_if_needed(store.pool(), &sessions_path).await {
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "imported sessions from sessions.json into store");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "sessions.json boot import failed (daemon continues)");
+            }
         }
 
         // P8.5: the in-memory health stats collector — shared between the RPC server
