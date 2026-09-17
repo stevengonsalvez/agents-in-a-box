@@ -13,6 +13,7 @@ use ainb_app::wire::frame::{HostId, Subscription};
 
 use crate::executor::DesktopExecutor;
 use crate::host::{DesktopHost, Executor, FrameSink};
+use crate::intent::Refusal;
 
 struct Core<S: FrameSink> {
     host: DesktopHost<S>,
@@ -44,17 +45,24 @@ impl<S: FrameSink> Shell<S> {
     }
 
     /// Apply an intent the webview sent, unless
-    /// [`DesktopHost::refused_from_renderer`] refuses what it would run. The
-    /// check runs under the same lock that would apply the intent, so the
-    /// state cannot move between the check and the dispatch.
-    pub fn dispatch_renderer(&self, intent: Intent) {
+    /// [`DesktopHost::refused_from_renderer`] refuses what it would run; the
+    /// refusal is returned for the webview to show. The check runs under the
+    /// same lock that would apply the intent, so the state cannot move between
+    /// the check and the dispatch.
+    #[must_use = "a refusal the webview never hears about looks like a dead key"]
+    pub fn dispatch_renderer(&self, intent: Intent) -> Option<Refusal> {
         let mut core = self.core();
         let Core { host, executor } = &mut *core;
-        if let Some((id, why)) = host.refused_from_renderer(&intent) {
-            tracing::warn!("`{id}` refused from the webview: {why}");
-            return;
+        if let Some(refusal) = host.refused_from_renderer(&intent) {
+            tracing::warn!(
+                "`{}` refused from the webview: {}",
+                refusal.command,
+                refusal.reason
+            );
+            return Some(refusal);
         }
         host.run(intent, executor);
+        None
     }
 
     /// Frame what moved since the last tick, and run the effects and deferred
