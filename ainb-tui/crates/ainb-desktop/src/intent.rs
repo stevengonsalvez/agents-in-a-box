@@ -1,7 +1,7 @@
 //! What the webview may ask of the host.
 
 use ainb_app::{Chord, CommandId, Intent, Keymap};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The intents a DOM renderer sends: a key, a named command, pasted text.
 ///
@@ -13,6 +13,14 @@ pub enum RendererIntent {
     Key(Chord),
     Command(CommandId, ainb_app::app::Args),
     Text(String),
+}
+
+/// Why an intent from the webview was not applied, for the webview to show:
+/// the row it would have run and the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Refusal {
+    pub command: CommandId,
+    pub reason: &'static str,
 }
 
 /// Whether `id` names a row only a host authors: an effect's report, or a
@@ -57,16 +65,19 @@ pub fn palette_offers(
 }
 
 impl TryFrom<RendererIntent> for Intent {
-    /// The host-authored command id the webview tried to send. A key-only
-    /// id passes here and is refused by the shell, which holds the keymap.
-    type Error = CommandId;
+    /// The host-authored command the webview tried to send. A key-only id
+    /// passes here and is refused by the shell, which holds the keymap.
+    type Error = Refusal;
 
-    fn try_from(intent: RendererIntent) -> Result<Self, CommandId> {
+    fn try_from(intent: RendererIntent) -> Result<Self, Refusal> {
         match intent {
             RendererIntent::Key(chord) => Ok(Self::Key(chord)),
             RendererIntent::Command(id, _) if is_host_authored(&id) => {
                 tracing::warn!("command `{id}` is host-authored; refused from the webview");
-                Err(id)
+                Err(Refusal {
+                    command: id,
+                    reason: "a host sends it, not the window",
+                })
             }
             RendererIntent::Command(id, args) => Ok(Self::Command(id, args)),
             RendererIntent::Text(text) => Ok(Self::Text(text)),
