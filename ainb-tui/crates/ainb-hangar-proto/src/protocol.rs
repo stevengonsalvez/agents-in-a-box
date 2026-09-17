@@ -171,6 +171,8 @@ pub const CAP_CONNECTIONS_TRANSIENT: &str = "hangar.connections.transient";
 /// omits `host_id` and serves rows named `local`. The `host_id` member's
 /// presence in the hello reply is the only signal that the daemon has one.
 pub const CAP_HOST_IDENTITY: &str = "hangar.host_identity";
+/// Capability: durable sessions table behind RPC (spec P6d, #1166).
+pub const CAP_WORKSPACE_SESSIONS: &str = "hangar.workspace.sessions";
 /// Capability: the converged attention inbox, list, subscribe, answer.
 pub const CAP_ATTENTION_INBOX: &str = "hangar.attention.inbox";
 /// Capability: the wire attention row carries its `version`, so a client can
@@ -327,6 +329,7 @@ pub const CAPABILITY_CATALOGUE: &[&str] = &[
     CAP_CONNECTIONS_TRANSIENT,
     crate::fleet::FLEET_CAPABILITY_ROSTER_STATUS_READ,
     CAP_HOST_IDENTITY,
+    CAP_WORKSPACE_SESSIONS,
 ];
 
 /// Whether this build advertises `id`.
