@@ -420,6 +420,26 @@ mod tests {
         );
     }
 
+    /// The cut counts characters, not bytes: a multi-byte question straddling
+    /// the bound keeps exactly 512 whole characters and never splits one.
+    #[test]
+    fn a_multi_byte_question_is_cut_on_a_character_boundary() {
+        // Two-byte and four-byte characters, so the byte offset at the bound
+        // falls inside a character for any byte-based cut.
+        let text: String = "é🦀".repeat(MAX_CHIP_TEXT_CHARS);
+        let row = wire(
+            "a",
+            "ask_user_question",
+            "/w",
+            serde_json::json!({ "kind": "ASK", "context": { "question": text, "options": [{ "label": text }] } }),
+        );
+        let chip = &group_by_cwd(&[row])["/w"][0];
+        let detail = chip.detail.as_deref().expect("a question");
+        assert_eq!(detail.chars().count(), MAX_CHIP_TEXT_CHARS);
+        assert!(detail.ends_with('🦀'), "the last kept character is whole");
+        assert_eq!(chip.options[0].label.chars().count(), MAX_CHIP_TEXT_CHARS);
+    }
+
     #[test]
     fn every_answerable_daemon_kind_maps_to_a_chip() {
         for (kind, expected) in [
