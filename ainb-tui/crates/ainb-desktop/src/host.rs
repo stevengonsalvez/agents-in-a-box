@@ -220,7 +220,7 @@ impl<S: FrameSink> DesktopHost<S> {
         // this window would leave the row reading SENT for as long as the shell
         // is open: the worker reports into the state, and this is the only
         // thing in this process that folds it.
-        self.state.tick_surfaces();
+        self.state.tick_surfaces(ainb_app::fleet::daemons::heartbeat::now_ms());
         // A session another process created is found by a scan and by nothing
         // else, so the window keeps asking for one. Never two at once: the
         // reducer owns the load and reports it running.
