@@ -60,8 +60,10 @@ use crate::workspace_store::{
     set_active_logic, set_default_logic,
 };
 
-/// Wire-protocol ABI version the runtime advertises.
-const ABI_VERSION: u32 = 2;
+// The wire-protocol ABI version the runtime advertises is the protocol crate's,
+// so the runtime and the per-key gate in `RuntimeHandle::send_key` read one
+// number (#1171).
+use ainb_plugin_protocol::manifest::ABI_VERSION;
 
 /// Esc presses a plugin may leave unanswered in a row before the next one goes
 /// to the host (#1087).
