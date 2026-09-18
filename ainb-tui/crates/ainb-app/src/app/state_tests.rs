@@ -3502,16 +3502,21 @@ mod tests {
     // ========================================================================
 
     /// The pacing seam applies a finished scan, restarts the cadence from its
-    /// end, and starts nothing while one runs or before the cadence is due.
+    /// end, and starts nothing while one runs, or before the cadence or the
+    /// news floor is due.
     #[test]
     fn pace_workspace_load_applies_a_scan_and_waits_out_the_cadence() {
-        use crate::app::state::WorkspaceLoadResult;
+        use crate::app::state::{WorkspaceLoadResult, WorkspaceRescan};
 
         let mut state = AppState::new();
         let tx = state.start_background_workspace_loading();
 
+        let at_once = WorkspaceRescan {
+            every: Duration::ZERO,
+            news_floor: Duration::ZERO,
+        };
         assert!(
-            !state.pace_workspace_load(Some(Duration::ZERO)),
+            !state.pace_workspace_load(Some(at_once)),
             "nothing landed yet"
         );
         assert!(state.workspace_scan_running(), "one scan at a time");
@@ -3528,10 +3533,20 @@ mod tests {
             "the cadence runs from the end of the scan"
         );
 
-        assert!(!state.pace_workspace_load(Some(Duration::from_secs(3600))));
+        // News inside the floor waits too.
+        state.host.workspace_scanned_generation = Some(0);
+        state
+            .host
+            .daemon_attention_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        let later = WorkspaceRescan {
+            every: Duration::from_secs(3600),
+            news_floor: Duration::from_secs(3600),
+        };
+        assert!(!state.pace_workspace_load(Some(later)));
         assert!(
             !state.workspace_scan_running(),
-            "no scan starts before the cadence is due"
+            "no scan starts before the cadence or the news floor is due"
         );
     }
 
