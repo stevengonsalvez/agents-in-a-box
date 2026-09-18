@@ -113,8 +113,8 @@
 | P6 | `ainb-hangar-client` reconnect + resync; `ainb-web` onto the client; sessions.json → daemon table | | web e2e green, TUI + web + CLI concurrent smoke |
 | S | surface-safety fixes and `ConnectionRegistry` (see "Concurrency between surfaces"); daemon, notifyd, config only; runs in parallel with P0-P5 | | concurrency tests green |
 | D1 | `ainb-desktop` crate: shell, sidecar supervisor, WS terminal, sessions sidebar + tabs, palette | | wdio e2e sessions journey |
-| D2 | board + attention + answer + ACP card; hangar `ui.state` component | | wdio e2e answer journey |
-| D3 | review tab, inbox, settings, burndown component, plugin fallback cell | | full parity suite |
+| D2 | board + attention + answer + ACP card | | wdio e2e answer journey |
+| D3 | review tab, inbox, settings, burndown component, plugin fallback cell, hangar `ui.state` component | | full parity suite |
 | D4 | host switcher + ssh forward, updater, release matrix | | release-branch human-driver run |
 
 - Each step is its own PR. `ainb-core` never breaks because it re-exports. D1 can start after P2; D2 after P3; D3 after P5; D4 after P6 + S.
@@ -205,6 +205,14 @@ plugin/handle_action    NEW { action_id: String, payload: Value }   (clicks, pal
 
 **Amendment (2026-09-15, D1): the local terminal has no WS listener.** The desktop's Rust side owns the `tmux attach-session` PTY and streams its bytes to xterm.js on a Tauri `Channel<Vec<u8>>`, with input and resize as `invoke` commands: no loopback TCP port, no token in a URL, nothing a visited web page can reach. The `ws://.../ws/session/<id>` URL is the remote leg only, served by `ainb-web` on the box behind the tunnel. Both legs sit behind one frontend `TerminalTransport` (`send`, `resize`, `onBytes`), so "WS terminal" elsewhere in this spec (the component table, the drop error, the throughput test) reads as that transport. A later lane that binds a local WS binds `127.0.0.1` on port 0, requires the token, and rejects any `Origin` outside the app's own.
 
+**Amendment (2026-09-16, D2): the board draws from the `agent_status` and Fleet frames.** The D2 row read "hangar `ui.state` component", and the screen inventory mapped the board tab to "plugin `ui.state` + desktop component". Neither is reachable without reopening a locked rule, for three reasons, so the desktop board is a component over sections instead. First, a plugin's `ui.state` is deliberately not on the wire: `wire/mod.rs:610-613` says each view is JSON its plugin wrote, with keys no key-path check can know in advance, so nothing proves it free of a secret, and framing it would break the key-path fixture's premise and the deny-list test at `state_serde.rs:631`. Second, the desktop runs no plugin runtime at all: `executor.rs:29` is `NO_PLUGIN_RUNTIME`, `ForwardToPlugin` and `RunPluginAction` are answered undelivered, and `tests/host_side_effects.rs` proves no module in `ainb-app` owns a runtime, so reading a plugin view would mean standing up a second plugin host rather than adding a component. Third, the data is already framed by a better source: D14 made `agent_status` the one truth across every surface, and `agent_status.view.cards[]` carries the card the board wants (`state`, `tier`, `lifecycle`, `wait_kind`, `has_open_request`, `transport_health`, `provenance`), with `fleet.fleet_snapshot[]` beside it for provider, model and capabilities. Drawing the board from a plugin's render of that same data would be a second projection of one truth, which is the drift D14 exists to stop.
+
+**Amendment (2026-09-16, D2): the hangar `ui.state` desktop component moves to D3.** It belongs beside the plugin fallback cell, which is where the desktop first needs a plugin host at all, and it stays blocked on the two facts above until a node decides how a plugin view crosses the wire safely. D2 ships the board without it, and nothing else in the D2 row changes.
+
+**Amendment (2026-09-16, D2): the board's stat strip and turn timeline are deferred.** The interface block promises "LAST REPLY, 12k tok, +12/-3, 4 tools, 3m, timeline" on a card, and no section carries any of those numbers: `fleet.fleet_snapshot[]` has `active_work_count` and `confidence` and nothing else numeric, `agent_status.view.cards[]` has no counters, and the web's cost projection was deliberately kept off the sections. Adding them is a new daemon read and a new framed family rather than a component, so D2 draws the columns and the cards, and the strip and the timeline are filed for D3 with the measurement of what a read would cost.
+
+**Amendment (2026-09-16, D2): the conversation reaches the wire as a bounded scrubbed projection.** The ACP card's chunks come from the `ChatHost` the reducer already drives, and the handles stay in `HostOnlyState`, which is not a section by design and which no frame carries. The reducer writes a bounded window of the open conversation into a framed field on its own tick, the pattern the merged attention used, with each chunk field picking a scrubber from `wire/fields.rs` and the deny-list test proving the choice; a field nothing can prove safe carries a count or is withheld. The window is bounded so a long conversation cannot cross `MAX_FRAME_BYTES`.
+
 ## Screen inventory
 
 | TUI screen | Desktop screen | Mapping | v1 |
@@ -213,7 +221,7 @@ plugin/handle_action    NEW { action_id: String, payload: Value }   (clicks, pal
 | sessions + tmux preview | sessions sidebar + terminal tabs | 1:1, preview becomes live tab | yes |
 | new session wizard | new session form | 1:1 state, one page | yes |
 | fleet panel | attention list (header counts) | 1:1 | yes |
-| hangar board (plugin) | board tab | plugin `ui.state` + desktop component | yes |
+| hangar board (plugin) | board tab | `agent_status` + Fleet frames, desktop component (the plugin's own `ui.state` component is D3) | yes |
 | code review | review tab | 1:1 hunks, CM6 paint | yes |
 | inbox | inbox | 1:1 | yes |
 | stats / burndown (plugin) | stats tab | plugin `ui.state` + desktop component | yes |
