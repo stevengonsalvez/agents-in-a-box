@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use ainb_plugin_protocol::manifest::ABI_VERSION;
 use ainb_plugin_protocol::params::{HandleKeyParams, Viewport};
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
 use bytes::Bytes;
@@ -250,12 +251,13 @@ impl RuntimeHandle {
         self.lookup(plugin_id).is_some_and(|p| p.render_wedged.load(Ordering::Acquire))
     }
 
-    /// The ABI revision this plugin's manifest declares, or `None` for an
-    /// unregistered plugin. A host reads it to know which keys the plugin can
-    /// decode ([`ainb_plugin_protocol::params::KeyCode::min_abi`], #1171).
+    /// The ABI revision this runtime speaks to the plugin in, or `None` for an
+    /// unregistered plugin: its manifest's `abi_version`, capped at this
+    /// build's [`ABI_VERSION`]. A host reads it to know which keys the plugin
+    /// can decode ([`ainb_plugin_protocol::params::KeyCode::min_abi`], #1171).
     #[must_use]
     pub fn plugin_abi(&self, plugin_id: &PluginId) -> Option<u32> {
-        self.lookup(plugin_id).map(|p| p.plugin.manifest.plugin.abi_version)
+        self.lookup(plugin_id).map(|p| spoken_abi(&p.plugin))
     }
 
     /// Atomically check-and-clear the render-dirty flag for a plugin.
@@ -346,7 +348,7 @@ impl RuntimeHandle {
         // revision predates would fail to decode on the plugin side, so it is
         // dropped here, before a generation is spent or the screen marked
         // dirty (#1171).
-        let abi = handle.plugin.manifest.plugin.abi_version;
+        let abi = spoken_abi(&handle.plugin);
         if key.code.min_abi() > abi {
             tracing::debug!(
                 plugin = %plugin_id,
@@ -769,4 +771,12 @@ fn warn_on_input_drop(plugin_id: &PluginId, input: &str, before: u64, after: u64
             "plugin input inbox full; dropping the oldest events"
         );
     }
+}
+
+/// The ABI revision the runtime speaks to `plugin` in: its manifest's
+/// `abi_version`, capped at this build's [`ABI_VERSION`]. A manifest claiming a
+/// newer revision, or `u32::MAX`, is never sent a frame this build cannot vouch
+/// for (#1171).
+fn spoken_abi(plugin: &crate::registry::RegisteredPlugin) -> u32 {
+    plugin.manifest.plugin.abi_version.min(ABI_VERSION)
 }
