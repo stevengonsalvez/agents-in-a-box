@@ -2964,6 +2964,25 @@ pub struct AppState {
     pub host: HostOnlyState,
 }
 
+/// How a host that keeps its session list fresh wants it rescanned; see
+/// [`AppState::pace_workspace_load`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkspaceRescan {
+    /// The blind cadence, for sessions that never touch the daemon.
+    pub every: Duration,
+    /// The least time after a scan before daemon news may start the next.
+    pub news_floor: Duration,
+}
+
+impl Default for WorkspaceRescan {
+    fn default() -> Self {
+        Self {
+            every: AppState::WORKSPACE_RESCAN,
+            news_floor: AppState::WORKSPACE_NEWS_FLOOR,
+        }
+    }
+}
+
 /// Result of background workspace loading
 #[derive(Debug)]
 pub enum WorkspaceLoadResult {
@@ -4290,6 +4309,9 @@ impl AppState {
     /// `WorkspaceLoadResult` rather than blocking the host. Must be called
     /// inside a tokio runtime.
     pub fn start_workspace_load(&mut self) {
+        // Recorded at the START of the scan, so news that arrives while it
+        // runs is still news when it finishes.
+        self.host.workspace_scanned_generation = Some(self.daemon_publish_generation());
         let result_sender = self.start_background_workspace_loading();
         tokio::spawn(async move {
             let budget = std::time::Duration::from_secs(Self::DOCKER_TIMEOUT_SECS);
@@ -4407,29 +4429,49 @@ impl AppState {
     /// the next one starting as it gives up.
     pub const WORKSPACE_RESCAN: Duration = Duration::from_secs(Self::DOCKER_TIMEOUT_SECS + 5);
 
-    /// Apply a workspace scan that finished, and start the next one once
-    /// `rescan_every` has passed since the last one ended (or since the state
-    /// was created, before any has). Returns whether a scan's workspaces were
-    /// applied.
+    /// The least time after a scan ends before daemon news may start the next.
+    ///
+    /// The scan's own budget: measured from the end of a scan, it already
+    /// leaves a gap as long as a whole scan, so a daemon publishing while a
+    /// scan runs cannot queue the next one the moment it ends. Shorter than
+    /// [`Self::WORKSPACE_RESCAN`] on purpose: news is a signal that something
+    /// happened, so it should not wait as long as the blind timer does.
+    pub const WORKSPACE_NEWS_FLOOR: Duration = Duration::from_secs(Self::DOCKER_TIMEOUT_SECS);
+
+    /// Apply a workspace scan that finished, and start the next one when it is
+    /// due. Returns whether a scan's workspaces were applied.
     ///
     /// The one load seam a host ticks, beside [`Self::start_workspace_load`]:
     /// the pacing is the state's, so no host re-implements it. `None` never
-    /// rescans (the TUI refreshes on its own events); a host that must find
-    /// sessions other processes create passes [`Self::WORKSPACE_RESCAN`].
-    /// Never starts a scan while one runs. Must be called inside a tokio
-    /// runtime when `rescan_every` is set.
-    pub fn pace_workspace_load(&mut self, rescan_every: Option<Duration>) -> bool {
+    /// rescans (the TUI refreshes on its own events). With a
+    /// [`WorkspaceRescan`], the next scan is due once its `every` has passed
+    /// since the last one ended (or since the state was created, before any
+    /// has), or once the daemon's publish counter has moved since the last scan
+    /// started and `news_floor` has passed (#1156). Never starts a scan while
+    /// one runs. Must be called inside a tokio runtime when a rescan is given.
+    pub fn pace_workspace_load(&mut self, rescan: Option<WorkspaceRescan>) -> bool {
         let was_running = self.workspace_scan_running();
         let applied = self.check_workspace_loading_complete();
         if was_running && !self.workspace_scan_running() {
             self.host.workspace_rescan_from = Instant::now();
         }
-        let due =
-            rescan_every.is_some_and(|every| self.host.workspace_rescan_from.elapsed() >= every);
+        let due = rescan.is_some_and(|rescan| {
+            let since = self.host.workspace_rescan_from.elapsed();
+            let news = self
+                .host
+                .workspace_scanned_generation
+                .is_some_and(|seen| seen != self.daemon_publish_generation());
+            since >= rescan.every || (news && since >= rescan.news_floor)
+        });
         if due && !self.workspace_scan_running() {
             self.start_workspace_load();
         }
         applied
+    }
+
+    /// The attention poller's publish counter as it stands.
+    fn daemon_publish_generation(&self) -> u64 {
+        self.host.daemon_attention_generation.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Whether a workspace scan is running.
