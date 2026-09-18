@@ -45,6 +45,7 @@
 
 use std::collections::HashMap;
 
+use ainb_hangar_core::redact::scrub;
 use serde_json::Value;
 
 use crate::events::MessageKind;
@@ -243,7 +244,7 @@ impl StreamJsonClassifier {
         let snippet = block
             .get("content")
             .and_then(value_text)
-            .map(|s| truncate_chars(&one_line(&s), SUMMARY_MAX))
+            .map(|s| summary(&s))
             .unwrap_or_default();
         let dur = self
             .tool_starts
@@ -379,7 +380,7 @@ impl AcpClassifier {
         }
 
         let snippet = tool_output_text(payload)
-            .map(|s| truncate_chars(&one_line(&s), SUMMARY_MAX))
+            .map(|s| summary(&s))
             .unwrap_or_default();
         let terminal = matches!(status, "completed" | "failed");
         if snippet.is_empty() && !terminal {
@@ -469,10 +470,7 @@ fn fold_acp_plan(payload: &Value, out: &mut Vec<(MessageKind, String)>) {
     for entry in entries {
         let status = entry.get("status").and_then(Value::as_str).unwrap_or("pending");
         let content = entry.get("content").and_then(Value::as_str).unwrap_or_default();
-        let body = truncate_chars(
-            &one_line(&format!("plan · {status} · {content}")),
-            SUMMARY_MAX,
-        );
+        let body = summary(&format!("plan · {status} · {content}"));
         out.push((MessageKind::ToolCall, body));
     }
 }
@@ -576,6 +574,9 @@ fn capped(mut out: Vec<(MessageKind, String)>) -> Vec<(MessageKind, String)> {
         out.push((MessageKind::ToolResult, format!("… {dropped} more lines")));
     }
     for (_, body) in &mut out {
+        // Scrub first, then cut: a cut through a credential leaves its prefix
+        // and a few characters, which no shape matches downstream (#1187).
+        *body = scrub(body);
         if body.chars().count() > BODY_MAX {
             *body = truncate_chars(body, BODY_MAX);
         }
@@ -653,8 +654,11 @@ fn ts_of(v: &Value) -> Option<i64> {
 /// Split `text` into non-empty trimmed lines and push one entry per line in
 /// `kind`'s lane, so a multi-line block never overflows a single render row (the
 /// renderer paints one entry per row). Empty input pushes nothing.
+///
+/// The whole text is scrubbed before the split: a private key spans lines, and
+/// each of its body lines alone matches no shape.
 fn push_lines(out: &mut Vec<(MessageKind, String)>, kind: MessageKind, text: &str) {
-    for line in text.lines() {
+    for line in scrub(text).lines() {
         let line = line.trim_end();
         if line.trim().is_empty() {
             continue;
@@ -681,7 +685,7 @@ fn compact_input(input: Option<&Value>) -> String {
         "prompt",
     ] {
         if let Some(s) = obj.get(key).and_then(value_text) {
-            return truncate_chars(&one_line(&s), SUMMARY_MAX);
+            return summary(&s);
         }
     }
     // No telling field: a flat, truncated key=val rendering.
@@ -690,7 +694,7 @@ fn compact_input(input: Option<&Value>) -> String {
         .map(|(k, val)| format!("{k}={}", one_line(&compact_value(val))))
         .collect::<Vec<_>>()
         .join(" ");
-    truncate_chars(&flat, SUMMARY_MAX)
+    summary(&flat)
 }
 
 /// Read a JSON value as display text: a string as-is, else its compact JSON.
@@ -743,6 +747,16 @@ fn fmt_dur(ms: i64) -> String {
     } else {
         format!("{}m{}s", ms / 60_000, (ms % 60_000) / 1000)
     }
+}
+
+/// A one-line summary clipped to [`SUMMARY_MAX`], scrubbed BEFORE the clip.
+///
+/// Every summary cut goes through here (#1187). Scrubbed after, a token that
+/// starts near the cut keeps its prefix plus a few characters, and that
+/// fragment matches no shape, so no later scrub can catch it. Scrubbed before
+/// the whitespace collapse too, while a private key still has its armour lines.
+fn summary(s: &str) -> String {
+    truncate_chars(&one_line(&scrub(s)), SUMMARY_MAX)
 }
 
 /// Truncate to `max` display chars with a trailing ellipsis on overflow
