@@ -55,9 +55,10 @@ function sqlText(value) {
 }
 
 /**
- * What the window asked the host to do, in order: each `renderer intent` line
- * the desktop logged, as a command id, or `key` / `text` for the kinds whose
- * content is never logged.
+ * What the window asked the host to do and what became of it, in order: each
+ * `renderer intent` line the desktop logged, as `{ command, outcome }`. A key
+ * or a text reads `key` or `text(N chars)`, since their content is never
+ * logged, and `outcome` is `dispatched` or `refused`.
  */
 function intentsSent() {
   let lines = "";
@@ -69,7 +70,10 @@ function intentsSent() {
   return lines
     .split("\n")
     .filter(Boolean)
-    .map((line) => line.match(/command="?([\w.]+)/)?.[1] ?? line.match(/kind="?(\w+)/)?.[1] ?? "unknown");
+    .map((line) => ({
+      command: line.match(/command="?([^"\s]+)/)?.[1] ?? "unknown",
+      outcome: line.match(/outcome="?(\w+)/)?.[1] ?? "unknown",
+    }));
 }
 
 /** The daemon's own record of one attention row, read by a separate process. */
@@ -185,14 +189,20 @@ describe("answering from the window", () => {
     // What the window sent for that pick, from the host's own log: the
     // reducer's session list commands, one Enter, and nothing it authored.
     const sent = intentsSent().slice(sentBefore);
-    const picked = sent.filter((id) => id.startsWith("session_list."));
+    const shown = sent.map(({ command, outcome }) => `${command}:${outcome}`).join(", ");
     assert.deepEqual(
-      sent.filter((id) => !id.startsWith("session_list.")),
+      sent.filter(({ command }) => !command.startsWith("session_list.")),
       [],
-      `the pick sent only session list commands: ${sent.join(", ")}`,
+      `the pick sent only session list commands: ${shown}`,
     );
-    assert.equal(picked.at(-1), "session_list.ask.enter", `the pick ends in Enter: ${picked.join(", ")}`);
-    assert.equal(picked.filter((id) => id === "session_list.ask.enter").length, 1, "and sends exactly once");
+    assert.deepEqual(
+      sent.filter(({ outcome }) => outcome !== "dispatched"),
+      [],
+      `the host applied every one of them: ${shown}`,
+    );
+    const enters = sent.filter(({ command }) => command === "session_list.ask.enter");
+    assert.deepEqual(enters, [{ command: "session_list.ask.enter", outcome: "dispatched" }], `Enter: ${shown}`);
+    assert.equal(sent.at(-1)?.command, "session_list.ask.enter", `the pick ends in Enter: ${shown}`);
 
     // The last mile: the agent in the pane read the label.
     await browser.waitUntil(() => paneText(target.tmux).includes(`agent read: ${OPTIONS[PICK]}`), {
