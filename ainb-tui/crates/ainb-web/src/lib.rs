@@ -1,14 +1,14 @@
-//! `ainb-web` — an SSE-live web dashboard + remote-control surface for the ainb
+//! `ainb-web`: an SSE-live web dashboard + remote-control surface for the ainb
 //! agent fleet.
 //!
 //! The dashboard surfaces three things at a glance: the live session list,
 //! fleet `needs` (ASK/ERR/IDLE/WAIT), and cost rollups. On top of that read
 //! surface it adds two control/depth features:
 //!
-//! * a **live terminal** ([`terminal`]) — `GET /ws/session/{id}` attaches to a
+//! * a **live terminal** ([`terminal`]): `GET /ws/session/{id}` attaches to a
 //!   session's tmux pane over a WebSocket (render + input + resize). This is a
 //!   write surface, so it is auth-gated *and* refused in `--read-only` mode.
-//! * **web-push** ([`push`]) — VAPID-authenticated browser notifications fired
+//! * **web-push** ([`push`]): VAPID-authenticated browser notifications fired
 //!   when a session enters an attention state, plus an installable PWA.
 //!
 //! ## Security model
@@ -19,7 +19,7 @@
 //! * When a token is configured, every `/api/*` route (and the WS terminal)
 //!   requires `Authorization: Bearer <token>` (401 otherwise). The `?token=`
 //!   query fallback is scoped to the two streaming surfaces that cannot send a
-//!   header — the SSE stream and the WS terminal — and no other route.
+//!   header (the SSE stream and the WS terminal) and no other route.
 //! * The WS terminal is additionally refused with `403` whenever the server
 //!   runs `--read-only`.
 //!
@@ -47,7 +47,7 @@ pub mod terminal;
 use std::sync::Arc;
 
 pub use config::{BindError, WebConfig};
-pub use daemon::{Answerer, DaemonAnswerer, DaemonClient, DaemonError};
+pub use daemon::{Answerer, DaemonAnswerer, DaemonClient, DaemonError, web_client, web_surface};
 pub use data::{AinbCliSource, DataError, DataSource, FleetSnapshot};
 pub use routes::{AppState, router};
 
@@ -86,10 +86,11 @@ pub async fn serve(config: WebConfig, data: Arc<dyn DataSource>) -> Result<(), S
     // full server lifetime. It reconnects independently of request handling,
     // so an idle dashboard remains discoverable and daemon recovery never
     // stalls a snapshot pull or answer submission.
-    let _presence = daemon::WebPresence::spawn();
+    ainb_hangar_client::mark_process_as_surface();
+    let _presence = ainb_hangar_client::PresenceLease::spawn(web_surface());
 
     // Best-effort web-push init. A failure here (e.g. unwritable home dir) must
-    // not take down the dashboard — push is an enhancement, the read surface
+    // not take down the dashboard: push is an enhancement, the read surface
     // and terminal still work without it.
     let push = match push::PushState::init(
         "mailto:ainb@localhost",

@@ -750,7 +750,7 @@ async fn run_tui_loop(
                     // `None` for keys the keymap has no spelling for; those still
                     // reach the embed, the palette and plugins below, but never
                     // the host keymap.
-                    let chord = crate::app::terminal_keys::chord_from_key_event(&key_event);
+                    let chord = crate::app::screens::builtin::chord_from_key_event(&key_event);
                     let interactive_detach =
                         chord.as_ref().is_some_and(|chord| keymap.releases_in_place_pane(chord));
                     if interactive_detach {

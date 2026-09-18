@@ -313,12 +313,13 @@ fn every_palette_entry_passes_the_seam_and_no_refused_row_is_offered() {
 
     let log = Log::default();
     let host = host(&[SectionId::Shell], &log);
+    let keymap = Keymap::defaults();
     let palette = host.palette();
     assert!(!palette.is_empty(), "the keymap has commands to offer");
 
     for entry in &palette {
         assert!(
-            !refused_from_webview(&entry.id),
+            !refused_from_webview(&keymap, &entry.id),
             "the palette offers a refused row: {}",
             entry.id.as_str()
         );
@@ -331,18 +332,24 @@ fn every_palette_entry_passes_the_seam_and_no_refused_row_is_offered() {
     }
 
     let offered: Vec<&str> = palette.iter().map(|entry| entry.id.as_str()).collect();
+    let key_only: Vec<CommandId> =
+        keymap.commands().filter(|(_, row)| row.key_only()).map(|(id, _)| id).collect();
+    assert!(!key_only.is_empty(), "the keymap has key-only rows");
     for refused in ainb_app::app::reports::ids::ALL
         .iter()
         .chain(ainb_app::app::plugin_action::ids::ALL)
-        .chain(ainb_app::app::KEY_ONLY_COMMANDS)
+        .copied()
+        .chain(key_only.iter().map(CommandId::as_str))
     {
-        assert!(!offered.contains(refused), "the palette offers `{refused}`");
+        assert!(
+            !offered.contains(&refused),
+            "the palette offers `{refused}`"
+        );
     }
 
     // A palette names a row with no payload, so a pointer row that refuses
     // `Args::Null` has nothing to run with and is not offered; one that runs
     // without a payload is an ordinary row and is.
-    let keymap = Keymap::defaults();
     for pointer in ainb_app::app::pointer::ids::ALL {
         let Some(row) = keymap.command(&CommandId::new(*pointer)) else {
             continue;
@@ -364,22 +371,52 @@ fn every_palette_entry_passes_the_seam_and_no_refused_row_is_offered() {
     );
 }
 
-/// A key-only row writes outside ainb, so a chord that lands on one is named
-/// for the shell to refuse; any other chord is not.
+/// A key-only row writes outside ainb, so a chord or a name that lands on one
+/// is refused for the webview, with the row and the reason; any other is not.
 #[test]
-fn a_chord_on_a_key_only_row_is_named() {
+fn a_chord_or_a_name_on_a_key_only_row_is_refused() {
     let log = Log::default();
     let host = host(&[SectionId::Shell], &log);
 
-    assert_eq!(
-        host.key_only_command(&Chord::parse("W").expect("valid chord"))
-            .as_ref()
-            .map(ainb_app::CommandId::as_str),
-        Some("global.wire_statusline")
+    let refusal = host.refused_from_renderer(&key("W")).expect("W is key-only");
+    assert_eq!(refusal.command.as_str(), "global.wire_statusline");
+    assert!(refusal.reason.contains("only from its key"), "{refusal:?}");
+    let named = Intent::Command(refusal.command.clone(), serde_json::Value::Null);
+    assert_eq!(host.refused_from_renderer(&named), Some(refusal));
+    assert_eq!(host.refused_from_renderer(&key("s")), None);
+}
+
+/// Enter confirms whatever the open dialog holds, so it is judged by that
+/// action: on the abtop setup offer, whose selected "Enable" edits Claude
+/// Code's settings, the webview's Enter is refused.
+#[test]
+fn enter_on_a_dialog_holding_a_key_only_action_is_refused() {
+    let log = Log::default();
+    let mut host = host(&[SectionId::Shell], &log);
+    assert_eq!(host.refused_from_renderer(&key("enter")), None);
+
+    let _ = host.dispatch(key("t"));
+    let dialog = host
+        .state()
+        .shell
+        .confirmation_dialog
+        .as_ref()
+        .expect("the first abtop open offers the setup");
+    assert!(matches!(
+        dialog.selected_action(),
+        Some(ainb_app::app::state::ConfirmAction::SetupAbtopRateLimits)
+    ));
+
+    let refusal = host
+        .refused_from_renderer(&key("enter"))
+        .expect("Enter would run the abtop setup");
+    assert!(
+        refusal.command.as_str().ends_with(".confirm"),
+        "{refusal:?}"
     );
-    assert_eq!(
-        host.key_only_command(&Chord::parse("s").expect("valid chord")),
-        None
+    assert!(
+        refusal.reason.contains("runs only from its key"),
+        "{refusal:?}"
     );
 }
 

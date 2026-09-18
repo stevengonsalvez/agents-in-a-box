@@ -233,6 +233,7 @@ async fn registry_lists_surfaces_and_broadcasts_connection_lifecycle() {
     assert_eq!(changed["connections"][0]["surface"]["kind"], "tui");
 }
 
+// Note: mark_process_as_surface sets a process-global AtomicBool that is never cleared, leaking across tests in this binary runner.
 #[tokio::test]
 async fn web_server_presence_lives_for_server_task() {
     let _env_lock = WEB_HOME_ENV_LOCK.lock().await;
@@ -259,18 +260,31 @@ async fn web_server_presence_lives_for_server_task() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let listed = observer.connections().await;
-        if listed["connections"]
-            .as_array()
-            .is_some_and(|rows| rows.iter().any(|row| row["surface"]["kind"] == "web"))
-        {
+        let count = listed["connections"].as_array().map_or(0, |rows| {
+            rows.iter().filter(|row| row["surface"]["kind"] == "web").count()
+        });
+        assert!(
+            count <= 1,
+            "web presence registered more than once in connections_list: {listed}"
+        );
+        if count == 1 {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "web presence never appeared in connections_list: {listed}"
+            "web presence never appeared in connections_list as exactly one row: {listed}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let settled = observer.connections().await;
+    let settled_count = settled["connections"].as_array().map_or(0, |rows| {
+        rows.iter().filter(|row| row["surface"]["kind"] == "web").count()
+    });
+    assert_eq!(
+        settled_count, 1,
+        "web presence remains exactly one row after settle: {settled}"
+    );
 
     // Aborting the web server drops its server-owned guard and actual socket.
     // The daemon must remove that row, not retain a synthetic lease.
@@ -748,21 +762,33 @@ async fn presence_lease_registers_once_a_late_daemon_comes_up() {
 /// saw as flicker.
 #[tokio::test]
 async fn web_one_shot_calls_beside_its_presence_never_list_a_second_row() {
+    let _env_lock = WEB_HOME_ENV_LOCK.lock().await;
     let home = tempfile::tempdir().expect("temporary Hangar home");
     let (socket, _store) = start_server(home.path()).await;
+    let _hangar_home = EnvGuard::set("AINB_HANGAR_HOME", home.path());
+    let _ainb_home = EnvGuard::set("AINB_HOME", home.path());
 
     // The web server's presence socket, at this process's pid, as `serve`
     // holds it.
-    let mut presence = Client::connect(&socket).await;
-    presence.hello_with(home.path(), "web", std::process::id(), false).await;
+    let lease = ainb_hangar_client::PresenceLease::spawn_with(
+        ainb_hangar_proto::connections::SurfaceInfo {
+            kind: ainb_hangar_proto::connections::SurfaceKind::Web,
+            pid: std::process::id(),
+        },
+        lease_dialer(home.path()),
+    );
+    wait_for_state(
+        &lease,
+        &ainb_hangar_client::PresenceState::Connected,
+        Duration::from_secs(5),
+    )
+    .await;
 
     let mut watcher = Client::connect(&socket).await;
     watcher.hello(home.path(), Some("tui")).await;
     watcher.subscribe_connections().await;
 
-    let token = std::fs::read_to_string(ainb_hangar_proto::auth::token_file_in(home.path()))
-        .expect("daemon token");
-    let web = ainb_web::daemon::DaemonClient::with_parts(socket.clone(), token.trim().to_string());
+    let web = ainb_web::daemon::web_client().expect("web client from env");
     for _ in 0..3 {
         web.attention_list_fleet().await.expect("one-shot web read is served");
     }
@@ -776,11 +802,17 @@ async fn web_one_shot_calls_beside_its_presence_never_list_a_second_row() {
         panic!("a one-shot web read changed the listed registry: {event}");
     }
     let listed = watcher.connections().await;
-    let web_rows = listed["connections"].as_array().map_or(0, |rows| {
-        rows.iter().filter(|row| row["surface"]["kind"] == "web").count()
+    let this_pid = u64::from(std::process::id());
+    let this_process_rows = listed["connections"].as_array().map_or(0, |rows| {
+        rows.iter()
+            .filter(|row| row["surface"]["pid"].as_u64() == Some(this_pid))
+            .count()
     });
-    assert_eq!(web_rows, 1, "only the presence socket is listed: {listed}");
-    drop(presence);
+    assert_eq!(
+        this_process_rows, 1,
+        "only the presence socket is listed for this process: {listed}"
+    );
+    lease.close().await;
 }
 
 /// Review finding on #998: the daemon, not the client, decides transient. A

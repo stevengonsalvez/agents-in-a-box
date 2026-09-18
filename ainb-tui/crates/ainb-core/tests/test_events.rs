@@ -22,21 +22,21 @@ fn test_quit_key_events() {
     let mut state = AppState::default();
 
     let quit_event1 = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('q')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('q')))
             .expect("mapped key"),
         &mut state,
     );
     assert!(quit_event1.is_some());
 
     let quit_event2 = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Esc))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Esc))
             .expect("mapped key"),
         &mut state,
     );
     assert!(quit_event2.is_some());
 
     let quit_event3 = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event_with_modifiers(
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event_with_modifiers(
             KeyCode::Char('c'),
             KeyModifiers::CONTROL,
         ))
@@ -51,28 +51,28 @@ fn test_navigation_key_events() {
     let mut state = AppState::default();
 
     let down_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('j')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('j')))
             .expect("mapped key"),
         &mut state,
     );
     assert!(down_event.is_some());
 
     let up_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('k')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('k')))
             .expect("mapped key"),
         &mut state,
     );
     assert!(up_event.is_some());
 
     let left_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('h')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('h')))
             .expect("mapped key"),
         &mut state,
     );
     assert!(left_event.is_some());
 
     let right_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('l')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('l')))
             .expect("mapped key"),
         &mut state,
     );
@@ -90,7 +90,7 @@ async fn test_n_key_triggers_new_session() {
 
     // Handle the key event
     let app_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&key_event).expect("mapped key"),
+        ainb::app::screens::builtin::chord_from_key_event(&key_event).expect("mapped key"),
         &mut state,
     );
 
@@ -127,28 +127,28 @@ fn test_arrow_key_navigation() {
     let mut state = AppState::default();
 
     let down_arrow = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Down))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Down))
             .expect("mapped key"),
         &mut state,
     );
     assert!(down_arrow.is_some());
 
     let up_arrow = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Up))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Up))
             .expect("mapped key"),
         &mut state,
     );
     assert!(up_arrow.is_some());
 
     let left_arrow = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Left))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Left))
             .expect("mapped key"),
         &mut state,
     );
     assert!(left_arrow.is_some());
 
     let right_arrow = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Right))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Right))
             .expect("mapped key"),
         &mut state,
     );
@@ -160,28 +160,28 @@ fn test_action_key_events() {
     let mut state = AppState::default();
 
     let new_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('n')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('n')))
             .expect("mapped key"),
         &mut state,
     );
     assert!(new_event.is_some());
 
     let attach_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('a')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('a')))
             .expect("mapped key"),
         &mut state,
     );
     assert!(attach_event.is_some());
 
     let start_stop_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('s')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('s')))
             .expect("mapped key"),
         &mut state,
     );
     assert!(start_stop_event.is_some());
 
     let delete_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('d')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('d')))
             .expect("mapped key"),
         &mut state,
     );
@@ -193,7 +193,7 @@ fn test_help_key_event() {
     let mut state = AppState::default();
 
     let help_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('?')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('?')))
             .expect("mapped key"),
         &mut state,
     );
@@ -206,21 +206,21 @@ fn test_help_visible_only_responds_to_help_and_esc() {
     state.shell.help_visible = true;
 
     let help_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('?')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('?')))
             .expect("mapped key"),
         &mut state,
     );
     assert!(help_event.is_some());
 
     let esc_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Esc))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Esc))
             .expect("mapped key"),
         &mut state,
     );
     assert!(esc_event.is_some());
 
     let other_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('j')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('j')))
             .expect("mapped key"),
         &mut state,
     );
@@ -232,14 +232,14 @@ fn test_go_to_top_bottom() {
     let mut state = AppState::default();
 
     let go_top = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Home))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Home))
             .expect("mapped key"),
         &mut state,
     );
     assert!(go_top.is_some());
 
     let go_bottom = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::End))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::End))
             .expect("mapped key"),
         &mut state,
     );
@@ -252,14 +252,14 @@ fn test_unknown_key_returns_none() {
 
     // Test with a truly unmapped key like 'z'
     let unknown_event = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('z')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('z')))
             .expect("mapped key"),
         &mut state,
     );
     assert!(unknown_event.is_none());
 
     let unknown_f_key = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::F(1)))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::F(1)))
             .expect("mapped key"),
         &mut state,
     );
@@ -273,7 +273,7 @@ fn test_process_quit_event() {
     assert!(!state.shell.should_quit);
 
     if let Some(event) = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('q')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('q')))
             .expect("mapped key"),
         &mut state,
     ) {
@@ -290,7 +290,7 @@ fn test_process_help_toggle_event() {
     assert!(!state.shell.help_visible);
 
     if let Some(event) = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&create_key_event(KeyCode::Char('?')))
+        ainb::app::screens::builtin::chord_from_key_event(&create_key_event(KeyCode::Char('?')))
             .expect("mapped key"),
         &mut state,
     ) {

@@ -903,14 +903,16 @@ fn a_plugin_granted_a_fleet_topic_cannot_publish_on_it() {
     );
 }
 
-/// #1087: a plugin that stops reading its stdin costs bounded memory however
-/// long the user keeps typing at it. Once the pipe is full the task cannot
-/// write, so keys pile up in the inbox, which holds at most its capacity and
-/// counts every event it pushes out.
-#[test]
-fn a_wedged_plugin_keeps_a_bounded_key_inbox_and_counts_drops() {
-    const KEYS: usize = 20_000;
-    let (rt, handle) = Runtime::new().expect("build runtime");
+/// A registered fixture that has stopped reading its stdin, and the key the
+/// tests flood it with. `write_bound` is the runtime's frame write timeout.
+fn wedged_fixture(
+    write_bound: Duration,
+) -> (Runtime, ainb_plugin_runtime::RuntimeHandle, PluginId) {
+    let (rt, handle) = Runtime::with_config(RuntimeConfig {
+        frame_write_timeout: write_bound,
+        ..RuntimeConfig::default()
+    })
+    .expect("build runtime");
     let plugin = RegisteredPlugin::new(
         fixture_manifest(),
         fixture_path(),
@@ -931,14 +933,29 @@ fn a_wedged_plugin_keeps_a_bounded_key_inbox_and_counts_drops() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    let key = ainb_plugin_protocol::params::KeyEvent {
+    (rt, handle, id)
+}
+
+fn flood_key() -> ainb_plugin_protocol::params::KeyEvent {
+    ainb_plugin_protocol::params::KeyEvent {
         code: ainb_plugin_protocol::params::KeyCode::Char { ch: 'j' },
         mods: 0,
         kind: ainb_plugin_protocol::params::KeyKind::Press,
-    };
+    }
+}
+
+/// #1087: a plugin that stops reading its stdin costs bounded memory however
+/// long the user keeps typing at it. Once the pipe is full the task cannot
+/// write, so keys pile up in the inbox, which holds at most its capacity and
+/// counts every event it pushes out. The write bound is set far past the test
+/// so the plugin is still wedged, not yet dropped, when the inbox is read.
+#[test]
+fn a_wedged_plugin_keeps_a_bounded_key_inbox_and_counts_drops() {
+    const KEYS: usize = 20_000;
+    let (_rt, handle, id) = wedged_fixture(Duration::from_secs(600));
     for _ in 0..KEYS {
         assert!(
-            handle.send_key(&id, "fixture", key.clone()),
+            handle.send_key(&id, "fixture", flood_key()),
             "the task is alive"
         );
     }
@@ -955,6 +972,76 @@ fn a_wedged_plugin_keeps_a_bounded_key_inbox_and_counts_drops() {
         stats.keys_dropped > 0,
         "{KEYS} keys into a wedged plugin dropped none: {stats:?}"
     );
+}
+
+/// #1118: a plugin that stops reading its stdin cannot trap Esc. A frame write
+/// that outlives the bound flags the plugin wedged, which is what makes the
+/// host take a back key itself (`effect_host` reports it undelivered, and the
+/// reducer runs `PanelBack`), and the plugin is dropped like a closed pipe.
+/// Before the bound, the task sat in its write forever and kept both from
+/// happening.
+#[test]
+fn a_plugin_that_stops_reading_stdin_releases_esc_within_the_write_bound() {
+    const BOUND: Duration = Duration::from_millis(300);
+    let (_rt, handle, id) = wedged_fixture(BOUND);
+    assert!(!handle.render_wedged(&id), "precondition: not wedged yet");
+
+    // Type at it until its pipe is full and a write blocks. The inbox drops
+    // the oldest keys, so a single burst writes only a few hundred; keeping on
+    // typing is what a user facing a frozen screen does anyway.
+    let typing = std::time::Instant::now();
+    let deadline = typing + BOUND + Duration::from_secs(10);
+    let mut pipe_full_at = None;
+    while !handle.render_wedged(&id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a plugin not reading its stdin still held Esc {:?} after typing began",
+            typing.elapsed()
+        );
+        for _ in 0..200 {
+            handle.send_key(&id, "fixture", flood_key());
+        }
+        // The inbox stops draining once the task is parked in a write.
+        let stats = handle.input_inbox_stats(&id).expect("registered");
+        if pipe_full_at.is_none()
+            && stats.keys_queued == ainb_plugin_runtime::inbox::INPUT_INBOX_CAPACITY
+        {
+            pipe_full_at = Some(std::time::Instant::now());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // The inbox stays at capacity once the task is parked in its write, so
+    // the loop above always saw it full before the plugin was flagged.
+    let full = pipe_full_at.expect("the key inbox filled before the plugin was flagged");
+    assert!(
+        full.elapsed() < BOUND + Duration::from_secs(2),
+        "Esc was released {:?} after the task stopped draining, past the {BOUND:?} bound",
+        full.elapsed()
+    );
+    // An Esc now: delivered to the runtime, but not serviced, so the host
+    // takes it (the `delivered && !render_wedged` rule in `effect_host`).
+    let esc = ainb_plugin_protocol::params::KeyEvent {
+        code: ainb_plugin_protocol::params::KeyCode::Esc,
+        mods: 0,
+        kind: ainb_plugin_protocol::params::KeyKind::Press,
+    };
+    let serviced = handle.send_key(&id, "fixture", esc) && !handle.render_wedged(&id);
+    assert!(
+        !serviced,
+        "the host takes the back key from a wedged plugin"
+    );
+
+    // And the plugin is gone, the way a closed pipe drops it. A deadline of its
+    // own: the one above may be nearly spent by the typing loop.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while handle.lifecycle_state(&id) == Some(LifecycleState::Running) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the wedged plugin was never dropped: {:?}",
+            handle.lifecycle_state(&id)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// A fixture plugin on the render loop, for the #1087 Esc watch.

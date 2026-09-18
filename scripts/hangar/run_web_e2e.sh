@@ -35,10 +35,24 @@ WORKSPACE="$REPO_ROOT/ainb-tui"
 E2E_DIR="$WORKSPACE/crates/ainb-web/e2e"
 
 # Shared target dir keeps this in step with the rest of the ccc build (avoids a
-# from-scratch rebuild). Override by exporting CARGO_TARGET_DIR before the run.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/stevengonsalvez/.cache/ccc-shared-target}"
-TARGET_DIR="$CARGO_TARGET_DIR/debug"
-
+# from-scratch rebuild). Resolve from CARGO_TARGET_DIR, cargo metadata, or local cache.
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  TARGET_ROOT="$CARGO_TARGET_DIR"
+elif [ -d "/Users/stevengonsalvez/.cache/ccc-shared-target" ]; then
+  TARGET_ROOT="/Users/stevengonsalvez/.cache/ccc-shared-target"
+  export CARGO_TARGET_DIR="$TARGET_ROOT"
+else
+  # Query cargo itself for target_directory (honours .cargo/config.toml, rust-cache layout, etc.)
+  TARGET_ROOT=$(cargo metadata --manifest-path "$WORKSPACE/Cargo.toml" --format-version 1 --no-deps 2>/dev/null | jq -r .target_directory 2>/dev/null)
+  if [ -z "$TARGET_ROOT" ] || [ "$TARGET_ROOT" = "null" ]; then
+    TARGET_ROOT=$(cargo metadata --manifest-path "$WORKSPACE/Cargo.toml" --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+  fi
+  if [ -z "$TARGET_ROOT" ]; then
+    TARGET_ROOT="$WORKSPACE/target"
+  fi
+  export CARGO_TARGET_DIR="$TARGET_ROOT"
+fi
+TARGET_DIR="${TARGET_ROOT:-$WORKSPACE/target}/debug"
 AINB="$TARGET_DIR/ainb"
 DAEMON="$TARGET_DIR/ainb-hangar-daemon"
 SEEDER="$TARGET_DIR/examples/seed_control_center"
@@ -75,16 +89,51 @@ command -v node    >/dev/null 2>&1 || die "node not found (required for Playwrig
 command -v npm     >/dev/null 2>&1 || die "npm not found (required for Playwright)"
 
 # ── build ────────────────────────────────────────────────────────────────────
-log "building ainb + daemon + seed_control_center (shared target: $CARGO_TARGET_DIR)"
-( cd "$WORKSPACE" && cargo build -p ainb -p ainb-hangar-daemon --example seed_control_center ) \
+log "building ainb + daemon + seed_control_center in $WORKSPACE"
+( cd "$WORKSPACE" && cargo build -p ainb -p ainb-hangar-daemon && cargo build -p ainb-hangar-daemon --example seed_control_center ) \
   || die "cargo build failed"
+
+# Derive the directory cargo actually wrote to (query cargo metadata from WORKSPACE).
+CARGO_META_DIR="$(cd "$WORKSPACE" && cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r .target_directory 2>/dev/null)"
+if [ -z "$CARGO_META_DIR" ] || [ "$CARGO_META_DIR" = "null" ]; then
+  CARGO_META_DIR="$(cd "$WORKSPACE" && cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+fi
+
+ACTUAL_TARGET=""
+for cand in \
+  "${CARGO_TARGET_DIR:-}/debug" \
+  "${CARGO_META_DIR:-}/debug" \
+  "${TARGET_ROOT:-}/debug" \
+  "$WORKSPACE/target/debug" \
+  "$REPO_ROOT/target/debug"; do
+  if [ -n "$cand" ] && [ -x "$cand/ainb" ]; then
+    ACTUAL_TARGET="$cand"
+    break
+  fi
+done
+
+if [ -z "$ACTUAL_TARGET" ]; then
+  ACTUAL_TARGET="${CARGO_META_DIR:-$WORKSPACE/target}/debug"
+fi
+
+TARGET_DIR="$ACTUAL_TARGET"
+log "cargo target directory: $TARGET_DIR"
+
+AINB="$TARGET_DIR/ainb"
+DAEMON="$TARGET_DIR/ainb-hangar-daemon"
+SEEDER="$TARGET_DIR/examples/seed_control_center"
+
 for b in "$AINB" "$DAEMON" "$SEEDER"; do
   [ -x "$b" ] || die "expected binary missing after build: $b"
 done
 
 # ── Playwright deps (idempotent) ─────────────────────────────────────────────
 log "installing e2e npm deps"
-( cd "$E2E_DIR" && npm install --no-audit --no-fund ) || die "npm install failed"
+if [ -f "$E2E_DIR/package-lock.json" ]; then
+  ( cd "$E2E_DIR" && npm ci --no-audit --no-fund ) || die "npm ci failed"
+else
+  ( cd "$E2E_DIR" && npm install --no-audit --no-fund ) || die "npm install failed"
+fi
 log "ensuring the Playwright chromium is installed"
 ( cd "$E2E_DIR" && npx playwright install chromium ) || die "playwright install chromium failed"
 

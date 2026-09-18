@@ -16,7 +16,7 @@
 // Root selectors return scalars, so a drain that leaves a count unchanged wakes
 // nothing that reads the count.
 
-import { batch, createMemo, type Accessor } from "solid-js";
+import { batch, createMemo, createSignal, type Accessor } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type {
   DaemonRead,
@@ -68,6 +68,14 @@ export interface FrameStore {
   /** How many hosts the store holds any section from. */
   hostCount: Accessor<number>;
   /**
+   * Frames that applied nothing since the store was made, as
+   * `wire::store::MirrorStore::frames_ignored` counts them: an unsubscribed
+   * section, a host other than the channel's peer, a host past `MAX_HOSTS`, an
+   * older epoch, or a version at or below the one held (#1132). A frame a
+   * later one of the same section replaced within a drain is not counted.
+   */
+  framesIgnored: Accessor<number>;
+  /**
    * Drop everything held from `host`, its stale marks included, as
    * `wire::store::MirrorStore::evict_host`: the host went away, or the window's
    * peer was re-pinned to a new id (#1066). The slot no longer counts toward
@@ -93,22 +101,34 @@ interface Plan {
 export function createFrameStore(subscribed: readonly SectionName[]): FrameStore {
   const wanted = new Set<string>(subscribed);
   const [state, setState] = createStore<FrameState>({ hosts: {}, stale: {} });
+  const [framesIgnored, setFramesIgnored] = createSignal(0);
 
   function applyDrain(peer: HostId, batches: readonly FrameBatch_Serialize[]) {
     const hosts = new Set([...Object.keys(state.hosts), ...Object.keys(state.stale)]);
-    if (!hosts.has(peer) && hosts.size >= MAX_HOSTS) return;
+    if (!hosts.has(peer) && hosts.size >= MAX_HOSTS) {
+      const refused = batches.reduce((sum, { frames }) => sum + frames.length, 0);
+      if (refused > 0) batch(() => setFramesIgnored((count) => count + refused));
+      return;
+    }
+    let ignored = 0;
     // Decide in plain objects first, so the store is written once per
     // (host, section) however many frames the drain carried for it.
     const plans = new Map<HostId, Plan>();
     const withheld = new Set<SectionName>();
     for (const { frames, oversize } of batches) {
       for (const frame of frames) {
-        if (!wanted.has(frame.section) || frame.host_id !== peer) continue;
+        if (!wanted.has(frame.section) || frame.host_id !== peer) {
+          ignored += 1;
+          continue;
+        }
         const name = frame.section as SectionName;
         const held = state.hosts[frame.host_id];
         let plan = plans.get(frame.host_id);
         const epoch = plan?.epoch ?? held?.epoch;
-        if (epoch !== undefined && frame.epoch < epoch) continue;
+        if (epoch !== undefined && frame.epoch < epoch) {
+          ignored += 1;
+          continue;
+        }
         if (epoch === undefined || frame.epoch > epoch) {
           plan = { epoch: frame.epoch, reset: true, frames: new Map() };
           plans.set(frame.host_id, plan);
@@ -118,7 +138,10 @@ export function createFrameStore(subscribed: readonly SectionName[]): FrameStore
         }
         const prior =
           plan.frames.get(name)?.version ?? (plan.reset ? undefined : held?.sections[name]?.version);
-        if (prior !== undefined && frame.version <= prior) continue;
+        if (prior !== undefined && frame.version <= prior) {
+          ignored += 1;
+          continue;
+        }
         plan.frames.set(name, frame);
         withheld.delete(name);
       }
@@ -130,6 +153,7 @@ export function createFrameStore(subscribed: readonly SectionName[]): FrameStore
     }
 
     batch(() => {
+      if (ignored > 0) setFramesIgnored((count) => count + ignored);
       for (const [host, plan] of plans) {
         if (plan.reset) setState("hosts", host, { epoch: plan.epoch, sections: {} });
         for (const [name, frame] of plan.frames) {
@@ -177,5 +201,5 @@ export function createFrameStore(subscribed: readonly SectionName[]): FrameStore
     });
   }
 
-  return { state, applyDrain, section, hostCount, evictHost };
+  return { state, applyDrain, section, hostCount, framesIgnored, evictHost };
 }
