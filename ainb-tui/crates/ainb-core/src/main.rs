@@ -572,9 +572,10 @@ async fn run_tui_loop(
     const STARTUP_GUARD_MS: u64 = 100;
 
     let mut slash_palette = SlashPalette::new(SlashCommandRegistry::built_ins());
-    // An event read while re-joining a split paste that was not part of it
-    // (a resize, a mouse event), handled on the next pass instead of lost.
-    let mut replayed: Option<Event> = None;
+    // Events read while re-joining a split paste that were not part of it (a
+    // resize, a mouse event), handled on the next passes in order instead of
+    // lost.
+    let mut replayed: std::collections::VecDeque<Event> = std::collections::VecDeque::new();
 
     loop {
         // Effects still on the outbox. dispatch, tick and apply_pending_event
@@ -710,7 +711,7 @@ async fn run_tui_loop(
         // Tolerate transient terminal-read failures: EINTR (e.g. SIGWINCH on
         // resize, common over SSH) must not crash the session. Only fatal I/O
         // errors propagate.
-        let has_event = replayed.is_some()
+        let has_event = !replayed.is_empty()
             || match crossterm::event::poll(timeout) {
                 Ok(v) => v,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => false,
@@ -720,7 +721,7 @@ async fn run_tui_loop(
             // Any input (key/mouse/paste/resize) warrants a repaint on the next
             // loop iteration (perf: bead `wai` dirty-gate).
             needs_redraw = true;
-            let read_event = match replayed.take().map_or_else(event::read, Ok) {
+            let read_event = match replayed.pop_front().map_or_else(event::read, Ok) {
                 Ok(ev) => ev,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e.into()),
@@ -1243,21 +1244,33 @@ async fn run_tui_loop(
                         //
                         // crossterm ends a paste at the first terminator it
                         // reads, so a clipboard carrying its own arrives as a
-                        // short paste plus the rest as keys already queued
-                        // behind it (#1003). Drain what is queued now and put
-                        // its keys back into the paste; the whole is then
-                        // stripped of escapes and wrapped once, so none of it
-                        // runs as typed input.
+                        // short paste plus the rest as keys queued behind it
+                        // (#1003). Drain what follows and put its keys back
+                        // into the paste; the whole is then stripped of escapes
+                        // and wrapped once, so none of it runs as typed input.
+                        //
+                        // The poll waits 1 ms, not zero: crossterm 0.29 only
+                        // hands out events its parser already holds when the
+                        // poll has time left (`tty.rs` checks the parser
+                        // inside `while timeout.leftover() != 0`), so a zero
+                        // poll reports nothing and the tail escapes. Draining
+                        // continues while events keep arriving within 1 ms,
+                        // and a resize or mouse event in between is kept for
+                        // the next pass rather than ending the drain.
+                        //
+                        // Limit: crossterm reads the tty 1024 bytes at a time.
+                        // A paste larger than that, or one split in transit
+                        // (over ssh), can have its tail arrive more than 1 ms
+                        // after the paste event; that tail is not rejoined and
+                        // reaches the pane as keys.
                         let mut tail = Vec::new();
-                        while replayed.is_none()
-                            && crossterm::event::poll(Duration::ZERO).unwrap_or(false)
-                        {
+                        while crossterm::event::poll(Duration::from_millis(1)).unwrap_or(false) {
                             match event::read() {
                                 Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => {
                                     tail.push(key);
                                 }
                                 Ok(Event::Key(_)) => {}
-                                Ok(other) => replayed = Some(other),
+                                Ok(other) => replayed.push_back(other),
                                 Err(_) => break,
                             }
                         }
