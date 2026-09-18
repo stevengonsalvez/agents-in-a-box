@@ -47,7 +47,9 @@ pub mod terminal;
 use std::sync::Arc;
 
 pub use config::{BindError, WebConfig};
-pub use daemon::{Answerer, DaemonAnswerer, DaemonClient, DaemonError};
+pub use daemon::{
+    Answerer, DaemonAnswerer, DaemonClient, DaemonError, web_client, web_surface,
+};
 pub use data::{AinbCliSource, DataError, DataSource, FleetSnapshot};
 pub use routes::{AppState, router};
 
@@ -87,11 +89,7 @@ pub async fn serve(config: WebConfig, data: Arc<dyn DataSource>) -> Result<(), S
     // so an idle dashboard remains discoverable and daemon recovery never
     // stalls a snapshot pull or answer submission.
     ainb_hangar_client::mark_process_as_surface();
-    let _presence =
-        ainb_hangar_client::PresenceLease::spawn(ainb_hangar_proto::connections::SurfaceInfo {
-            kind: ainb_hangar_proto::connections::SurfaceKind::Web,
-            pid: std::process::id(),
-        });
+    let _presence = ainb_hangar_client::PresenceLease::spawn(web_surface());
 
     // Best-effort web-push init. A failure here (e.g. unwritable home dir) must
     // not take down the dashboard: push is an enhancement, the read surface
