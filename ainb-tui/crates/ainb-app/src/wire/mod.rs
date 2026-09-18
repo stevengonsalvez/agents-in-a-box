@@ -711,9 +711,19 @@ mod tests {
         assert!(detail.starts_with("Paste "), "{detail}");
         assert!(!detail.contains(&key), "the detail is scrubbed: {detail}");
         assert_eq!(
-            attention[0].as_object().map(serde_json::Map::len),
-            Some(2),
-            "kind and detail only: {attention}"
+            attention[0].as_object().map(|mark| {
+                let mut keys = mark.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                keys
+            }),
+            Some(vec![
+                "detail".to_string(),
+                "kind".to_string(),
+                "options".to_string(),
+                "request".to_string(),
+                "route".to_string(),
+            ]),
+            "the kind, the detail, and what a surface needs to answer this chip: {attention}"
         );
 
         let disk = serde_json::to_value(&session).expect("serialises");
