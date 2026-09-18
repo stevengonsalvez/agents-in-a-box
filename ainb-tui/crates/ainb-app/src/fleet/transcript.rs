@@ -84,12 +84,14 @@ impl ChunkKind {
     }
 }
 
-/// One chunk as the host holds it: already classified, not yet scrubbed.
+/// One chunk as the host holds it: classified, scrubbed, then cut, so what
+/// the host keeps is bounded by `KEEP_CHUNKS` bodies of `MAX_CHUNK_CHARS`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HeldChunk {
     order: i64,
     kind: ChunkKind,
-    text: String,
+    body: String,
+    truncated: bool,
 }
 
 /// What a page worker reported.
@@ -211,10 +213,15 @@ impl TranscriptHost {
                         .collect::<Vec<_>>()
                         .join("\n");
                     self.after = Some(chunk.ingest_order);
+                    // Scrubbed before the cut, so a credential straddling the
+                    // bound is redacted whole rather than cut in half.
+                    let (body, truncated) =
+                        crate::fleet::conversation::cut(&scrub(&text), MAX_CHUNK_CHARS);
                     self.chunks.push(HeldChunk {
                         order: chunk.ingest_order,
                         kind: ChunkKind::of(&chunk.event_type),
-                        text,
+                        body,
+                        truncated,
                     });
                     moved = true;
                 }
@@ -234,16 +241,27 @@ impl TranscriptHost {
 
 /// Read one page on a worker thread and report it into `inbox`.
 fn spawn_page(session_key: String, after: Option<i64>, inbox: Arc<Mutex<Vec<TranscriptOutcome>>>) {
+    let worker_inbox = Arc::clone(&inbox);
     let spawned =
         std::thread::Builder::new().name("ainb-transcript-page".into()).spawn(move || {
             let outcome = read_page(session_key, after);
-            if let Ok(mut inbox) = inbox.lock() {
-                inbox.push(outcome);
-            }
+            report(&worker_inbox, outcome);
         });
+    // A page that never starts must still land, or `in_flight` never clears
+    // and the card waits on a read nobody is doing.
     if let Err(error) = spawned {
         tracing::warn!(%error, "transcript page thread spawn failed");
+        report(
+            &inbox,
+            TranscriptOutcome::Failed(format!("the transcript read could not start: {error}")),
+        );
     }
+}
+
+/// Put `outcome` in `inbox`, through a poisoned lock as `tick` reads it: a
+/// dropped report would leave the page in flight for good.
+fn report(inbox: &Mutex<Vec<TranscriptOutcome>>, outcome: TranscriptOutcome) {
+    inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(outcome);
 }
 
 fn read_page(session_key: String, after: Option<i64>) -> TranscriptOutcome {
@@ -281,7 +299,8 @@ pub struct TranscriptChunk {
     pub order: i64,
     pub kind: ChunkKind,
     /// What the chunk says, as the daemon's classifier renders it: scrubbed,
-    /// then cut to [`MAX_CHUNK_CHARS`], and scrubbed again on the frame.
+    /// then cut to [`MAX_CHUNK_CHARS`] as the host folds it, and scrubbed
+    /// again on the frame.
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub body: String,
@@ -312,7 +331,10 @@ pub enum TranscriptStatus {
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Transcript {
-    /// The Fleet session it belongs to (`acp:<id>`), an identity.
+    /// The Fleet session it belongs to (`acp:<id>`), an identity the host
+    /// resolved against its own status read, scrubbed all the same.
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub session_key: Option<String>,
     pub status: TranscriptStatus,
     /// The newest chunks, oldest first, at most [`MAX_CHUNKS`].
@@ -340,15 +362,11 @@ pub fn project(host: &TranscriptHost) -> Transcript {
         },
         chunks: held[held.len().saturating_sub(MAX_CHUNKS)..]
             .iter()
-            .map(|chunk| {
-                let (body, truncated) =
-                    crate::fleet::conversation::cut(&scrub(&chunk.text), MAX_CHUNK_CHARS);
-                TranscriptChunk {
-                    order: chunk.order,
-                    kind: chunk.kind,
-                    body,
-                    truncated,
-                }
+            .map(|chunk| TranscriptChunk {
+                order: chunk.order,
+                kind: chunk.kind,
+                body: chunk.body.clone(),
+                truncated: chunk.truncated,
             })
             .collect(),
         chunks_held: u32::try_from(held.len()).unwrap_or(u32::MAX),
@@ -490,5 +508,39 @@ mod tests {
             projected.status,
             TranscriptStatus::Unavailable { .. }
         ));
+    }
+
+    #[test]
+    fn a_report_through_a_poisoned_inbox_still_lands() {
+        let host = TranscriptHost::new("acp:s-1".to_string());
+        let inbox = host.reports();
+        let poisoner = Arc::clone(&inbox);
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.lock().expect("inbox");
+            panic!("a worker died holding the inbox");
+        })
+        .join();
+        assert!(inbox.is_poisoned());
+        report(
+            &inbox,
+            TranscriptOutcome::Failed("could not start".to_string()),
+        );
+        assert_eq!(
+            inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(),
+            1,
+            "the page is reported, so it is no longer in flight"
+        );
+    }
+
+    #[test]
+    fn the_host_holds_bounded_bodies() {
+        let mut host = TranscriptHost::new("acp:s-1".to_string());
+        host.fold(page(vec![chunk(
+            1,
+            "acp.message",
+            serde_json::json!({ "text": "x".repeat(MAX_CHUNK_CHARS * 40) }),
+        )]));
+        assert!(host.chunks[0].body.chars().count() <= MAX_CHUNK_CHARS + 1);
+        assert!(host.chunks[0].truncated);
     }
 }
