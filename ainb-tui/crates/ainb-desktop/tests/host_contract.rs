@@ -873,4 +873,25 @@ mod agent_status {
         let _ = host.tick();
         assert_eq!(health(&host), Some(ViewHealth::Live));
     }
+
+    #[test]
+    fn a_read_from_before_the_outage_never_folds_after_it() {
+        let frames = Rc::new(RefCell::new(0));
+        let mut host = status_host(&frames);
+        deliver(&host, StatusOutcome::Read(acp_roster()));
+        let _ = host.tick();
+        // A read is in flight when the daemon goes; the worker holds the inbox.
+        let before = host.agent_status_reports();
+        host.daemon_lost("reconnecting");
+        host.daemon_connected();
+
+        // It lands after the reconnect, into the inbox it was started with.
+        before.lock().expect("inbox").push(StatusOutcome::Read(acp_roster()));
+        let _ = host.tick();
+
+        assert!(
+            matches!(health(&host), Some(ViewHealth::Unreachable { .. })),
+            "the pre-outage read is not shown as current"
+        );
+    }
 }
