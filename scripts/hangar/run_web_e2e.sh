@@ -52,8 +52,7 @@ else
   fi
   export CARGO_TARGET_DIR="$TARGET_ROOT"
 fi
-TARGET_DIR="$TARGET_ROOT/debug"
-
+TARGET_DIR="${TARGET_ROOT:-$WORKSPACE/target}/debug"
 AINB="$TARGET_DIR/ainb"
 DAEMON="$TARGET_DIR/ainb-hangar-daemon"
 SEEDER="$TARGET_DIR/examples/seed_control_center"
@@ -90,9 +89,40 @@ command -v node    >/dev/null 2>&1 || die "node not found (required for Playwrig
 command -v npm     >/dev/null 2>&1 || die "npm not found (required for Playwright)"
 
 # ── build ────────────────────────────────────────────────────────────────────
-log "building ainb + daemon + seed_control_center (shared target: $TARGET_ROOT)"
-( cd "$WORKSPACE" && cargo build --target-dir "$TARGET_ROOT" -p ainb -p ainb-hangar-daemon --example seed_control_center ) \
+log "building ainb + daemon + seed_control_center in $WORKSPACE"
+( cd "$WORKSPACE" && cargo build -p ainb -p ainb-hangar-daemon && cargo build -p ainb-hangar-daemon --example seed_control_center ) \
   || die "cargo build failed"
+
+# Derive the directory cargo actually wrote to (query cargo metadata from WORKSPACE).
+CARGO_META_DIR="$(cd "$WORKSPACE" && cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r .target_directory 2>/dev/null)"
+if [ -z "$CARGO_META_DIR" ] || [ "$CARGO_META_DIR" = "null" ]; then
+  CARGO_META_DIR="$(cd "$WORKSPACE" && cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+fi
+
+ACTUAL_TARGET=""
+for cand in \
+  "${CARGO_TARGET_DIR:-}/debug" \
+  "${CARGO_META_DIR:-}/debug" \
+  "${TARGET_ROOT:-}/debug" \
+  "$WORKSPACE/target/debug" \
+  "$REPO_ROOT/target/debug"; do
+  if [ -n "$cand" ] && [ -x "$cand/ainb" ]; then
+    ACTUAL_TARGET="$cand"
+    break
+  fi
+done
+
+if [ -z "$ACTUAL_TARGET" ]; then
+  ACTUAL_TARGET="${CARGO_META_DIR:-$WORKSPACE/target}/debug"
+fi
+
+TARGET_DIR="$ACTUAL_TARGET"
+log "cargo target directory: $TARGET_DIR"
+
+AINB="$TARGET_DIR/ainb"
+DAEMON="$TARGET_DIR/ainb-hangar-daemon"
+SEEDER="$TARGET_DIR/examples/seed_control_center"
+
 for b in "$AINB" "$DAEMON" "$SEEDER"; do
   [ -x "$b" ] || die "expected binary missing after build: $b"
 done
