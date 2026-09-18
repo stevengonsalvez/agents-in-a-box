@@ -850,6 +850,28 @@ export type ChangedFile = {
 	deletions: number,
 };
 
+/**  What one chunk is, from its `acp.<kind>` event type. */
+export type ChunkKind = 
+/**  The agent's message text. */
+"Message" | 
+/**  The user's message text. */
+"UserMessage" | 
+/**  The agent's reasoning. */
+"Thought" | 
+/**  A tool call or its update. */
+"ToolCall" | 
+/**  An execution plan. */
+"Plan" | 
+/**  A permission the agent asked for. */
+"Permission" | 
+/**  Token and cost accounting. */
+"Usage" | 
+/**
+ *  Anything else the daemon records about the run: a turn ending, a
+ *  truncation notice, a kind this build does not know.
+ */
+"Lifecycle";
+
 /**  Authentication provider for Claude API */
 export type ClaudeAuthProvider = 
 /**  System authentication (Claude Pro/Max subscription) */
@@ -2446,6 +2468,7 @@ export type FleetView_Serialize = {
 	ask_state: AskState_Serialize,
 	broadcast: Broadcast_Serialize,
 	conversation: Conversation_Serialize,
+	transcript: Transcript_Serialize,
 	daemon_attention: DaemonAttention_Serialize,
 	fleet_snapshot: FleetRowFrame[],
 	fleet_metadata: { [key in string]: SessionFleetMetadata },
@@ -4725,6 +4748,59 @@ export type TopicReport_Serialize = {
 	label: string,
 	description: string,
 	deps: DepReport_Serialize[],
+};
+
+/**  The open ACP transcript, as a frame carries it. */
+export type Transcript = Transcript_Serialize;
+
+/**  One chunk as a frame carries it. */
+export type TranscriptChunk = TranscriptChunk_Serialize;
+
+/**  One chunk as a frame carries it. */
+export type TranscriptChunk_Serialize = {
+	/**  The daemon's ingest order, which keys and orders the chunks. */
+	order: number,
+	kind: ChunkKind,
+	/**
+	 *  What the chunk says, as the daemon's classifier renders it: scrubbed,
+	 *  then cut to [`MAX_CHUNK_CHARS`], and scrubbed again on the frame.
+	 */
+	body: string,
+	/**  Whether the body was cut. */
+	truncated: boolean,
+};
+
+/**  Where the transcript read stands, as a frame carries it. */
+export type TranscriptStatus = TranscriptStatus_Serialize;
+
+/**  Where the transcript read stands, as a frame carries it. */
+export type TranscriptStatus_Serialize = 
+/**  No transcript is open. */
+"Closed" | 
+/**  Opened; the first page has not arrived. */
+"Loading" | 
+/**  The daemon answered. */
+"Live" | 
+/**  The daemon could not answer, in its client's words, scrubbed. */
+{ Unavailable: {
+	detail: string,
+} };
+
+/**  The open ACP transcript, as a frame carries it. */
+export type Transcript_Serialize = {
+	/**  The Fleet session it belongs to (`acp:<id>`), an identity. */
+	session_key: string | null,
+	status: TranscriptStatus_Serialize,
+	/**  The newest chunks, oldest first, at most [`MAX_CHUNKS`]. */
+	chunks: TranscriptChunk_Serialize[],
+	/**  How many chunks the host holds. */
+	chunks_held: number,
+	/**
+	 *  Whether older chunks exist that neither the host nor the frame holds,
+	 *  so a surface says the transcript starts part-way rather than implying
+	 *  the run began here.
+	 */
+	starts_part_way: boolean,
 };
 
 /**  Health of the preferred provider transport. */

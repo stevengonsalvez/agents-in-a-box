@@ -338,6 +338,14 @@ fleet.live_window.seven_day_pct
 fleet.live_window.seven_day_resets_at
 fleet.live_window.source
 fleet.live_window.today_cost_usd
+fleet.transcript.chunks[].body
+fleet.transcript.chunks[].kind
+fleet.transcript.chunks[].order
+fleet.transcript.chunks[].truncated
+fleet.transcript.chunks_held
+fleet.transcript.session_key
+fleet.transcript.starts_part_way
+fleet.transcript.status.Unavailable.detail
 frame.daemon_read.clock_ms
 frame.daemon_read.revision
 frame.epoch
