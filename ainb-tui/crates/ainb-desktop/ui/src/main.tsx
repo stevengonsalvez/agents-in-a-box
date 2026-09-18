@@ -8,7 +8,7 @@ import { shellAgentStatus, shellFleet, shellSessions, SUBSCRIBED } from "./subsc
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { AnswerBanner } from "./answer.tsx";
-import { phaseOf, questionFor } from "./answer.ts";
+import { phaseOf, questionFor, type Refusal, sendInOrder } from "./answer.ts";
 import { newNotices, noticeKey } from "./notices.ts";
 import { Board } from "./board.tsx";
 import { Palette } from "./palette.tsx";
@@ -37,13 +37,6 @@ const HEADER_COUNTS = [
   [ROOT_SELECTORS.waitCount, "WAIT"],
   [ROOT_SELECTORS.errCount, "ERR"],
 ] as const;
-
-/**
- * `ainb_desktop::intent::Refusal`: an intent the host did not apply, with the
- * row it would have run and why. Keys that write outside ainb run only from
- * the TUI or the CLI.
- */
-type Refusal = { command: string; reason: string };
 
 /** How long a toast stays up. */
 const TOAST_MS = 5000;
@@ -131,8 +124,10 @@ function Shell() {
    * a cursor move ahead of the Enter that reads it. A refusal on any of them
    * is reported the same way.
    */
+  // Stops at the first refusal: a pick whose cursor move was refused must not
+  // go on to send Enter on whatever option the reducer is pointing at.
   const run = async (intents: RendererIntent[]) => {
-    for (const intent of intents) report(await invoke<Refusal | null>("dispatch", { intent }));
+    report(await sendInOrder(intents, (intent) => invoke<Refusal | null>("dispatch", { intent })));
   };
   /** Select a session-list row and attach it, so the reducer marks it attached. */
   const openRow = (row: RowId) => dispatch(openRowIntent(row));
