@@ -11,6 +11,9 @@
 //! ```
 //!
 //! A failed read freezes the rows as unreachable, never a state of its own.
+//! While the sidecar has no daemon nothing is read, and on reconnect the inbox
+//! is replaced: a read started before the outage reports into the old one, so
+//! it can never fold as current after it.
 //! The terminal has its own reader (`ainb-core`'s agent status host), which
 //! follows the daemon's revisions; this one polls, which is enough for a board
 //! a person reads.
@@ -63,9 +66,14 @@ impl AgentStatusPoll {
     }
 
     /// The daemon is back: read on the next tick rather than a poll later.
+    ///
+    /// A fresh inbox, not a cleared one: a read still in flight from before
+    /// the outage reports into the old one, which nothing reads any more.
     pub fn daemon_connected(&mut self) {
         self.down = false;
+        self.in_flight = false;
         self.last_poll_ms = None;
+        self.inbox = Reports::default();
     }
 
     /// Fold what the worker reported into `state`, and ask for the next read
