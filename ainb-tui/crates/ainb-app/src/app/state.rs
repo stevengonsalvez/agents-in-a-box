@@ -765,6 +765,95 @@ pub enum ConfirmAction {
     Cancel,            // No-op terminator for tri-option dialogs
 }
 
+impl ConfirmAction {
+    /// Whether confirming this action must come from a key press (#1080): it
+    /// writes outside ainb, so a remote surface may not confirm it by name.
+    /// Exhaustive on purpose, so a new action is judged when it is added.
+    #[must_use]
+    pub const fn runs_only_from_key(&self) -> bool {
+        match self {
+            // Kills tmux sessions ainb did not start.
+            Self::KillOtherTmux(_)
+            | Self::KillOtherTmuxSessions(_)
+            // Writes Claude Code and Codex hook config, and runs
+            // `claude plugin install`.
+            | Self::InstallNotifyHooks
+            // Runs `abtop --setup`, which edits Claude Code's statusline hook.
+            | Self::SetupAbtopRateLimits => true,
+            // ainb's own sessions, shells, pool and preferences, or nothing.
+            Self::DeleteSession(_)
+            | Self::StopSession(_)
+            | Self::BulkDeleteSessions(_)
+            | Self::BulkStopSessions(_)
+            | Self::KillWorkspaceShell(_)
+            | Self::DismissNotifyPrompt
+            | Self::McpStopServer(_)
+            | Self::McpStopDaemon
+            | Self::OpenAbtopSkipSetup
+            | Self::DismissAbtopSetup
+            | Self::Cancel => false,
+        }
+    }
+}
+
+impl AppState {
+    /// Why `action` must not run from a remote surface right now, or `None`
+    /// (#1080). The reason is for the surface to show, not only to log.
+    ///
+    /// An action that writes outside ainb ([`KeyAction::writes_outside_ainb`])
+    /// is always refused. Two more do something different depending on state:
+    /// - Confirm runs whatever the open dialog holds, so it is judged by that
+    ///   action ([`ConfirmAction::runs_only_from_key`]);
+    /// - Next and Finish on the onboarding wizard complete it, and completing
+    ///   with OpenTelemetry opted into writes Claude Code's settings and the
+    ///   user's shell rc.
+    ///
+    /// [`KeyAction::writes_outside_ainb`]: crate::app::keymap::KeyAction::writes_outside_ainb
+    #[must_use]
+    pub fn remote_command_refusal(
+        &self,
+        action: &crate::app::keymap::KeyAction,
+    ) -> Option<&'static str> {
+        use crate::app::events::AppEvent;
+        use crate::app::keymap::KeyAction;
+        match action {
+            action if action.writes_outside_ainb() => {
+                Some("it writes outside ainb, so it runs only from its key")
+            }
+            KeyAction::App(AppEvent::ConfirmationConfirm)
+                if self
+                    .shell
+                    .confirmation_dialog
+                    .as_ref()
+                    .and_then(ConfirmationDialog::selected_action)
+                    .is_some_and(ConfirmAction::runs_only_from_key) =>
+            {
+                Some("it would confirm an action that runs only from its key")
+            }
+            KeyAction::App(AppEvent::OnboardingNext | AppEvent::OnboardingFinish)
+                if self.onboarding.onboarding_state.as_ref().is_some_and(
+                    crate::components::onboarding::OnboardingState::otel_should_setup,
+                ) =>
+            {
+                Some("it could finish onboarding with telemetry set up outside ainb")
+            }
+            _ => None,
+        }
+    }
+}
+
+impl ConfirmationDialog {
+    /// The action Confirm would run now: the highlighted option's in
+    /// tri-option mode, the dialog's own when Yes is selected, else none.
+    #[must_use]
+    pub fn selected_action(&self) -> Option<&ConfirmAction> {
+        self.options.as_ref().map_or_else(
+            || self.selected_option.then_some(&self.confirm_action),
+            |options| options.get(self.selected_index).map(|option| &option.action),
+        )
+    }
+}
+
 /// Assemble the shared Stop / Delete / Cancel dialog.
 ///
 /// One builder for the single-row and the bulk path, so a future safety change

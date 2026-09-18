@@ -985,6 +985,26 @@ impl KeyAction {
             .or_else(|| crate::app::plugin_action::with_args(event, args))
     }
 
+    /// Whether running this action changes something ainb did not create:
+    /// a file outside `~/.agents-in-a-box` and the session worktree, a tmux
+    /// session ainb did not start, a package install, or a network write.
+    /// `tests/key_only_completeness.rs` derives the same set from the reducer
+    /// source and fails when the two disagree.
+    ///
+    /// A confirmation dialog's Confirm is not listed here: what it does is the
+    /// dialog's pending [`crate::app::state::ConfirmAction`], which
+    /// [`crate::app::state::ConfirmAction::runs_only_from_key`] judges.
+    #[must_use]
+    pub const fn writes_outside_ainb(&self) -> bool {
+        match self {
+            Self::App(event) => app_event_writes_outside_ainb(event),
+            Self::Ui(action) => ui_action_writes_outside_ainb(action),
+            // A pass-through key goes to the session pane ainb started; a
+            // palette opens and a character is typed into ainb's own input.
+            Self::Passthrough | Self::OpenSlashPalette | Self::Text(_) => false,
+        }
+    }
+
     fn carries_payload(&self) -> bool {
         // A pointer row carries a payload exactly when it refuses to run bare.
         if let Self::App(event) = self {
@@ -1071,6 +1091,473 @@ impl KeyAction {
     }
 }
 
+/// Whether `event` writes outside ainb; see [`KeyAction::writes_outside_ainb`].
+///
+/// Exhaustive on purpose: a new variant does not compile until someone
+/// judges it.
+#[allow(clippy::too_many_lines, reason = "one arm per variant, by design")]
+const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
+    match event {
+        // Dependency installs and `~/.tmux.conf`.
+        AppEvent::OnboardingInstallFocusedDep
+        | AppEvent::OnboardingInstallConfig
+        // A catalog install runs its `sh -c` recipe.
+        | AppEvent::SkillManagerBrowseInstall
+        // Skill sync, update and removal write the tools' own skill dirs
+        // (`~/.claude`, `~/.codex`, `~/.cursor`), which those tools load.
+        | AppEvent::SkillManagerSyncConfirm
+        | AppEvent::SkillManagerUpdate
+        // `git commit` and `git push` in the user's repository.
+        | AppEvent::GitViewCommitConfirm
+        | AppEvent::QuickCommitConfirm
+        // `tmux rename-session` on a session ainb did not start.
+        | AppEvent::OtherTmuxConfirmRename
+        => true,
+        AppEvent::Quit
+        | AppEvent::Plugin { .. }
+        | AppEvent::PluginAction { .. }
+        | AppEvent::WatchPluginScreen { .. }
+        | AppEvent::NavigateTo(..)
+        | AppEvent::GoToHomeScreen
+        | AppEvent::NextSession
+        | AppEvent::PreviousSession
+        | AppEvent::NextWorkspace
+        | AppEvent::PreviousWorkspace
+        | AppEvent::ToggleHelp
+        | AppEvent::McpOverlayOpen
+        | AppEvent::McpOverlayClose
+        | AppEvent::McpOverlayPrev
+        | AppEvent::McpOverlayNext
+        | AppEvent::McpOverlayRefresh
+        | AppEvent::McpOverlayStopServer
+        | AppEvent::McpOverlayStopDaemon
+        | AppEvent::McpOverlayImport
+        | AppEvent::DaemonsRefresh
+        | AppEvent::DaemonsRepairHooks
+        | AppEvent::DaemonsPinHookBinary
+        | AppEvent::RefreshWorkspaces
+        | AppEvent::CycleSessionFilter
+        | AppEvent::ToggleClaudeChat
+        | AppEvent::NewSession
+        | AppEvent::SearchWorkspace
+        | AppEvent::DetachSession
+        | AppEvent::KillContainer
+        | AppEvent::ReauthenticateCredentials
+        | AppEvent::RestartSession
+        | AppEvent::DowngradeHeadroom
+        | AppEvent::DeleteSession
+        | AppEvent::ResumeSession(..)
+        | AppEvent::ResumeSelectedSessions(..)
+        | AppEvent::OpenInEditor
+        | AppEvent::OpenQuickShell
+        | AppEvent::CleanupOrphaned
+        | AppEvent::SwitchToLogs
+        | AppEvent::SwitchToTerminal
+        | AppEvent::GoToTop
+        | AppEvent::GoToBottom
+        | AppEvent::SwitchPaneFocus
+        | AppEvent::Consumed
+        | AppEvent::SessionTabNext
+        | AppEvent::SessionTabPrev
+        | AppEvent::SessionAskSend
+        | AppEvent::SessionTabComposerSend
+        | AppEvent::SessionStartHangarDaemon
+        | AppEvent::SessionListSelectRow { .. }
+        | AppEvent::SessionListOpenRowMenu { .. }
+        | AppEvent::SessionListFocusPane(..)
+        | AppEvent::SaveSessionsPaneLayout { .. }
+        | AppEvent::SkillManagerFocusPane(..)
+        | AppEvent::HomeSidebarSaveWidth { .. }
+        | AppEvent::MigrateLayoutWidths { .. }
+        | AppEvent::AttachFinished { .. }
+        | AppEvent::ShellPrepared { .. }
+        | AppEvent::AbtopSetupFinished { .. }
+        | AppEvent::InPlaceOpened { .. }
+        | AppEvent::ObserverOpened { .. }
+        | AppEvent::ObserverFailed { .. }
+        | AppEvent::TerminalExited { .. }
+        | AppEvent::TerminalInputClosed { .. }
+        | AppEvent::InPlaceFailed { .. }
+        | AppEvent::PluginActionUndelivered { .. }
+        | AppEvent::PluginInputUndelivered { .. }
+        | AppEvent::HostDisconnected { .. }
+        | AppEvent::Detached
+        | AppEvent::EditorFinished { .. }
+        | AppEvent::ClipboardFailed { .. }
+        | AppEvent::LoginFinished { .. }
+        | AppEvent::DaemonActionFinished { .. }
+        | AppEvent::PersistFailed { .. }
+        | AppEvent::GitReviewSelectRow { .. }
+        | AppEvent::GitViewScrollBy(..)
+        | AppEvent::HomeSidebarClickItem { .. }
+        | AppEvent::NewSessionCancel
+        | AppEvent::PickRepoPaste(..)
+        | AppEvent::ShowNotification(..)
+        | AppEvent::DismissNotifications
+        | AppEvent::FileFinderNavigateUp
+        | AppEvent::FileFinderNavigateDown
+        | AppEvent::FileFinderSelectFile
+        | AppEvent::FileFinderCancel
+        | AppEvent::ConfirmationToggle
+        | AppEvent::ConfirmationPrev
+        | AppEvent::ConfirmationConfirm
+        | AppEvent::ConfirmationCancel
+        | AppEvent::AuthSetupNext
+        | AppEvent::AuthSetupPrevious
+        | AppEvent::AuthSetupSelect
+        | AppEvent::AuthSetupCancel
+        | AppEvent::AuthSetupInputChar(..)
+        | AppEvent::AuthSetupBackspace
+        | AppEvent::AuthSetupCheckStatus
+        | AppEvent::AuthSetupRefresh
+        | AppEvent::AuthSetupShowCommand
+        | AppEvent::ShowGitView
+        | AppEvent::GitViewSwitchTab
+        | AppEvent::GitViewNextFile
+        | AppEvent::GitViewPrevFile
+        | AppEvent::GitViewScrollUp
+        | AppEvent::GitViewScrollDown
+        | AppEvent::GitViewNextCommit
+        | AppEvent::GitViewPrevCommit
+        | AppEvent::GitViewShowCommitDiff
+        | AppEvent::GitViewCommitPush
+        | AppEvent::GitViewBack
+        | AppEvent::GitCommitAndPush
+        | AppEvent::QuickCommitStart
+        | AppEvent::QuickCommitInputChar(..)
+        | AppEvent::QuickCommitBackspace
+        | AppEvent::QuickCommitCursorLeft
+        | AppEvent::QuickCommitCursorRight
+        | AppEvent::QuickCommitCancel
+        | AppEvent::GitViewStartCommit
+        | AppEvent::GitViewCommitInputChar(..)
+        | AppEvent::GitViewCommitBackspace
+        | AppEvent::GitViewCommitCursorLeft
+        | AppEvent::GitViewCommitCursorRight
+        | AppEvent::GitViewCommitCancel
+        | AppEvent::GitCommitSuccess(..)
+        | AppEvent::GitViewToggleFolder
+        | AppEvent::GitViewExpandAll
+        | AppEvent::GitViewCollapseAll
+        | AppEvent::GitReviewToggleCollapse
+        | AppEvent::GitReviewExpandContext
+        | AppEvent::GitReviewNextHunk
+        | AppEvent::GitReviewPrevHunk
+        | AppEvent::GitReviewNextReviewFile
+        | AppEvent::GitReviewPrevReviewFile
+        | AppEvent::GitReviewSidebarUp
+        | AppEvent::GitReviewSidebarDown
+        | AppEvent::GitReviewExpandAllFolders
+        | AppEvent::GitReviewCollapseAllFolders
+        | AppEvent::AttachTmuxSession
+        | AppEvent::EnterInteractivePane
+        | AppEvent::DetachTmuxSession
+        | AppEvent::ToggleExpandAll
+        | AppEvent::ToggleSessionMenuBar
+        | AppEvent::OtherTmuxStartRename
+        | AppEvent::OtherTmuxRenameChar(..)
+        | AppEvent::OtherTmuxRenameBackspace
+        | AppEvent::OtherTmuxCancelRename
+        | AppEvent::SshSessionStartRename
+        | AppEvent::SshSessionRenameChar(..)
+        | AppEvent::SshSessionRenameBackspace
+        | AppEvent::SshSessionConfirmRename
+        | AppEvent::SshSessionCancelRename
+        | AppEvent::SessionLabelStartRename
+        | AppEvent::SessionLabelRenameChar(..)
+        | AppEvent::SessionLabelRenameBackspace
+        | AppEvent::SessionLabelConfirmRename
+        | AppEvent::SessionLabelCancelRename
+        | AppEvent::SessionContextNext
+        | AppEvent::SessionContextPrev
+        | AppEvent::SessionContextActivate
+        | AppEvent::SessionContextCancel
+        | AppEvent::HomeScreenSelectTile
+        | AppEvent::HomeScreenNavigateUp
+        | AppEvent::HomeScreenNavigateDown
+        | AppEvent::HomeScreenNavigateLeft
+        | AppEvent::HomeScreenNavigateRight
+        | AppEvent::HomeScreenSidebarUp
+        | AppEvent::HomeScreenSidebarDown
+        | AppEvent::HomeScreenSidebarSelect
+        | AppEvent::HomeScreenToggleFocus
+        | AppEvent::StarSelectedWorkspace
+        | AppEvent::WelcomePanelScrollUp
+        | AppEvent::WelcomePanelScrollDown
+        | AppEvent::WelcomePanelPageUp
+        | AppEvent::WelcomePanelPageDown
+        | AppEvent::WelcomePanelCopyContent
+        | AppEvent::GoToConfig
+        | AppEvent::GoToSessionList
+        | AppEvent::GoToStats
+        | AppEvent::GoToWitr
+        | AppEvent::GoToLearnings
+        | AppEvent::GoToAbtop
+        | AppEvent::GoToSkills
+        | AppEvent::GoToSetupMenu
+        | AppEvent::GoToLogHistory
+        | AppEvent::GoToSkillManager
+        | AppEvent::SkillManagerBack
+        | AppEvent::SkillManagerDiscoveryImport
+        | AppEvent::SkillManagerDiscoveryToggleDetails
+        | AppEvent::SkillManagerDiscoverySkip
+        | AppEvent::SkillManagerConflictFlip
+        | AppEvent::SkillManagerSync
+        | AppEvent::SkillManagerSyncCancel
+        | AppEvent::SkillManagerSyncScroll(..)
+        | AppEvent::SkillManagerSelectPrev
+        | AppEvent::SkillManagerSelectNext
+        | AppEvent::SkillManagerSelectFirst
+        | AppEvent::SkillManagerSelectLast
+        | AppEvent::SkillManagerToggleFocus
+        | AppEvent::SkillManagerSourceSelectPrev
+        | AppEvent::SkillManagerSourceSelectNext
+        | AppEvent::SkillManagerApplySourceFilter
+        | AppEvent::SkillManagerClearSourceFilter
+        | AppEvent::SkillManagerSourceClick { .. }
+        | AppEvent::SkillManagerUnitClick { .. }
+        | AppEvent::SkillManagerSaveSourcesWidth { .. }
+        | AppEvent::SkillManagerRefreshDiscovery
+        | AppEvent::SkillManagerCheck
+        | AppEvent::SkillManagerRemove
+        | AppEvent::SkillManagerOpenAddSource
+        | AppEvent::SkillManagerOpenSearch
+        | AppEvent::SkillManagerInputChar(..)
+        | AppEvent::SkillManagerInputBackspace
+        | AppEvent::SkillManagerInputSubmit
+        | AppEvent::SkillManagerInputCancel
+        | AppEvent::SkillManagerOpenLibrary
+        | AppEvent::SkillManagerLibrarySelectPrev
+        | AppEvent::SkillManagerLibrarySelectNext
+        | AppEvent::SkillManagerLibraryEnter
+        | AppEvent::SkillManagerLibraryClose
+        | AppEvent::SkillManagerOpenBrowse
+        | AppEvent::SkillManagerBrowseInputChar(..)
+        | AppEvent::SkillManagerBrowseInputBackspace
+        | AppEvent::SkillManagerBrowseSearch
+        | AppEvent::SkillManagerBrowseSelectPrev
+        | AppEvent::SkillManagerBrowseSelectNext
+        | AppEvent::SkillManagerBrowseEditQuery
+        | AppEvent::SkillManagerBrowseToggleCatalog
+        | AppEvent::SkillManagerBrowseClose
+        | AppEvent::SkillManagerPreviewUp
+        | AppEvent::SkillManagerPreviewDown
+        | AppEvent::SkillManagerPreviewToggle
+        | AppEvent::SkillManagerPreviewAll
+        | AppEvent::SkillManagerPreviewNone
+        | AppEvent::SkillManagerPreviewTool(..)
+        | AppEvent::SkillManagerPreviewConfirm
+        | AppEvent::SkillManagerPreviewClose
+        | AppEvent::SkillManagerPreviewSource
+        | AppEvent::SkillManagerApplySourceFilterKey
+        | AppEvent::SkillManagerOpenUnitInEditor
+        | AppEvent::SkillManagerToggleLibrarySource
+        | AppEvent::SkillManagerCopyToLibrary
+        | AppEvent::SkillManagerSourceRemoveOpen
+        | AppEvent::SkillManagerSourceRemoveMove(..)
+        | AppEvent::SkillManagerSourceRemoveConfirm
+        | AppEvent::SkillManagerSourceRemoveCancel
+        | AppEvent::GoToRecovery
+        | AppEvent::GoToDaemons
+        | AppEvent::PanelBack
+        | AppEvent::GoToHangar
+        | AppEvent::ConfigBack
+        | AppEvent::ConfigNextCategory
+        | AppEvent::ConfigPrevCategory
+        | AppEvent::ConfigNextSetting
+        | AppEvent::ConfigPrevSetting
+        | AppEvent::ConfigSwitchPane
+        | AppEvent::ConfigNavigateUp
+        | AppEvent::ConfigNavigateDown
+        | AppEvent::ConfigFocusCategories
+        | AppEvent::ConfigFocusSettings
+        | AppEvent::ConfigEditSetting
+        | AppEvent::ConfigSaveEdit
+        | AppEvent::ConfigCancelEdit
+        | AppEvent::ConfigEditChar(..)
+        | AppEvent::ConfigEditBackspace
+        | AppEvent::ConfigSaveAll
+        | AppEvent::ConfigToggleExpand
+        | AppEvent::ConfigSearchStart
+        | AppEvent::ConfigSearchChar(..)
+        | AppEvent::ConfigSearchBackspace
+        | AppEvent::ConfigSearchCancel
+        | AppEvent::ConfigSecretToKeychain
+        | AppEvent::ConfigApiKeyStart
+        | AppEvent::ConfigApiKeySave
+        | AppEvent::ConfigApiKeyDelete
+        | AppEvent::AuthProviderPopupOpen
+        | AppEvent::AuthProviderPopupClose
+        | AppEvent::AuthProviderPopupNext
+        | AppEvent::AuthProviderPopupPrev
+        | AppEvent::AuthProviderPopupSelect
+        | AppEvent::AuthProviderPopupInputChar(..)
+        | AppEvent::AuthProviderPopupBackspace
+        | AppEvent::AuthProviderPopupDeleteKey
+        | AppEvent::ConfigPopupNavigateUp
+        | AppEvent::ConfigPopupNavigateDown
+        | AppEvent::ConfigPopupConfirm
+        | AppEvent::ConfigPopupCancel
+        | AppEvent::ConfigPopupInputChar(..)
+        | AppEvent::ConfigPopupBackspace
+        | AppEvent::ConfigPopupPaste(..)
+        | AppEvent::ConfigPopupPasteClipboard
+        | AppEvent::ConfigPopupDelete
+        | AppEvent::ConfigPopupCursorLeft
+        | AppEvent::ConfigPopupCursorRight
+        | AppEvent::ConfigPopupCursorHome
+        | AppEvent::ConfigPopupCursorEnd
+        | AppEvent::LogHistoryBack
+        | AppEvent::LogHistoryNextSession
+        | AppEvent::LogHistoryPrevSession
+        | AppEvent::LogHistorySelectSession
+        | AppEvent::LogHistoryToggleFocus
+        | AppEvent::LogHistoryScrollUp
+        | AppEvent::LogHistoryScrollDown
+        | AppEvent::LogHistoryPageUp
+        | AppEvent::LogHistoryPageDown
+        | AppEvent::LogHistoryCycleFilter
+        | AppEvent::LogHistoryRefresh
+        | AppEvent::LogHistoryCopySelection
+        | AppEvent::LogHistoryScrollLeft
+        | AppEvent::LogHistoryScrollRight
+        | AppEvent::LogHistoryScrollHome
+        | AppEvent::LogHistoryCleanup
+        | AppEvent::OnboardingNext
+        | AppEvent::OnboardingBack
+        | AppEvent::OnboardingToMenu
+        | AppEvent::OnboardingInputChar(..)
+        | AppEvent::OnboardingBackspace
+        | AppEvent::OnboardingDelete
+        | AppEvent::OnboardingCursorLeft
+        | AppEvent::OnboardingCursorRight
+        | AppEvent::OnboardingCursorHome
+        | AppEvent::OnboardingCursorEnd
+        | AppEvent::OnboardingCheckDeps
+        | AppEvent::OnboardingSkipAuth
+        | AppEvent::OnboardingAuthUp
+        | AppEvent::OnboardingAuthDown
+        | AppEvent::OnboardingAuthSelect
+        | AppEvent::OnboardingAuthKeyChar(..)
+        | AppEvent::OnboardingAuthKeyBackspace
+        | AppEvent::OnboardingAuthCancel
+        | AppEvent::OnboardingEditorUp
+        | AppEvent::OnboardingEditorDown
+        | AppEvent::OnboardingQuestionUp
+        | AppEvent::OnboardingQuestionDown
+        | AppEvent::OnboardingFinish
+        | AppEvent::OnboardingDepCursorUp
+        | AppEvent::OnboardingDepCursorDown
+        | AppEvent::OnboardingScriptPrompt
+        | AppEvent::OnboardingCancelScriptPrompt
+        | AppEvent::OnboardingGenerateScript(..)
+        | AppEvent::OnboardingOtelChar(..)
+        | AppEvent::OnboardingOtelBackspace
+        | AppEvent::OnboardingOtelNextField
+        | AppEvent::OnboardingOtelPrevField
+        | AppEvent::SetupMenuBack
+        | AppEvent::SetupMenuSelect
+        | AppEvent::SetupMenuUp
+        | AppEvent::SetupMenuDown
+        | AppEvent::StartOnboarding
+        | AppEvent::FactoryReset
+        | AppEvent::ShowChangelog
+        | AppEvent::ChangelogBack
+        | AppEvent::UsageWireStatusline
+        | AppEvent::SkillsBack
+        | AppEvent::SkillsNextProvider
+        | AppEvent::SkillsPrevProvider
+        | AppEvent::SkillsNextTab
+        | AppEvent::SkillsPrevTab
+        | AppEvent::SkillsScrollUp
+        | AppEvent::SkillsScrollDown
+        | AppEvent::SkillsPageUp
+        | AppEvent::SkillsPageDown
+        | AppEvent::SkillsToTop
+        | AppEvent::SkillsToBottom
+        | AppEvent::SkillsRefresh
+        | AppEvent::SkillsSearchStart
+        | AppEvent::SkillsSearchChar(..)
+        | AppEvent::SkillsSearchBackspace
+        | AppEvent::SkillsSearchClose
+        | AppEvent::SessionRecoveryBack
+        | AppEvent::SessionRecoveryNext
+        | AppEvent::SessionRecoveryPrev
+        | AppEvent::SessionRecoveryResume
+        | AppEvent::SessionRecoveryArchive
+        | AppEvent::SessionRecoveryRefresh
+        | AppEvent::SessionRecoveryToggleView
+        | AppEvent::SessionRecoveryRecoverAll
+        | AppEvent::SessionRecoveryToggleSelect
+        | AppEvent::SessionRecoveryDeleteSelected
+        | AppEvent::SessionRecoverySearchStart
+        | AppEvent::SessionRecoverySearchChar(..)
+        | AppEvent::SessionRecoverySearchBackspace
+        | AppEvent::SessionRecoverySearchClose
+        | AppEvent::SessionRecoverySearchCancel
+        | AppEvent::ToggleSelectSession
+        | AppEvent::DeleteSelectedSessions
+        | AppEvent::ConfigureLaunch(..)
+        | AppEvent::ConfigureBack
+        | AppEvent::ConfigureOpenPresetManager
+        | AppEvent::ConfigureOpenBranchPicker
+        | AppEvent::ConfigureInitRemoteRepo
+        => false,
+    }
+}
+
+/// Whether `action` writes outside ainb; see [`KeyAction::writes_outside_ainb`].
+///
+/// Exhaustive on purpose: a new variant does not compile until someone
+/// judges it.
+const fn ui_action_writes_outside_ainb(action: &UiAction) -> bool {
+    match action {
+        // `~/.claude/settings.json`.
+        UiAction::UsageWireStatusline
+        // Copying and removing skills write the tools' own skill dirs.
+        | UiAction::SkillManagerCopyToLibraryIfFocused
+        | UiAction::SkillManagerRemoveOrSource
+        // `s` previews a sync through the same `ainb_cli` dispatch that
+        // applies one; the walk cannot tell the dry run apart, so it is
+        // judged with the apply.
+        | UiAction::SkillManagerSyncOrConflict
+        => true,
+        UiAction::Scroll(..)
+        | UiAction::SessionComposerEnter
+        | UiAction::SessionComposerBackspace
+        | UiAction::SessionComposerEscape
+        | UiAction::SessionComposerUp
+        | UiAction::SessionComposerDown
+        | UiAction::SessionComposerFocusToggle
+        | UiAction::SessionComposerRetry
+        | UiAction::SessionComposerCancel
+        | UiAction::PalCycleEngine
+        | UiAction::PalCycleModel
+        | UiAction::PalCycleMode
+        | UiAction::PalRetry
+        | UiAction::SessionAskPrevious
+        | UiAction::SessionAskNext
+        | UiAction::SessionAskBackspace
+        | UiAction::SkillManagerShrinkSources
+        | UiAction::SkillManagerGrowSources
+        | UiAction::DaemonsCloseOverlay
+        | UiAction::DaemonsCloseAndBack
+        | UiAction::DaemonsConfirmMenu
+        | UiAction::DaemonsOpenMenu
+        | UiAction::DaemonsMoveOverlay(..)
+        | UiAction::DaemonsMoveSelection(..)
+        | UiAction::SkillManagerOpenUnitIfFocused
+        | UiAction::SkillManagerBackOrClearFilter
+        | UiAction::SessionActivateSelected
+        | UiAction::SessionResumeSelected
+        | UiAction::SessionStartRename
+        | UiAction::SessionHeadroomOrHelp
+        | UiAction::AttachSessionByPosition(..)
+        | UiAction::ToggleSessionsSidebar
+        => false,
+    }
+}
+
 /// One discoverable, overrideable row in the keymap.
 #[derive(Debug, Clone)]
 pub struct Binding {
@@ -1081,6 +1568,18 @@ pub struct Binding {
     pub chord: Option<Chord>,
     pub action: KeyAction,
     pub doc: &'static str,
+}
+
+impl Binding {
+    /// Whether this row runs only from its key, never from
+    /// `Intent::Command` (#1080): its action writes outside ainb, so no other
+    /// surface (a desktop webview, a mirror, a web client) may fire it by
+    /// name. Derived from the action, so no row can carry a writer without
+    /// the flag.
+    #[must_use]
+    pub fn key_only(&self) -> bool {
+        self.action.writes_outside_ainb()
+    }
 }
 
 /// Immutable resolved table. No dispatch code stores a mutable binding map.
@@ -1193,6 +1692,12 @@ impl Keymap {
     /// presses resolve through, overrides included.
     pub fn commands(&self) -> impl Iterator<Item = (CommandId, &Binding)> {
         self.bindings.iter().map(|binding| (CommandId::of(binding), binding))
+    }
+
+    /// Whether the row `id` runs only from its key; see [`Binding::key_only`].
+    #[must_use]
+    pub fn is_key_only(&self, id: &CommandId) -> bool {
+        self.command(id).is_some_and(Binding::key_only)
     }
 
     /// Look a command up by id. `None` for ids no row carries.

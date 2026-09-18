@@ -247,3 +247,136 @@ fn command_args_that_do_not_fit_the_row_change_nothing() {
         assert!(bumped(&before, &state.versions()).is_empty(), "{id} {args}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// The remote command gate judges state-dependent rows by state (#1080)
+// ---------------------------------------------------------------------------
+
+fn command(id: &str) -> Intent {
+    Intent::Command(CommandId::new(id), serde_json::Value::Null)
+}
+
+/// A dialog whose highlighted option is `action`, then Cancel.
+fn dialog_over(
+    action: ainb_app::app::state::ConfirmAction,
+) -> ainb_app::app::state::ConfirmationDialog {
+    use ainb_app::app::state::{ConfirmAction, ConfirmationDialog, DialogOption};
+    ConfirmationDialog {
+        title: "Confirm".to_string(),
+        message: String::new(),
+        confirm_action: action.clone(),
+        selected_option: false,
+        warning: None,
+        options: Some(vec![
+            DialogOption {
+                label: "Go".to_string(),
+                action,
+            },
+            DialogOption {
+                label: "Cancel".to_string(),
+                action: ConfirmAction::Cancel,
+            },
+        ]),
+        selected_index: 0,
+    }
+}
+
+#[test]
+fn a_remote_confirm_over_the_hook_install_is_refused() {
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.confirmation_dialog = Some(dialog_over(
+        ainb_app::app::state::ConfirmAction::InstallNotifyHooks,
+    ));
+
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        command("confirm_dialog.confirm"),
+    );
+
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(
+        state.shell.confirmation_dialog.is_some(),
+        "the refused confirm left the dialog open"
+    );
+}
+
+#[test]
+fn a_remote_confirm_over_a_session_delete_runs() {
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.confirmation_dialog = Some(dialog_over(
+        ainb_app::app::state::ConfirmAction::DeleteSession(uuid::Uuid::nil()),
+    ));
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        command("confirm_dialog.confirm"),
+    );
+
+    assert!(
+        state.shell.confirmation_dialog.is_none(),
+        "the confirm ran and closed the dialog"
+    );
+}
+
+/// The onboarding wizard on its welcome step, telemetry skipped or typed in.
+fn onboarding(otel_skip: bool) -> AppState {
+    use ainb_app::components::onboarding::{OnboardingState, OnboardingStep};
+    let mut state = AppState::new();
+    state.shell.current_screen = "onboarding".to_string();
+    state.onboarding.onboarding_state = Some(OnboardingState {
+        current_step: OnboardingStep::Welcome,
+        otel_skip,
+        otel_otlp_endpoint: "https://otlp.example.test".to_string(),
+        otel_instance_id: "123".to_string(),
+        otel_api_token: "token".to_string(),
+        ..OnboardingState::default()
+    });
+    state
+}
+
+fn onboarding_step(state: &AppState) -> ainb_app::components::onboarding::OnboardingStep {
+    state
+        .onboarding
+        .onboarding_state
+        .as_ref()
+        .expect("the wizard is open")
+        .current_step
+}
+
+#[test]
+fn a_remote_onboarding_next_with_telemetry_set_up_is_refused() {
+    use ainb_app::components::onboarding::OnboardingStep;
+    let keymap = Keymap::defaults();
+    let mut state = onboarding(false);
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        command("onboarding.welcome.next"),
+    );
+
+    assert_eq!(onboarding_step(&state), OnboardingStep::Welcome);
+}
+
+#[test]
+fn a_remote_onboarding_next_with_telemetry_skipped_runs() {
+    use ainb_app::components::onboarding::OnboardingStep;
+    let keymap = Keymap::defaults();
+    let mut state = onboarding(true);
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        command("onboarding.welcome.next"),
+    );
+
+    assert_ne!(onboarding_step(&state), OnboardingStep::Welcome);
+}

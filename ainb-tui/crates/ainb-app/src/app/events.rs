@@ -38,10 +38,6 @@ pub trait RendererHost {
     fn pointer(&mut self, state: &AppState, pos: Pos, btn: Btn) -> Option<Intent>;
 }
 
-/// Rows that write outside ainb (`global.wire_statusline` edits Claude Code's
-/// settings), so they run from a key press and never from `Intent::Command`.
-pub const KEY_ONLY_COMMANDS: &[&str] = &["global.wire_statusline"];
-
 /// A [`RendererHost`] with no renderer: layout work is dropped and nothing is
 /// under the pointer.
 #[derive(Debug, Default, Clone, Copy)]
@@ -1522,8 +1518,12 @@ impl EventHandler {
                 // runs only while its context is active and no overlay covers
                 // it, so a click resolved on one screen cannot act after the
                 // user has left it or opened a dialog over it.
-                if KEY_ONLY_COMMANDS.contains(&id.as_str()) {
+                if binding.key_only() {
                     tracing::warn!("command `{id}` runs only from its key");
+                    return None;
+                }
+                if let Some(why) = state.remote_command_refusal(&binding.action) {
+                    tracing::warn!("command `{id}` refused: {why}");
                     return None;
                 }
                 let host_authored = crate::app::reports::ids::ALL.contains(&id.as_str())
@@ -3319,14 +3319,7 @@ impl EventHandler {
             }
             AppEvent::ConfirmationConfirm => {
                 if let Some(dialog) = state.shell.confirmation_dialog.take() {
-                    let action = if let Some(options) = dialog.options.as_ref() {
-                        // Tri-option mode: pick the highlighted option's action.
-                        options.get(dialog.selected_index).map(|o| o.action.clone())
-                    } else if dialog.selected_option {
-                        Some(dialog.confirm_action.clone())
-                    } else {
-                        None
-                    };
+                    let action = dialog.selected_action().cloned();
 
                     if let Some(action) = action {
                         match action {

@@ -28,7 +28,7 @@ fn a_host_authored_command_is_refused() {
     {
         let renderer = RendererIntent::Command(CommandId::new(*id), serde_json::Value::Null);
         assert_eq!(
-            Intent::try_from(renderer),
+            Intent::try_from(renderer).map_err(|refusal| refusal.command),
             Err(CommandId::new(*id)),
             "`{id}` came from the webview"
         );
@@ -43,4 +43,16 @@ fn a_pointer_intent_is_refused() {
     ))
     .expect("serialises");
     assert!(serde_json::from_value::<RendererIntent>(wire).is_err());
+}
+
+/// The window reads a refusal as `{ command, reason }` to toast it.
+#[test]
+fn a_refusal_reads_as_the_row_and_the_reason() {
+    let id = ainb_app::app::reports::ids::ALL[0];
+    let renderer = RendererIntent::Command(CommandId::new(id), serde_json::Value::Null);
+    let refusal = Intent::try_from(renderer).expect_err("host-authored");
+    assert_eq!(
+        serde_json::to_value(&refusal).expect("serialises"),
+        serde_json::json!({ "command": id, "reason": refusal.reason })
+    );
 }
