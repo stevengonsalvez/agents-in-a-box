@@ -239,6 +239,18 @@ const DENY_WORDS: &[&str] = &[
 /// the text is safe on the wire. Keyed by the traced `Owner.field`.
 const NAME_ALLOW: &[(&str, &str)] = &[
     (
+        "FleetView.transcript",
+        "the open ACP transcript's window: at most 80 chunks, each body scrubbed before it is cut to 512 characters and scrubbed again on the frame; the default when none is open",
+    ),
+    (
+        "Transcript.session_key",
+        "the Fleet session the transcript belongs to (`acp:<id>`), an identity, not a credential",
+    ),
+    (
+        "TranscriptStatus::Unavailable.detail",
+        "the daemon client's own reason the transcript could not be read, scrubbed through redact::scrub",
+    ),
+    (
         "Conversation.scope_key",
         "the daemon's scope for the open thread (`session:<key>`, `channel:<id>`), an identity a second surface reads the same conversation by",
     ),
@@ -1039,6 +1051,8 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "BranchPickerState.filter_len",
     "Broadcast.text_len",
     "Conversation.composer_len",
+    "TranscriptChunk.body",
+    "TranscriptStatus::Unavailable.detail",
     "Conversation.send_block",
     "ConversationCard.arguments",
     "ConversationCard.detail",
