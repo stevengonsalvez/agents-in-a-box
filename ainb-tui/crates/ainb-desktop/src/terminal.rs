@@ -601,6 +601,16 @@ impl Terminals {
         ));
     }
 
+    /// Whether `key` names the tab the window is showing.
+    ///
+    /// The webview sizes a tab when it shows it, which is what marks it, so
+    /// this is the window's own answer to "is this pane in front of the
+    /// operator" without the renderer asserting it.
+    #[must_use]
+    pub fn showing(&self, key: &str) -> bool {
+        lock(&self.inner.in_view).as_deref() == Some(key)
+    }
+
     /// Size the tab's client to the webview's grid.
     ///
     /// The webview sizes a tab whenever it shows it, so this also marks the

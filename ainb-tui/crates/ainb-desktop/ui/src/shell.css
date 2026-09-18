@@ -339,3 +339,88 @@ body {
   background: var(--panel);
   color: var(--text);
 }
+
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  justify-content: center;
+  padding-top: 12vh;
+  background: rgba(25, 25, 35, 0.6);
+}
+
+.palette {
+  display: flex;
+  flex-direction: column;
+  width: min(640px, 90vw);
+  max-height: 60vh;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.palette-query {
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-size: 15px;
+  padding: 10px 14px;
+}
+
+.palette-query:focus {
+  outline: none;
+}
+
+.palette-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+}
+
+.palette-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+.palette-row.at {
+  background: var(--highlight);
+}
+
+.palette-row.inactive .palette-title {
+  color: var(--muted);
+}
+
+.palette-title,
+.palette-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-detail {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.palette-chord {
+  margin-left: auto;
+  color: var(--gold);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.palette .empty {
+  color: var(--muted);
+  padding: 10px 14px;
+}

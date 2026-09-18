@@ -284,10 +284,34 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "the plain-text popup variant (`Input` in its name); its value is scrubbed",
     ),
     (
+        "ConfigPopupType::NumberInput",
+        "the number popup variant (`Input` in its name); its buffer is scrubbed",
+    ),
+    (
+        "ConfigPopupType::NumberInput.input_buffer",
+        "digits being typed into a number setting, scrubbed; the popup draws them",
+    ),
+    (
         "ConfigPopupType::TextInput.value",
         "a plain setting being edited, scrubbed; secret and credential-bearing rows open SecretInput",
     ),
     ("ActionOutcome.detail", "daemon action output, scrubbed"),
+    (
+        "DepState.detail",
+        "a probed command's first output line, scrubbed on a frame",
+    ),
+    (
+        "FleetActionReceipt.detail",
+        "a broadcast leg's daemon detail, scrubbed by scrub_receipts",
+    ),
+    (
+        "FleetActionReceipt.idempotency_key",
+        "the tui-minted broadcast key (a uuid), not a credential",
+    ),
+    (
+        "FleetActionReceipt.session_key",
+        "the daemon's stable session identity a receipt names",
+    ),
     ("BrowseRow.install_uri", "catalog install URI, scrubbed"),
     ("ChangedFile.path", "repo-relative path of a changed file"),
     ("CloneProgress.url", "clone URL in progress, scrubbed"),
@@ -496,6 +520,10 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "clone URL, scrubbed so userinfo becomes `<redacted>@`",
     ),
     (
+        "RepoSource::SshUrl.0",
+        "ssh clone URL, scrubbed like the https one",
+    ),
+    (
         "ServerStatus.socket",
         "MCP pool socket path under ~/.agents-in-a-box/mcp/sockets, drawn in the overlay",
     ),
@@ -651,6 +679,26 @@ const DENY_TYPES: &[(&str, &str)] = &[
 
 /// Fields of a denied type that stay on the wire, each with its reason.
 const TYPE_ALLOW: &[(&str, &str)] = &[
+    (
+        "ConfirmAction::BulkDeleteSessions.0",
+        "ids of the sessions a bulk delete names; uuids, not text",
+    ),
+    (
+        "ConfirmAction::BulkStopSessions.0",
+        "ids of the sessions a bulk stop names; uuids, not text",
+    ),
+    (
+        "ConfirmAction::KillOtherTmuxSessions.0",
+        "tmux session names the kill dialog lists; the same names the tmux section carries",
+    ),
+    (
+        "ConfigPopupType::Choice.options",
+        "the choices a registry setting declares; labels, not user text",
+    ),
+    (
+        "DiscoveryBannerCounts.orphan_units_per_tool",
+        "(tool name, count) pairs; tool names come from the agent registry",
+    ),
     (
         "AgentDef.source_path",
         "agent definition file under ~/.claude/agents",
@@ -933,7 +981,19 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "OrphanedWorktree.last_commit",
     "Skill.description",
     "Snapshot.hook_health",
+    "DepState.detail",
+    "ImageSource.base_image",
+    "ImageSource.name",
+    "McpInstallation.branch",
+    "McpInstallation.package",
+    "McpInstallation.script",
+    "McpInstallation.version",
+    "BroadcastPhase::Failed.0",
+    "BroadcastPhase::Sent.0",
+    "ConfigPopupType::Choice.options",
+    "ConfigPopupType::NumberInput.input_buffer",
     "ConfigPopupType::TextInput.value",
+    "MarkdownStyle::CodeBlockHeader.0",
     "AgentAuthStatus.has_key",
     "AnswerPhase::Failed.draft_len",
     "AnswerPhase::InFlight.draft_len",
@@ -1003,7 +1063,11 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "PluginsHostView.plugin_render_errors",
     "RecoveryResultLine.detail",
     "RepoCheck::Failed.0",
+    "RepoSource::GithubShorthand.owner",
+    "RepoSource::GithubShorthand.repo",
     "RepoSource::HttpsUrl.0",
+    "RepoSource::SshSession.0",
+    "RepoSource::SshUrl.0",
     "RepositoryPreset.custom_rules",
     "RepositoryPreset.environment",
     "SecretValue.reference",
@@ -1098,10 +1162,6 @@ const UNFILLED_WAIVED: &[(&str, &str)] = &[
         "a GitFileStatus unit enum: filled, and a leaf by shape",
     ),
     (
-        "OnboardingState.dependency_status",
-        "detected-dependency report: static catalog labels and install hints, built by probing the machine",
-    ),
-    (
         "OrphanedWorktree.agent_type",
         "a SessionAgentType unit enum; no text",
     ),
@@ -1113,14 +1173,6 @@ const UNFILLED_WAIVED: &[(&str, &str)] = &[
     (
         "SessionFleetMetadata.lifecycle",
         "a LifecycleState unit enum; no text",
-    ),
-    (
-        "SessionLabelsView.session_context_menu",
-        "row indices and a cursor; no text",
-    ),
-    (
-        "SessionLabelsView.session_label_rename_target",
-        "row indices; no text",
     ),
     (
         "SetupMenuState.pending_action",
@@ -1293,6 +1345,10 @@ fn the_sample_fills_every_string_field() {
 /// Typed fields the frame shows on purpose, so their marker MUST appear. Every
 /// other typed label's marker must not.
 const CANARY_SHOWN: &[(&str, &str)] = &[
+    (
+        "config.number_popup",
+        "digits being typed into a number setting, scrubbed; the popup draws them",
+    ),
     (
         "fleet.ask.delivered_via",
         "how an answer was delivered, built from the tmux session name; the chip draws it",
@@ -1555,6 +1611,44 @@ fn deny_word_matching_is_word_aware() {
 /// The frame-only redaction must not reach config.toml, presets.toml or the
 /// session store: those writes go through the same `Serialize` impls, outside
 /// a frame, and have to keep the real values or a save wipes the bot tokens.
+/// A choice row is not always a closed registry list: a free-form row such as
+/// the preferred editor command is promoted from Text to Choice. Its options
+/// are scrubbed on the Config frame, in the settings row and in the popup it
+/// opens, the same as a Text row's value (#1153 review).
+#[test]
+fn a_choice_carrying_a_credential_is_scrubbed_in_the_row_and_the_popup() {
+    use ainb_app::app::state::ConfigValue;
+    use ainb_app::components::config_popup::ConfigPopupType;
+    isolated_home();
+    let token = credential_samples()[2].clone();
+    let option = format!("code --token {token}");
+    let mut state = shape::sample_state(&mut shape::PlainSeed);
+    {
+        let config = &mut *state.config;
+        let row = config
+            .config_screen_state
+            .settings
+            .values_mut()
+            .flatten()
+            .next()
+            .expect("the sample has a settings row");
+        row.value = ConfigValue::Choice(vec!["vim".to_string(), option.clone()], 1);
+        config.config_popup_state.popup_type = ConfigPopupType::Choice {
+            options: vec![option.clone()],
+            selected_index: 0,
+        };
+    }
+    let frame = section_json(&state, SectionId::Config, &HostId::local()).to_string();
+    assert!(
+        !frame.contains(&token),
+        "a choice option carried a credential onto the Config frame"
+    );
+    assert!(
+        frame.contains("code --token"),
+        "the option's harmless text is kept"
+    );
+}
+
 #[test]
 fn saves_outside_a_frame_keep_what_the_frame_withholds() {
     isolated_home();
@@ -1604,6 +1698,75 @@ fn saves_outside_a_frame_keep_what_the_frame_withholds() {
     );
 }
 
+/// The frame-only scrubs #1146 added (npm and python package and version, a
+/// claude-docker base image, a detected dependency's detail) leave disk and CLI
+/// output alone. Those fields are seeded only by the alternate samples, so the
+/// last of them is the one read here.
+#[test]
+fn frame_only_scrubs_leave_the_saved_config_and_the_dependency_report_alone() {
+    struct TokenSeed(String);
+    impl Seed for TokenSeed {
+        fn text(&mut self, label: &'static str, kind: TextKind) -> String {
+            match kind {
+                TextKind::Typed => format!("typed {label}"),
+                TextKind::Captured => format!("{label} {}", self.0),
+            }
+        }
+    }
+    isolated_home();
+    let plain = shape::sample_states(&mut shape::PlainSeed)
+        .pop()
+        .expect("the alternate samples");
+    let config = toml::to_string(&plain.config.app_config).expect("config serialises to TOML");
+    assert!(
+        config.contains("sample config.mcp.npm_package"),
+        "npm package kept on disk"
+    );
+    assert!(
+        config.contains("sample config.container.base_image"),
+        "base image kept on disk"
+    );
+    let dependencies = serde_json::to_string(
+        &plain
+            .onboarding
+            .onboarding_state
+            .as_ref()
+            .and_then(|wizard| wizard.dependency_status.as_ref())
+            .expect("the alternate sample reports dependencies"),
+    )
+    .expect("dependency report serialises");
+    assert!(
+        dependencies.contains("sample onboarding.dep.version"),
+        "a detected version kept outside a frame"
+    );
+
+    let token = credential_samples()[2].clone();
+    let seeded = shape::sample_states(&mut TokenSeed(token.clone()))
+        .pop()
+        .expect("the alternate samples");
+    let config = toml::to_string(&seeded.config.app_config).expect("config serialises to TOML");
+    for label in ["config.mcp.npm_package", "config.container.base_image"] {
+        assert!(
+            config.contains(&format!("{label} {token}")),
+            "{label} kept verbatim on disk"
+        );
+    }
+    let frame = section_json(&seeded, SectionId::Config, &HostId::local()).to_string();
+    let onboarding = section_json(&seeded, SectionId::Onboarding, &HostId::local()).to_string();
+    for (label, frame) in [
+        ("config.mcp.npm_package", &frame),
+        ("config.mcp.npm_version", &frame),
+        ("config.container.base_image", &frame),
+        ("onboarding.dep.version", &onboarding),
+    ] {
+        assert!(frame.contains(label), "{label} reaches its frame");
+        assert!(
+            !frame.contains(&format!("{label} {token}")),
+            "{label} reached its frame unscrubbed"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 5. Payload-carrying enum variants (#1145)
 // ---------------------------------------------------------------------------
@@ -1617,209 +1780,27 @@ const BINDINGS: &str = include_str!("../bindings/AppState.ts");
 /// `SessionStatus::Error` was exactly this until #1144 seeded it: it shipped a
 /// raw string past every gate. These are the same class, found when this test
 /// was written; the fix for each is to seed it in `wire::shape::sample_state`
-/// and regenerate the fixture, not to extend this list. A line that is no
+/// and regenerate the fixture, not to extend this list. The one case seeding
+/// cannot fix is a field the bindings still declare but the frame never emits
+/// (behind `omit_in_frame`): name it here with that reason. A line that is no
 /// longer missing fails too, so the list cannot go stale.
-const UNSEEDED_VARIANTS: &[(&str, &str)] = &[
-    (
-        "config.config_popup_state.popup_type.Boolean",
-        "ConfigPopupType: the sample opens the text and secret popups, not this one (#1146)",
-    ),
-    (
-        "config.config_popup_state.popup_type.Choice",
-        "ConfigPopupType: the sample opens the text and secret popups, not this one (#1146)",
-    ),
-    (
-        "config.config_popup_state.popup_type.NumberInput",
-        "ConfigPopupType: the sample opens the text and secret popups, not this one (#1146)",
-    ),
-    (
-        "fleet.broadcast.phase.Failed",
-        "BroadcastPhase: the sample never sets this phase (#1146)",
-    ),
-    (
-        "fleet.broadcast.phase.Sent",
-        "BroadcastPhase: the sample never sets this phase (#1146)",
-    ),
-    (
-        "fleet.daemon_attention.all{}.answerable.Broker",
-        "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
-    (
-        "fleet.daemon_attention.all{}.answerable.Daemon",
-        "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
-    (
-        "fleet.daemon_attention.all{}.answerable.No",
-        "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
-    (
-        "fleet.daemon_attention.by_session_id{}[].answerable.Broker",
-        "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
-    (
-        "fleet.daemon_attention.by_session_id{}[].answerable.Daemon",
-        "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
-    (
-        "fleet.daemon_attention.by_session_id{}[].answerable.No",
-        "Answerable: the sample never sets this route on a chip (#1146)",
-    ),
-    (
-        "git_view.git_view_state.markdown_content[].style.CodeBlockHeader",
-        "MarkdownStyle: the sample never renders this style (#1146)",
-    ),
-    (
-        "new_session.new_session_state.configure_state.repo_source.GithubShorthand",
-        "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.configure_state.repo_source.LocalPath",
-        "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.configure_state.repo_source.SshSession",
-        "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.configure_state.repo_source.SshUrl",
-        "RepoSource: the sample configures an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.pending_clone_source.GithubShorthand",
-        "RepoSource: the sample pending clone is an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.pending_clone_source.LocalPath",
-        "RepoSource: the sample pending clone is an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.pending_clone_source.SshSession",
-        "RepoSource: the sample pending clone is an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.pending_clone_source.SshUrl",
-        "RepoSource: the sample pending clone is an HTTPS repo, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.rows[].source.GithubShorthand",
-        "RepoSource: the sample repo rows are local paths, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.rows[].source.HttpsUrl",
-        "RepoSource: the sample repo rows are local paths, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.rows[].source.SshSession",
-        "RepoSource: the sample repo rows are local paths, not this source (#1146)",
-    ),
-    (
-        "new_session.new_session_state.pick_repo_state.rows[].source.SshUrl",
-        "RepoSource: the sample repo rows are local paths, not this source (#1146)",
-    ),
-    (
-        "onboarding.onboarding_state.auth_pane.MethodPicker",
-        "AuthPane: the sample auth pane is on key entry (#1146)",
-    ),
-    (
-        "onboarding.onboarding_state.focus.Item",
-        "OnboardingFocus: the sample never focuses an item (#1146)",
-    ),
-    (
-        "session_labels.session_context_menu.target.OtherTmux",
-        "AttachableRef: the sample never targets this ref from the context menu (#1146)",
-    ),
-    (
-        "session_labels.session_context_menu.target.SshSession",
-        "AttachableRef: the sample never targets this ref from the context menu (#1146)",
-    ),
-    (
-        "session_labels.session_context_menu.target.WorkspaceSession",
-        "AttachableRef: the sample never targets this ref from the context menu (#1146)",
-    ),
-    (
-        "session_labels.session_context_menu.target.WorkspaceShell",
-        "AttachableRef: the sample never targets this ref from the context menu (#1146)",
-    ),
-    (
-        "session_labels.session_label_rename_target.OtherTmux",
-        "AttachableRef: the sample never renames this ref (#1146)",
-    ),
-    (
-        "session_labels.session_label_rename_target.SshSession",
-        "AttachableRef: the sample never renames this ref (#1146)",
-    ),
-    (
-        "session_labels.session_label_rename_target.WorkspaceSession",
-        "AttachableRef: the sample never renames this ref (#1146)",
-    ),
-    (
-        "session_labels.session_label_rename_target.WorkspaceShell",
-        "AttachableRef: the sample never renames this ref (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.BulkDeleteSessions",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.BulkStopSessions",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.KillOtherTmux",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.KillOtherTmuxSessions",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.KillWorkspaceShell",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.McpStopServer",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.confirm_action.StopSession",
-        "ConfirmAction: the sample dialog confirms a session delete, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.BulkDeleteSessions",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.BulkStopSessions",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.KillOtherTmux",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.KillOtherTmuxSessions",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.KillWorkspaceShell",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.McpStopServer",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "shell.confirmation_dialog.options[].action.StopSession",
-        "ConfirmAction: the sample dialog options delete a session, not this (#1146)",
-    ),
-    (
-        "skills.skill_manager_state.banner.Details",
-        "DiscoveryBannerState: the sample never shows this banner state (#1146)",
-    ),
-    (
-        "skills.skill_manager_state.banner.Visible",
-        "DiscoveryBannerState: the sample never shows this banner state (#1146)",
-    ),
+const UNSEEDED_VARIANTS: &[(&str, &str)] = &[];
+
+/// The variants that carry each scrubbed field of an internally tagged enum.
+///
+/// The tracer names those fields by the enum alone (`McpInstallation.package`),
+/// because serde writes the variant as the tag's value. `SERIALIZER_REDACTED`
+/// therefore cannot say WHICH variants its entry was triaged for, and a new
+/// `Pip { package }` would inherit the pass unread. Pinning the carriers makes
+/// that new variant change the set and fail here instead (#1153 review).
+const TAGGED_SCRUB_CARRIERS: &[(&str, &str)] = &[
+    ("DepState.detail", "DepState::ok|alt|too_old"),
+    ("ImageSource.base_image", "ImageSource::ClaudeDocker"),
+    ("ImageSource.name", "ImageSource::Image"),
+    ("McpInstallation.branch", "McpInstallation::Git"),
+    ("McpInstallation.package", "McpInstallation::Npm|Python"),
+    ("McpInstallation.script", "McpInstallation::Custom"),
+    ("McpInstallation.version", "McpInstallation::Npm|Python"),
 ];
 
 /// Every externally tagged enum variant with a payload, reachable from a
@@ -1832,17 +1813,16 @@ const UNSEEDED_VARIANTS: &[(&str, &str)] = &[
 /// each section's view type gives the variants that must appear; the committed
 /// key-path fixture is what the sample actually reached.
 ///
-/// What this does NOT gate: internally tagged enums (`{ type: "Npm", ... }`).
-/// The variant name is a field's value, so no key path carries it, and the
-/// payload fields beside the tag are walked but gated by NOTHING today: the
-/// key-path fixture is built from the sample, so a variant the sample never
-/// seeds is missing from both sides and nothing fails. The sites, 18 members
-/// in all, are recorded against #1146:
-/// - `DepState` at `onboarding.onboarding_state.dependency_status.topics[].deps[].state`
-/// - `HealthFrame` at `agent_status.view.health`
-/// - `ImageSource` at `config.app_config.container_templates{}.config.image_source`
-/// - `McpInstallation` at `config.app_config.mcp_servers{}.installation`
-/// - `McpServerDefinition` at `config.app_config.mcp_servers{}.definition`
+/// Internally tagged enums (`{ type: "Npm", ... }`) are gated by their FIELDS
+/// (#1146): every field beside the tag is a leaf the fixture must hold, named
+/// in a failure by the variants that carry it (`McpInstallation::Npm|Python`).
+/// What that still cannot see:
+/// - a variant with no field besides its tag (`PreInstalled`, `Missing`), since
+///   the variant name is the tag's value and no key path carries it;
+/// - a variant whose fields are all shared with a seeded one (`Python` beside
+///   `Npm`), since the leaf is already present;
+/// - a payload field the bindings omit (`specta(skip)`, as on
+///   `McpServerDefinition::Json.config`), since the walk never sees it.
 #[test]
 fn every_payload_carrying_variant_reachable_from_a_section_is_seeded() {
     let bindings = Bindings::parse(BINDINGS);
@@ -1864,9 +1844,39 @@ fn every_payload_carrying_variant_reachable_from_a_section_is_seeded() {
     let reached = |variant: &String| {
         committed.contains(variant)
             || committed.iter().any(|path| {
-                path.starts_with(&format!("{variant}.")) || path.starts_with(&format!("{variant}["))
+                path.starts_with(&format!("{variant}."))
+                    || path.starts_with(&format!("{variant}["))
+                    || path.starts_with(&format!("{variant}{{"))
             })
     };
+
+    // Tagged field -> the variants carrying it, as the walk found them.
+    let mut carriers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (path, owner) in &expected {
+        if let Some((enum_name, _)) = owner.split_once("::") {
+            let field = path.rsplit('.').next().unwrap_or(path);
+            carriers
+                .entry(format!("{enum_name}.{field}"))
+                .or_default()
+                .insert(owner.clone());
+        }
+    }
+    let drifted: Vec<String> = TAGGED_SCRUB_CARRIERS
+        .iter()
+        .filter(|(field, pinned)| {
+            carriers
+                .get(*field)
+                .is_none_or(|found| found.iter().any(|owner| owner != pinned))
+        })
+        .map(|(field, pinned)| {
+            format!("{field}: pinned {pinned}, found {:?}", carriers.get(*field))
+        })
+        .collect();
+    assert!(
+        drifted.is_empty(),
+        "a scrubbed tagged field is carried by other variants than it was triaged \
+         for; re-triage it and update TAGGED_SCRUB_CARRIERS:\n{drifted:#?}"
+    );
 
     let allowed: BTreeSet<&str> = UNSEEDED_VARIANTS.iter().map(|(path, _)| *path).collect();
     let missing: Vec<String> = expected
@@ -1969,12 +1979,29 @@ impl Bindings {
                     // field's VALUE, which no key path can carry. The tag
                     // itself is already a leaf the fixture locks. Its PAYLOAD
                     // still reaches the wire as ordinary fields beside the
-                    // tag, so those are walked here (#1145).
-                    for (field, field_ty) in struct_fields(member) {
-                        if field == key {
+                    // tag, so those are walked here (#1145), and each one is
+                    // recorded as a leaf the fixture must hold, named by the
+                    // variant that carries it (#1146).
+                    let fields = struct_fields(member);
+                    let tag = fields
+                        .iter()
+                        .find(|(field, _)| *field == key)
+                        .map_or("?", |(_, value)| value.trim().trim_matches('"'))
+                        .to_string();
+                    let owner = chain.last().map_or_else(
+                        || "(inline enum)".to_string(),
+                        |name| name.trim_end_matches("_Serialize").to_string(),
+                    );
+                    for (field, field_ty) in &fields {
+                        if *field == key {
                             continue;
                         }
-                        self.walk(&field_ty, &format!("{path}.{field}"), chain, found);
+                        let field_path = format!("{path}.{field}");
+                        found
+                            .entry(field_path.clone())
+                            .and_modify(|carriers| carriers.push_str(&format!("|{tag}")))
+                            .or_insert_with(|| format!("{owner}::{tag}"));
+                        self.walk(field_ty, &field_path, chain, found);
                     }
                     continue;
                 }

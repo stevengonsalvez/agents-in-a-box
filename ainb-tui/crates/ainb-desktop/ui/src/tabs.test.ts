@@ -35,6 +35,17 @@ test("elsewhere the shell's mod is ctrl+shift and plain ctrl reaches the pane", 
   assert.equal(accelerator(key("Digit1", { meta: true }), false), null);
 });
 
+test("copy and paste are the shell's only elsewhere, and native on macOS", () => {
+  assert.deepEqual(accelerator(key("KeyC", { ctrl: true, shift: true }), false), { kind: "copy" });
+  assert.deepEqual(accelerator(key("KeyV", { ctrl: true, shift: true }), false), { kind: "paste" });
+  // The pane keeps plain ctrl+c and ctrl+v.
+  assert.equal(accelerator(key("KeyC", { ctrl: true }), false), null);
+  assert.equal(accelerator(key("KeyV", { ctrl: true }), false), null);
+  // macOS: the Edit menu copies and pastes, so the shell claims neither.
+  assert.equal(accelerator(key("KeyC", { meta: true }), true), null);
+  assert.equal(accelerator(key("KeyV", { meta: true }), true), null);
+});
+
 test("Esc twice within 300 ms leaves the terminal; a slower pair does not", () => {
   const esc = escEsc();
   assert.equal(esc(1000), false);

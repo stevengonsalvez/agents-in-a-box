@@ -7,8 +7,19 @@ import { createFrameStore } from "./store.ts";
 import { shellSessions, SUBSCRIBED } from "./subscription.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
+import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
-import { accelerator, openRowIntent, rowOf, stepTab, type Accelerator, type RowId, type Tab, type TabsView } from "./tabs.ts";
+import {
+  accelerator,
+  openRowIntent,
+  rowOf,
+  stepTab,
+  type Accelerator,
+  type RendererIntent,
+  type RowId,
+  type Tab,
+  type TabsView,
+} from "./tabs.ts";
 import { TerminalView } from "./terminal.tsx";
 import "./shell.css";
 
@@ -85,8 +96,19 @@ function Shell() {
     if (view.focus !== null) activate(view.focus);
     else if (!view.tabs.some((tab) => tab.key === active())) activate(view.tabs[0]?.key ?? null);
   };
+  const dispatch = (intent: RendererIntent) => void invoke("dispatch", { intent });
   /** Select a session-list row and attach it, so the reducer marks it attached. */
-  const openRow = (row: RowId) => void invoke("dispatch", { intent: openRowIntent(row) });
+  const openRow = (row: RowId) => dispatch(openRowIntent(row));
+
+  // The palette is mounted only while it is open: each opening lists the
+  // commands afresh, with the host's answer for which of them run now.
+  const [palette, setPalette] = createSignal(false);
+  const closePalette = () => {
+    setPalette(false);
+    const key = active();
+    if (key !== null) focusers.get(key)?.();
+    else sidebar?.focus();
+  };
   const choose = (tab: Tab) => {
     if (tab.state === "detached") openRow(rowOf(tab.target));
     activate(tab.key);
@@ -107,10 +129,20 @@ function Shell() {
         if (key !== null) void invoke("terminal_close", { key });
         return;
       }
-      // ponytail: the palette is D1d, the attention jump D2, the host switcher R1.
-      case "palette":
+      // ponytail: the attention jump is D2, the host switcher R1.
       case "attention":
       case "hosts":
+        return;
+      // Answered by the terminal that has focus; outside one there is no
+      // selection to copy and nowhere to paste.
+      case "copy":
+      case "paste":
+        return;
+      case "palette":
+        // The second press closes it the way Esc does, so focus goes back to
+        // the pane or the sidebar rather than to the body.
+        if (palette()) closePalette();
+        else setPalette(true);
         return;
     }
   };
@@ -155,6 +187,19 @@ function Shell() {
       const batches = queue;
       queue = [];
       store.applyDrain(host, batches);
+      // What the renderer applied, for the proof harness to read from the
+      // log. Names and a count, never a body, and never a drain that carried
+      // nothing for this window.
+      const applied = [...new Set(batches.flatMap(({ frames }) => frames.map((frame) => frame.section)))];
+      // A drain carrying nothing but the loading flag is not something the
+      // renderer applied for a reader to see, and the window asks for a scan
+      // on a cadence, so reporting it would append a line forever.
+      if (applied.some((section) => section !== "workspace_load")) {
+        void invoke("renderer_applied", {
+          sections: applied,
+          sessions: allSessions(store.section(host, "sessions")).length,
+        });
+      }
     };
     const frames = new Channel<FrameBatch_Serialize>();
     frames.onmessage = (batch) => {
@@ -310,6 +355,9 @@ function Shell() {
           </For>
         </section>
       </div>
+      <Show when={palette()}>
+        <Palette sessions={sessions()} onChoose={dispatch} onClose={closePalette} />
+      </Show>
       <div class="toasts" aria-live="polite">
         <For each={toasts()}>{(entry) => <div class="toast">{entry.text}</div>}</For>
       </div>

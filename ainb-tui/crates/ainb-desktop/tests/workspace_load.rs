@@ -56,3 +56,42 @@ fn a_started_workspace_load_is_applied_on_a_later_tick() {
         let _ = host.tick();
     }
 }
+
+/// A session another process creates reaches the sidebar only because the tick
+/// keeps asking for a fresh scan, so the tick starts a second one on its own.
+/// The sidebar's loading flag is the first load's alone, so the second scan is
+/// seen through the host's own "a scan is running" answer.
+#[test]
+fn the_tick_starts_another_scan_once_the_cadence_has_passed() {
+    support::isolated_home();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let _runtime = runtime.enter();
+
+    let mut host = DesktopHost::new(
+        AppConfig::default(),
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::only(&[SectionId::WorkspaceLoad]),
+        |_batch: FrameBatch| {},
+    )
+    // Long enough to be a cadence rather than a loop, short enough for a test.
+    .rescanning_every(Duration::from_secs(1));
+
+    // Nothing is started by hand here: the first scan is the tick's too.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut scans = 0_u8;
+    let mut running = false;
+    while scans < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the tick started {scans} scan(s), not two"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = host.tick();
+        let now = host.state().workspace_scan_running();
+        if now && !running {
+            scans += 1;
+        }
+        running = now;
+    }
+}
