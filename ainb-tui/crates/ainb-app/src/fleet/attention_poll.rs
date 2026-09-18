@@ -110,7 +110,7 @@ pub fn spawn(
                         *cell = next.clone();
                     }
                     if let Ok(mut cell) = snapshot_shared.lock() {
-                        *cell = last_snapshot.clone();
+                        cell.clone_from(&last_snapshot);
                     }
                     // Published AFTER both cells, so a render that sees the
                     // new generation sees the rows that go with it.
@@ -327,7 +327,7 @@ mod tests {
             !changed_since(Some(&published), &quiet, &[]),
             "the same picture again publishes nothing"
         );
-        let down = DaemonAttention::down_cached(quiet.clone(), "socket gone".to_string(), true);
+        let down = DaemonAttention::down_cached(quiet, "socket gone".to_string(), true);
         assert!(
             changed_since(Some(&published), &down, &[]),
             "a daemon going away is news"
