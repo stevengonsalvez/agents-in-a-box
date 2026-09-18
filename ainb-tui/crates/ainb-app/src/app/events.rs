@@ -1328,6 +1328,14 @@ impl EventHandler {
         // fire session shortcuts one character at a time.
         let session_composer_active = state.shell.current_screen == screen_ids::SESSION_LIST
             && state.session_composer_captures_text();
+        // The `ask` pane's free-text answer is a composer too: the keymap
+        // already puts the text context on top while it has focus, and this
+        // predicate is what the paste route reads, so without it a pasted
+        // answer (and a renderer's `Intent::Text`) was dropped on the floor.
+        let ask_free_text_active = state.shell.current_screen == screen_ids::SESSION_LIST
+            && crate::components::session_tabs::resolve(state, state.shell.session_tab)
+                == crate::components::session_tabs::SessionTab::Ask
+            && state.fleet.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText;
         let skills_text_active = state.shell.current_screen == screen_ids::SKILLS
             && state.skills.skills_state.search_active;
         let recovery_text_active = state.shell.current_screen == screen_ids::SESSION_RECOVERY
@@ -1408,6 +1416,7 @@ impl EventHandler {
             || skill_manager_input_active
             || git_view_text_active
             || session_composer_active
+            || ask_free_text_active
     }
 
     /// Pure decision logic shared between the production global-`W`
