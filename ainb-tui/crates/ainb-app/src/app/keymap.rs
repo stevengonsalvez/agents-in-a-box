@@ -1540,6 +1540,7 @@ const fn ui_action_writes_outside_ainb(action: &UiAction) -> bool {
         | UiAction::SessionAskPrevious
         | UiAction::SessionAskNext
         | UiAction::SessionAskBackspace
+        | UiAction::SessionAskClear
         | UiAction::SkillManagerShrinkSources
         | UiAction::SkillManagerGrowSources
         | UiAction::DaemonsCloseOverlay
