@@ -245,6 +245,7 @@ function Shell() {
   const idle = createMemo(() => ROOT_SELECTORS.idleCount(store, host()));
   const sessionsStale = createMemo(() => ROOT_SELECTORS.sessionsStale(store, host()));
   const loading = createMemo(() => ROOT_SELECTORS.workspacesLoading(store, host()));
+  const elsewhere = createMemo(() => ROOT_SELECTORS.attentionElsewhere(store, host()));
 
   /** A tab's title: its session's name when the sidebar knows it. */
   const title = (tab: Tab) => {
@@ -363,6 +364,7 @@ function Shell() {
               agentStatus={agentStatus()}
               fleet={fleet()}
               sessions={sessions()}
+              elsewhere={elsewhere()}
               onChoose={dispatch}
             />
           </Show>
