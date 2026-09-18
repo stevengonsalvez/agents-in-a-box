@@ -22,9 +22,23 @@ import type {
   Session_Serialize,
 } from "../../../ainb-app/bindings/AppState";
 import { allSessions, ATTENTION_ORDER, label } from "./sessions.ts";
+import type { RendererIntent } from "./tabs.ts";
+
+/**
+ * What each column is called, in the operator's words rather than the wire's,
+ * left to right. Typed over every `AgentState`, so a state Rust adds fails to
+ * compile here instead of every card in it vanishing from the board.
+ */
+export const COLUMN_TITLES: Record<AgentState, string> = {
+  waiting: "Waiting on you",
+  working: "Working",
+  idle: "Idle",
+  unverifiable: "Unverified",
+  exited: "Exited",
+};
 
 /** The columns the board draws, left to right. */
-export const COLUMNS: readonly AgentState[] = ["waiting", "working", "idle", "unverifiable", "exited"];
+export const COLUMNS = Object.keys(COLUMN_TITLES) as AgentState[];
 
 /** One card on the board. */
 export interface BoardCard {
@@ -208,4 +222,16 @@ export function elsewhereCount(fleet: FleetView_Serialize | undefined): number {
 /** Whether the daemon answered the last attention poll. */
 export function daemonReachable(fleet: FleetView_Serialize | undefined): boolean {
   return fleet?.daemon_attention?.reachable ?? false;
+}
+
+/**
+ * What a click on a card or an attention row sends: its session list row
+ * selected WITHOUT attaching it (a terminal is a decision of its own), then the
+ * pane the click is about, which is `ask` when something is open on that agent.
+ */
+export function showIntents(sessionId: string, openRequest: boolean): RendererIntent[] {
+  return [
+    { Command: ["session_list.select_row", { target: { session: sessionId }, open: false }] },
+    { Command: ["session_list.select_tab", { tab: openRequest ? "Ask" : "Preview" }] },
+  ];
 }

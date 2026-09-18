@@ -8,7 +8,7 @@ import type {
   FleetView_Serialize,
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
-import { attentionRows, boardColumns, boardHealth, COLUMNS, elsewhereCount } from "./board.ts";
+import { attentionRows, boardColumns, boardHealth, COLUMNS, elsewhereCount, showIntents } from "./board.ts";
 
 function card(sessionKey: string, over: Partial<AgentCardFrame> = {}): AgentCardFrame {
   return {
@@ -140,4 +140,12 @@ test("rows waiting elsewhere are counted, never swallowed", () => {
   fleet.attention_elsewhere = 2;
   assert.equal(elsewhereCount(fleet), 2);
   assert.equal(elsewhereCount(undefined), 0);
+});
+
+test("a click selects the row without attaching it, then shows the pane it is about", () => {
+  assert.deepEqual(showIntents("u-1", true), [
+    { Command: ["session_list.select_row", { target: { session: "u-1" }, open: false }] },
+    { Command: ["session_list.select_tab", { tab: "Ask" }] },
+  ]);
+  assert.deepEqual(showIntents("u-1", false)[1], { Command: ["session_list.select_tab", { tab: "Preview" }] });
 });

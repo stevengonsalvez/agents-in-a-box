@@ -118,7 +118,14 @@ function Shell() {
       if (!view.tabs.some((tab) => tab.key === key)) focusers.delete(key);
     }
     if (view.focus !== null) activate(view.focus);
-    else if (!view.tabs.some((tab) => tab.key === active())) activate(view.tabs[0]?.key ?? null);
+    else if (!view.tabs.some((tab) => tab.key === active())) {
+      // The shown tab ended (an unrelated tmux session died, say): point at
+      // the next one WITHOUT leaving the board. `activate` means a person chose
+      // a terminal; this is the strip tidying up after itself.
+      const next = view.tabs[0]?.key ?? null;
+      setActive(next);
+      if (next !== null && !board()) requestAnimationFrame(() => focusers.get(next)?.());
+    }
   };
   const dispatch = (intent: RendererIntent) => void invoke("dispatch", { intent });
   /**

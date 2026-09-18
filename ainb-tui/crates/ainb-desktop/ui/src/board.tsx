@@ -1,16 +1,16 @@
 import { createMemo, For, Show } from "solid-js";
-import type {
-  AgentStatusView,
-  FleetView_Serialize,
-  SessionsView_Serialize,
-} from "../../../ainb-app/bindings/AppState";
+import type { AgentStatusView, FleetView_Serialize, SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
 import {
   attentionRows,
   boardColumns,
   boardHealth,
+  COLUMN_TITLES,
   daemonReachable,
+  showIntents,
   type BoardCard,
+  type BoardColumn,
 } from "./board.ts";
+import { label } from "./sessions.ts";
 import type { RendererIntent } from "./tabs.ts";
 
 interface Props {
@@ -26,14 +26,14 @@ interface Props {
   onChoose(intent: RendererIntent): void;
 }
 
-/** What each column is called, in the operator's words rather than the wire's. */
-const COLUMN_TITLES: Record<string, string> = {
-  waiting: "Waiting on you",
-  working: "Working",
-  idle: "Idle",
-  unverifiable: "Unverified",
-  exited: "Exited",
-};
+/**
+ * Whether two projections draw the same board. A drain that touches Sessions,
+ * Fleet or agent_status recomputes the columns; without this every card button
+ * would be rebuilt, and a keyboard user's focus dropped, on every one.
+ */
+function sameColumns(a: BoardColumn[], b: BoardColumn[]): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
 
 /**
  * The board: every agent the host knows about, in the column its state names,
@@ -44,18 +44,15 @@ const COLUMN_TITLES: Record<string, string> = {
  * is the `ask` pane when something is open on that agent.
  */
 export function Board(props: Props) {
-  const columns = createMemo(() => boardColumns(props.agentStatus, props.fleet, props.sessions));
+  const columns = createMemo(() => boardColumns(props.agentStatus, props.fleet, props.sessions), undefined, {
+    equals: sameColumns,
+  });
   const health = createMemo(() => boardHealth(props.agentStatus));
   const waiting = createMemo(() => attentionRows(props.fleet, props.sessions));
 
-  const show = (sessionId: string | null, tab: "Ask" | "Preview") => {
+  const show = (sessionId: string | null, openRequest: boolean) => {
     if (sessionId === null) return;
-    // Selected, not attached: the board is a place to look, and a terminal is
-    // a decision of its own.
-    props.onChoose({
-      Command: ["session_list.select_row", { target: { session: sessionId }, open: false }],
-    });
-    props.onChoose({ Command: ["session_list.select_tab", { tab }] });
+    for (const intent of showIntents(sessionId, openRequest)) props.onChoose(intent);
   };
 
   const healthLine = () => {
@@ -86,7 +83,7 @@ export function Board(props: Props) {
           {(column) => (
             <div class="board-column" data-state={column.state}>
               <h2>
-                {COLUMN_TITLES[column.state] ?? column.state}
+                {COLUMN_TITLES[column.state]}
                 <span class="board-count">{column.cards.length}</span>
               </h2>
               <Show when={column.cards.length > 0} fallback={<p class="empty">Nothing here</p>}>
@@ -100,14 +97,18 @@ export function Board(props: Props) {
                           classList={{ open: card.hasOpenRequest }}
                           data-card={card.key}
                           disabled={card.sessionId === null}
-                          onClick={() => show(card.sessionId, card.hasOpenRequest ? "Ask" : "Preview")}
+                          onClick={() => show(card.sessionId, card.hasOpenRequest)}
                         >
                           <span class="card-title">{card.title}</span>
                           <span class="card-line">{cardLine(card)}</span>
                           <Show when={card.attention.length > 0}>
                             <span class="card-chips">
                               <For each={card.attention}>
-                                {(kind) => <span class="chip" data-kind={kind}>{kind}</span>}
+                                {(kind) => (
+                                  <span class="chip" data-kind={kind}>
+                                    {kind}
+                                  </span>
+                                )}
                               </For>
                             </span>
                           </Show>
@@ -126,9 +127,7 @@ export function Board(props: Props) {
         <Show
           when={waiting().length > 0}
           fallback={
-            <p class="empty">
-              {daemonReachable(props.fleet) ? "Nothing is waiting" : "The daemon has not answered"}
-            </p>
+            <p class="empty">{daemonReachable(props.fleet) ? "Nothing is waiting" : "The daemon has not answered"}</p>
           }
         >
           <ul>
@@ -141,7 +140,7 @@ export function Board(props: Props) {
                     data-row={row.key}
                     data-kind={row.kind}
                     disabled={row.sessionId === null}
-                    onClick={() => show(row.sessionId, "Ask")}
+                    onClick={() => show(row.sessionId, true)}
                   >
                     <span class="row-kind">{row.kind}</span>
                     <span class="row-title">{row.title}</span>
@@ -166,7 +165,14 @@ export function Board(props: Props) {
 
 /** The line under a card's title: what it is and how it is reachable. */
 function cardLine(card: BoardCard): string {
-  const parts = [card.provider, card.model, card.lifecycle.toLowerCase(), card.waitKind];
+  // The model is free text off the frame, drawn through the same rule as a
+  // session name, so a bidi override or an escape cannot restyle the card.
+  const parts = [
+    card.provider,
+    card.model === null ? null : label(card.model),
+    card.lifecycle.toLowerCase(),
+    card.waitKind,
+  ];
   if (card.transport !== "HEALTHY") parts.push(`transport ${card.transport.toLowerCase()}`);
   return parts.filter((part): part is string => Boolean(part)).join(" · ");
 }
