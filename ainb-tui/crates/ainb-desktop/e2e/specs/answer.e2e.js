@@ -49,13 +49,36 @@ function askLine(eventId, sessionId, cwd) {
   };
 }
 
+/** `value` as an SQL string literal, its quotes doubled. */
+function sqlText(value) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+/**
+ * What the window asked the host to do, in order: each `renderer intent` line
+ * the desktop logged, as a command id, or `key` / `text` for the kinds whose
+ * content is never logged.
+ */
+function intentsSent() {
+  let lines = "";
+  try {
+    lines = run("sh", ["-c", 'cat "$1"/desktop.log* 2>/dev/null | grep "renderer intent"', "log", env().AINB_HANGAR_HOME]);
+  } catch {
+    return [];
+  }
+  return lines
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.match(/command="?([\w.]+)/)?.[1] ?? line.match(/kind="?(\w+)/)?.[1] ?? "unknown");
+}
+
 /** The daemon's own record of one attention row, read by a separate process. */
 function attentionRow(id) {
   const db = join(env().AINB_HANGAR_HOME, "hangar.db");
   try {
     return run("sqlite3", [
       db,
-      `SELECT state || '|' || COALESCE(answered_by, '') || '|' || COALESCE(answer, '') FROM attention WHERE id = '${id}';`,
+      `SELECT state || '|' || COALESCE(answered_by, '') || '|' || COALESCE(answer, '') FROM attention WHERE id = ${sqlText(id)};`,
     ]).trim();
   } catch {
     return "";
@@ -139,6 +162,7 @@ describe("answering from the window", () => {
     // second redraw the banner, so a button looked up by the driver can be
     // replaced before its click lands. The click event is the page's own, so
     // the button's handler runs exactly as it does for a person.
+    const sentBefore = intentsSent().length;
     const clicked = await browser.execute((index) => {
       const option = document.querySelector(`.answer-banner .answer-option[data-option="${index}"]`);
       option?.click();
@@ -157,6 +181,18 @@ describe("answering from the window", () => {
       60_000,
       () => `the banner never read delivered (last phase: ${phase || "none"}; row: ${attentionRow(request)}; pane: ${paneText(target.tmux).trim().split("\n").slice(-3).join(" / ")})\n${desktopLog()}`,
     );
+
+    // What the window sent for that pick, from the host's own log: the
+    // reducer's session list commands, one Enter, and nothing it authored.
+    const sent = intentsSent().slice(sentBefore);
+    const picked = sent.filter((id) => id.startsWith("session_list."));
+    assert.deepEqual(
+      sent.filter((id) => !id.startsWith("session_list.")),
+      [],
+      `the pick sent only session list commands: ${sent.join(", ")}`,
+    );
+    assert.equal(picked.at(-1), "session_list.ask.enter", `the pick ends in Enter: ${picked.join(", ")}`);
+    assert.equal(picked.filter((id) => id === "session_list.ask.enter").length, 1, "and sends exactly once");
 
     // The last mile: the agent in the pane read the label.
     await browser.waitUntil(() => paneText(target.tmux).includes(`agent read: ${OPTIONS[PICK]}`), {
@@ -209,7 +245,7 @@ describe("answering from the window", () => {
     await $(".board-tab .tab-title").click();
     await $(card).waitForExist({
       timeout: 30_000,
-      timeoutMsg: "the card for the unanswered row is still waiting (#1049)",
+      timeoutMsg: "the card for the unanswered row left the waiting column (#1049 keeps it there)",
     });
   });
 });
