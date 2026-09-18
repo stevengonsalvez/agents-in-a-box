@@ -880,7 +880,8 @@ mod agent_status {
         let mut host = status_host(&frames);
         deliver(&host, StatusOutcome::Read(acp_roster()));
         let _ = host.tick();
-        // A read is in flight when the daemon goes; the worker holds the inbox.
+        // Stands in for a worker started before the outage: it keeps the inbox
+        // it was handed, whatever the host does with its own after.
         let before = host.agent_status_reports();
         host.daemon_lost("reconnecting");
         host.daemon_connected();
