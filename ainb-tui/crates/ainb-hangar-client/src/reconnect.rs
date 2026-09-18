@@ -287,7 +287,7 @@ async fn run_reconnecting_fleet(
         let dial_fut = async {
             let client = dialer()?;
             let (subscribe_result, subscription) = client.open_fleet_subscription(covered).await?;
-            Ok::<_, DaemonError>((subscribe_result, subscription))
+            Ok::<_, DaemonError>((client.socket().to_path_buf(), subscribe_result, subscription))
         };
 
         let dial_res = tokio::select! {
@@ -299,7 +299,7 @@ async fn run_reconnecting_fleet(
         };
 
         let last_error: Option<String> = match dial_res {
-            Ok((subscribe_result, mut subscription)) => {
+            Ok((socket, subscribe_result, mut subscription)) => {
                 let connected_at = std::time::Instant::now();
                 state_tx.send_replace(ConnectionState::Connected);
 
@@ -356,6 +356,7 @@ async fn run_reconnecting_fleet(
                                     }
                                 }
                                 Err(err) => {
+                                    crate::reset_host_id(&socket);
                                     disconnect_error = Some(err.to_string());
                                     break;
                                 }
@@ -370,7 +371,12 @@ async fn run_reconnecting_fleet(
                 }
                 disconnect_error
             }
-            Err(err) => Some(err.to_string()),
+            Err(err) => {
+                if let Ok(client) = dialer() {
+                    crate::reset_host_id(client.socket());
+                }
+                Some(err.to_string())
+            }
         };
 
         let delay = timing.delay_for_attempt(attempt);
