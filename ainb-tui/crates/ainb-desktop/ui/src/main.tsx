@@ -6,6 +6,8 @@ import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/Ap
 import { createFrameStore, type SectionName } from "./store.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
+import { AcpCard } from "./acp.tsx";
+import { transcriptIntent, transcriptView } from "./acp.ts";
 import { AnswerBanner } from "./answer.tsx";
 import { phaseOf, questionFor } from "./answer.ts";
 import { newNotices, noticeKey } from "./notices.ts";
@@ -100,6 +102,9 @@ function Shell() {
   // what is waiting on a human. A terminal takes the work area while it is
   // chosen, and the board is one click back.
   const [board, setBoard] = createSignal(true);
+  // The ACP session whose transcript card holds the work area, if any. It has
+  // no tmux pane, so the card stands where its terminal would.
+  const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
   const focusers = new Map<string, () => void>();
   const tabKeys = createMemo(
     () => tabs().map((tab) => tab.key),
@@ -110,7 +115,10 @@ function Shell() {
 
   const activate = (key: string | null) => {
     setActive(key);
-    if (key !== null) setBoard(false);
+    if (key !== null) {
+      setBoard(false);
+      closeTranscript();
+    }
     if (key !== null) requestAnimationFrame(() => focusers.get(key)?.());
   };
   const showTabs = (view: TabsView) => {
@@ -129,6 +137,17 @@ function Shell() {
     }
   };
   const dispatch = (intent: RendererIntent) => void invoke("dispatch", { intent });
+  const openTranscript = (sessionKey: string) => {
+    dispatch(transcriptIntent(sessionKey));
+    setTranscriptKey(sessionKey);
+    setBoard(false);
+  };
+  /** Close the card; the host drops the transcript and frames the default. */
+  function closeTranscript() {
+    if (transcriptKey() === null) return;
+    dispatch(transcriptIntent(null));
+    setTranscriptKey(null);
+  }
   /**
    * Send `intents` in order, each one applied before the next is sent: the
    * host applies a dispatch before the command returns, so awaiting each keeps
@@ -382,16 +401,41 @@ function Shell() {
         />
         <section class="workarea">
           <nav class="tabs" aria-label="Board and terminals">
-            <span class="tab board-tab" classList={{ active: board() }}>
+            <span class="tab board-tab" classList={{ active: board() && transcriptKey() === null }}>
               <button
                 type="button"
                 class="tab-title"
-                aria-current={board() ? "page" : undefined}
-                onClick={() => setBoard(true)}
+                aria-current={board() && transcriptKey() === null ? "page" : undefined}
+                onClick={() => {
+                  closeTranscript();
+                  setBoard(true);
+                }}
               >
                 Board
               </button>
             </span>
+            {/* The ACP card's own place in the strip, where the session's
+                terminal tab would be if it had a pane. */}
+            <Show when={transcriptKey()}>
+              {(key) => (
+                <span class="tab transcript-tab active" data-state="transcript">
+                  <button type="button" class="tab-title" aria-current="page">
+                    {key()}
+                  </button>
+                  <button
+                    type="button"
+                    class="tab-close"
+                    aria-label={`Close ${key()}`}
+                    onClick={() => {
+                      closeTranscript();
+                      setBoard(true);
+                    }}
+                  >
+                    ×
+                  </button>
+                </span>
+              )}
+            </Show>
             <For each={tabs()}>
               {(tab) => (
                 <span
@@ -422,16 +466,29 @@ function Shell() {
           <Show when={question()}>
             {(shown) => <AnswerBanner question={shown()} ask={ask()} run={run} />}
           </Show>
-          <Show when={board()}>
+          <Show when={transcriptKey()}>
+            {(key) => (
+              <AcpCard
+                sessionKey={key()}
+                view={transcriptView(fleet(), key())}
+                onClose={() => {
+                  closeTranscript();
+                  setBoard(true);
+                }}
+              />
+            )}
+          </Show>
+          <Show when={board() && transcriptKey() === null}>
             <Board
               agentStatus={agentStatus()}
               fleet={fleet()}
               sessions={sessions()}
               elsewhere={elsewhere()}
               onChoose={dispatch}
+              onOpenTranscript={openTranscript}
             />
           </Show>
-          <Show when={!board() && tabs().length === 0}>
+          <Show when={!board() && transcriptKey() === null && tabs().length === 0}>
             <p class="empty">Choose a session to open its terminal</p>
           </Show>
           {/* Keyed by tab key, not by the tab object each event replaces: a
@@ -443,7 +500,7 @@ function Shell() {
                   <TerminalView
                     tab={tab()}
                     title={title(tab())}
-                    active={!board() && key === active()}
+                    active={!board() && transcriptKey() === null && key === active()}
                     mac={MAC}
                     onAccelerator={onAccelerator}
                     onLeave={() => sidebar?.focus()}
