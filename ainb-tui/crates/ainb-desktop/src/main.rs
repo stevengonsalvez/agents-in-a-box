@@ -418,13 +418,24 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    let (view, connected) = {
+                    let (view, connected, lost) = {
                         let state = states.borrow_and_update();
+                        let lost = match &*state {
+                            SidecarState::Reconnecting { error }
+                            | SidecarState::Degraded { error, .. } => Some(error.clone()),
+                            _ => None,
+                        };
                         (
                             state.view(),
                             matches!(*state, SidecarState::Connected { .. }),
+                            lost,
                         )
                     };
+                    // The board's rows are only as current as the daemon they
+                    // came from: while it is gone they read unreachable.
+                    if let Some(reason) = &lost {
+                        handle.state::<Window>().shell.daemon_lost(reason);
+                    }
                     // A connected sidecar has completed a hello, so the daemon
                     // may now have named its host (#1066). The webview hears the
                     // new id first, then the mirror re-pins and reframes under
@@ -442,6 +453,7 @@ fn main() {
                             }
                             window.shell.set_host(host_id);
                         }
+                        window.shell.daemon_connected();
                     }
                     if let Err(error) = handle.emit("sidecar", view) {
                         tracing::warn!(%error, "sidecar state not delivered to the webview");
