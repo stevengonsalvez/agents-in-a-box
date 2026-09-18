@@ -1,7 +1,7 @@
 //! The desktop's embedded host: one `AppState`, driven through `dispatch`, with
 //! every change framed for the webview.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
@@ -76,21 +76,6 @@ pub struct PaletteEntry {
     pub active: bool,
 }
 
-/// How long after a scan finishes the window asks for the next one.
-///
-/// A session another process creates reaches the sidebar only because this
-/// runs: the scan is what finds it, and nothing else tells this window it
-/// exists. A scan that finds the same list writes no Sessions frame, so the
-/// cadence costs a scan rather than a reframe; the WorkspaceLoad flag it does
-/// move is the "write only what changed" audit's, #1139.
-///
-/// Strictly longer than the floor the state publishes
-/// (`AppState::workspace_rescan_floor`, its own scan budget), and measured
-/// from the end of a scan, so a scan that times out is followed by a gap
-/// instead of the next one starting as it gives up.
-pub const WORKSPACE_RESCAN: Duration =
-    Duration::from_secs(ainb_app::AppState::workspace_rescan_floor().as_secs() + 5);
-
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
     state: AppState,
@@ -98,8 +83,7 @@ pub struct DesktopHost<S: FrameSink> {
     layout: DesktopLayout,
     mirror: Mirror,
     sink: S,
-    /// When the last scan was asked for, so the tick can pace the next.
-    scanned_at: Instant,
+    /// How often the tick asks the state for a fresh scan.
     rescan_every: Duration,
 }
 
@@ -120,12 +104,11 @@ impl<S: FrameSink> DesktopHost<S> {
             layout: DesktopLayout::default(),
             mirror: Mirror::new(host_id, subscription),
             sink,
-            scanned_at: Instant::now(),
-            rescan_every: WORKSPACE_RESCAN,
+            rescan_every: AppState::WORKSPACE_RESCAN,
         }
     }
 
-    /// Rescan on `every` instead of [`WORKSPACE_RESCAN`]. For tests, which
+    /// Rescan on `every` instead of [`AppState::WORKSPACE_RESCAN`]. For tests, which
     /// cannot wait ten seconds to see the second scan.
     #[must_use]
     pub const fn rescanning_every(mut self, every: Duration) -> Self {
@@ -159,14 +142,9 @@ impl<S: FrameSink> DesktopHost<S> {
     /// the effects that work queued.
     #[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
     pub fn tick(&mut self) -> Vec<Effect> {
-        let was_scanning = self.state.workspace_scan_running();
-        self.state.check_workspace_loading_complete();
-        // The cadence runs from the end of a scan, not its start: a scan that
-        // took the whole Docker budget would otherwise be followed by the next
-        // one immediately.
-        if was_scanning && !self.state.workspace_scan_running() {
-            self.scanned_at = Instant::now();
-        }
+        // A session another process created is found by a scan and by nothing
+        // else, so the window keeps asking for one; the pacing is the state's.
+        self.state.pace_workspace_load(Some(self.rescan_every));
         // The poller is idempotent by an atomic, so starting it every tick is
         // its documented use. Every read here is by shared reference: a `&mut`
         // path through the `Versioned` Fleet section would bump it each tick.
@@ -180,12 +158,6 @@ impl<S: FrameSink> DesktopHost<S> {
         // reducer paces it: at once on daemon news, otherwise on its own
         // cadence, and a merge that finds nothing new bumps nothing.
         self.state.refresh_attention(ainb_app::fleet::daemons::heartbeat::now_ms());
-        // A session another process created is found by a scan and by nothing
-        // else, so the window keeps asking for one. Never two at once: the
-        // reducer owns the load and reports it running.
-        if !self.state.workspace_scan_running() && self.scanned_at.elapsed() >= self.rescan_every {
-            self.state.start_workspace_load();
-        }
         let effects = self.state.take_effects();
         self.pump();
         effects
