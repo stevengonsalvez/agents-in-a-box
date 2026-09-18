@@ -591,3 +591,123 @@ fn a_desktop_tick_frames_the_open_conversation() {
         log.borrow()
     );
 }
+
+/// An ACP session's transcript: opened from the board by its Fleet session
+/// key, paged by the host's own tick, framed on Fleet.
+mod transcript {
+    use super::*;
+    use ainb_app::app::pointer::open_transcript;
+    use ainb_app::fleet::transcript::{ChunkKind, MAX_CHUNKS, Transcript, TranscriptOutcome};
+    use ainb_hangar_proto::fleet::{FleetTranscriptChunk, FleetTranscriptListResult};
+
+    /// A host on the sessions screen whose sink records each Fleet frame's
+    /// encoded size.
+    fn sized_host(sizes: &Rc<RefCell<Vec<usize>>>) -> DesktopHost<impl FnMut(FrameBatch)> {
+        scratch_home();
+        let sizes = Rc::clone(sizes);
+        let mut host = DesktopHost::new(
+            AppConfig::default(),
+            Keymap::defaults(),
+            HostId::local(),
+            Subscription::only(&[SectionId::Fleet]),
+            move |batch: FrameBatch| {
+                for frame in batch.frames {
+                    sizes.borrow_mut().push(serde_json::to_vec(&frame).expect("encodes").len());
+                }
+            },
+        );
+        host.open_sessions(&mut Recorder(Log::default()));
+        host
+    }
+
+    fn page(count: i64, text: &str) -> TranscriptOutcome {
+        let chunks: Vec<FleetTranscriptChunk> = (1..=count)
+            .map(|order| FleetTranscriptChunk {
+                ingest_order: order,
+                event_id: format!("e-{order}"),
+                session_key: "acp:s-1".to_string(),
+                event_type: if order % 2 == 0 {
+                    "acp.thought"
+                } else {
+                    "acp.message"
+                }
+                .to_string(),
+                payload: serde_json::json!({ "text": text }),
+                observed_at: order,
+            })
+            .collect();
+        TranscriptOutcome::Page(FleetTranscriptListResult {
+            next_after_order: chunks.last().map(|chunk| chunk.ingest_order),
+            chunks,
+            truncated: false,
+        })
+    }
+
+    /// Stand in for the page worker, as a real one reports.
+    fn deliver(host: &DesktopHost<impl FnMut(FrameBatch)>, outcome: TranscriptOutcome) {
+        let open = host.state().host.transcript.as_ref().expect("a transcript is open");
+        open.reports().lock().expect("inbox").insert(0, outcome);
+    }
+
+    #[test]
+    fn a_tick_frames_the_open_transcript() {
+        let sizes = Rc::new(RefCell::new(Vec::new()));
+        let mut host = sized_host(&sizes);
+        let _ = host.dispatch(open_transcript(Some("acp:s-1")));
+        deliver(&host, page(2, "hello"));
+
+        let _ = host.tick();
+
+        let framed = &host.state().fleet.transcript;
+        assert_eq!(framed.session_key.as_deref(), Some("acp:s-1"));
+        assert_eq!(
+            framed.chunks.iter().map(|chunk| chunk.kind).collect::<Vec<_>>(),
+            vec![ChunkKind::Message, ChunkKind::Thought]
+        );
+        assert!(!sizes.borrow().is_empty(), "and the Fleet frame went out");
+    }
+
+    #[test]
+    fn a_transcript_past_the_bound_still_frames_inside_one_frame() {
+        let sizes = Rc::new(RefCell::new(Vec::new()));
+        let mut host = sized_host(&sizes);
+        let _ = host.dispatch(open_transcript(Some("acp:s-1")));
+        // Far more than the host keeps, each far longer than a row survives.
+        deliver(&host, page(600, &"x".repeat(20_000)));
+        sizes.borrow_mut().clear();
+
+        let _ = host.tick();
+
+        let framed = &host.state().fleet.transcript;
+        assert_eq!(framed.chunks.len(), MAX_CHUNKS);
+        assert!(framed.starts_part_way);
+        let largest = sizes.borrow().iter().copied().max().expect("a frame went out");
+        assert!(
+            largest < ainb_app::wire::frame::MAX_FRAME_BYTES,
+            "a Fleet frame of {largest} bytes"
+        );
+    }
+
+    #[test]
+    fn a_closed_transcript_frames_nothing() {
+        let sizes = Rc::new(RefCell::new(Vec::new()));
+        let mut host = sized_host(&sizes);
+        let _ = host.dispatch(open_transcript(Some("acp:s-1")));
+        deliver(&host, page(2, "hello"));
+        let _ = host.tick();
+
+        let _ = host.dispatch(open_transcript(None));
+        let _ = host.tick();
+        assert_eq!(
+            host.state().fleet.transcript,
+            Transcript::default(),
+            "closing clears the field on the next tick"
+        );
+        sizes.borrow_mut().clear();
+        let _ = host.tick();
+        assert!(
+            sizes.borrow().is_empty(),
+            "and a closed transcript frames nothing after"
+        );
+    }
+}
