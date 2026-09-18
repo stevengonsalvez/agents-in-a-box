@@ -4,9 +4,194 @@
 // Uses prefix matching for both UUID and workspace name for user convenience.
 
 use anyhow::{Result, anyhow};
+use chrono::{DateTime, Utc};
+use std::path::PathBuf;
 use uuid::Uuid;
 
-use crate::interactive::session_manager::{SessionMetadata, SessionStore};
+use crate::interactive::session_manager::{ModelSource, SessionMetadata, SessionStore};
+use crate::models::SessionAgentType;
+use ainb_hangar_client::DaemonClient;
+use ainb_hangar_proto::protocol::CAP_WORKSPACE_SESSIONS;
+use ainb_hangar_proto::sessions::{
+    WorkspaceSessionDeleteParams, WorkspaceSessionEntry, WorkspaceSessionListParams,
+    WorkspaceSessionUpsertParams,
+};
+
+/// Convert a proto [`WorkspaceSessionEntry`] into local [`SessionMetadata`].
+#[must_use]
+pub fn entry_to_metadata(entry: &WorkspaceSessionEntry) -> SessionMetadata {
+    let session_id = Uuid::parse_str(&entry.session_id).unwrap_or_else(|_| Uuid::new_v4());
+    let created_at = DateTime::from_timestamp_millis(entry.created_at).unwrap_or_else(Utc::now);
+    let agent_type = serde_json::from_value(serde_json::Value::String(entry.agent_type.clone()))
+        .unwrap_or(SessionAgentType::Claude);
+    let model_source =
+        serde_json::from_value(serde_json::Value::String(entry.model_source.clone()))
+            .unwrap_or(ModelSource::LegacyTyped);
+    let codex_model = entry
+        .codex_model
+        .as_ref()
+        .and_then(|cm| serde_json::from_value(serde_json::Value::String(cm.clone())).ok());
+
+    SessionMetadata {
+        session_id,
+        tmux_session_name: entry.tmux_session_name.clone(),
+        worktree_path: PathBuf::from(&entry.worktree_path),
+        workspace_name: entry.workspace_name.clone(),
+        created_at,
+        agent_type,
+        headroom_enabled: entry.headroom_enabled,
+        rtk_enabled: entry.rtk_enabled,
+        skip_permissions: entry.skip_permissions,
+        model: entry.model.clone(),
+        model_source,
+        codex_model,
+        codex_thread_id: entry.codex_thread_id.clone(),
+    }
+}
+
+/// Convert local [`SessionMetadata`] into proto [`WorkspaceSessionEntry`].
+#[must_use]
+pub fn metadata_to_entry(meta: &SessionMetadata) -> WorkspaceSessionEntry {
+    let agent_type = serde_json::to_value(&meta.agent_type)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "Claude".to_string());
+    let model_source = serde_json::to_value(&meta.model_source)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "LegacyTyped".to_string());
+    let codex_model = meta
+        .codex_model
+        .as_ref()
+        .and_then(|cm| serde_json::to_value(cm).ok().and_then(|v| v.as_str().map(String::from)));
+
+    WorkspaceSessionEntry {
+        session_id: meta.session_id.to_string(),
+        tmux_session_name: meta.tmux_session_name.clone(),
+        worktree_path: meta.worktree_path.to_string_lossy().to_string(),
+        workspace_name: meta.workspace_name.clone(),
+        created_at: meta.created_at.timestamp_millis(),
+        agent_type,
+        headroom_enabled: meta.headroom_enabled,
+        rtk_enabled: meta.rtk_enabled,
+        skip_permissions: meta.skip_permissions,
+        model: meta.model.clone(),
+        model_source,
+        codex_model,
+        codex_thread_id: meta.codex_thread_id.clone(),
+    }
+}
+
+async fn try_daemon_client() -> Option<DaemonClient> {
+    let client = DaemonClient::from_env().ok()?;
+    let hello = client.hello().await.ok()?;
+    if hello.advertises(CAP_WORKSPACE_SESSIONS) {
+        Some(client)
+    } else {
+        None
+    }
+}
+
+fn run_async<F: std::future::Future<Output = T> + Send + 'static, T: Send + 'static>(fut: F) -> T {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        match handle.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| handle.block_on(fut))
+            }
+            _ => std::thread::scope(|s| {
+                s.spawn(|| handle.block_on(fut)).join().expect("thread join")
+            }),
+        }
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create tokio runtime")
+            .block_on(fut)
+    }
+}
+
+/// Load session store through the daemon RPC when available, falling back to disk.
+pub async fn load_session_store_async() -> SessionStore {
+    if let Some(client) = try_daemon_client().await {
+        if let Ok(res) = client.workspace_session_list(WorkspaceSessionListParams::default()).await
+        {
+            let mut store = SessionStore::default();
+            for entry in res.sessions {
+                let meta = entry_to_metadata(&entry);
+                store.sessions.insert(meta.tmux_session_name.clone(), meta);
+            }
+            return store;
+        }
+    }
+    SessionStore::load()
+}
+
+/// Load session store through the daemon RPC when available, falling back to disk (sync).
+#[must_use]
+pub fn load_session_store() -> SessionStore {
+    run_async(load_session_store_async())
+}
+
+/// Mutate session store through the daemon RPC when available, falling back to disk.
+pub async fn mutate_session_store_async<F>(f: F) -> Result<(), std::io::Error>
+where
+    F: FnOnce(&mut SessionStore),
+{
+    if let Some(client) = try_daemon_client().await {
+        let mut store =
+            match client.workspace_session_list(WorkspaceSessionListParams::default()).await {
+                Ok(res) => {
+                    let mut s = SessionStore::default();
+                    for entry in res.sessions {
+                        let meta = entry_to_metadata(&entry);
+                        s.sessions.insert(meta.tmux_session_name.clone(), meta);
+                    }
+                    s
+                }
+                Err(_) => SessionStore::load(),
+            };
+
+        let before_keys: std::collections::HashSet<String> =
+            store.sessions.keys().cloned().collect();
+        f(&mut store);
+        let after_keys: std::collections::HashSet<String> =
+            store.sessions.keys().cloned().collect();
+
+        // Deleted sessions
+        for removed in before_keys.difference(&after_keys) {
+            let _ = client
+                .workspace_session_delete(WorkspaceSessionDeleteParams {
+                    session_id: None,
+                    tmux_session_name: Some(removed.clone()),
+                })
+                .await;
+        }
+
+        // Added or updated sessions
+        for meta in store.sessions.values() {
+            let _ = client
+                .workspace_session_upsert(WorkspaceSessionUpsertParams {
+                    session: metadata_to_entry(meta),
+                })
+                .await;
+        }
+
+        // Downgrade backup to sessions.json
+        let _ = SessionStore::mutate(|s| *s = store);
+        return Ok(());
+    }
+
+    SessionStore::mutate(f)
+}
+
+/// Mutate session store through the daemon RPC when available, falling back to disk (sync).
+pub fn mutate_session_store<F>(f: F) -> Result<(), std::io::Error>
+where
+    F: FnOnce(&mut SessionStore) + Send + 'static,
+{
+    run_async(mutate_session_store_async(f))
+}
 
 /// Find a session by ID (full or partial UUID) or workspace name prefix
 ///
@@ -17,7 +202,7 @@ use crate::interactive::session_manager::{SessionMetadata, SessionStore};
 ///
 /// Returns an error if no match is found or if multiple sessions match.
 pub fn find_session(id_or_name: &str) -> Result<SessionMetadata> {
-    let store = SessionStore::load();
+    let store = load_session_store();
     find_session_in_store(id_or_name, &store)
 }
 
