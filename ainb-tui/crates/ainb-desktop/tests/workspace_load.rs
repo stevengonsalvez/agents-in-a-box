@@ -212,7 +212,10 @@ fn a_stopped_session_reaches_the_sidebar() {
         if listed {
             break true;
         }
-        assert!(Instant::now() < deadline, "the stopped session never arrived");
+        assert!(
+            Instant::now() < deadline,
+            "the stopped session never arrived"
+        );
         std::thread::sleep(Duration::from_millis(50));
         let _ = host.tick();
     };
