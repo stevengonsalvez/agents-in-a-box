@@ -23,8 +23,21 @@ import type {
 } from "../../../ainb-app/bindings/AppState";
 import { allSessions, ATTENTION_ORDER, label } from "./sessions.ts";
 
+/**
+ * What each column is called, in the operator's words rather than the wire's,
+ * left to right. Typed over every `AgentState`, so a state Rust adds fails to
+ * compile here instead of every card in it vanishing from the board.
+ */
+export const COLUMN_TITLES: Record<AgentState, string> = {
+  waiting: "Waiting on you",
+  working: "Working",
+  idle: "Idle",
+  unverifiable: "Unverified",
+  exited: "Exited",
+};
+
 /** The columns the board draws, left to right. */
-export const COLUMNS: readonly AgentState[] = ["waiting", "working", "idle", "unverifiable", "exited"];
+export const COLUMNS = Object.keys(COLUMN_TITLES) as AgentState[];
 
 /** One card on the board. */
 export interface BoardCard {
