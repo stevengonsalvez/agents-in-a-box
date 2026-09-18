@@ -160,19 +160,14 @@ impl TranscriptHost {
     pub fn tick(&mut self, now_ms: i64) -> bool {
         // ONE outcome per tick, whatever the inbox holds: with one page in
         // flight there is only ever one, and the bound holds even if not.
-        let landed = self
-            .inbox
-            .lock()
-            .map(|mut inbox| (!inbox.is_empty()).then(|| inbox.remove(0)))
-            .unwrap_or_else(|poisoned| {
-                let mut inbox = poisoned.into_inner();
-                (!inbox.is_empty()).then(|| inbox.remove(0))
-            });
-        let mut moved = false;
-        if let Some(outcome) = landed {
+        let landed = {
+            let mut inbox = self.inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            (!inbox.is_empty()).then(|| inbox.remove(0))
+        };
+        let moved = landed.is_some_and(|outcome| {
             self.in_flight = false;
-            moved = self.fold(outcome);
-        }
+            self.fold(outcome)
+        });
         let due = self.last_poll_ms.is_none_or(|last| now_ms - last >= POLL_MS);
         if due && !self.in_flight {
             self.last_poll_ms = Some(now_ms);
