@@ -1277,6 +1277,12 @@ pub fn defaults() -> Vec<Binding> {
         ),
         unbound(
             Context::screen("session_list"),
+            "open_transcript",
+            AppEvent::SessionListOpenTranscript(None),
+            "Open the ACP transcript a board card names",
+        ),
+        unbound(
+            Context::screen("session_list"),
             "save_pane_layout",
             AppEvent::SaveSessionsPaneLayout {
                 fraction: 0.0,
