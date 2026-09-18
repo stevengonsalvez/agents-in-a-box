@@ -338,3 +338,84 @@ fn an_acp_row_of_many_lines_admits_what_the_gate_dropped() {
         "the shared gate's own marker closes the run"
     );
 }
+
+/// A GitHub token, built at run time so no scanner mistakes the fixture for a
+/// leak. Its body is one repeated letter, so any piece of it shows as a run.
+fn token() -> String {
+    format!("ghp_{}", "Q".repeat(40))
+}
+
+/// No piece of [`token`] survives in `body`: not its prefix, not a run of its
+/// body. A cut that ran before the scrub leaves the prefix plus a few body
+/// characters, which is exactly the fragment no credential shape matches.
+fn assert_no_token_piece(body: &str, what: &str) {
+    assert!(!body.contains("ghp_"), "{what}: the token's prefix survived: {body}");
+    assert!(!body.contains("QQQQ"), "{what}: the token's body survived: {body}");
+}
+
+/// #1187: every cut the classifier makes runs after the scrub. Each fixture
+/// starts the token a few characters before its cut, where a cut-then-scrub
+/// leaves `ghp_` plus a handful of characters that match no shape.
+#[test]
+fn a_token_straddling_each_cut_never_survives_it() {
+    let token = token();
+    let lead = "x".repeat(70);
+
+    // The tool result's one-line summary (SUMMARY_MAX).
+    let result = classify(&[(
+        "acp.tool_call",
+        &serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": format!("{lead} {token}")}}],
+        })
+        .to_string(),
+    )]);
+    assert_eq!(result.len(), 1, "one result line: {result:?}");
+    assert_no_token_piece(&result[0].1, "tool result");
+
+    // The tool call's compact input (SUMMARY_MAX), telling field and flat form.
+    for raw_input in [
+        serde_json::json!({"command": format!("{lead} {token}")}),
+        serde_json::json!({"note": format!("{lead} {token}")}),
+    ] {
+        let call = classify(&[(
+            "acp.tool_call",
+            &serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "c2",
+                "title": "Bash",
+                "status": "pending",
+                "rawInput": raw_input,
+            })
+            .to_string(),
+        )]);
+        assert_eq!(call.len(), 1, "one call line: {call:?}");
+        assert_no_token_piece(&call[0].1, "tool input");
+    }
+
+    // A plan entry (SUMMARY_MAX, after its `plan · status · ` prefix).
+    let plan = classify(&[(
+        "acp.plan",
+        &serde_json::json!({
+            "entries": [{"status": "pending", "content": format!("{} {token}", "x".repeat(50))}],
+        })
+        .to_string(),
+    )]);
+    assert_eq!(plan.len(), 1, "one plan line: {plan:?}");
+    assert_no_token_piece(&plan[0].1, "plan entry");
+
+    // A body at the hard ceiling (BODY_MAX, 8192 chars).
+    let message = classify(&[(
+        "acp.message",
+        &serde_json::json!({
+            "kind": "acp.message",
+            "text": format!("{} {token}", "x".repeat(8180)),
+            "coalescedDeltas": 1,
+        })
+        .to_string(),
+    )]);
+    assert_eq!(message.len(), 1, "one message line: {message:?}");
+    assert_no_token_piece(&message[0].1, "message body");
+}
