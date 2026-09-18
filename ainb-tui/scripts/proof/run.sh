@@ -56,6 +56,21 @@ if ((BUILD)); then
   (cd "$AINB_TUI_DIR" \
     && CARGO_INCREMENTAL=0 cargo build -j 4 -p ainb -p ainb-hangar-daemon \
     && bash scripts/build-plugins.sh) || { echo "build failed" >&2; exit 2; }
+  # The desktop shell (d1-shell) is its own cargo workspace and needs the
+  # platform webview. Built only where webkit2gtk-4.1 is present; elsewhere
+  # d1-shell records a skip that says why. Its frontend is built first because
+  # `bundled` serves ui/dist from inside the binary. CARGO_TARGET_DIR is dropped
+  # so the binary lands where d1-shell looks for it by default.
+  if pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+    echo "building the desktop shell (ui/dist, then --features bundled)" >&2
+    (cd "$AINB_TUI_DIR/crates/ainb-desktop" \
+      && npm --prefix ui ci \
+      && npm --prefix ui run build \
+      && env -u CARGO_TARGET_DIR CARGO_INCREMENTAL=0 cargo build -j 4 --features bundled) \
+      || { echo "desktop shell build failed" >&2; exit 2; }
+  else
+    echo "webkit2gtk-4.1 not found; not building the desktop shell (d1-shell will skip)" >&2
+  fi
 fi
 
 # A shared cargo target (CARGO_TARGET_DIR) is where the build put the binary;
