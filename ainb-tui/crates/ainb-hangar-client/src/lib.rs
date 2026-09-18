@@ -1439,10 +1439,8 @@ mod tests {
     async fn reset_host_id_allows_restarted_daemon_to_establish_new_id() {
         const FIRST: &str = "01K5A0000000000000000AAAAA";
         const SECOND: &str = "01K5A0000000000000000BBBBB";
-        let (_temp, socket) = serve_hellos(vec![
-            json!({"host_id": FIRST}),
-            json!({"host_id": SECOND}),
-        ]);
+        let (_temp, socket) =
+            serve_hellos(vec![json!({"host_id": FIRST}), json!({"host_id": SECOND})]);
         let client = DaemonClient::with_parts(socket.clone(), "test-token".into());
 
         client.hello().await.expect("hello");
@@ -1507,10 +1505,8 @@ mod tests {
         assert_eq!(daemon_host_id(&socket), None);
 
         // Next subscription accepts SECOND
-        let (initial, _sub) = client
-            .open_fleet_subscription(0)
-            .await
-            .expect("subscribe succeeds after reset");
+        let (initial, _sub) =
+            client.open_fleet_subscription(0).await.expect("subscribe succeeds after reset");
         assert_eq!(initial.snapshot.head_revision, 1);
         assert_eq!(daemon_host_id(&socket).as_deref(), Some(SECOND));
     }
@@ -1547,7 +1543,10 @@ mod tests {
 
         let socket_clone = socket.clone();
         let dialer: presence::Dialer = Box::new(move || {
-            Ok(DaemonClient::with_parts(socket_clone.clone(), "test-token".into()))
+            Ok(DaemonClient::with_parts(
+                socket_clone.clone(),
+                "test-token".into(),
+            ))
         });
         let timing = reconnect::Timing {
             backoff_1s: Duration::from_millis(15),
@@ -1607,6 +1606,9 @@ mod tests {
         let Err(err) = client.open_fleet_subscription(0).await else {
             panic!("should fail closed");
         };
-        assert!(matches!(err, DaemonError::Decode(_)), "expected Decode error, got {err:?}");
+        assert!(
+            matches!(err, DaemonError::Decode(_)),
+            "expected Decode error, got {err:?}"
+        );
     }
 }
