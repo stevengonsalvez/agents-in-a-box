@@ -57,6 +57,11 @@ export interface BoardCard {
   waitKind: string | null;
   /** Something is open on this agent, so it floats to the top of its column. */
   hasOpenRequest: boolean;
+  /**
+   * An ACP session: no tmux pane and no session list row, so its card opens
+   * its transcript instead of a row.
+   */
+  acp: boolean;
   /** The chips its session row carries, tightest first. */
   attention: AttentionKind[];
 }
@@ -139,6 +144,7 @@ export function boardColumns(
       transport: card.transport_health,
       waitKind: card.wait_kind,
       hasOpenRequest: card.has_open_request,
+      acp: card.provider === "acp",
       attention: chipsOf(session),
     };
   });
