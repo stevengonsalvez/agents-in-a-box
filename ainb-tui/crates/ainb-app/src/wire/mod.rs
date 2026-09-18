@@ -581,6 +581,7 @@ view!(FleetView<'a> for FleetSection {
     ask_state: crate::fleet::answer::AskState,
     broadcast: crate::fleet::broadcast::Broadcast,
     conversation: crate::fleet::conversation::Conversation,
+    transcript: crate::fleet::transcript::Transcript,
     #[serde(serialize_with = "locked")]
     #[cfg_attr(feature = "typescript-bindings", specta(type = crate::fleet::attention::DaemonAttention))]
     daemon_attention: Mutex<crate::fleet::attention::DaemonAttention>,
