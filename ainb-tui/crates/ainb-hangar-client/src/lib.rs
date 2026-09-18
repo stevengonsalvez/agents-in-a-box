@@ -1067,24 +1067,17 @@ impl DaemonClient {
         )
         .map_err(|error| DaemonError::Decode(format!("decoding auth/hello: {error}")))?;
         if let Some(expected) = daemon_host_id(&self.socket) {
-            match hello.host_id.as_deref() {
-                Some(id) if is_host_id(id) => {
-                    if id != expected.as_str() {
-                        tracing::info!(
-                            socket = %self.socket.display(),
-                            previous = %expected,
-                            current = %id,
-                            "daemon host identity changed on reconnect; updating observed host"
-                        );
-                        reset_host_id(&self.socket);
-                        remember_host_id(&self.socket, Some(id));
-                    }
-                }
-                other => {
-                    return Err(DaemonError::Decode(format!(
-                        "daemon host identity mismatch: expected {expected}, got {other:?}"
-                    )));
-                }
+            if hello.host_id.as_deref() != Some(expected.as_str()) {
+                tracing::warn!(
+                    socket = %self.socket.display(),
+                    expected = %expected,
+                    current = ?hello.host_id,
+                    "daemon host identity mismatch on reconnect; refusing connection"
+                );
+                return Err(DaemonError::Decode(format!(
+                    "daemon host identity mismatch: expected {expected}, got {:?}",
+                    hello.host_id
+                )));
             }
         } else {
             remember_host_id(&self.socket, hello.host_id.as_deref());
@@ -1463,45 +1456,130 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_fleet_subscription_updates_host_id_on_legitimate_restart() {
+    async fn open_fleet_subscription_refuses_mismatch_while_pin_holds_then_accepts_after_reset() {
         const FIRST: &str = "01K5A0000000000000000AAAAA";
         const SECOND: &str = "01K5A0000000000000000BBBBB";
         let temp = tempfile::tempdir().expect("temporary socket directory");
         let socket = temp.path().join("hangar.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake hangar socket");
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept client");
-            let (read_half, mut writer) = stream.into_split();
-            let mut reader = BufReader::new(read_half);
-            let _hello = read_frame(&mut reader).await.expect("read auth request");
-            write_test_frame(
-                &mut writer,
-                &json!({"jsonrpc": "2.0", "id": 1, "result": {"host_id": SECOND}}),
-            )
-            .await;
-            let _sub = read_frame(&mut reader).await.expect("read subscribe");
-            write_test_frame(
-                &mut writer,
-                &json!({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "result": {
-                        "snapshot": {"head_revision": 1, "sessions": []},
-                        "replay": [],
-                        "replay_state": {"state": "complete"}
+            while let Ok((stream, _)) = listener.accept().await {
+                let (read_half, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                if let Ok(_hello) = read_frame(&mut reader).await {
+                    write_test_frame(
+                        &mut writer,
+                        &json!({"jsonrpc": "2.0", "id": 1, "result": {"host_id": SECOND}}),
+                    )
+                    .await;
+                    if let Ok(_sub) = read_frame(&mut reader).await {
+                        write_test_frame(
+                            &mut writer,
+                            &json!({
+                                "jsonrpc": "2.0",
+                                "id": 2,
+                                "result": {
+                                    "snapshot": {"head_revision": 1, "sessions": []},
+                                    "replay": [],
+                                    "replay_state": {"state": "complete"}
+                                }
+                            }),
+                        )
+                        .await;
                     }
-                }),
-            )
-            .await;
+                }
+            }
         });
 
         remember_host_id(&socket, Some(FIRST));
         assert_eq!(daemon_host_id(&socket).as_deref(), Some(FIRST));
 
         let client = DaemonClient::with_parts(socket.clone(), "test-token".into());
-        let (initial, _sub) = client.open_fleet_subscription(0).await.expect("subscribe succeeds");
+        // Live pin holds FIRST: mismatched SECOND is refused!
+        let Err(err) = client.open_fleet_subscription(0).await else {
+            panic!("should refuse mismatch while pin holds");
+        };
+        assert!(matches!(err, DaemonError::Decode(_)));
+        assert_eq!(daemon_host_id(&socket).as_deref(), Some(FIRST));
+
+        // After legitimate restart (socket closed -> reset_host_id): pin is cleared
+        reset_host_id(&socket);
+        assert_eq!(daemon_host_id(&socket), None);
+
+        // Next subscription accepts SECOND
+        let (initial, _sub) = client
+            .open_fleet_subscription(0)
+            .await
+            .expect("subscribe succeeds after reset");
         assert_eq!(initial.snapshot.head_revision, 1);
         assert_eq!(daemon_host_id(&socket).as_deref(), Some(SECOND));
+    }
+
+    #[tokio::test]
+    async fn reconnect_loop_refuses_mismatched_hello_on_every_attempt_while_pin_holds() {
+        const FIRST: &str = "01K5A0000000000000000AAAAA";
+        const SECOND: &str = "01K5A0000000000000000BBBBB";
+        let temp = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temp.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake hangar socket");
+
+        remember_host_id(&socket, Some(FIRST));
+        assert_eq!(daemon_host_id(&socket).as_deref(), Some(FIRST));
+
+        let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::channel::<usize>(8);
+
+        tokio::spawn(async move {
+            let mut count = 0;
+            while let Ok((stream, _)) = listener.accept().await {
+                count += 1;
+                let (read_half, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                if let Ok(_hello) = read_frame(&mut reader).await {
+                    write_test_frame(
+                        &mut writer,
+                        &json!({"jsonrpc": "2.0", "id": 1, "result": {"host_id": SECOND}}),
+                    )
+                    .await;
+                    let _ = attempt_tx.send(count).await;
+                }
+            }
+        });
+
+        let socket_clone = socket.clone();
+        let dialer: presence::Dialer = Box::new(move || {
+            Ok(DaemonClient::with_parts(socket_clone.clone(), "test-token".into()))
+        });
+        let timing = reconnect::Timing {
+            backoff_1s: Duration::from_millis(15),
+            backoff_4s: Duration::from_millis(15),
+            backoff_16s: Duration::from_millis(15),
+        };
+        let client = DaemonClient::with_parts(socket.clone(), "test-token".into());
+        let sub = client.reconnecting_fleet_subscription_with(dialer, 0, timing);
+
+        // Attempt 1 fails because SECOND != FIRST; pin must NOT be cleared by dial error.
+        let a1 = tokio::time::timeout(Duration::from_secs(2), attempt_rx.recv())
+            .await
+            .expect("attempt 1 made")
+            .expect("attempt 1 received");
+        assert_eq!(a1, 1);
+        assert_eq!(daemon_host_id(&socket).as_deref(), Some(FIRST));
+
+        // Attempt 2 also fails because pin STILL holds FIRST.
+        let a2 = tokio::time::timeout(Duration::from_secs(2), attempt_rx.recv())
+            .await
+            .expect("attempt 2 made")
+            .expect("attempt 2 received");
+        assert_eq!(a2, 2);
+        assert_eq!(daemon_host_id(&socket).as_deref(), Some(FIRST));
+
+        let state = sub.state().borrow().clone();
+        assert!(
+            matches!(state, reconnect::ConnectionState::Reconnecting { .. }),
+            "expected Reconnecting state, got {state:?}"
+        );
+
+        sub.close().await;
     }
 
     #[tokio::test]
