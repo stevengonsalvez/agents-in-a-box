@@ -193,6 +193,10 @@ pub struct PluginPresence {
     pub registered: bool,
     /// Its render has blown its budget, so input sent to it sits unserviced.
     pub wedged: bool,
+    /// The ABI revision its manifest declares, 0 while it is not registered.
+    /// The router sends a key only to a plugin at or past that key's
+    /// `min_abi` (#1171).
+    pub abi: u32,
 }
 
 /// The requests keeping one plugin screen rendering for hosts that are not
