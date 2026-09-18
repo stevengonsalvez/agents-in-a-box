@@ -12,7 +12,6 @@
 // exists to remove.
 
 import type {
-  AgentCardFrame,
   AgentState,
   AgentStatusView,
   AttentionKind,
@@ -87,15 +86,21 @@ function providerId(sessionKey: string): string {
   return at < 0 ? sessionKey : sessionKey.slice(at + 1);
 }
 
-/** The session row a card belongs to, by the provider id the host correlated. */
-function rowFor(
-  card: AgentCardFrame,
+/**
+ * Each session row by the provider session id the host correlated it with,
+ * built once per projection rather than searched once per card.
+ */
+function rowsByProvider(
   sessions: SessionsView_Serialize | undefined,
   fleet: FleetView_Serialize | undefined,
-): Session_Serialize | undefined {
-  const wanted = providerId(card.session_key);
+): Map<string, Session_Serialize> {
   const metadata = fleet?.fleet_metadata ?? {};
-  return allSessions(sessions).find((session) => metadata[session.id]?.provider_session_id === wanted);
+  const rows = new Map<string, Session_Serialize>();
+  for (const session of allSessions(sessions)) {
+    const provider = metadata[session.id]?.provider_session_id;
+    if (provider !== null && provider !== undefined) rows.set(provider, session);
+  }
+  return rows;
 }
 
 /** The chips a session row carries, tightest first. */
@@ -120,8 +125,9 @@ export function boardColumns(
   sessions: SessionsView_Serialize | undefined,
 ): BoardColumn[] {
   const models = new Map((fleet?.fleet_snapshot ?? []).map((row) => [row.session_key, row.model]));
+  const rows = rowsByProvider(sessions, fleet);
   const cards: BoardCard[] = (agentStatus?.view?.cards ?? []).map((card) => {
-    const session = rowFor(card, sessions, fleet);
+    const session = rows.get(providerId(card.session_key));
     return {
       key: card.session_key,
       title: label(session?.name ?? card.session_key),
@@ -186,12 +192,10 @@ export function attentionRows(
   fleet: FleetView_Serialize | undefined,
   sessions: SessionsView_Serialize | undefined,
 ): AttentionRow[] {
-  const metadata = fleet?.fleet_metadata ?? {};
+  const byProvider = rowsByProvider(sessions, fleet);
   const rows: AttentionRow[] = [];
   for (const [providerSessionId, chips] of Object.entries(fleet?.daemon_attention?.by_session_id ?? {})) {
-    const session = allSessions(sessions).find(
-      (row) => metadata[row.id]?.provider_session_id === providerSessionId,
-    );
+    const session = byProvider.get(providerSessionId);
     (chips as SessionAttention_Serialize[]).forEach((chip, index) => {
       rows.push({
         key: `${providerSessionId}:${index}`,
