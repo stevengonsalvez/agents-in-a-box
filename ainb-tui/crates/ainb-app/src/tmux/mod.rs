@@ -9,6 +9,7 @@
 // - Lightweight, fast, and responsive interactions
 
 pub mod capture;
+pub mod paste;
 pub mod process_detection;
 pub mod session;
 
