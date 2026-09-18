@@ -59,6 +59,52 @@ impl Executor for Recorder {
 }
 
 #[test]
+fn a_host_that_never_draws_still_lands_an_answer_outcome() {
+    // The send worker reports into the state. This shell has none of the
+    // terminal's draw loop, so unless its tick folds the report, an answer sent
+    // from this window leaves the row reading SENT for as long as it is open.
+    use ainb_app::fleet::answer::{AnswerPhase, request_id};
+    use ainb_app::fleet::attention::{AttentionKind, SessionAttention};
+
+    let log = Log::default();
+    let mut host = host(&[SectionId::Shell], &log);
+    let _ = host.tick();
+    let chip = SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into());
+
+    // Exactly what a worker does when the daemon has answered.
+    host.state().fleet.ask_state.reports().lock().expect("inbox").push((
+        request_id(&chip),
+        AnswerPhase::Delivered {
+            via: "tmux (feat-login)".to_string(),
+        },
+    ));
+    let _ = host.tick();
+
+    assert!(
+        matches!(
+            host.state().fleet.ask_state.phase_for(&chip),
+            Some(AnswerPhase::Delivered { .. })
+        ),
+        "the desktop's own tick folded the outcome"
+    );
+}
+
+#[test]
+fn an_answer_from_this_window_is_recorded_as_the_desktops() {
+    // The daemon stamps `answered_by` from the kind the connection declares,
+    // and the answer path dials with the kind the state carries. A shell that
+    // left it at the default would record every answer as the TUI's, and the
+    // concurrency gate would read a surface nobody sat at.
+    let log = Log::default();
+    let host = host(&[SectionId::Shell], &log);
+
+    assert_eq!(
+        host.state().host.surface,
+        ainb_hangar_proto::connections::SurfaceKind::Desktop
+    );
+}
+
+#[test]
 fn the_first_batch_frames_every_subscribed_section_and_nothing_else() {
     let log = Log::default();
     let mut host = host(&[SectionId::Sessions, SectionId::Shell], &log);
@@ -267,12 +313,13 @@ fn every_palette_entry_passes_the_seam_and_no_refused_row_is_offered() {
 
     let log = Log::default();
     let host = host(&[SectionId::Shell], &log);
+    let keymap = Keymap::defaults();
     let palette = host.palette();
     assert!(!palette.is_empty(), "the keymap has commands to offer");
 
     for entry in &palette {
         assert!(
-            !refused_from_webview(&entry.id),
+            !refused_from_webview(&keymap, &entry.id),
             "the palette offers a refused row: {}",
             entry.id.as_str()
         );
@@ -285,18 +332,24 @@ fn every_palette_entry_passes_the_seam_and_no_refused_row_is_offered() {
     }
 
     let offered: Vec<&str> = palette.iter().map(|entry| entry.id.as_str()).collect();
+    let key_only: Vec<CommandId> =
+        keymap.commands().filter(|(_, row)| row.key_only()).map(|(id, _)| id).collect();
+    assert!(!key_only.is_empty(), "the keymap has key-only rows");
     for refused in ainb_app::app::reports::ids::ALL
         .iter()
         .chain(ainb_app::app::plugin_action::ids::ALL)
-        .chain(ainb_app::app::KEY_ONLY_COMMANDS)
+        .copied()
+        .chain(key_only.iter().map(CommandId::as_str))
     {
-        assert!(!offered.contains(refused), "the palette offers `{refused}`");
+        assert!(
+            !offered.contains(&refused),
+            "the palette offers `{refused}`"
+        );
     }
 
     // A palette names a row with no payload, so a pointer row that refuses
     // `Args::Null` has nothing to run with and is not offered; one that runs
     // without a payload is an ordinary row and is.
-    let keymap = Keymap::defaults();
     for pointer in ainb_app::app::pointer::ids::ALL {
         let Some(row) = keymap.command(&CommandId::new(*pointer)) else {
             continue;
@@ -318,22 +371,52 @@ fn every_palette_entry_passes_the_seam_and_no_refused_row_is_offered() {
     );
 }
 
-/// A key-only row writes outside ainb, so a chord that lands on one is named
-/// for the shell to refuse; any other chord is not.
+/// A key-only row writes outside ainb, so a chord or a name that lands on one
+/// is refused for the webview, with the row and the reason; any other is not.
 #[test]
-fn a_chord_on_a_key_only_row_is_named() {
+fn a_chord_or_a_name_on_a_key_only_row_is_refused() {
     let log = Log::default();
     let host = host(&[SectionId::Shell], &log);
 
-    assert_eq!(
-        host.key_only_command(&Chord::parse("W").expect("valid chord"))
-            .as_ref()
-            .map(ainb_app::CommandId::as_str),
-        Some("global.wire_statusline")
+    let refusal = host.refused_from_renderer(&key("W")).expect("W is key-only");
+    assert_eq!(refusal.command.as_str(), "global.wire_statusline");
+    assert!(refusal.reason.contains("only from its key"), "{refusal:?}");
+    let named = Intent::Command(refusal.command.clone(), serde_json::Value::Null);
+    assert_eq!(host.refused_from_renderer(&named), Some(refusal));
+    assert_eq!(host.refused_from_renderer(&key("s")), None);
+}
+
+/// Enter confirms whatever the open dialog holds, so it is judged by that
+/// action: on the abtop setup offer, whose selected "Enable" edits Claude
+/// Code's settings, the webview's Enter is refused.
+#[test]
+fn enter_on_a_dialog_holding_a_key_only_action_is_refused() {
+    let log = Log::default();
+    let mut host = host(&[SectionId::Shell], &log);
+    assert_eq!(host.refused_from_renderer(&key("enter")), None);
+
+    let _ = host.dispatch(key("t"));
+    let dialog = host
+        .state()
+        .shell
+        .confirmation_dialog
+        .as_ref()
+        .expect("the first abtop open offers the setup");
+    assert!(matches!(
+        dialog.selected_action(),
+        Some(ainb_app::app::state::ConfirmAction::SetupAbtopRateLimits)
+    ));
+
+    let refusal = host
+        .refused_from_renderer(&key("enter"))
+        .expect("Enter would run the abtop setup");
+    assert!(
+        refusal.command.as_str().ends_with(".confirm"),
+        "{refusal:?}"
     );
-    assert_eq!(
-        host.key_only_command(&Chord::parse("s").expect("valid chord")),
-        None
+    assert!(
+        refusal.reason.contains("runs only from its key"),
+        "{refusal:?}"
     );
 }
 
@@ -368,4 +451,37 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     found
+}
+
+/// Seam 4 reaches the desktop: the host's own tick opens the conversation the
+/// open tab names and frames it. The terminal used to open and tick chat hosts
+/// only while drawing, so on this shell `fleet.conversation` stayed the default
+/// forever.
+#[test]
+fn a_desktop_tick_frames_the_open_conversation() {
+    use ainb_app::app::pointer::select_session_tab;
+    use ainb_app::components::session_tabs::SessionTab;
+    use ainb_app::fleet::conversation::{Conversation, ConversationTopic};
+
+    let log = Log::default();
+    let mut host = host(&[SectionId::Fleet], &log);
+    let mut recorder = Recorder(Rc::clone(&log));
+    host.open_sessions(&mut recorder);
+    let _ = host.dispatch(select_session_tab(SessionTab::Pal));
+    log.borrow_mut().clear();
+
+    let _ = host.tick();
+
+    let conversation = &host.state().fleet.conversation;
+    assert_ne!(
+        *conversation,
+        Conversation::default(),
+        "the tick projected it"
+    );
+    assert_eq!(conversation.topic, ConversationTopic::Pal);
+    assert!(
+        log.borrow().iter().any(|frame| frame == "frame fleet"),
+        "and framed it: {:?}",
+        log.borrow()
+    );
 }

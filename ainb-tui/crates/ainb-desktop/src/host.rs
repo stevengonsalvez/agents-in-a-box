@@ -3,13 +3,15 @@
 
 use std::time::{Duration, Instant};
 
+use ainb_app::app::RendererHost;
 use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
-use ainb_app::app::{KEY_ONLY_COMMANDS, RendererHost};
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
-use ainb_app::{AppState, Chord, CommandId, Effect, Intent, Keymap};
+use ainb_app::{AppState, CommandId, Effect, Intent, Keymap};
 use serde::Serialize;
+
+use crate::intent::Refusal;
 
 /// Where framed state goes: the Tauri channel in the app, a recorder in tests.
 pub trait FrameSink {
@@ -62,7 +64,9 @@ const MAX_REPORT_ROUNDS: usize = 32;
 
 /// One row the palette offers: a command the webview may send by name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct PaletteEntry {
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub id: CommandId,
     /// What the row does, as the keymap documents it.
     pub doc: &'static str,
@@ -101,6 +105,15 @@ pub struct DesktopHost<S: FrameSink> {
     /// When the last scan was asked for, so the tick can pace the next.
     scanned_at: Instant,
     rescan_every: Duration,
+    /// The daemon's publish counter as it stood when the last scan started, so
+    /// news the poller brings can start one before the cadence would (#1156).
+    ///
+    /// `None` until this window has scanned at all: news is a reason to look
+    /// AGAIN, and a host that has never asked for a list has nothing to
+    /// refresh.
+    scanned_generation: Option<u64>,
+    /// The least time after a scan before news may start the next one.
+    news_floor: Duration,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -114,14 +127,21 @@ impl<S: FrameSink> DesktopHost<S> {
         subscription: Subscription,
         sink: S,
     ) -> Self {
+        let mut state = AppState::with_config(config);
+        // This shell is the surface a person sits at, so an answer sent from
+        // this window is recorded as the desktop's. The sidecar already tells
+        // the daemon the same thing about this process (`sidecar::surface`).
+        state.host.surface = ainb_hangar_proto::connections::SurfaceKind::Desktop;
         Self {
-            state: AppState::with_config(config),
+            state,
             keymap,
             layout: DesktopLayout::default(),
             mirror: Mirror::new(host_id, subscription),
             sink,
             scanned_at: Instant::now(),
             rescan_every: WORKSPACE_RESCAN,
+            scanned_generation: None,
+            news_floor: ainb_app::AppState::workspace_rescan_floor(),
         }
     }
 
@@ -130,6 +150,14 @@ impl<S: FrameSink> DesktopHost<S> {
     #[must_use]
     pub const fn rescanning_every(mut self, every: Duration) -> Self {
         self.rescan_every = every;
+        self
+    }
+
+    /// Let news start a scan `floor` after the last one instead of after the
+    /// state's own scan budget. For tests, as [`Self::rescanning_every`] is.
+    #[must_use]
+    pub const fn flooring_news_at(mut self, floor: Duration) -> Self {
+        self.news_floor = floor;
         self
     }
 
@@ -151,7 +179,16 @@ impl<S: FrameSink> DesktopHost<S> {
     /// policy; a later [`Self::tick`] applies the result. Must be called inside
     /// a tokio runtime.
     pub fn start_workspace_load(&mut self) {
+        self.scanned_generation = Some(self.daemon_generation());
         self.state.start_workspace_load();
+    }
+
+    /// The attention poller's publish counter as it stands.
+    fn daemon_generation(&self) -> u64 {
+        self.state
+            .host
+            .daemon_attention_generation
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Apply background work that finished (a workspace load, a daemon
@@ -180,10 +217,31 @@ impl<S: FrameSink> DesktopHost<S> {
         // reducer paces it: at once on daemon news, otherwise on its own
         // cadence, and a merge that finds nothing new bumps nothing.
         self.state.refresh_attention(ainb_app::fleet::daemons::heartbeat::now_ms());
+        // What the answer worker reported, the tab reconciled, and the composer
+        // pointed at the request it is showing. Without it an answer sent from
+        // this window would leave the row reading SENT for as long as the shell
+        // is open: the worker reports into the state, and this is the only
+        // thing in this process that folds it.
+        self.state.tick_surfaces(ainb_app::fleet::daemons::heartbeat::now_ms());
         // A session another process created is found by a scan and by nothing
         // else, so the window keeps asking for one. Never two at once: the
         // reducer owns the load and reports it running.
-        if !self.state.workspace_scan_running() && self.scanned_at.elapsed() >= self.rescan_every {
+        //
+        // The daemon already knows when something happened, so its publish
+        // counter starts a scan at once and the cadence is the floor under it
+        // (#1156): a box whose sessions never touch the daemon still gets one
+        // on the timer. The counter is recorded at the START of the scan, so
+        // news that arrives while it runs is still news when it finishes.
+        let generation = self.daemon_generation();
+        // News is floored too, on the state's own scan budget, so a daemon
+        // publishing while a scan runs cannot queue the next one the moment it
+        // ends.
+        let news = self.scanned_generation.is_some_and(|seen| seen != generation)
+            && self.scanned_at.elapsed() >= self.news_floor;
+        if !self.state.workspace_scan_running()
+            && (news || self.scanned_at.elapsed() >= self.rescan_every)
+        {
+            self.scanned_generation = Some(generation);
             self.state.start_workspace_load();
         }
         let effects = self.state.take_effects();
@@ -239,7 +297,7 @@ impl<S: FrameSink> DesktopHost<S> {
         let contexts = ainb_app::app::keymap::command_contexts(&self.state);
         self.keymap
             .commands()
-            .filter(|(id, row)| crate::intent::palette_offers(id, row))
+            .filter(|(id, row)| crate::intent::palette_offers(&self.keymap, id, row))
             .map(|(id, row)| PaletteEntry {
                 id,
                 doc: row.doc,
@@ -250,19 +308,39 @@ impl<S: FrameSink> DesktopHost<S> {
             .collect()
     }
 
-    /// The key-only row `chord` runs in the current state, if it runs one.
+    /// The row `intent` would run now and why the webview may not run it, for
+    /// the webview to show, or `None` when it may (or when the intent names no
+    /// row).
     ///
-    /// Those rows write outside ainb (`global.wire_statusline` edits Claude
-    /// Code's settings), so the reducer runs them only from a key. A chord the
-    /// webview sends is script-reachable, so the shell refuses it there.
+    /// A key or a name the webview sends is script-reachable, so one judgement
+    /// covers both: a row that writes outside ainb runs only from a key the
+    /// host reads ([`Keymap::is_key_only`]), and a row whose effect depends on
+    /// state is refused while that state makes it write outside ainb
+    /// ([`AppState::remote_command_refusal`]): Enter on a dialog holding the
+    /// hook install or the abtop setup, Next on onboarding with telemetry set
+    /// up.
     #[must_use]
-    pub fn key_only_command(&self, chord: &Chord) -> Option<CommandId> {
-        let (ctx, _) = self.keymap.resolve_with_context(&active_contexts(&self.state), chord)?;
-        self.keymap
-            .commands()
-            .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))
-            .map(|(id, _)| id)
-            .filter(|id| KEY_ONLY_COMMANDS.contains(&id.as_str()))
+    pub fn refused_from_renderer(&self, intent: &Intent) -> Option<Refusal> {
+        let (id, row) = match intent {
+            Intent::Key(chord) => {
+                let (ctx, _) =
+                    self.keymap.resolve_with_context(&active_contexts(&self.state), chord)?;
+                self.keymap
+                    .commands()
+                    .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))?
+            }
+            Intent::Command(id, _) => (id.clone(), self.keymap.command(id)?),
+            _ => return None,
+        };
+        let why = if self.keymap.is_key_only(&id) {
+            Some("it writes outside ainb, so it runs only from its key")
+        } else {
+            self.state.remote_command_refusal(&row.action)
+        };
+        why.map(|reason| Refusal {
+            command: id,
+            reason,
+        })
     }
 
     /// Layout work for the webview queued since the last call.

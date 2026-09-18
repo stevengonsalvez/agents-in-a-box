@@ -5,7 +5,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type {
   AttentionKind,
-  SessionFilter,
   SessionStatus,
   Session_Serialize,
   SessionsView_Serialize,
@@ -54,38 +53,35 @@ test("a label drops control and format characters and stops at the cap", () => {
   assert.equal(label("\u{1F600}".repeat(100)), "\u{1F600}".repeat(LABEL_CHARS));
 });
 
-test("the sidebar draws only the rows the session list's filter keeps", () => {
-  const rows = (filter: SessionFilter) => {
+test("the sidebar draws the rows the frame keeps, and keeps each row's index", () => {
+  // The reducer decides; the frame carries the verdict. The window never
+  // re-derives the filter, so a rule that grows a case in Rust cannot be
+  // silently wrong here (#1157).
+  const rows = (hidden: string[]) => {
     const sessions = {
       workspaces: [
         {
           name: "repo",
-          sessions: [
-            { ...session("live"), mode: "Interactive" },
-            { ...session("gone", "Stopped"), mode: "Interactive" },
-            { ...session("boss", "Stopped"), mode: "Boss" },
-          ],
+          sessions: [session("live"), session("gone", "Stopped"), session("boss", "Stopped")],
         },
       ],
-      session_filter: filter,
+      hidden_sessions: hidden,
     } as unknown as SessionsView_Serialize;
     return visibleRows(sessions, sessions.workspaces[0]);
   };
 
   assert.deepEqual(
-    rows("active_only").map((row) => [row.index, row.session.id]),
+    rows(["gone"]).map((row) => [row.index, row.session.id]),
     [
       [0, "live"],
-      // A Boss session is not the filter's business, as the reducer has it.
+      // The row below a hidden one keeps ITS index: the selection is expressed
+      // in the reducer's own list, not in what is on screen.
       [2, "boss"],
     ],
   );
-  assert.deepEqual(
-    rows("stopped_only").map((row) => [row.index, row.session.id]),
-    [
-      [1, "gone"],
-      [2, "boss"],
-    ],
-  );
-  assert.equal(rows("all").length, 3);
+  assert.equal(rows([]).length, 3);
+  assert.equal(rows(["live", "gone", "boss"]).length, 0);
+  // A host at another version may send no verdict at all.
+  const bare = { workspaces: [{ name: "repo", sessions: [session("live")] }] } as unknown as SessionsView_Serialize;
+  assert.equal(visibleRows(bare, bare.workspaces[0]).length, 1);
 });

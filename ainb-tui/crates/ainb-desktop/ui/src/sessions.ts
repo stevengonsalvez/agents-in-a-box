@@ -5,7 +5,6 @@
 
 import type {
   AttentionKind,
-  SessionFilter,
   SessionStatus,
   Session_Serialize,
   SessionsView_Serialize,
@@ -69,24 +68,6 @@ export function allSessions(view: SessionsView_Serialize | undefined): Session_S
   return view?.workspaces.flatMap((workspace) => workspace.sessions) ?? [];
 }
 
-/**
- * Whether the session list's filter keeps this row, exactly as
- * `AppState::session_passes_filter` decides it: the filter applies to
- * interactive sessions and to nothing else.
- */
-export function passesFilter(session: Session_Serialize, filter: SessionFilter): boolean {
-  if (session.mode !== "Interactive") return true;
-  switch (filter) {
-    case "active_only":
-      return session.status !== "Stopped";
-    case "stopped_only":
-      return session.status === "Stopped";
-    // `all`, and a filter a host at another version may send.
-    default:
-      return true;
-  }
-}
-
 /** A row the sidebar draws, with its place in the frame's own list. */
 export interface VisibleRow {
   /** The index the reducer selects by, which filtering must not shift. */
@@ -95,18 +76,22 @@ export interface VisibleRow {
 }
 
 /**
- * One workspace's rows as the sidebar draws them: the filter's own, in frame
- * order. The sidebar draws what the reducer walks, so a row its navigation
- * skips is not on screen either.
+ * One workspace's rows as the sidebar draws them, in frame order.
+ *
+ * The frame says which rows the filter hides (`hidden_sessions`), so the rule
+ * itself lives in the reducer and nowhere else: a window deciding for itself
+ * was a second copy of a rule that grows cases (#1157). Each row keeps its
+ * index in the frame's own list, because that index is what the selection is
+ * expressed in.
  */
 export function visibleRows(
   view: SessionsView_Serialize | undefined,
   workspace: Workspace_Serialize,
 ): VisibleRow[] {
-  const filter = view?.session_filter ?? "all";
+  const hidden = new Set(view?.hidden_sessions ?? []);
   return workspace.sessions
     .map((session, index) => ({ index, session }))
-    .filter((row) => passesFilter(row.session, filter));
+    .filter((row) => !hidden.has(row.session.id));
 }
 
 /** How many rows ring with `kind`: one header count. */

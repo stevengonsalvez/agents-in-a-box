@@ -95,3 +95,139 @@ fn the_tick_starts_another_scan_once_the_cadence_has_passed() {
         running = now;
     }
 }
+
+/// The daemon already knows when something happened, so its publish counter
+/// starts a scan rather than the window waiting out the cadence (#1156).
+#[test]
+fn daemon_news_starts_a_scan_before_the_cadence_would() {
+    use std::sync::atomic::Ordering;
+
+    support::isolated_home();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let _runtime = runtime.enter();
+
+    let mut host = DesktopHost::new(
+        AppConfig::default(),
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::only(&[SectionId::WorkspaceLoad]),
+        |_batch: FrameBatch| {},
+    )
+    // Far longer than this test runs: a scan here is the news's, not the
+    // cadence's.
+    .rescanning_every(Duration::from_secs(600))
+    .flooring_news_at(Duration::from_millis(500));
+    // Held off, so the poller thread does not move the counter under the test.
+    host.state().host.attention_poll_running.store(true, Ordering::Release);
+
+    // News is a reason to look AGAIN, so the window has to have looked once.
+    host.start_workspace_load();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while host.state().workspace_scan_running() {
+        assert!(Instant::now() < deadline, "the first scan never finished");
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = host.tick();
+    }
+    let _ = host.tick();
+    assert!(
+        !host.state().workspace_scan_running(),
+        "nothing has happened since, and the cadence is 10 minutes away"
+    );
+
+    // News inside the floor waits: a daemon publishing while a scan ran
+    // must not queue the next one the moment it ends.
+    host.state().host.daemon_attention_generation.fetch_add(1, Ordering::Release);
+    let _ = host.tick();
+    assert!(
+        !host.state().workspace_scan_running(),
+        "news right after a scan waits out the floor"
+    );
+
+    std::thread::sleep(Duration::from_millis(600));
+    let _ = host.tick();
+
+    assert!(
+        host.state().workspace_scan_running(),
+        "the daemon reported news, so the window looked well before the cadence"
+    );
+
+    // Wait the scan out, so the test leaves no loader thread behind.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while host.state().workspace_scan_running() {
+        assert!(Instant::now() < deadline, "the scan never finished");
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = host.tick();
+    }
+}
+
+/// A session the operator stopped is still theirs: the worktree is on disk and
+/// the row is how they resume it. The full refresh that used to be the only
+/// thing to find one is queued as an action no host is obliged to run, so on
+/// this shell it never ran at all (#1159). The scan finds them now.
+#[test]
+fn a_stopped_session_reaches_the_sidebar() {
+    let home = support::isolated_home();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let _runtime = runtime.enter();
+
+    // A real worktree: a stopped row is only offered for a directory that is
+    // still inside a git repository, which is what makes it resumable.
+    let worktree = home.join("stopped-repo");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let git = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&worktree)
+        .status()
+        .expect("git init");
+    assert!(git.success(), "git init failed");
+
+    // Persisted metadata for a session whose tmux is long gone.
+    let store = home.join(".agents-in-a-box");
+    std::fs::create_dir_all(&store).expect("ainb home");
+    std::fs::write(
+        store.join("sessions.json"),
+        serde_json::json!({
+            "sessions": {
+                "ainb_stopped_main": {
+                    "session_id": "6f1d3d64-0f44-4a1e-9a9e-6f2f7e6a1b11",
+                    "tmux_session_name": "ainb_stopped_main",
+                    "worktree_path": worktree,
+                    "workspace_name": "stopped-repo",
+                    "created_at": "2026-09-16T10:00:00Z",
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("sessions.json");
+
+    let mut host = DesktopHost::new(
+        AppConfig::default(),
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::only(&[SectionId::Sessions]),
+        |_batch: FrameBatch| {},
+    );
+    host.start_workspace_load();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let found = loop {
+        let listed = host
+            .state()
+            .sessions
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.sessions.iter())
+            .any(|session| session.tmux_session_name.as_deref() == Some("ainb_stopped_main"));
+        if listed {
+            break true;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the stopped session never arrived"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = host.tick();
+    };
+    assert!(found);
+}
