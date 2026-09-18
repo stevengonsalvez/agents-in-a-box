@@ -56,7 +56,10 @@ pub enum AnswerPhase {
     /// The transport reported delivery. The chip clears on the next refresh,
     /// when the producer stops reporting the row.
     Delivered {
-        /// How it was delivered, e.g. `tmux (session-name)`.
+        /// How it was delivered, e.g. `tmux (session-name)`, scrubbed as the
+        /// failure's reason is: it echoes transport text.
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
         via: String,
     },
     /// Nothing was delivered. The chip goes BACK to ASK and this is why.
