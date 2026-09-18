@@ -246,6 +246,13 @@ fn send_key_refuses_a_key_newer_than_the_plugin_abi() {
         !handle.take_render_dirty(&id),
         "a refused key kicks no render"
     );
+    // The fixture re-publishes every key it decodes, so nothing published
+    // means nothing reached the wire.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        handle.snapshot_get("fixture.last_key").is_none(),
+        "the refused key never reached the plugin"
+    );
     assert!(handle.send_key(
         &id,
         "ainb_analytics",
@@ -254,32 +261,28 @@ fn send_key_refuses_a_key_newer_than_the_plugin_abi() {
     assert!(handle.plugin_abi(&PluginId::from("absent")).is_none());
 }
 
-/// #1171: a plugin that declares the ABI Insert arrived in receives it.
+/// #1171: a manifest claiming an ABI newer than this build, even `u32::MAX`, is
+/// spoken to at the build's own `ABI_VERSION`, so it is not sent Insert either.
 #[test]
-fn send_key_delivers_insert_to_a_plugin_at_its_abi() {
-    let (rt, handle) = build_runtime();
-    let id = register_fixture_at_abi(&rt, ainb_plugin_runtime::KeyCode::Insert.min_abi());
-    spawned(&rt, &handle, &id);
-
-    assert!(handle.send_key(
-        &id,
-        "ainb_analytics",
-        press(ainb_plugin_runtime::KeyCode::Insert)
-    ));
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let mut payload = None;
-    while std::time::Instant::now() < deadline {
-        if let Some(p) = handle.snapshot_get("fixture.last_key") {
-            payload = Some(p);
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
+fn a_manifest_abi_past_the_build_is_capped_at_abi_version() {
+    for claimed in [ainb_plugin_runtime::KeyCode::Insert.min_abi(), u32::MAX] {
+        let (rt, handle) = build_runtime();
+        let id = register_fixture_at_abi(&rt, claimed);
+        assert_eq!(
+            handle.plugin_abi(&id),
+            Some(ainb_plugin_protocol::manifest::ABI_VERSION),
+            "claimed {claimed}"
+        );
+        spawned(&rt, &handle, &id);
+        assert!(
+            !handle.send_key(
+                &id,
+                "ainb_analytics",
+                press(ainb_plugin_runtime::KeyCode::Insert)
+            ),
+            "claimed {claimed}: Insert is past this build's ABI"
+        );
     }
-    let bytes = payload.expect("fixture never re-published last_key snapshot");
-    let decoded: serde_json::Value =
-        serde_json::from_slice(&bytes).expect("fixture payload is JSON");
-    assert_eq!(decoded["key"]["code"]["type"], "insert");
 }
 
 #[test]
