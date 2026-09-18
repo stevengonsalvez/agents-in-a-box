@@ -123,7 +123,25 @@ impl<S: FrameSink> DesktopHost<S> {
         subscription: Subscription,
         sink: S,
     ) -> Self {
-        let mut state = AppState::with_config(config);
+        Self::hosting(
+            AppState::with_config(config),
+            keymap,
+            host_id,
+            subscription,
+            sink,
+        )
+    }
+
+    /// Host `state` as it was built, rather than one built on a config. For a
+    /// caller that has already assembled the state it wants hosted: a test
+    /// seeding a session that is waiting on a question, for one.
+    pub fn hosting(
+        mut state: AppState,
+        keymap: Keymap,
+        host_id: HostId,
+        subscription: Subscription,
+        sink: S,
+    ) -> Self {
         // This shell is the surface a person sits at, so an answer sent from
         // this window is recorded as the desktop's. The sidecar already tells
         // the daemon the same thing about this process (`sidecar::surface`).
