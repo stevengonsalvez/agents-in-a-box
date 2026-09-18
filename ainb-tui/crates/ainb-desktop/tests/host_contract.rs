@@ -415,3 +415,146 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     found
 }
+
+/// The answer's full round trip with no window: the ask commands a person's
+/// clicks send, against a session waiting on a daemon question, move the
+/// frame's phase to in flight and then settle it. There is no daemon in this
+/// test, so it settles as a failure that names the call and keeps the answer;
+/// the delivered leg runs against a real daemon in the journey.
+#[test]
+fn the_ask_commands_send_an_answer_and_the_frame_follows_it() {
+    use ainb_app::AppState;
+    use ainb_app::app::pointer::select_session_tab;
+    use ainb_app::app::screens::ids as screen_ids;
+    use ainb_app::components::session_tabs::SessionTab;
+    use ainb_app::fleet::answer::AnswerPhase;
+    use ainb_app::fleet::attention::{AttentionKind, AttentionOption, SessionAttention};
+    use ainb_app::models::{Session, Workspace};
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    scratch_home();
+    let chip = SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-7".into()).with_options(
+        ["staging", "production"]
+            .iter()
+            .map(|label| AttentionOption {
+                label: (*label).to_string(),
+                description: String::new(),
+            })
+            .collect(),
+    );
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    let mut workspace = Workspace::new("api".to_string(), "/work/api".into());
+    let mut session = Session::new("feat".to_string(), "/work/api/wt".to_string());
+    session.live_attention = vec![chip.clone()];
+    workspace.add_session(session);
+    state.sessions.workspaces = vec![workspace];
+    state.sessions.selected_workspace_index = Some(0);
+    state.sessions.selected_session_index = Some(0);
+    // The chip is the seed; a merge would recompute it from stores this test
+    // does not have, so none is due while the test runs.
+    state.host.last_attention_refresh = Some(Instant::now());
+    let log = Log::default();
+    let sink_log = Rc::clone(&log);
+    let mut host = DesktopHost::hosting(
+        state,
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::only(&[SectionId::Fleet]),
+        move |batch: FrameBatch| {
+            for frame in batch.frames {
+                sink_log.borrow_mut().push(format!("frame {}", frame.section));
+            }
+        },
+    );
+    host.state().host.attention_poll_running.store(true, Ordering::Release);
+
+    // What the banner sends to pick the second option.
+    let _ = host.dispatch(select_session_tab(SessionTab::Ask));
+    let _ = host.tick();
+    let _ = host.dispatch(Intent::Command(
+        CommandId::new("session_list.ask.next"),
+        serde_json::Value::Null,
+    ));
+    assert_eq!(
+        host.state().fleet.ask_state.cursor(),
+        1,
+        "the cursor is on option two"
+    );
+    log.borrow_mut().clear();
+    let _ = host.dispatch(Intent::Command(
+        CommandId::new("session_list.ask.enter"),
+        serde_json::Value::Null,
+    ));
+    assert!(
+        matches!(
+            host.state().fleet.ask_state.phase_for(&chip),
+            Some(AnswerPhase::InFlight { .. })
+        ),
+        "the send is out"
+    );
+    assert!(
+        log.borrow().iter().any(|frame| frame == "frame fleet"),
+        "and the frame says so"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while host.state().fleet.ask_state.in_flight() {
+        assert!(Instant::now() < deadline, "the send never settled");
+        std::thread::sleep(Duration::from_millis(20));
+        let _ = host.tick();
+    }
+    match host.state().fleet.ask_state.phase_for(&chip) {
+        Some(AnswerPhase::Failed { reason, .. }) => {
+            assert!(
+                reason.contains("attention/answer"),
+                "names the call: {reason}"
+            );
+        }
+        other => panic!("with no daemon the send fails, and says so: {other:?}"),
+    }
+}
+
+/// Typed text reaches the reducer's composer once its cursor is on the
+/// composer row, which is what the banner's free-text send relies on.
+#[test]
+fn text_typed_at_the_composer_row_lands_in_the_reducers_composer() {
+    use ainb_app::AppState;
+    use ainb_app::app::pointer::select_session_tab;
+    use ainb_app::app::screens::ids as screen_ids;
+    use ainb_app::components::session_tabs::SessionTab;
+    use ainb_app::fleet::attention::{AttentionKind, SessionAttention};
+    use ainb_app::models::{Session, Workspace};
+    use std::time::Instant;
+
+    scratch_home();
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    let mut workspace = Workspace::new("api".to_string(), "/work/api".into());
+    let mut session = Session::new("feat".to_string(), "/work/api/wt".to_string());
+    session.live_attention = vec![SessionAttention::daemon(
+        AttentionKind::Ask,
+        1,
+        "att-9".into(),
+    )];
+    workspace.add_session(session);
+    state.sessions.workspaces = vec![workspace];
+    state.sessions.selected_workspace_index = Some(0);
+    state.sessions.selected_session_index = Some(0);
+    state.host.last_attention_refresh = Some(Instant::now());
+    let mut host = DesktopHost::hosting(
+        state,
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::only(&[SectionId::Fleet]),
+        |_batch: FrameBatch| {},
+    );
+
+    let _ = host.dispatch(select_session_tab(SessionTab::Ask));
+    let _ = host.tick();
+    // No options, so the retarget has already put the cursor on the composer.
+    let _ = host.dispatch(Intent::Text("qa".to_string()));
+
+    assert_eq!(host.state().fleet.ask_state.free_text(), "qa");
+}
