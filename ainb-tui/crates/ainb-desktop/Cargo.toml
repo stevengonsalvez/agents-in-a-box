@@ -34,6 +34,10 @@ bundled = ["app", "tauri/custom-protocol"]
 # WebDriver symbol and binds no driver port. The journey drives a window
 # serving its own frontend, so this implies `bundled`.
 wdio = ["bundled", "dep:tauri-plugin-wdio-webdriver"]
+# Derives `specta::Type` on the two shapes that cross the IPC seam and exposes
+# `bindings`, which renders `Desktop.ts`. Off in every normal build; the CI
+# desktop workflow builds with it and diffs the output.
+typescript-bindings = ["dep:specta", "dep:specta-serde", "dep:specta-typescript"]
 
 [dependencies]
 ainb-app = { path = "../ainb-app" }
@@ -51,6 +55,11 @@ tracing-subscriber = { version = "0.3", optional = true, features = ["fmt"] }
 uuid = { version = "1.5", features = ["serde"] }
 tauri = { version = "~2.11.5", optional = true }
 tauri-plugin-wdio-webdriver = { version = "1.4", optional = true }
+# Pinned to the same releases `ainb-app` renders its frame contract with, so
+# both files are produced by one version of specta.
+specta = { version = "=2.0.0-rc.25", features = ["derive", "uuid", "chrono", "serde_json"], optional = true }
+specta-serde = { version = "=0.0.12", optional = true }
+specta-typescript = { version = "=0.0.12", optional = true }
 
 [build-dependencies]
 tauri-build = { version = "~2.6.3", optional = true }

@@ -61,7 +61,11 @@ fn log_detail(row: &ainb_plugin_notifyd::NotificationRecord) -> String {
 ///
 /// Declaration order is STRIP order, left to right, and `cycle` walks it, so
 /// the rendered strip and the key that moves through it cannot disagree.
-#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+// `Deserialize` as well as `Serialize`: a pointer row names a tab by the same
+// spelling the frame carries, so a click can say which pane it wants.
+#[derive(
+    serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default,
+)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum SessionTab {
     /// The read-only tmux mirror. Today's default, and still the default.

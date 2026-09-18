@@ -34,6 +34,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use ainb_hangar_proto::connections::SurfaceKind;
 use ainb_hangar_proto::fleet::FleetSnapshot;
 
 use crate::fleet::bridge::daemon::FleetStreamEvent;
@@ -599,15 +600,26 @@ fn describe_decision(decided: Result<bool, String>, approve: bool) -> Result<Str
     }
 }
 
-/// Answer one open attention row through the daemon, blocking.
+/// Answer one open attention row through the daemon, blocking, as `surface`.
 ///
 /// The daemon runs first-answer-wins and performs its own verified last-mile
 /// send, so this reports what it decided rather than deciding anything.
 ///
+/// `surface` is the kind the sending surface calls itself, supplied by the
+/// caller rather than fixed here: this one function answers for the TUI and
+/// for the desktop shell, and the daemon records the row as answered by the
+/// kind the connection declared (base spec `:307`, `answered_by =
+/// "<kind>@<host>"`). Stamping every answer `tui` made the winner a surface
+/// nobody sat at.
+///
 /// # Errors
 ///
 /// Returns the reason the answer was not delivered.
-pub fn answer_via_daemon_blocking(attention_id: String, answer: String) -> Result<String, String> {
+pub fn answer_via_daemon_blocking(
+    attention_id: String,
+    answer: String,
+    surface: SurfaceKind,
+) -> Result<String, String> {
     use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -615,14 +627,17 @@ pub fn answer_via_daemon_blocking(attention_id: String, answer: String) -> Resul
         .build()
         .map_err(|error| error.to_string())?;
     runtime.block_on(async {
-        let client = crate::fleet::bridge::daemon::tui_client()
+        let client = crate::fleet::bridge::daemon::surface_client(surface)
             .map_err(|error| format!("attention/answer unavailable: {error}"))?;
         let socket = client.socket().display().to_string();
         let result = client
             .answer(AnswerParams {
                 attention_id,
                 answer,
-                answered_by: "tui".to_string(),
+                // The daemon replaces this with the connection's own kind
+                // before any write; it stays here for a daemon old enough to
+                // read the body, and it says the same thing either way.
+                answered_by: surface.to_string(),
                 is_answer: true,
                 mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
             })

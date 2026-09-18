@@ -9,9 +9,17 @@ use serde::{Deserialize, Serialize};
 /// the webview hit-tests its own DOM and sends the command a press means, so a
 /// terminal cell position has nothing to hit here.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum RendererIntent {
-    Key(Chord),
-    Command(CommandId, ainb_app::app::Args),
+    // A chord and a command id are strings on the wire by their own serde
+    // attributes, and an argument payload is arbitrary JSON; named here so this
+    // crate's bindings do not depend on how `ainb-app` was built.
+    Key(#[cfg_attr(feature = "typescript-bindings", specta(type = String))] Chord),
+    Command(
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))] CommandId,
+        #[cfg_attr(feature = "typescript-bindings", specta(type = specta_typescript::Unknown))]
+        ainb_app::app::Args,
+    ),
     Text(String),
 }
 
