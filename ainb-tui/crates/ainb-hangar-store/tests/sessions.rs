@@ -27,7 +27,12 @@ async fn sessions_round_trip_all_thirteen_fields() {
     let store = Store::open_in(dir.path()).await.unwrap();
     let pool = store.pool();
 
-    let s1 = test_session("00000000-0000-0000-0000-000000000001", "ainb-alpha", "workspace-a", 1000);
+    let s1 = test_session(
+        "00000000-0000-0000-0000-000000000001",
+        "ainb-alpha",
+        "workspace-a",
+        1000,
+    );
     SessionsRepo::upsert(pool, &s1).await.unwrap();
 
     let fetched = SessionsRepo::get_by_id(pool, &s1.session_id).await.unwrap();
@@ -47,9 +52,24 @@ async fn sessions_list_filtering_and_ordering() {
     let store = Store::open_in(dir.path()).await.unwrap();
     let pool = store.pool();
 
-    let s1 = test_session("00000000-0000-0000-0000-000000000001", "ainb-s1", "ws-1", 1000);
-    let s2 = test_session("00000000-0000-0000-0000-000000000002", "ainb-s2", "ws-2", 3000);
-    let s3 = test_session("00000000-0000-0000-0000-000000000003", "ainb-s3", "ws-1", 2000);
+    let s1 = test_session(
+        "00000000-0000-0000-0000-000000000001",
+        "ainb-s1",
+        "ws-1",
+        1000,
+    );
+    let s2 = test_session(
+        "00000000-0000-0000-0000-000000000002",
+        "ainb-s2",
+        "ws-2",
+        3000,
+    );
+    let s3 = test_session(
+        "00000000-0000-0000-0000-000000000003",
+        "ainb-s3",
+        "ws-1",
+        2000,
+    );
 
     SessionsRepo::upsert(pool, &s1).await.unwrap();
     SessionsRepo::upsert(pool, &s2).await.unwrap();
@@ -75,7 +95,12 @@ async fn sessions_upsert_and_deletion() {
     let store = Store::open_in(dir.path()).await.unwrap();
     let pool = store.pool();
 
-    let mut s1 = test_session("00000000-0000-0000-0000-000000000001", "ainb-s1", "ws-1", 1000);
+    let mut s1 = test_session(
+        "00000000-0000-0000-0000-000000000001",
+        "ainb-s1",
+        "ws-1",
+        1000,
+    );
     SessionsRepo::upsert(pool, &s1).await.unwrap();
 
     // Update fields
@@ -89,10 +114,16 @@ async fn sessions_upsert_and_deletion() {
     // Delete by tmux name
     assert!(SessionsRepo::delete_by_tmux_name(pool, "ainb-s1").await.unwrap());
     assert!(!SessionsRepo::delete_by_tmux_name(pool, "ainb-s1").await.unwrap());
-    assert_eq!(SessionsRepo::get_by_id(pool, &s1.session_id).await.unwrap(), None);
+    assert_eq!(
+        SessionsRepo::get_by_id(pool, &s1.session_id).await.unwrap(),
+        None
+    );
 
     // Re-insert and delete by ID
     SessionsRepo::upsert(pool, &s1).await.unwrap();
     assert!(SessionsRepo::delete_by_id(pool, &s1.session_id).await.unwrap());
-    assert_eq!(SessionsRepo::get_by_tmux_name(pool, "ainb-s1").await.unwrap(), None);
+    assert_eq!(
+        SessionsRepo::get_by_tmux_name(pool, "ainb-s1").await.unwrap(),
+        None
+    );
 }
