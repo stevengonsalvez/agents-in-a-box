@@ -114,6 +114,31 @@ impl Session<'_> {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
+    /// Start recording the pane's raw output, as its program writes it, to a
+    /// file in the server's directory. Returns the file's path.
+    fn pipe_output(&self) -> PathBuf {
+        let path = self.server.dir.path().join(format!("{}.out", self.name));
+        let status = self
+            .server
+            .command()
+            .args(["pipe-pane", "-o", "-t", &format!("={}:", self.name)])
+            .arg(format!("cat >> '{}'", path.display()))
+            .status()
+            .expect("pipe-pane runs");
+        assert!(status.success(), "pipe-pane on {} started", self.name);
+        path
+    }
+
+    fn send_enter(&self) {
+        let status = self
+            .server
+            .command()
+            .args(["send-keys", "-t", &format!("={}:", self.name), "Enter"])
+            .status()
+            .expect("send-keys runs");
+        assert!(status.success(), "Enter sent to {}", self.name);
+    }
+
     fn clients(&self) -> usize {
         let output = self
             .server
@@ -239,15 +264,21 @@ fn pane_output_reaches_the_sink_and_typed_input_reaches_the_pane() {
 }
 
 /// #1003: a paste whose payload carries the bracketed-paste terminator and
-/// then a command lands in the pane as text; the command never runs. The pane
-/// is bash with readline's bracketed paste on, so a paste that ended early
-/// would run `echo pwned-$((6*7))` and print `pwned-42`.
+/// then a command lands in the pane as text; the command never runs. A paste
+/// that ended early would run `echo pwned-$((6*7))` and print `pwned-42`.
+///
+/// The proof needs a shell that brackets pastes. Without that, the return
+/// inside the paste runs the line whatever the strip did, so the test would
+/// fail for the wrong reason. macOS ships bash 3.2, whose readline has no
+/// bracketed paste, so the pane runs zsh (zle brackets pastes by default since
+/// 5.1) and falls back to bash (on by default since 5.1) where zsh is absent.
+/// The test asserts the shell turned the mode on before it pastes.
 #[test]
 fn a_paste_carrying_the_terminator_lands_as_literal_text() {
     let server = Server::new();
     let session = server.start(
         "d1c-paste",
-        "env -i PATH=/usr/bin:/bin TERM=xterm-256color PS1='ready> ' bash --norc --noprofile",
+        r#"env -i PATH=/usr/bin:/bin TERM=xterm-256color PS1='ready> ' sh -c "command -v zsh >/dev/null && exec zsh -f; exec bash --norc --noprofile""#,
     );
     let (terminals, _recorder, _reports) = terminals(&server);
     assert_eq!(
@@ -255,7 +286,19 @@ fn a_paste_carrying_the_terminator_lands_as_literal_text() {
         None,
         "the tab opened"
     );
-    wait_for("the bash prompt", || session.capture().contains("ready>"));
+    wait_for("the shell prompt", || session.capture().contains("ready>"));
+    // The shell's own output, not the tab's: tmux turns bracketed paste on
+    // for every client it drives, so the tab sees `ESC[?2004h` whatever the
+    // shell does. Both shells re-arm the mode on each prompt, so an empty
+    // line after the pipe is open draws one the pipe records.
+    let shell_output = session.pipe_output();
+    session.send_enter();
+    wait_for("the shell to turn bracketed paste on", || {
+        std::fs::read(&shell_output)
+            .unwrap_or_default()
+            .windows(8)
+            .any(|window| window == b"\x1b[?2004h")
+    });
 
     // As xterm.js sends a paste: one chunk, wrapped in the markers, with the
     // hostile payload between them.
