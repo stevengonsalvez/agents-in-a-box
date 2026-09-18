@@ -189,6 +189,99 @@ fn send_key_forwards_handle_key_notification() {
     );
 }
 
+/// Register the fixture under a manifest that declares `abi`.
+fn register_fixture_at_abi(rt: &Runtime, abi: u32) -> PluginId {
+    let mut manifest = fixture_manifest();
+    manifest.plugin.abi_version = abi;
+    let plugin = RegisteredPlugin::new(
+        manifest,
+        fixture_path(),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    let id = plugin.id.clone();
+    rt.register(plugin);
+    id
+}
+
+/// Spawn the plugin and wait for its first render, so a key has a child to
+/// reach (see `send_key_forwards_handle_key_notification`).
+fn spawned(rt: &Runtime, handle: &ainb_plugin_runtime::RuntimeHandle, id: &PluginId) {
+    let render_rx = handle.render(id, Viewport::new(20, 5), 0);
+    rt.tokio_handle().block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), render_rx)
+            .await
+            .expect("spawn render timed out")
+            .expect("spawn render channel closed")
+    });
+}
+
+fn press(code: ainb_plugin_runtime::KeyCode) -> ainb_plugin_runtime::KeyEvent {
+    ainb_plugin_runtime::KeyEvent {
+        code,
+        mods: 0,
+        kind: ainb_plugin_runtime::KeyKind::Press,
+    }
+}
+
+/// #1171: `send_key` is the chokepoint. An ABI 2 plugin is never sent Insert,
+/// which its protocol predates, and the refusal spends nothing: no render is
+/// kicked for it. Any other key still goes through.
+#[test]
+fn send_key_refuses_a_key_newer_than_the_plugin_abi() {
+    let (rt, handle) = build_runtime();
+    let id = register_fixture_at_abi(&rt, 2);
+    assert_eq!(handle.plugin_abi(&id), Some(2));
+    spawned(&rt, &handle, &id);
+    let _ = handle.take_render_dirty(&id);
+
+    assert!(
+        !handle.send_key(
+            &id,
+            "ainb_analytics",
+            press(ainb_plugin_runtime::KeyCode::Insert)
+        ),
+        "an ABI 2 plugin is not sent Insert"
+    );
+    assert!(
+        !handle.take_render_dirty(&id),
+        "a refused key kicks no render"
+    );
+    assert!(handle.send_key(
+        &id,
+        "ainb_analytics",
+        press(ainb_plugin_runtime::KeyCode::Delete)
+    ));
+    assert!(handle.plugin_abi(&PluginId::from("absent")).is_none());
+}
+
+/// #1171: a plugin that declares the ABI Insert arrived in receives it.
+#[test]
+fn send_key_delivers_insert_to_a_plugin_at_its_abi() {
+    let (rt, handle) = build_runtime();
+    let id = register_fixture_at_abi(&rt, ainb_plugin_runtime::KeyCode::Insert.min_abi());
+    spawned(&rt, &handle, &id);
+
+    assert!(handle.send_key(
+        &id,
+        "ainb_analytics",
+        press(ainb_plugin_runtime::KeyCode::Insert)
+    ));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut payload = None;
+    while std::time::Instant::now() < deadline {
+        if let Some(p) = handle.snapshot_get("fixture.last_key") {
+            payload = Some(p);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let bytes = payload.expect("fixture never re-published last_key snapshot");
+    let decoded: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("fixture payload is JSON");
+    assert_eq!(decoded["key"]["code"]["type"], "insert");
+}
+
 #[test]
 fn render_dirty_flag_is_event_driven() {
     // Verifies the render-dirty gate that drives the host's
