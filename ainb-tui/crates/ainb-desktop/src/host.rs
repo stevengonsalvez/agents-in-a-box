@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
+use ainb_app::app::state::WorkspaceRescan;
 use ainb_app::app::{KEY_ONLY_COMMANDS, RendererHost};
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
@@ -83,8 +84,8 @@ pub struct DesktopHost<S: FrameSink> {
     layout: DesktopLayout,
     mirror: Mirror,
     sink: S,
-    /// How often the tick asks the state for a fresh scan.
-    rescan_every: Duration,
+    /// How the tick asks the state to keep the session list fresh.
+    rescan: WorkspaceRescan,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -104,7 +105,7 @@ impl<S: FrameSink> DesktopHost<S> {
             layout: DesktopLayout::default(),
             mirror: Mirror::new(host_id, subscription),
             sink,
-            rescan_every: AppState::WORKSPACE_RESCAN,
+            rescan: WorkspaceRescan::default(),
         }
     }
 
@@ -112,7 +113,7 @@ impl<S: FrameSink> DesktopHost<S> {
     /// cannot wait ten seconds to see the second scan.
     #[must_use]
     pub const fn rescanning_every(mut self, every: Duration) -> Self {
-        self.rescan_every = every;
+        self.rescan.every = every;
         self
     }
 
@@ -144,7 +145,7 @@ impl<S: FrameSink> DesktopHost<S> {
     pub fn tick(&mut self) -> Vec<Effect> {
         // A session another process created is found by a scan and by nothing
         // else, so the window keeps asking for one; the pacing is the state's.
-        self.state.pace_workspace_load(Some(self.rescan_every));
+        self.state.pace_workspace_load(Some(self.rescan));
         // The poller is idempotent by an atomic, so starting it every tick is
         // its documented use. Every read here is by shared reference: a `&mut`
         // path through the `Versioned` Fleet section would bump it each tick.
