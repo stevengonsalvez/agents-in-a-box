@@ -495,19 +495,42 @@ export type AttentionKind =
 
 /**
  *  One chip of a session row's merged attention, as a mirror frame carries it:
- *  the kind the row paints and the detail it can show, scrubbed. How the chip
- *  is answered stays on the host.
+ *  the kind the row paints, the detail it can show, and what a surface needs to
+ *  answer THIS chip rather than another one, all in the reducer's own order.
+ * 
+ *  A renderer that answers from the window must name the chip the reducer will
+ *  answer (`selected_blocking`, the first blocking chip here). Reading the
+ *  daemon's rows instead picked a chip in wire order, so with two open
+ *  questions on one session a click could send the other question's option.
+ *  The route is the coarse kind of transport only; the attention id rides in
+ *  `request`, which is how the reducer's own answer state names the chip.
  */
 export type AttentionMark = AttentionMark_Serialize;
 
 /**
  *  One chip of a session row's merged attention, as a mirror frame carries it:
- *  the kind the row paints and the detail it can show, scrubbed. How the chip
- *  is answered stays on the host.
+ *  the kind the row paints, the detail it can show, and what a surface needs to
+ *  answer THIS chip rather than another one, all in the reducer's own order.
+ * 
+ *  A renderer that answers from the window must name the chip the reducer will
+ *  answer (`selected_blocking`, the first blocking chip here). Reading the
+ *  daemon's rows instead picked a chip in wire order, so with two open
+ *  questions on one session a click could send the other question's option.
+ *  The route is the coarse kind of transport only; the attention id rides in
+ *  `request`, which is how the reducer's own answer state names the chip.
  */
 export type AttentionMark_Serialize = {
 	kind: AttentionKind,
 	detail: string | null,
+	/**  The chip's request identity, as `fleet.ask_state.request` names it. */
+	request: string,
+	/**
+	 *  The structured answers it offers, labels and descriptions scrubbed, in
+	 *  the order the reducer's cursor walks them.
+	 */
+	options: AttentionOption_Serialize[],
+	/**  How an answer to it would travel. */
+	route: MarkRoute,
 };
 
 /**  One structured option an ASK offers. */
@@ -2997,6 +3020,17 @@ export type ManagementState =
 "MANAGED" | 
 /**  Only discovery or fallback control is available. */
 "DEGRADED";
+
+/**  How an answer to a chip would travel, without the transport's details. */
+export type MarkRoute = 
+/**  Through the daemon's `attention/answer`. */
+"Daemon" | 
+/**  Typed into the session's own pane. */
+"Pane" | 
+/**  Through the approve broker: only `approve` or `deny` can land. */
+"Broker" | 
+/**  Not answerable from here. */
+"None";
 
 /**  A line of rendered markdown content */
 export type MarkdownLine = MarkdownLine_Serialize;
