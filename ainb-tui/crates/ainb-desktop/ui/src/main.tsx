@@ -6,6 +6,7 @@ import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/Ap
 import { createFrameStore, type SectionName } from "./store.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
+import { Board } from "./board.tsx";
 import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
 import {
@@ -92,6 +93,10 @@ function Shell() {
   // Terminal tabs: the strip is the Rust side's; which tab shows is ours.
   const [tabs, setTabs] = createSignal<Tab[]>([]);
   const [active, setActive] = createSignal<string | null>(null);
+  // The board is the window's landing surface: what every agent is doing, and
+  // what is waiting on a human. A terminal takes the work area while it is
+  // chosen, and the board is one click back.
+  const [board, setBoard] = createSignal(true);
   const focusers = new Map<string, () => void>();
   const tabKeys = createMemo(
     () => tabs().map((tab) => tab.key),
@@ -102,6 +107,7 @@ function Shell() {
 
   const activate = (key: string | null) => {
     setActive(key);
+    if (key !== null) setBoard(false);
     if (key !== null) requestAnimationFrame(() => focusers.get(key)?.());
   };
   const showTabs = (view: TabsView) => {
@@ -230,6 +236,8 @@ function Shell() {
   // In this node the window holds exactly one host: this machine's daemon.
   const host = peer;
   const sessions = () => (host() ? store.section(host()!, "sessions") : undefined);
+  const fleet = () => (host() ? store.section(host()!, "fleet") : undefined);
+  const agentStatus = () => (host() ? store.section(host()!, "agent_status") : undefined);
   const counts = HEADER_COUNTS.map(([select, label]) => ({
     label,
     count: createMemo(() => select(store, host())),
@@ -323,9 +331,18 @@ function Shell() {
         />
         <section class="workarea">
           <nav class="tabs" aria-label="Terminal tabs">
+            <span class="tab board-tab" classList={{ active: board() }}>
+              <button type="button" class="tab-title" onClick={() => setBoard(true)}>
+                Board
+              </button>
+            </span>
             <For each={tabs()}>
               {(tab) => (
-                <span class="tab" classList={{ active: tab.key === active() }} data-state={tab.state}>
+                <span
+                  class="tab"
+                  classList={{ active: !board() && tab.key === active() }}
+                  data-state={tab.state}
+                >
                   <button type="button" class="tab-title" onClick={() => choose(tab)}>
                     {title(tab)}
                   </button>
@@ -341,7 +358,15 @@ function Shell() {
               )}
             </For>
           </nav>
-          <Show when={tabs().length === 0}>
+          <Show when={board()}>
+            <Board
+              agentStatus={agentStatus()}
+              fleet={fleet()}
+              sessions={sessions()}
+              onChoose={dispatch}
+            />
+          </Show>
+          <Show when={!board() && tabs().length === 0}>
             <p class="empty">Choose a session to open its terminal</p>
           </Show>
           {/* Keyed by tab key, not by the tab object each event replaces: a
@@ -353,7 +378,7 @@ function Shell() {
                   <TerminalView
                     tab={tab()}
                     title={title(tab())}
-                    active={key === active()}
+                    active={!board() && key === active()}
                     mac={MAC}
                     onAccelerator={onAccelerator}
                     onLeave={() => sidebar?.focus()}
