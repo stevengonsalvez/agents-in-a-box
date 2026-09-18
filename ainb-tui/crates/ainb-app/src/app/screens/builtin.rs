@@ -197,7 +197,14 @@ pub fn route_key_to_focused_plugin(
     // Esc is a floor on a dead screen: a rowset rebound away from it must not
     // trap the operator on a plugin that will never pop.
     let dead = !presence.registered || presence.wedged;
-    if dead && (back || matches!(key.code, KeyCode::Esc)) {
+    // A key newer than the plugin's ABI (Insert, for an ABI 2 plugin) would
+    // not decode on its side, so it never reaches the plugin.
+    // `RuntimeHandle::send_key` refuses the same keys, so a second sender
+    // cannot slip one past this (#1171). A blocked back key or Esc gets the
+    // same floor as a dead screen: a plugin declaring an ABI older than every
+    // key's cannot trap the operator.
+    let blocked = key.code.min_abi() > presence.abi;
+    if (dead || blocked) && (back || matches!(key.code, KeyCode::Esc)) {
         return PluginRoute::Host;
     }
     // Every other key stays claimed on an absent plugin's screen, so the
@@ -206,11 +213,9 @@ pub fn route_key_to_focused_plugin(
     if !presence.registered {
         return PluginRoute::Consumed;
     }
-    // A key newer than the plugin's ABI (Insert, for an ABI 2 plugin) would
-    // not decode on its side. The screen still claims it, as it claims every
-    // key the wire has no shape for. `RuntimeHandle::send_key` refuses the same
-    // keys, so a second sender cannot slip one past this (#1171).
-    if key.code.min_abi() > presence.abi {
+    // Any other blocked key the screen still claims, as it claims every key
+    // the wire has no shape for.
+    if blocked {
         return PluginRoute::Consumed;
     }
     PluginRoute::Forward(crate::app::Effect::ForwardToPlugin {
@@ -517,6 +522,26 @@ mod tests {
             panic!("a plain key on a live plugin is forwarded");
         };
         assert!(!back);
+    }
+
+    /// #1171: a plugin whose ABI predates every key cannot trap the operator.
+    /// Esc and the back keys go to the host, as on a dead screen; every other
+    /// key is claimed and never sent.
+    #[test]
+    fn a_plugin_below_every_key_abi_leaves_esc_to_the_host() {
+        let keymap = Keymap::defaults();
+        let mut old = on_plugin_screen(ids::HANGAR, true, false);
+        old.plugins_host.plugin_presence.get_mut(ids::HANGAR).unwrap().abi = 1;
+        assert_eq!(
+            route_key_to_focused_plugin(&old, &keymap, &key(KeyCode::Esc, 0)),
+            PluginRoute::Host,
+            "Esc leaves the screen"
+        );
+        assert_eq!(
+            route_key_to_focused_plugin(&old, &keymap, &ch('j')),
+            PluginRoute::Consumed,
+            "any other key is claimed, not sent"
+        );
     }
 
     /// #1171: a plugin screen claims Insert without sending it while its
