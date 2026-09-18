@@ -9,7 +9,6 @@ import {
   boardColumns,
   boardHealth,
   daemonReachable,
-  elsewhereCount,
   type BoardCard,
 } from "./board.ts";
 import type { RendererIntent } from "./tabs.ts";
@@ -21,6 +20,8 @@ interface Props {
   fleet: FleetView_Serialize | undefined;
   /** The sessions frame: a card's title and its row's chips. */
   sessions: SessionsView_Serialize | undefined;
+  /** Open rows no session in this window can show: a root selector's memo. */
+  elsewhere: number;
   /** A row was chosen: dispatch its intent. */
   onChoose(intent: RendererIntent): void;
 }
@@ -46,7 +47,6 @@ export function Board(props: Props) {
   const columns = createMemo(() => boardColumns(props.agentStatus, props.fleet, props.sessions));
   const health = createMemo(() => boardHealth(props.agentStatus));
   const waiting = createMemo(() => attentionRows(props.fleet, props.sessions));
-  const elsewhere = createMemo(() => elsewhereCount(props.fleet));
 
   const show = (sessionId: string | null, tab: "Ask" | "Preview") => {
     if (sessionId === null) return;
@@ -156,8 +156,8 @@ export function Board(props: Props) {
         </Show>
         {/* Never swallowed: a row this window cannot show is still a human
             being waited on somewhere. */}
-        <Show when={elsewhere() > 0}>
-          <p class="elsewhere">{elsewhere()} waiting elsewhere</p>
+        <Show when={props.elsewhere > 0}>
+          <p class="elsewhere">{props.elsewhere} waiting elsewhere</p>
         </Show>
       </aside>
     </section>
