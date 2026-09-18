@@ -1036,6 +1036,9 @@ pub struct HostOnlyState {
     pub workspace_load_started: Option<Instant>,
     /// Channel receiver for background workspace loading results
     pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
+    /// When a host's rescan cadence runs from: the end of the last workspace
+    /// scan, or the state's creation before any has finished.
+    pub(crate) workspace_rescan_from: Instant,
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
     // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
@@ -1152,6 +1155,7 @@ impl Default for HostOnlyState {
             host_tmux_session: None,
             workspace_load_started: None,
             workspace_load_receiver: None,
+            workspace_rescan_from: Instant::now(),
             last_snapshot_time: None,
             last_preview_update: None,
             last_attention_refresh: None,
