@@ -668,3 +668,89 @@ body {
 .answer-phase[data-phase="already_answered"] {
   color: var(--green);
 }
+
+/* The ACP card: a pane-less session's transcript, where its terminal would be. */
+.acp-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.acp-card header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--highlight);
+}
+
+.acp-title {
+  color: var(--gold);
+  font-weight: 600;
+}
+
+.acp-close {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.acp-close:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.acp-status {
+  margin: 8px 12px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.acp-chunks {
+  list-style: none;
+  margin: 0;
+  padding: 8px 12px 12px;
+  overflow-y: auto;
+}
+
+.acp-chunk {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--highlight);
+}
+
+.acp-kind {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.acp-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.acp-chunk[data-kind="Thought"] .acp-body,
+.acp-chunk[data-kind="Usage"] .acp-body,
+.acp-chunk[data-kind="Lifecycle"] .acp-body {
+  color: var(--muted);
+}
+
+.acp-chunk[data-kind="Permission"] .acp-kind,
+.acp-chunk[data-kind="ToolCall"] .acp-kind {
+  color: var(--gold);
+}
+
+.acp-cut {
+  color: var(--muted);
+  font-size: 11px;
+}
