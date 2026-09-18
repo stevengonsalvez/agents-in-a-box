@@ -440,13 +440,13 @@ function Shell() {
               {(tab) => (
                 <span
                   class="tab"
-                  classList={{ active: !board() && tab.key === active() }}
+                  classList={{ active: !board() && transcriptKey() === null && tab.key === active() }}
                   data-state={tab.state}
                 >
                   <button
                     type="button"
                     class="tab-title"
-                    aria-current={!board() && tab.key === active() ? "page" : undefined}
+                    aria-current={!board() && transcriptKey() === null && tab.key === active() ? "page" : undefined}
                     onClick={() => choose(tab)}
                   >
                     {title(tab)}
