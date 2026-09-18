@@ -162,3 +162,32 @@ export function typedIntents(question: Question, ask: AskState_Serialize | undef
     { Command: ["session_list.ask.enter", null] },
   ];
 }
+
+/**
+ * An intent the host did not apply, with the row it would have run and why
+ * (`ainb_desktop::intent::Refusal`).
+ */
+export interface Refusal {
+  command: string;
+  reason: string;
+}
+
+/**
+ * Send `intents` in order, one at a time, and STOP at the first one the host
+ * refused, returning it.
+ *
+ * The pick is a sequence: put the cursor on the row, step it to the option,
+ * then Enter. Each step is applied before the next is sent. If a step is
+ * refused and the sequence carries on, Enter still fires, on whatever option
+ * the reducer's cursor is on: the wrong answer, sent as if a person picked it.
+ */
+export async function sendInOrder(
+  intents: RendererIntent[],
+  send: (intent: RendererIntent) => Promise<Refusal | null>,
+): Promise<Refusal | null> {
+  for (const intent of intents) {
+    const refusal = await send(intent);
+    if (refusal !== null && refusal !== undefined) return refusal;
+  }
+  return null;
+}
