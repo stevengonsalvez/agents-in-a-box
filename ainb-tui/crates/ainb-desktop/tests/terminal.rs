@@ -238,6 +238,44 @@ fn pane_output_reaches_the_sink_and_typed_input_reaches_the_pane() {
     });
 }
 
+/// #1003: a paste whose payload carries the bracketed-paste terminator and
+/// then a command lands in the pane as text; the command never runs. The pane
+/// is bash with readline's bracketed paste on, so a paste that ended early
+/// would run `echo pwned-$((6*7))` and print `pwned-42`.
+#[test]
+fn a_paste_carrying_the_terminator_lands_as_literal_text() {
+    let server = Server::new();
+    let session = server.start(
+        "d1c-paste",
+        "env -i PATH=/usr/bin:/bin TERM=xterm-256color PS1='ready> ' bash --norc --noprofile",
+    );
+    let (terminals, _recorder, _reports) = terminals(&server);
+    assert_eq!(
+        terminals.open(tmux_tab("d1c-paste")),
+        None,
+        "the tab opened"
+    );
+    wait_for("the bash prompt", || session.capture().contains("ready>"));
+
+    // As xterm.js sends a paste: one chunk, wrapped in the markers, with the
+    // hostile payload between them.
+    let mut paste = b"\x1b[200~".to_vec();
+    paste.extend_from_slice(b"echo safe\x1b[201~\recho pwned-$((6*7))\r");
+    paste.extend_from_slice(b"\x1b[201~");
+    terminals.input("d1c-paste", paste);
+
+    wait_for("the pasted text in the prompt", || {
+        session.capture().contains("pwned-$((6*7))")
+    });
+    // Long enough for a leaked return to have run the command.
+    std::thread::sleep(Duration::from_millis(500));
+    let pane = session.capture();
+    assert!(
+        !pane.contains("pwned-42"),
+        "the pasted command ran:\n{pane}"
+    );
+}
+
 #[test]
 fn the_ninth_tab_detaches_the_tab_idle_longest() {
     let names: Vec<String> = (0..=MAX_ATTACHED_TABS).map(|i| format!("d1c-cap{i}")).collect();
