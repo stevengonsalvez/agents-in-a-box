@@ -64,7 +64,75 @@ impl TryFrom<RendererIntent> for Intent {
                 Err(id)
             }
             RendererIntent::Command(id, args) => Ok(Self::Command(id, args)),
-            RendererIntent::Text(text) => Ok(Self::Text(text)),
+            RendererIntent::Text(text) => Ok(Self::Text(typed_text(&text))),
         }
+    }
+}
+
+/// The most characters one `Text` intent from the webview carries.
+///
+/// The composer's `maxlength` is the page's to honour or not; this is the
+/// host's, and a script in the page cannot talk past it.
+pub const MAX_TEXT_CHARS: usize = 2_000;
+
+/// `text` as the reducer may receive it from the webview: control and format
+/// characters removed, then cut to [`MAX_TEXT_CHARS`].
+///
+/// Format characters (Unicode `Cf`: bidi overrides and isolates, zero-width
+/// joiners and spaces, the byte-order mark, tag characters) are invisible where
+/// every display path strips them, so a bidi override typed or pasted into an
+/// answer would reach the agent's composer reading differently from what the
+/// person saw. Control characters would submit or jump fields mid-text.
+#[must_use]
+pub fn typed_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() && !is_format(*c))
+        .take(MAX_TEXT_CHARS)
+        .collect()
+}
+
+/// Whether `c` is in Unicode's `Cf` (format) category.
+fn is_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_text_loses_what_a_person_cannot_see() {
+        let override_ = "\u{202E}";
+        let typed = typed_text(&format!("stag{override_}ing\u{200B}\u{0007}"));
+        assert_eq!(typed, "staging");
+    }
+
+    #[test]
+    fn typed_text_is_capped_on_characters() {
+        let long = "é".repeat(MAX_TEXT_CHARS + 10);
+        assert_eq!(typed_text(&long).chars().count(), MAX_TEXT_CHARS);
     }
 }
