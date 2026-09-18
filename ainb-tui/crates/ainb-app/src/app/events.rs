@@ -1711,15 +1711,17 @@ impl EventHandler {
     ) -> Option<AppEvent> {
         use UiAction::{
             PalCycleEngine, PalCycleMode, PalCycleModel, PalRetry, SessionAskBackspace,
-            SessionAskNext, SessionAskPrevious, SessionComposerBackspace, SessionComposerCancel,
-            SessionComposerDown, SessionComposerEnter, SessionComposerEscape,
-            SessionComposerFocusToggle, SessionComposerRetry, SessionComposerUp,
+            SessionAskClear, SessionAskNext, SessionAskPrevious, SessionComposerBackspace,
+            SessionComposerCancel, SessionComposerDown, SessionComposerEnter,
+            SessionComposerEscape, SessionComposerFocusToggle, SessionComposerRetry,
+            SessionComposerUp,
         };
 
         match action {
             SessionAskPrevious => Self::route_session_ask_move(-1, state),
             SessionAskNext => Self::route_session_ask_move(1, state),
             SessionAskBackspace => Self::route_session_ask_backspace(state),
+            SessionAskClear => Self::route_session_ask_clear(state),
             SessionComposerEnter => Self::route_session_composer_action(
                 ainb_plugin_hangar::screen::fleet_chat::ChatKey::Enter,
                 state,
@@ -1971,6 +1973,14 @@ impl EventHandler {
         let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
         state.fleet.ask_state.retarget(&chip);
         state.fleet.ask_state.backspace();
+        state.shell.ui_needs_refresh = true;
+        Some(AppEvent::Consumed)
+    }
+
+    fn route_session_ask_clear(state: &mut AppState) -> Option<AppEvent> {
+        let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
+        state.fleet.ask_state.retarget(&chip);
+        state.fleet.ask_state.clear_free_text();
         state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
