@@ -627,3 +627,54 @@ open_session_list() {
   keys "$1" s
   wait_screen "$1" 'agent tick' 20
 }
+
+# ---------------------------------------------------------------------------
+# The desktop window (d1-shell, d2-board)
+# ---------------------------------------------------------------------------
+
+# The window under test: a debug build of the desktop shell, built with the
+# `bundled` feature so it serves `ui/dist` itself rather than a dev server
+# (`cargo build --features bundled` in `crates/ainb-desktop`).
+DESKTOP_BIN="${AINB_DESKTOP_BIN:-$AINB_TUI_DIR/crates/ainb-desktop/target/debug/ainb-desktop}"
+# A debug build takes its sidecar from here; a bundle carries it beside itself.
+DESKTOP_DAEMON_BIN="${AINB_DESKTOP_DAEMON_BIN:-${CARGO_TARGET_DIR:-$AINB_TUI_DIR/target}/debug/ainb-hangar-daemon}"
+
+DESKTOP_LOG=""
+
+# start_desktop: the window in a harness pane, under a headless X server,
+# waited on until its renderer has applied a batch.
+start_desktop() {
+  DESKTOP_LOG="$AINB_HANGAR_HOME/desktop.log"
+  ptmux new-session -d -s desktop -x "$PROOF_COLS" -y "$PROOF_ROWS" \
+    "env -u TMUX -u TMUX_PANE AINB_DESKTOP_DAEMON_BIN='$DESKTOP_DAEMON_BIN' \
+       xvfb-run -a '$DESKTOP_BIN' 2>>'$PROOF_WORLD/desktop.stderr'"
+  wait_for 90 grep -q "renderer applied" "$DESKTOP_LOG" 2>/dev/null
+}
+
+# applied_sessions: the session count on the last batch the renderer applied.
+applied_sessions() {
+  sed -n 's/.*renderer applied .*sessions=\([0-9][0-9]*\).*/\1/p' "$DESKTOP_LOG" 2>/dev/null | tail -1
+}
+
+# applied_sections: the section names on the first batch it applied.
+applied_sections() {
+  sed -n 's/.*renderer applied sections=\(\[[^]]*\]\).*/\1/p' "$DESKTOP_LOG" 2>/dev/null | head -1
+}
+
+# sessions_at_least <n>: the renderer has applied a batch carrying n rows.
+sessions_at_least() {
+  local seen
+  seen="$(applied_sessions)"
+  [[ -n "$seen" ]] && ((seen >= $1))
+}
+
+# applied_board: the board columns on the last batch the renderer applied,
+# as `state=cards` pairs.
+applied_board() {
+  sed -n 's/.*renderer applied .*board=\[\([^]]*\)\].*/\1/p' "$DESKTOP_LOG" 2>/dev/null | tail -1 | tr -d '"'
+}
+
+# applied_cards <state>: the card count the last batch drew in that column.
+applied_cards() {
+  applied_board | tr ',' '\n' | sed -n "s/^ *$1=\([0-9][0-9]*\)$/\1/p"
+}
