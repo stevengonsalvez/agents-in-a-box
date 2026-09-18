@@ -302,3 +302,26 @@ mod tests {
         assert_eq!(source("123456:plaintext"), "<literal>");
     }
 }
+
+/// The length of `value` as compact JSON, counted without building the string.
+///
+/// Here, inside the wire seam, because it serialises: a held tool call can
+/// carry a whole file, and the conversation projection needs its size to
+/// decide whether to carry it, without copying it to find out.
+#[must_use]
+pub fn compact_json_len(value: &serde_json::Value) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    // Writing a `Value` to a sink that never fails cannot fail.
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0
+}
