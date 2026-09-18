@@ -8,6 +8,7 @@ import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { AnswerBanner } from "./answer.tsx";
 import { phaseOf, questionFor } from "./answer.ts";
+import { newNotices, noticeKey } from "./notices.ts";
 import { Board } from "./board.tsx";
 import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
@@ -265,35 +266,33 @@ function Shell() {
   const elsewhere = createMemo(() => ROOT_SELECTORS.attentionElsewhere(store, host()));
   const shell = () => (host() ? store.section(host()!, "shell") : undefined);
   const ask = () => fleet()?.ask_state;
-  const question = createMemo(() => questionFor(sessions(), fleet()));
+  const question = createMemo(() => questionFor(sessions()));
 
   // The reducer speaks through its notices: a refused send says why in the
   // reducer's own words (a daemon that is gone, a native picker, nothing typed),
-  // so the window shows each new one as a toast rather than a dead button.
-  createEffect(
-    on(
-      () => shell()?.notifications.length ?? 0,
-      (length, previous = 0) => {
-        const notices = shell()?.notifications ?? [];
-        // A success notice is the reducer congratulating itself ("Workspaces
-        // loaded"), and the window rescans on a cadence: only what went wrong,
-        // or what the person needs to know, becomes a toast.
-        for (const notice of notices.slice(previous < length ? previous : length)) {
-          if (notice.notification_type !== "Success") toast(notice.message);
-        }
-      },
-    ),
-  );
+  // so the window shows each new one as a toast rather than a dead button. New
+  // by identity, not by count: the list is capped and drained from the front.
+  let heard: string[] = [];
+  createEffect(() => {
+    const notices = shell()?.notifications ?? [];
+    // A success notice is the reducer congratulating itself ("Workspaces
+    // loaded"), and the window rescans on a cadence: only what went wrong, or
+    // what the person needs to know, becomes a toast.
+    for (const notice of newNotices(heard, notices)) {
+      if (notice.notification_type !== "Success") toast(label(notice.message));
+    }
+    heard = notices.map(noticeKey);
+  });
   // Another surface answered first: the row reads delivered, and the winner is
-  // named once, in a toast.
+  // named once, in a toast, however many frames repeat it.
   createEffect(
     on(
       () => {
         const phase = phaseOf(ask());
         return phase.kind === "already_answered" ? [ask()?.request, phase.by].join("\n") : null;
       },
-      (winner) => {
-        if (winner !== null) toast(`Already answered by ${winner.slice(winner.indexOf("\n") + 1)}`);
+      (winner, previous) => {
+        if (winner !== null && winner !== previous) toast(`Already answered by ${winner.slice(winner.indexOf("\n") + 1)}`);
       },
     ),
   );
