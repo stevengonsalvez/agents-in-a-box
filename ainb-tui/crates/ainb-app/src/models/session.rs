@@ -716,11 +716,12 @@ pub struct Session {
     /// Not ainb's `id` and not the tmux name: this is the identity the daemon
     /// and the approve broker file everything under, so it is what a
     /// `session:<key>` chat scope and a parked permission waiter are addressed
-    /// by. Learned from the notifyd hook rows (agent + cwd), which is the only
-    /// place the host sees it — a session that has never fired a hook has none,
-    /// and the surfaces that need it say so rather than guessing.
+    /// by. Only a Codex session learns it today, from its app-server thread id
+    /// (`interactive::session_manager`). Nothing sets it for a Claude session,
+    /// whose hooks do carry one, so a Claude row has none and the surfaces
+    /// that need it say so rather than guessing (#1049).
     ///
-    /// Transient: never persisted; set in `AppState::refresh_attention`.
+    /// Transient: never persisted.
     #[serde(skip)]
     pub provider_session_id: Option<String>,
 }
