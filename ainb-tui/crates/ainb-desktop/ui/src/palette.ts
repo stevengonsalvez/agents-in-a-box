@@ -12,7 +12,7 @@ import type { PaletteEntry } from "../../bindings/Desktop.ts";
 import { openRowIntent, type RendererIntent } from "./tabs.ts";
 
 /** Generated from `ainb_desktop::host::PaletteEntry` (#1158). */
-export type { PaletteEntry } from "../../bindings/Desktop.ts";
+export type { PaletteEntry };
 
 /** One offered row: what it draws, and the intent choosing it sends. */
 export interface PaletteRow {

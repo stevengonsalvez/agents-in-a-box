@@ -503,16 +503,19 @@ impl LayoutComponent {
             state.hangar.daemons_state.tick();
         }
 
+        // The reducer's own tick step: the tab reconcile, the answer fold, the
+        // composer's retarget, the open conversation's host and its projection,
+        // and the rows the filter hides. Every host runs it, so none of it can
+        // depend on this draw loop; and it runs BEFORE the registry-screen
+        // return below, or an answer sent before opening a registry screen
+        // would sit unfolded until the operator came back. Its reasons are on
+        // `AppState::tick_surfaces`.
+        state.tick_surfaces(chrono::Utc::now().timestamp_millis());
+
         // Registry-routed screens return before any of this in `render`.
         if self.screens.contains(&state.shell.current_screen) {
             return;
         }
-
-        // The tab reconcile, the answer fold and the composer's retarget, which
-        // the reducer owns: every host ticks them, so an answer lands on a
-        // surface whose draw loop is not this one. Their reasons are on
-        // `AppState::tick_surfaces`.
-        state.tick_surfaces();
         let active = state.shell.session_tab;
 
         // An attached embed owns the right pane outright, and `preview` is a
@@ -542,16 +545,17 @@ impl LayoutComponent {
                 if state.host.pal_dial.tick() {
                     state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
-                let _ = state.chat_host_for(active);
+                // The conversation itself is the reducer's tick's, above.
             }
             SessionTab::Thread => {
                 // Checked rows win over the cursor, the same rule `Enter` and
                 // `r` follow on this screen: with a multi-select active this
                 // pane is a broadcast to the checked set, not one session's
                 // private thread.
-                if state.broadcast_targets().is_empty() {
-                    let _ = state.chat_host_for(active);
-                } else if state.fleet.update(|fleet| fleet.broadcast.tick()) {
+                // The thread's own conversation is the reducer's tick's.
+                if !state.broadcast_targets().is_empty()
+                    && state.fleet.update(|fleet| fleet.broadcast.tick())
+                {
                     state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
             }

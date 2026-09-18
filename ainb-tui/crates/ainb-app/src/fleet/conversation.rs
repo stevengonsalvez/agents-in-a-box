@@ -5,7 +5,7 @@
 // The host itself (`ChatHost`, and the `ChatState` it drives) stays in
 // `HostOnlyState`: it owns a poll loop, an inbox shared with workers and an
 // unsent draft, none of which crosses a process boundary. What crosses is this
-// projection, built the way #1131 built the attention merge — the reducer
+// projection, built the way #1131 built the attention merge: the reducer
 // writes it, every host ticks it, and nothing is re-derived on a render path.
 //
 // Two rules hold the shape together:
@@ -28,19 +28,22 @@ use crate::fleet::chat_host::ChatHost;
 /// is the part a surface draws without scrolling. The host keeps more.
 pub const MAX_ROWS: usize = 50;
 
-/// How many characters of one row's body survive. Longer bodies are cut with an
-/// ellipsis rather than dropped: a truncated reply still says what it was
-/// about, and a surface that needs the whole of one asks the daemon for it.
+/// How many characters of one row's body survive.
+///
+/// Longer bodies are cut with an ellipsis rather than dropped: a truncated
+/// reply still says what it was about, and a surface that needs the whole of
+/// one asks the daemon for it.
 pub const MAX_BODY_CHARS: usize = 512;
 
 /// How many confirm cards a frame carries. The pane itself windows to four
 /// (`CARDS_VISIBLE`), so this is already generous.
 pub const MAX_CARDS: usize = 8;
 
-/// How much of one card's arguments survive, as the compact JSON's length. A
-/// tool call can carry a whole file; past this the card says so and carries the
-/// size instead, because an operator deciding on a call needs the tool and the
-/// shape, not the payload.
+/// How much of one card's arguments survive, as the compact JSON's length.
+///
+/// A tool call can carry a whole file; past this the card says so and carries
+/// the size instead, because an operator deciding on a call needs the tool and
+/// the shape, not the payload.
 pub const MAX_ARGUMENT_BYTES: usize = 4 * 1024;
 
 /// Which conversation the window is showing.
@@ -176,8 +179,11 @@ pub struct Conversation {
     /// How many rows the host holds, so a surface can say the window is a tail
     /// rather than the whole conversation.
     pub rows_held: u32,
-    /// Held tool calls, at most [`MAX_CARDS`].
+    /// The newest held tool calls, at most [`MAX_CARDS`].
     pub cards: Vec<ConversationCard>,
+    /// How many cards the host holds, so a surface can say the window is the
+    /// newest of them rather than all of them.
+    pub cards_held: u32,
     /// Why a send would be refused right now, in the refusing surface's own
     /// words, or empty when it would not. A composer over a conversation that
     /// cannot send is the advertisement that makes a surface a lie.
@@ -200,6 +206,7 @@ pub struct Conversation {
 pub fn project(chat: &ChatHost) -> Conversation {
     let state = chat.state();
     let rows = state.messages();
+    let confirms = state.confirms();
     Conversation {
         topic: match chat.topic() {
             ChatTopic::Pal => ConversationTopic::Pal,
@@ -214,8 +221,11 @@ pub fn project(chat: &ChatHost) -> Conversation {
         // The TAIL: the newest rows are the ones a surface draws, and an
         // operator scrolling back is asking the daemon, not this window.
         rows: rows[rows.len().saturating_sub(MAX_ROWS)..].iter().map(row).collect(),
-        rows_held: rows.len() as u32,
-        cards: state.confirms().iter().take(MAX_CARDS).map(card).collect(),
+        rows_held: count(rows.len()),
+        // The newest cards, as with the rows: the one a surface is about to be
+        // asked about is the last one the daemon held.
+        cards: confirms[confirms.len().saturating_sub(MAX_CARDS)..].iter().map(card).collect(),
+        cards_held: count(confirms.len()),
         send_block: state.send_block().unwrap_or_default(),
         composer: state.composer().to_string(),
     }
@@ -234,7 +244,13 @@ fn status_of(state: &ChatState) -> ConversationStatus {
 }
 
 fn row(row: &ChatMessageRow) -> ConversationRow {
-    let (body, truncated) = cut(&row.body, MAX_BODY_CHARS);
+    // Scrubbed BEFORE it is cut. A fixed-length credential straddling the cut
+    // loses the tail its pattern needs, so a scrub after the cut would let the
+    // rest of it ride the frame; the serializer scrubs again, harmlessly.
+    let (body, truncated) = cut(
+        &crate::fleet::bridge::redact::scrub(&row.body),
+        MAX_BODY_CHARS,
+    );
     ConversationRow {
         id: row.id.clone(),
         actor: match &row.actor {
@@ -257,8 +273,8 @@ fn row(row: &ChatMessageRow) -> ConversationRow {
 fn card(card: &ChatConfirmCard) -> ConversationCard {
     match card {
         ChatConfirmCard::Known(confirm) => {
-            let compact = confirm.arguments.to_string();
-            let fits = compact.len() <= MAX_ARGUMENT_BYTES;
+            let size = crate::wire::fields::compact_json_len(&confirm.arguments);
+            let fits = size <= MAX_ARGUMENT_BYTES;
             ConversationCard {
                 confirm_id: confirm.confirm_id.clone(),
                 tool: confirm.tool.clone(),
@@ -267,7 +283,7 @@ fn card(card: &ChatConfirmCard) -> ConversationCard {
                 } else {
                     serde_json::Value::Null
                 },
-                arguments_bytes: compact.len() as u32,
+                arguments_bytes: count(size),
                 state: match confirm.state {
                     FleetConfirmState::Open => ConversationCardState::Open,
                     FleetConfirmState::Approved => ConversationCardState::Approved,
@@ -290,6 +306,12 @@ fn card(card: &ChatConfirmCard) -> ConversationCard {
             detail: detail.clone(),
         },
     }
+}
+
+/// A length as a frame carries it, saturating rather than wrapping on a count
+/// no frame could hold anyway.
+fn count(length: usize) -> u32 {
+    u32::try_from(length).unwrap_or(u32::MAX)
 }
 
 /// `text` cut to `limit` CHARACTERS, and whether anything was cut. Characters,
@@ -323,7 +345,7 @@ mod tests {
                     sender: "copilot".to_string(),
                     kind: FleetMessageKind::Agent,
                     body: "b".repeat(MAX_BODY_CHARS + 20),
-                    created_at: index as i64,
+                    created_at: i64::try_from(index).expect("a small index"),
                 })
                 .collect(),
             confirms: vec![serde_json::json!({
@@ -347,7 +369,7 @@ mod tests {
         let projected = project(&chat_with(MAX_ROWS + 5, 16));
 
         assert_eq!(projected.rows.len(), MAX_ROWS);
-        assert_eq!(projected.rows_held, MAX_ROWS as u32 + 5);
+        assert_eq!(projected.rows_held, count(MAX_ROWS + 5));
         assert_eq!(
             projected.rows.last().expect("a row").id,
             format!("m-{}", MAX_ROWS + 4),
@@ -364,7 +386,7 @@ mod tests {
 
         let card = &projected.cards[0];
         assert!(card.arguments.is_null(), "{card:?}");
-        assert!(card.arguments_bytes > MAX_ARGUMENT_BYTES as u32);
+        assert!(card.arguments_bytes > count(MAX_ARGUMENT_BYTES));
         assert_eq!(card.state, ConversationCardState::Open, "still answerable");
     }
 
@@ -392,6 +414,66 @@ mod tests {
             kept.chars().count(),
             MAX_BODY_CHARS + 1,
             "plus the ellipsis"
+        );
+    }
+
+    #[test]
+    fn a_credential_straddling_the_cut_is_scrubbed_whole() {
+        // Assembled at runtime, so no credential-shaped literal is committed.
+        // A 40-character npm token whose first half sits inside the cut would
+        // lose the tail its pattern needs if the cut ran first.
+        let token = format!("npm_{}", "a1B2".repeat(9));
+        let body = format!("{} {token} and more", "x".repeat(MAX_BODY_CHARS - 20));
+        let mut chat = ChatHost::thread("claude:s-1".to_string());
+        chat.state_mut().apply_snapshot(ChatSnapshot {
+            messages: vec![ainb_hangar_proto::fleet::FleetMessage {
+                id: "m-1".to_string(),
+                scope_key: "session:claude:s-1".to_string(),
+                origin_message_id: None,
+                sender: "copilot".to_string(),
+                kind: FleetMessageKind::Agent,
+                body,
+                created_at: 1,
+            }],
+            ..ChatSnapshot::default()
+        });
+
+        let framed = project(&chat).rows[0].body.clone();
+
+        assert!(
+            !framed.contains("npm_a1B2"),
+            "no part of the token survives: {framed}"
+        );
+    }
+
+    #[test]
+    fn the_newest_cards_are_the_window() {
+        let mut chat = chat_with(1, 16);
+        let confirms: Vec<serde_json::Value> = (0..MAX_CARDS + 3)
+            .map(|index| {
+                serde_json::json!({
+                    "confirm_id": format!("c-{index}"),
+                    "scope_key": "session:claude:s-1",
+                    "tool": "shell",
+                    "arguments": {},
+                    "state": "open",
+                    "created_at": 1,
+                    "expires_at": 2,
+                })
+            })
+            .collect();
+        chat.state_mut().apply_snapshot(ChatSnapshot {
+            confirms,
+            ..ChatSnapshot::default()
+        });
+
+        let projected = project(&chat);
+
+        assert_eq!(projected.cards.len(), MAX_CARDS);
+        assert_eq!(projected.cards_held, count(MAX_CARDS + 3));
+        assert_eq!(
+            projected.cards.last().expect("a card").confirm_id,
+            format!("c-{}", MAX_CARDS + 2)
         );
     }
 

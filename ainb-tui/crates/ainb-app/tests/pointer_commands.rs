@@ -184,6 +184,20 @@ fn a_click_on_the_strip_shows_the_tab_it_names_unless_that_tab_is_dead() {
 }
 
 #[test]
+fn a_palette_cannot_offer_the_tab_click() {
+    // A palette row runs with no payload. `ainb_desktop::intent::palette_offers`
+    // keeps a row out when its action refuses `Args::Null`, so this is the
+    // property that keeps `select_tab` off the palette: a palette that named it
+    // would offer a row that cannot run.
+    let keymap = Keymap::defaults();
+    let row = keymap
+        .command(&CommandId::new(ids::SESSION_LIST_SELECT_TAB))
+        .expect("the row resolves");
+    assert!(row.action.with_args(&serde_json::Value::Null).is_none());
+    assert!(row.chord.is_none(), "and no key reaches it either");
+}
+
+#[test]
 fn a_command_scoped_to_another_screen_changes_nothing() {
     let keymap = Keymap::defaults();
     let mut state = AppState::new();
