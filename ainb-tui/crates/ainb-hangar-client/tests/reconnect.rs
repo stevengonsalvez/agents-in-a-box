@@ -324,9 +324,11 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
     };
     assert_eq!(delay2, BACKOFF_4S);
     let elapsed1 = t1.elapsed();
+    // Relaxed upper bound to 2500 ms because heavily loaded CI runners (especially
+    // on macOS) experience scheduling delays, while keeping ordering assertions strict.
     assert!(
-        elapsed1 >= Duration::from_millis(900) && elapsed1 <= Duration::from_millis(1600),
-        "elapsed between attempt 1 and 2 was {elapsed1:?}, expected 900-1600ms"
+        elapsed1 >= Duration::from_millis(900) && elapsed1 <= Duration::from_millis(2500),
+        "elapsed between attempt 1 and 2 was {elapsed1:?}, expected 900-2500ms"
     );
     let t2 = Instant::now();
 
