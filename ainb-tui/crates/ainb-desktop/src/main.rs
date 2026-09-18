@@ -240,6 +240,20 @@ fn subscribe(
 /// host-authored command id, or a key on a key-only row, is refused.
 #[tauri::command]
 fn dispatch(window: tauri::State<'_, Window>, intent: RendererIntent) {
+    // What the webview asked for, so a reader of the log can tell what the
+    // window authored: a command's id, never its arguments, and never a key's
+    // chord or a text's characters, which are what a person typed.
+    match &intent {
+        RendererIntent::Command(id, _) => tracing::info!(command = id.as_str(), "renderer intent"),
+        RendererIntent::Key(_) => tracing::info!(kind = "key", "renderer intent"),
+        RendererIntent::Text(text) => {
+            tracing::info!(
+                kind = "text",
+                chars = text.chars().count(),
+                "renderer intent"
+            );
+        }
+    }
     if let Ok(intent) = Intent::try_from(intent) {
         window.shell.dispatch_renderer(intent);
     }
