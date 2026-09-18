@@ -382,9 +382,14 @@ function Shell() {
           ref={(element) => (sidebar = element)}
         />
         <section class="workarea">
-          <nav class="tabs" aria-label="Terminal tabs">
+          <nav class="tabs" aria-label="Board and terminals">
             <span class="tab board-tab" classList={{ active: board() }}>
-              <button type="button" class="tab-title" onClick={() => setBoard(true)}>
+              <button
+                type="button"
+                class="tab-title"
+                aria-current={board() ? "page" : undefined}
+                onClick={() => setBoard(true)}
+              >
                 Board
               </button>
             </span>
@@ -395,7 +400,12 @@ function Shell() {
                   classList={{ active: !board() && tab.key === active() }}
                   data-state={tab.state}
                 >
-                  <button type="button" class="tab-title" onClick={() => choose(tab)}>
+                  <button
+                    type="button"
+                    class="tab-title"
+                    aria-current={!board() && tab.key === active() ? "page" : undefined}
+                    onClick={() => choose(tab)}
+                  >
                     {title(tab)}
                   </button>
                   <button
