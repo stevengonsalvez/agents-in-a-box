@@ -1,6 +1,6 @@
 // ABOUTME: The reducer's own answer tick: the outcome a send worker reports
 // lands, the session tab is reconciled against what is available, and the
-// composer is pointed at the request being shown — all without a renderer in
+// composer is pointed at the request being shown, all without a renderer in
 // the process, because the desktop shell has none of the terminal's draw loop.
 
 use ainb_app::AppState;
@@ -131,6 +131,46 @@ fn the_frame_says_which_rows_the_filter_hides() {
     state.sessions.session_filter = SessionFilter::All;
     state.tick_surfaces();
     assert!(state.sessions.hidden_sessions.is_empty());
+}
+
+#[test]
+fn an_unsent_answer_survives_looking_at_another_question() {
+    // Typed on one row, not sent, then the cursor moved to another blocking
+    // row: the tick retargets on every pass, whichever pane is showing, so
+    // without a draft per request the answer was gone on the way back.
+    let first = ask(&[]);
+    let mut state = waiting_on(first);
+    let mut second_session = Session::new("spike".to_string(), "/parity/api/two".to_string());
+    second_session.live_attention = vec![SessionAttention::daemon(
+        AttentionKind::Ask,
+        2_000,
+        "att-2".into(),
+    )];
+    state.sessions.workspaces[0].add_session(second_session);
+    state.tick_surfaces();
+    for c in "staging".chars() {
+        state.fleet.update(|fleet| {
+            fleet.ask_state.push_char(c);
+            true
+        });
+    }
+
+    state.sessions.selected_session_index = Some(1);
+    state.tick_surfaces();
+    assert_eq!(
+        state.fleet.ask_state.free_text(),
+        "",
+        "the other question starts empty"
+    );
+
+    state.sessions.selected_session_index = Some(0);
+    state.tick_surfaces();
+    assert_eq!(
+        state.fleet.ask_state.free_text(),
+        "staging",
+        "and the first one kept its answer"
+    );
+    assert_eq!(state.fleet.ask_state.focus(), AskFocus::FreeText);
 }
 
 #[test]
