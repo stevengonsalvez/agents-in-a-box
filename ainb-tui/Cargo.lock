@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "ainb-plugin-protocol"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -824,7 +824,7 @@ name = "ainb-web"
 version = "1.28.2"
 dependencies = [
  "ainb-app",
- "ainb-hangar-core",
+ "ainb-hangar-client",
  "ainb-hangar-proto",
  "anyhow",
  "axum",

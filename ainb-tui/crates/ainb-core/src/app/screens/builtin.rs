@@ -85,6 +85,7 @@ pub fn crossterm_to_protocol_key(
         CtKey::Esc => ProtocolKey::Esc,
         CtKey::Backspace => ProtocolKey::Backspace,
         CtKey::Delete => ProtocolKey::Delete,
+        CtKey::Insert => ProtocolKey::Insert,
         CtKey::Up => ProtocolKey::Up,
         CtKey::Down => ProtocolKey::Down,
         CtKey::Left => ProtocolKey::Left,
@@ -118,6 +119,20 @@ pub fn crossterm_to_protocol_key(
     };
 
     Some(ProtocolEvent { code, mods, kind })
+}
+
+/// The keymap chord a terminal key event stands for, or `None` for a key the
+/// wire has no shape for (media keys, lone modifiers, `Null`).
+///
+/// The terminal's key input edge, and the only one (#1123): the event becomes
+/// the wire's key first ([`crossterm_to_protocol_key`]) and then a chord
+/// through `ainb-app`'s one key table ([`key_chord`]), so the terminal, a
+/// plugin screen and every other host spell a key the same way.
+#[must_use]
+pub fn chord_from_key_event(
+    event: &crossterm::event::KeyEvent,
+) -> Option<crate::app::keymap::Chord> {
+    crossterm_to_protocol_key(event).map(|key| key_chord(&key))
 }
 
 /// Convert a `crossterm::event::MouseEvent` into the portable wire shape
@@ -911,6 +926,7 @@ mod tests {
             (CtKey::Esc, ProtocolKey::Esc),
             (CtKey::Backspace, ProtocolKey::Backspace),
             (CtKey::Delete, ProtocolKey::Delete),
+            (CtKey::Insert, ProtocolKey::Insert),
             (CtKey::Up, ProtocolKey::Up),
             (CtKey::Down, ProtocolKey::Down),
             (CtKey::Left, ProtocolKey::Left),
@@ -932,6 +948,63 @@ mod tests {
             let p = crossterm_to_protocol_key(&ev)
                 .unwrap_or_else(|| panic!("translation missing for {ct:?}"));
             assert_eq!(p.code, expected, "wrong protocol code for {ct:?}");
+        }
+    }
+
+    /// The terminal route (crossterm, then the wire, then a chord) spells every
+    /// key the deleted terminal table did (#1123).
+    #[test]
+    fn terminal_keys_become_their_canonical_chords() {
+        use crate::app::keymap::Key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let chord = |code, modifiers| chord_from_key_event(&KeyEvent::new(code, modifiers));
+        let spelled = |code, modifiers| chord(code, modifiers).unwrap().as_str().to_string();
+        assert_eq!(spelled(KeyCode::Char(':'), KeyModifiers::SHIFT), ":");
+        assert_eq!(spelled(KeyCode::Char('G'), KeyModifiers::SHIFT), "G");
+        assert_eq!(spelled(KeyCode::Char('k'), KeyModifiers::CONTROL), "ctrl+k");
+        assert_eq!(spelled(KeyCode::Char('x'), KeyModifiers::ALT), "alt+x");
+        assert_eq!(spelled(KeyCode::BackTab, KeyModifiers::SHIFT), "shift+tab");
+        assert_eq!(spelled(KeyCode::BackTab, KeyModifiers::NONE), "shift+tab");
+        assert_eq!(spelled(KeyCode::Char(' '), KeyModifiers::NONE), "space");
+        assert_eq!(spelled(KeyCode::Char('+'), KeyModifiers::NONE), "plus");
+        assert_eq!(spelled(KeyCode::Insert, KeyModifiers::NONE), "insert");
+        assert_eq!(spelled(KeyCode::Delete, KeyModifiers::NONE), "delete");
+        assert_eq!(
+            spelled(KeyCode::Char('a'), KeyModifiers::SUPER),
+            "a",
+            "super is not part of a chord"
+        );
+        assert_eq!(
+            chord(KeyCode::F(5), KeyModifiers::NONE).unwrap().code(),
+            Key::F(5)
+        );
+        assert!(chord(KeyCode::Null, KeyModifiers::CONTROL).is_none());
+        assert!(chord(KeyCode::CapsLock, KeyModifiers::NONE).is_none());
+    }
+
+    /// Every key the terminal routes gets the same chord whether it is pressed,
+    /// repeated or released: the kind is not part of a chord.
+    #[test]
+    fn a_terminal_chord_ignores_the_key_kind() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+        for kind in [
+            KeyEventKind::Press,
+            KeyEventKind::Repeat,
+            KeyEventKind::Release,
+        ] {
+            let event = KeyEvent {
+                code: KeyCode::Char('q'),
+                modifiers: KeyModifiers::NONE,
+                kind,
+                state: KeyEventState::empty(),
+            };
+            assert_eq!(
+                chord_from_key_event(&event).unwrap().as_str(),
+                "q",
+                "{kind:?}"
+            );
         }
     }
 }

@@ -19,7 +19,7 @@ use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
 use ainb_app::{Intent, Keymap};
 use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::{DesktopHost, FrameSink};
-use ainb_desktop::intent::RendererIntent;
+use ainb_desktop::intent::{Refusal, RendererIntent};
 use ainb_desktop::shell::Shell;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarState, SidecarView};
 use ainb_desktop::terminal::{TabEvents, TabsView, Terminals, Tmux};
@@ -237,9 +237,10 @@ fn subscribe(
 }
 
 /// Apply an intent from the webview: a key, a command, pasted text. A
-/// host-authored command id, or a key on a key-only row, is refused.
+/// host-authored command, or a key or name the host refuses from the window,
+/// is not applied, and the answer says which row and why, for a toast.
 #[tauri::command]
-fn dispatch(window: tauri::State<'_, Window>, intent: RendererIntent) {
+fn dispatch(window: tauri::State<'_, Window>, intent: RendererIntent) -> Option<Refusal> {
     // What the webview asked for, so a reader of the log can tell what the
     // window authored: a command's id, never its arguments, and never a key's
     // chord or a text's characters, which are what a person typed.
@@ -254,8 +255,9 @@ fn dispatch(window: tauri::State<'_, Window>, intent: RendererIntent) {
             );
         }
     }
-    if let Ok(intent) = Intent::try_from(intent) {
-        window.shell.dispatch_renderer(intent);
+    match Intent::try_from(intent) {
+        Ok(intent) => window.shell.dispatch_renderer(intent),
+        Err(refusal) => Some(refusal),
     }
 }
 

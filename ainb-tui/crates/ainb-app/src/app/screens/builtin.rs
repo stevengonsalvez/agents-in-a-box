@@ -105,10 +105,18 @@ pub enum PluginRoute {
     Host,
 }
 
-/// The keymap chord a plugin key event stands for, so a plugin screen's keys
-/// resolve against the same rows as every other key. The wire has no Insert
-/// key, so no plugin key event becomes [`Key::Insert`].
-fn chord_for(key: &KeyEvent) -> Chord {
+/// The keymap chord a wire key event stands for: the one key table (#1123).
+///
+/// A plugin screen's keys resolve through it against the same rows as every
+/// other key, and a terminal host reaches the keymap through it too, by
+/// converting its own key event to the wire shape first, so a new key is one
+/// edit to the wire enum and one arm here.
+///
+/// `BackTab` becomes `Tab` with [`Mods::SHIFT`], its one canonical form. The
+/// wire's super bit and the press, repeat or release kind are not part of a
+/// chord.
+#[must_use]
+pub fn key_chord(key: &KeyEvent) -> Chord {
     let code = match key.code {
         KeyCode::Char { ch } => Key::Char(ch),
         KeyCode::Enter => Key::Enter,
@@ -116,6 +124,7 @@ fn chord_for(key: &KeyEvent) -> Chord {
         KeyCode::Esc => Key::Esc,
         KeyCode::Backspace => Key::Backspace,
         KeyCode::Delete => Key::Delete,
+        KeyCode::Insert => Key::Insert,
         KeyCode::Up => Key::Up,
         KeyCode::Down => Key::Down,
         KeyCode::Left => Key::Left,
@@ -144,7 +153,7 @@ fn is_back_key(keymap: &Keymap, key: &KeyEvent) -> bool {
     matches!(
         keymap.resolve(
             &[KeyContext::Screen("plugin", SubContext::Named("owned"))],
-            &chord_for(key)
+            &key_chord(key)
         ),
         Some(KeyAction::App(crate::app::AppEvent::PanelBack))
     )
@@ -166,6 +175,14 @@ pub fn route_key_to_focused_plugin(
     let Some(plugin_name) = plugin_id_for_screen(&state.shell.current_screen) else {
         return PluginRoute::Host;
     };
+    // Insert joined the wire in protocol 0.3.0, and a plugin built against an
+    // older one cannot decode it. The screen still claims it, as it claimed
+    // every key the wire had no shape for. Lift this when the runtime's
+    // `ABI_VERSION` passes 2 (`ainb-plugin-runtime/src/plugin_task.rs:64`), so
+    // every plugin that loads can decode Insert (#1171).
+    if matches!(key.code, KeyCode::Insert) {
+        return PluginRoute::Consumed;
+    }
     let capturing = focused_plugin_captures_text(state);
     if is_host_reserved_key(key, plugin_owns_help_keys(state), capturing) {
         // Host claims this key: the central dispatch resolves it to Quit or
@@ -493,6 +510,52 @@ mod tests {
             panic!("a plain key on a live plugin is forwarded");
         };
         assert!(!back);
+    }
+
+    /// #1123: Insert is claimed by a plugin screen and never sent to the
+    /// plugin, which may predate the wire's Insert; off a plugin screen it is
+    /// the host's.
+    #[test]
+    fn insert_is_claimed_by_a_plugin_screen_and_never_forwarded() {
+        let keymap = Keymap::defaults();
+        let insert = key(KeyCode::Insert, 0);
+        let live = on_plugin_screen(ids::HANGAR, true, false);
+        assert_eq!(
+            route_key_to_focused_plugin(&live, &keymap, &insert),
+            PluginRoute::Consumed
+        );
+        let home = on_plugin_screen(ids::HOME, true, false);
+        assert_eq!(
+            route_key_to_focused_plugin(&home, &keymap, &insert),
+            PluginRoute::Host
+        );
+    }
+
+    /// #1123: the one key table spells every wire key the way the keymap does.
+    #[test]
+    fn key_chord_spells_every_wire_key() {
+        let spelled = |code: KeyCode, mods: u8| key_chord(&key(code, mods)).as_str().to_string();
+        assert_eq!(spelled(KeyCode::Insert, 0), "insert");
+        assert_eq!(spelled(KeyCode::Delete, 0), "delete");
+        assert_eq!(
+            spelled(KeyCode::BackTab, 0),
+            "shift+tab",
+            "BackTab is shift+tab"
+        );
+        assert_eq!(spelled(KeyCode::BackTab, KEY_MOD_SHIFT), "shift+tab");
+        assert_eq!(spelled(KeyCode::Char { ch: 'k' }, KEY_MOD_CTRL), "ctrl+k");
+        assert_eq!(spelled(KeyCode::Char { ch: 'x' }, KEY_MOD_ALT), "alt+x");
+        assert_eq!(spelled(KeyCode::Char { ch: ' ' }, 0), "space");
+        assert_eq!(spelled(KeyCode::Char { ch: '+' }, 0), "plus");
+        assert_eq!(
+            spelled(
+                KeyCode::Char { ch: 'a' },
+                ainb_plugin_protocol::params::KEY_MOD_SUPER
+            ),
+            "a",
+            "the super bit is not part of a chord"
+        );
+        assert_eq!(key_chord(&key(KeyCode::F { n: 5 }, 0)).code(), Key::F(5));
     }
 
     /// On a plugin that renders its own help the router forwards `?`/`H`

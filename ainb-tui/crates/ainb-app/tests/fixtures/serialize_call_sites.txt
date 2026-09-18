@@ -110,9 +110,6 @@ ainb-core/src/cli/reflect.rs | serde_json::to_string_pretty(&reports)
 ainb-core/src/cli/status.rs | serde_json::to_string_pretty(&output)
 ainb-core/src/cli/usage.rs | serde_json::to_string_pretty(&json!({
 ainb-core/src/cli/usage.rs | serde_json::to_string_pretty(&json!({"cleared": true}))
-ainb-web/src/daemon.rs | serde_json::to_value(AttentionListParams {
-ainb-web/src/daemon.rs | serde_json::to_value(params)
-ainb-web/src/daemon.rs | serde_json::to_vec(&req)
 ainb-web/src/data.rs | serde_json::to_value(&core.needs)
 ainb-web/src/data.rs | serde_json::to_value(&cost)
 ainb-web/src/push.rs | serde_json::to_vec_pretty(&keys)
