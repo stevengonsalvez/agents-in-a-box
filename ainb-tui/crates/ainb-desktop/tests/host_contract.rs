@@ -607,13 +607,65 @@ mod transcript {
     use ainb_app::fleet::transcript::{ChunkKind, MAX_CHUNKS, Transcript, TranscriptOutcome};
     use ainb_hangar_proto::fleet::{FleetTranscriptChunk, FleetTranscriptListResult};
 
+    /// A state whose status read holds the ACP card `acp:s-1`: the host opens
+    /// a transcript only for a card it holds.
+    fn holding_acp_card() -> ainb_app::AppState {
+        use ainb_hangar_proto::agent_status as status;
+        use ainb_hangar_proto::fleet;
+        let session = fleet::FleetSession {
+            session_key: "acp:s-1".to_string(),
+            provider: fleet::FleetProvider::Acp,
+            provider_session_id: None,
+            tmux_target: None,
+            pane_binding: fleet::PaneBinding::PaneUnbound,
+            process_start_fingerprint: None,
+            cwd: "/w".to_string(),
+            display_name: None,
+            lifecycle: fleet::LifecycleState::Running,
+            active_work_count: 0,
+            attention: fleet::AttentionState::None,
+            current_request_fingerprint: None,
+            current_request: None,
+            management: fleet::ManagementState::Managed,
+            transport_health: fleet::TransportHealth::Healthy,
+            capabilities: fleet::FleetCapabilities::default(),
+            provenance: fleet::FleetProvenance::Authoritative,
+            confidence: fleet::FleetConfidence::High,
+            discovered_at: 1,
+            last_observed_at: 1,
+            lifecycle_updated_at: 1,
+            attention_updated_at: 1,
+            model: None,
+            reasoning_effort: None,
+            model_updated_at: 0,
+            version: 1,
+            updated_revision: 1,
+        };
+        let row = status::status_row_with_tier(&session, false, None);
+        let mut state = ainb_app::AppState::with_config(AppConfig::default());
+        state.apply_agent_status_read(
+            status::RosterStatusResult {
+                rows: vec![status::RosterStatusRow {
+                    session,
+                    status: row,
+                    read_revision: 1,
+                }],
+                read_revision: 1,
+                unknown_events: Vec::new(),
+                read_at_ms: 0,
+            },
+            1,
+        );
+        state
+    }
+
     /// A host on the sessions screen whose sink records each Fleet frame's
     /// encoded size.
     fn sized_host(sizes: &Rc<RefCell<Vec<usize>>>) -> DesktopHost<impl FnMut(FrameBatch)> {
         scratch_home();
         let sizes = Rc::clone(sizes);
-        let mut host = DesktopHost::new(
-            AppConfig::default(),
+        let mut host = DesktopHost::hosting(
+            holding_acp_card(),
             Keymap::defaults(),
             HostId::local(),
             Subscription::only(&[SectionId::Fleet]),
@@ -622,7 +674,10 @@ mod transcript {
                     sizes.borrow_mut().push(serde_json::to_vec(&frame).expect("encodes").len());
                 }
             },
-        );
+        )
+        // Folding a large page takes a while in a debug build; no rescan may
+        // come due inside it, since a scan needs the runtime this test lacks.
+        .rescanning_every(std::time::Duration::from_secs(600));
         host.open_sessions(&mut Recorder(Log::default()));
         host
     }
