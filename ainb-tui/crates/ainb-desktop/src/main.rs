@@ -23,6 +23,7 @@ use ainb_desktop::intent::RendererIntent;
 use ainb_desktop::shell::Shell;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarState, SidecarView};
 use ainb_desktop::terminal::{TabEvents, TabsView, Terminals, Tmux};
+use ainb_hangar_proto::agent_status::AgentState;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Emitter, Manager};
 
@@ -69,16 +70,23 @@ struct Window {
 }
 
 /// What the renderer applied, for the proof harness to read from the log: the
-/// sections of a batch and how many session rows the sidebar holds. Names and
-/// counts only, never a body.
+/// sections of a batch, how many session rows the sidebar holds, and how many
+/// cards each board column draws. Names and counts only, never a body.
 ///
 /// The names arrive as a `Subscription`, which deserializes from the wire
 /// names and drops anything else, so the line is bounded by the sections that
-/// exist and a renderer cannot name one it never applied.
+/// exist and a renderer cannot name one it never applied. The columns arrive
+/// as `AgentState`s, so they are bounded the same way: one per state at most.
 #[tauri::command]
-fn renderer_applied(sections: Subscription, sessions: usize) {
+fn renderer_applied(sections: Subscription, sessions: usize, board: Vec<(AgentState, usize)>) {
     let named: Vec<&str> = sections.sections().map(ainb_app::wire::section_name).collect();
-    tracing::info!(sections = ?named, sessions, "renderer applied");
+    let board: Vec<String> = board
+        .iter()
+        // Five states, so a longer list is a renderer that drew no board.
+        .take(5)
+        .map(|(state, cards)| format!("{}={cards}", state.as_str()))
+        .collect();
+    tracing::info!(sections = ?named, sessions, board = ?board, "renderer applied");
 }
 
 /// The terminal's copy: put the selection on the platform clipboard.
