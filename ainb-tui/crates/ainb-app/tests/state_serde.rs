@@ -244,7 +244,7 @@ const NAME_ALLOW: &[(&str, &str)] = &[
     ),
     (
         "Transcript.session_key",
-        "the Fleet session the transcript belongs to (`acp:<id>`), an identity, not a credential",
+        "the Fleet session the transcript belongs to (`acp:<id>`), an identity the host resolved against its own status read, scrubbed through redact::scrub all the same",
     ),
     (
         "TranscriptStatus::Unavailable.detail",
@@ -1052,6 +1052,7 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "BranchPickerState.filter_len",
     "Broadcast.text_len",
     "Conversation.composer_len",
+    "Transcript.session_key",
     "TranscriptChunk.body",
     "TranscriptStatus::Unavailable.detail",
     "Conversation.send_block",
