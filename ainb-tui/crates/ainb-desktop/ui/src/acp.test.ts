@@ -78,7 +78,7 @@ test("an unreachable read says why, in the daemon client's words", () => {
   assert.match(view.status!, /socket gone/);
 });
 
-test("a session with no tmux is a card that opens its transcript where the tab would be", () => {
+test("an ACP card has no session row, so it offers its transcript intent, open and close", () => {
   // No session list row names an ACP session: its board card is the way in,
   // and it is offered rather than drawn disabled.
   const status: AgentStatusView = {

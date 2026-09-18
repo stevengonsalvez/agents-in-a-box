@@ -60,8 +60,10 @@ function statusLine(status: TranscriptStatus_Serialize): string | null {
       return "Reading the transcript";
     case "Live":
       return null;
-    default:
-      return "No transcript is open";
+    // A closed transcript carries no key, so `transcriptView` never reads one.
+    // Named rather than defaulted: a status Rust adds fails this switch.
+    case "Closed":
+      return null;
   }
 }
 

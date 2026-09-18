@@ -3279,13 +3279,27 @@ impl EventHandler {
             }
             AppEvent::SessionListOpenTranscript(key) => {
                 use crate::fleet::transcript::TranscriptHost;
+                // The key comes from a renderer and the daemon scopes a read by
+                // key alone, so it is resolved first: only an ACP card this
+                // host's own status read holds opens. That keeps another host's
+                // or a hidden session's run out, and bounds the string.
+                let unknown = key.as_deref().is_some_and(|key| {
+                    !state
+                        .agent_status
+                        .view
+                        .as_ref()
+                        .and_then(|view| view.cards.get(key))
+                        .is_some_and(|card| {
+                            card.session.provider == ainb_hangar_proto::fleet::FleetProvider::Acp
+                        })
+                });
                 // The same session again keeps its host, and its cursor: a
                 // second click must not re-read a run from the start.
                 let same = matches!(
                     (&state.host.transcript, &key),
                     (Some(open), Some(key)) if open.session_key() == key
                 );
-                if !same {
+                if !unknown && !same {
                     state.host.transcript = key.map(TranscriptHost::new);
                 }
             }
@@ -9554,6 +9568,104 @@ mod session_ask_key_tests {
         assert!(
             press(&mut state, Esc).is_some(),
             "Esc must still do something"
+        );
+    }
+}
+
+#[cfg(test)]
+mod open_transcript_tests {
+    use super::{AppEvent, EventHandler};
+    use crate::app::AppState;
+    use ainb_hangar_proto::agent_status as status;
+    use ainb_hangar_proto::fleet::{self, FleetProvider};
+
+    /// A host whose status read holds one card, `key`, of `provider`.
+    fn holding(key: &str, provider: FleetProvider) -> AppState {
+        let mut state = AppState::new();
+        let session = fleet::FleetSession {
+            session_key: key.to_string(),
+            provider,
+            provider_session_id: None,
+            tmux_target: None,
+            pane_binding: fleet::PaneBinding::PaneUnbound,
+            process_start_fingerprint: None,
+            cwd: "/w".to_string(),
+            display_name: None,
+            lifecycle: fleet::LifecycleState::Running,
+            active_work_count: 0,
+            attention: fleet::AttentionState::None,
+            current_request_fingerprint: None,
+            current_request: None,
+            management: fleet::ManagementState::Managed,
+            transport_health: fleet::TransportHealth::Healthy,
+            capabilities: fleet::FleetCapabilities::default(),
+            provenance: fleet::FleetProvenance::Authoritative,
+            confidence: fleet::FleetConfidence::High,
+            discovered_at: 1,
+            last_observed_at: 1,
+            lifecycle_updated_at: 1,
+            attention_updated_at: 1,
+            model: None,
+            reasoning_effort: None,
+            model_updated_at: 0,
+            version: 1,
+            updated_revision: 1,
+        };
+        let row = status::status_row_with_tier(&session, false, None);
+        state.apply_agent_status_read(
+            status::RosterStatusResult {
+                rows: vec![status::RosterStatusRow {
+                    session,
+                    status: row,
+                    read_revision: 1,
+                }],
+                read_revision: 1,
+                unknown_events: Vec::new(),
+                read_at_ms: 0,
+            },
+            1,
+        );
+        state
+    }
+
+    fn open(state: &mut AppState, key: &str) -> Option<String> {
+        EventHandler::process_event(
+            AppEvent::SessionListOpenTranscript(Some(key.to_string())),
+            state,
+        );
+        state.host.transcript.as_ref().map(|open| open.session_key().to_string())
+    }
+
+    #[test]
+    fn an_acp_card_the_status_read_holds_opens() {
+        let mut state = holding("acp:s-1", FleetProvider::Acp);
+        assert_eq!(open(&mut state, "acp:s-1").as_deref(), Some("acp:s-1"));
+    }
+
+    #[test]
+    fn a_key_the_status_read_does_not_hold_opens_nothing() {
+        let mut state = holding("acp:s-1", FleetProvider::Acp);
+        assert_eq!(open(&mut state, "acp:elsewhere"), None);
+        assert_eq!(
+            open(&mut state, &"x".repeat(4 << 20)),
+            None,
+            "nor a huge one"
+        );
+    }
+
+    #[test]
+    fn a_card_that_is_not_acp_opens_nothing() {
+        let mut state = holding("claude:s-1", FleetProvider::Claude);
+        assert_eq!(open(&mut state, "claude:s-1"), None);
+    }
+
+    #[test]
+    fn a_refused_key_leaves_the_open_transcript_open() {
+        let mut state = holding("acp:s-1", FleetProvider::Acp);
+        open(&mut state, "acp:s-1");
+        assert_eq!(
+            open(&mut state, "acp:elsewhere").as_deref(),
+            Some("acp:s-1")
         );
     }
 }
