@@ -14,7 +14,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 use super::OutputFormat;
-use crate::cli::util::find_session;
+use crate::cli::util::{find_session, load_session_store};
 use crate::git::{WorktreeInfo, WorktreeManager};
 use crate::interactive::session_manager::SessionStore;
 
@@ -107,7 +107,7 @@ fn cmd_worktrees(format: OutputFormat) -> Result<()> {
     let manager = WorktreeManager::new().context("Failed to initialize WorktreeManager")?;
     let worktrees =
         manager.list_all_worktrees().context("Failed to enumerate managed worktrees")?;
-    let store = SessionStore::load();
+    let store = load_session_store();
 
     let entries: Vec<WorktreeEntry> =
         worktrees.iter().map(|(id, info)| build_entry(*id, info, &store)).collect();
@@ -167,7 +167,7 @@ fn cmd_cleanup(force: bool, dry_run: bool, format: OutputFormat) -> Result<()> {
     let manager = WorktreeManager::new().context("Failed to initialize WorktreeManager")?;
     let worktrees =
         manager.list_all_worktrees().context("Failed to enumerate managed worktrees")?;
-    let store = SessionStore::load();
+    let store = load_session_store();
 
     let orphans: Vec<(Uuid, WorktreeInfo)> =
         worktrees.into_iter().filter(|(id, _)| is_orphaned(id, &store)).collect();
