@@ -115,7 +115,8 @@ fn daemon_news_starts_a_scan_before_the_cadence_would() {
     )
     // Far longer than this test runs: a scan here is the news's, not the
     // cadence's.
-    .rescanning_every(Duration::from_secs(600));
+    .rescanning_every(Duration::from_secs(600))
+    .flooring_news_at(Duration::from_millis(500));
     // Held off, so the poller thread does not move the counter under the test.
     host.state().host.attention_poll_running.store(true, Ordering::Release);
 
@@ -133,12 +134,21 @@ fn daemon_news_starts_a_scan_before_the_cadence_would() {
         "nothing has happened since, and the cadence is 10 minutes away"
     );
 
+    // News inside the floor waits: a daemon publishing while a scan ran
+    // must not queue the next one the moment it ends.
     host.state().host.daemon_attention_generation.fetch_add(1, Ordering::Release);
+    let _ = host.tick();
+    assert!(
+        !host.state().workspace_scan_running(),
+        "news right after a scan waits out the floor"
+    );
+
+    std::thread::sleep(Duration::from_millis(600));
     let _ = host.tick();
 
     assert!(
         host.state().workspace_scan_running(),
-        "the daemon reported news, so the window looked at once"
+        "the daemon reported news, so the window looked well before the cadence"
     );
 
     // Wait the scan out, so the test leaves no loader thread behind.
