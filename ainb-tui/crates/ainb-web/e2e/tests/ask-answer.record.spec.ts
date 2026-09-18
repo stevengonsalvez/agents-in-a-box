@@ -125,7 +125,7 @@ test("RECORDING: web dashboard answers a seeded ASK: render → click ② → de
     row = attentionRow();
     return row.startsWith("answered|");
   });
-  expect(row).toMatch(new RegExp(`^answered\\|web(@[^|]+)?\\|${PICK_ANSWER}$`));
+  expect(row).toMatch(new RegExp(`^answered\\|web@[^|]+\\|${PICK_ANSWER}$`));
   console.log(`PASS store: attention row = ${JSON.stringify(row)}`);
 
   await page.waitForTimeout(1000);
