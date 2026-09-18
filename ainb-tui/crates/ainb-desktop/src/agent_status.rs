@@ -129,7 +129,12 @@ fn read_once() -> StatusOutcome {
         return StatusOutcome::Failed("no runtime for the agent status read".to_string());
     };
     runtime.block_on(async {
-        match ainb_app::fleet::bridge::daemon::tui_client() {
+        // As the desktop: each read is a connection, and the daemon's surface
+        // trail must not show a terminal this process never ran.
+        let client = ainb_app::fleet::bridge::daemon::surface_client(
+            ainb_hangar_proto::connections::SurfaceKind::Desktop,
+        );
+        match client {
             Ok(client) => match client.fleet_roster_status().await {
                 Ok(rows) => StatusOutcome::Read(rows),
                 Err(error) => StatusOutcome::Failed(format!("fleet/roster_status: {error}")),
