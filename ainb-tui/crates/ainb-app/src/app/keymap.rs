@@ -1165,6 +1165,7 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::SessionStartHangarDaemon
         | AppEvent::SessionListSelectRow { .. }
         | AppEvent::SessionListSelectTab(..)
+        | AppEvent::SessionListOpenTranscript(..)
         | AppEvent::SessionListOpenRowMenu { .. }
         | AppEvent::SessionListFocusPane(..)
         | AppEvent::SaveSessionsPaneLayout { .. }
