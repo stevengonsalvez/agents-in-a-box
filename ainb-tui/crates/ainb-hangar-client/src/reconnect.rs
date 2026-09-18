@@ -280,6 +280,7 @@ async fn run_reconnecting_fleet(
     state_tx: watch::Sender<ConnectionState>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
+    let socket_path = dialer().map(|c| c.socket().to_path_buf()).ok();
     let mut attempt: u32 = 1;
 
     loop {
@@ -287,7 +288,7 @@ async fn run_reconnecting_fleet(
         let dial_fut = async {
             let client = dialer()?;
             let (subscribe_result, subscription) = client.open_fleet_subscription(covered).await?;
-            Ok::<_, DaemonError>((client.socket().to_path_buf(), subscribe_result, subscription))
+            Ok::<_, DaemonError>((subscribe_result, subscription))
         };
 
         let dial_res = tokio::select! {
@@ -299,7 +300,7 @@ async fn run_reconnecting_fleet(
         };
 
         let last_error: Option<String> = match dial_res {
-            Ok((socket, subscribe_result, mut subscription)) => {
+            Ok((subscribe_result, mut subscription)) => {
                 let connected_at = std::time::Instant::now();
                 state_tx.send_replace(ConnectionState::Connected);
 
@@ -356,7 +357,11 @@ async fn run_reconnecting_fleet(
                                     }
                                 }
                                 Err(err) => {
-                                    crate::reset_host_id(&socket);
+                                    if matches!(err, DaemonError::Io(_)) {
+                                        if let Some(ref socket) = socket_path {
+                                            crate::reset_host_id(socket);
+                                        }
+                                    }
                                     disconnect_error = Some(err.to_string());
                                     break;
                                 }
@@ -371,12 +376,7 @@ async fn run_reconnecting_fleet(
                 }
                 disconnect_error
             }
-            Err(err) => {
-                if let Ok(client) = dialer() {
-                    crate::reset_host_id(client.socket());
-                }
-                Some(err.to_string())
-            }
+            Err(err) => Some(err.to_string()),
         };
 
         let delay = timing.delay_for_attempt(attempt);
