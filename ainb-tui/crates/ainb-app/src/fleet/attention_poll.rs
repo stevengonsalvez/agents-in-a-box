@@ -264,6 +264,9 @@ fn group_by_cwd(rows: &[WireRow]) -> HashMap<String, Vec<SessionAttention>> {
 /// "waiting for input" would read as something the agent actually said.
 fn question_of(payload: &serde_json::Value) -> Option<String> {
     const PATHS: &[&str] = &[
+        // What the daemon stores for an ASK its hook ingest raised: the
+        // `NeedsContext` it classified, `{"kind":"ASK","context":{..}}`.
+        "/context/question",
         // Claude AskUserQuestion, first question.
         "/tool_input/questions/0/question",
         "/payload/tool_input/questions/0/question",
@@ -283,6 +286,7 @@ fn question_of(payload: &serde_json::Value) -> Option<String> {
 /// The structured options an ASK offers, or empty for free text.
 fn options_of(payload: &serde_json::Value) -> Vec<AttentionOption> {
     const PATHS: &[&str] = &[
+        "/context/options",
         "/tool_input/questions/0/options",
         "/payload/tool_input/questions/0/options",
     ];
@@ -347,6 +351,32 @@ mod tests {
             channels: ainb_hangar_proto::ChannelSet::default(),
             version: 1,
         }
+    }
+
+    /// The row the daemon's hook ingest writes is the classified context, not
+    /// the hook's tool input, and the chip still carries its question and
+    /// options: without them the banner has nothing to offer.
+    #[test]
+    fn an_ask_the_hook_ingest_raised_carries_its_question_and_options() {
+        let row = wire(
+            "a",
+            "ask_user_question",
+            "/w",
+            serde_json::json!({
+                "kind": "ASK",
+                "context": {
+                    "question": "Ship to which environment?",
+                    "options": [{ "label": "staging" }, { "label": "prod" }],
+                    "multi_select": false
+                }
+            }),
+        );
+        let chip = &group_by_cwd(&[row])["/w"][0];
+        assert_eq!(chip.detail.as_deref(), Some("Ship to which environment?"));
+        assert_eq!(
+            chip.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(),
+            ["staging", "prod"]
+        );
     }
 
     #[test]
