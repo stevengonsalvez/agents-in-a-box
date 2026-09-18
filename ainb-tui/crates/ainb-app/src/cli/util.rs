@@ -92,7 +92,7 @@ async fn try_daemon_client() -> Option<DaemonClient> {
     }
 }
 
-fn run_async<F: std::future::Future<Output = T> + Send + 'static, T: Send + 'static>(fut: F) -> T {
+fn run_async<F: std::future::Future<Output = T> + Send, T: Send>(fut: F) -> T {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         match handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::MultiThread => {
@@ -188,7 +188,7 @@ where
 /// Mutate session store through the daemon RPC when available, falling back to disk (sync).
 pub fn mutate_session_store<F>(f: F) -> Result<(), std::io::Error>
 where
-    F: FnOnce(&mut SessionStore) + Send + 'static,
+    F: FnOnce(&mut SessionStore) + Send,
 {
     run_async(mutate_session_store_async(f))
 }
