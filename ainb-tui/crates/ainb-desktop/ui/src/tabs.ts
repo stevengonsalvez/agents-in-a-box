@@ -36,13 +36,14 @@ export function rowOf(target: TabTarget): RowId {
  * Re-exported here because this is where the window's intents are built; the
  * declaration itself is the Rust type's, checked fresh by CI.
  */
-export type { RendererIntent } from "../../bindings/Desktop.ts";
+import type { RendererIntent } from "../../bindings/Desktop.ts";
+export type { RendererIntent };
 
 /**
  * The intent that selects `row` and attaches it. Opening goes through the
  * session list's own row, so the reducer marks the session attached each time.
  */
-export function openRowIntent(row: RowId): import("../../bindings/Desktop.ts").RendererIntent {
+export function openRowIntent(row: RowId): RendererIntent {
   return { Command: ["session_list.select_row", { target: row, open: true }] };
 }
 
