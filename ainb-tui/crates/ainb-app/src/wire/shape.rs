@@ -908,7 +908,11 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
                 crate::fleet::attention::AttentionKind::Ask,
                 1_000,
             )
-            .with_detail(seed.text("session.attention.detail", Captured)),
+            .with_detail(seed.text("session.attention.detail", Captured))
+            .with_options(vec![crate::fleet::attention::AttentionOption {
+                label: seed.text("session.attention.option_label", Captured),
+                description: seed.text("session.attention.option_description", Captured),
+            }]),
         ];
         let mut target = crate::models::SshTarget::new("build.example.com".to_string());
         target.user = Some("deploy".to_string());
