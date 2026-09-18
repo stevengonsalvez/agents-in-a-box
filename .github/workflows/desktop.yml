@@ -131,7 +131,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
-            librsvg2-dev libxdo-dev libssl-dev patchelf tmux xvfb
+            librsvg2-dev libxdo-dev libssl-dev patchelf tmux xvfb sqlite3
       - name: Install tmux (macOS)
         if: runner.os == 'macOS'
         run: brew list tmux >/dev/null 2>&1 || brew install tmux
@@ -144,13 +144,9 @@ jobs:
         run: npm ci --no-audit --no-fund && npm run build
         working-directory: ainb-tui/crates/ainb-desktop/ui
       # The world seeds its sessions with this CLI, and the journey creates one
-      # more from it while the window is open. The answer journey raises its
-      # ASK from a separate process, the control-center seeder the web journey
-      # uses.
-      - name: Build the ainb CLI, the hangar daemon and the ASK seeder
-        run: |
-          cargo build --bin ainb --bin ainb-hangar-daemon
-          cargo build -p ainb-hangar-daemon --example seed_control_center
+      # more from it while the window is open.
+      - name: Build the ainb CLI and the hangar daemon
+        run: cargo build --bin ainb --bin ainb-hangar-daemon
         working-directory: ainb-tui
       # The window build reads `bundle.externalBin`, so the sidecar has to be
       # staged beside it first, exactly as the other two jobs do.
@@ -178,7 +174,6 @@ jobs:
           AINB_DESKTOP_BIN: ${{ github.workspace }}/ainb-tui/crates/ainb-desktop/target/debug/ainb-desktop
           AINB_BIN: ${{ github.workspace }}/ainb-tui/target/debug/ainb
           AINB_DESKTOP_DAEMON_BIN: ${{ github.workspace }}/ainb-tui/target/debug/ainb-hangar-daemon
-          AINB_E2E_SEEDER: ${{ github.workspace }}/ainb-tui/target/debug/examples/seed_control_center
       - name: Desktop journey (macOS)
         id: journey_macos
         if: runner.os == 'macOS' && env.MACOS_E2E_LEG == 'journey'
@@ -188,7 +183,6 @@ jobs:
           AINB_DESKTOP_BIN: ${{ github.workspace }}/ainb-tui/crates/ainb-desktop/target/debug/ainb-desktop
           AINB_BIN: ${{ github.workspace }}/ainb-tui/target/debug/ainb
           AINB_DESKTOP_DAEMON_BIN: ${{ github.workspace }}/ainb-tui/target/debug/ainb-hangar-daemon
-          AINB_E2E_SEEDER: ${{ github.workspace }}/ainb-tui/target/debug/examples/seed_control_center
       # The recorded substitute, run only when MACOS_E2E_LEG says so: the Rust
       # host contract and sidecar tests, with the bundle smoke in its own job.
       - name: The macOS substitute for the journey
