@@ -206,14 +206,15 @@ async fn run(
         let attempt = async {
             let mut client = dialer()?;
             client.set_surface(surface.clone());
-            tokio::time::timeout(RPC_TIMEOUT, client.dial_presence())
+            let (reader, writer) = tokio::time::timeout(RPC_TIMEOUT, client.dial_presence())
                 .await
-                .map_err(|_| DaemonError::Timeout(RPC_TIMEOUT))?
+                .map_err(|_| DaemonError::Timeout(RPC_TIMEOUT))??;
+            Ok::<_, DaemonError>((client.socket().to_path_buf(), reader, writer))
         };
         let error = tokio::select! {
             _ = &mut shutdown => break,
             dialed = attempt => match dialed {
-                Ok((reader, writer)) => {
+                Ok((socket, reader, writer)) => {
                     state.send_replace(PresenceState::Connected);
                     let connected_at = tokio::time::Instant::now();
                     let held = hold(reader, writer, timing, &mut shutdown).await;
@@ -222,10 +223,18 @@ async fn run(
                     }
                     match held {
                         Held::Shutdown => break,
-                        Held::Lost(error) => error,
+                        Held::Lost(error) => {
+                            crate::reset_host_id(&socket);
+                            error
+                        }
                     }
                 }
-                Err(error) => error.to_string(),
+                Err(error) => {
+                    if let Ok(client) = dialer() {
+                        crate::reset_host_id(client.socket());
+                    }
+                    error.to_string()
+                }
             },
         };
         state.send_replace(PresenceState::Waiting { error: Some(error) });
