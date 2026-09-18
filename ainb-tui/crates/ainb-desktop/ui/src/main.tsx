@@ -1,11 +1,13 @@
 import { render } from "solid-js/web";
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
 import { createFrameStore, type SectionName } from "./store.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
+import { AnswerBanner } from "./answer.tsx";
+import { phaseOf, questionFor } from "./answer.ts";
 import { Board } from "./board.tsx";
 import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
@@ -119,6 +121,14 @@ function Shell() {
     else if (!view.tabs.some((tab) => tab.key === active())) activate(view.tabs[0]?.key ?? null);
   };
   const dispatch = (intent: RendererIntent) => void invoke("dispatch", { intent });
+  /**
+   * Send `intents` in order, each one applied before the next is sent: the
+   * host applies a dispatch before the command returns, so awaiting each keeps
+   * a cursor move ahead of the Enter that reads it.
+   */
+  const run = async (intents: RendererIntent[]) => {
+    for (const intent of intents) await invoke("dispatch", { intent });
+  };
   /** Select a session-list row and attach it, so the reducer marks it attached. */
   const openRow = (row: RowId) => dispatch(openRowIntent(row));
 
@@ -246,6 +256,40 @@ function Shell() {
   const sessionsStale = createMemo(() => ROOT_SELECTORS.sessionsStale(store, host()));
   const loading = createMemo(() => ROOT_SELECTORS.workspacesLoading(store, host()));
   const elsewhere = createMemo(() => ROOT_SELECTORS.attentionElsewhere(store, host()));
+  const shell = () => (host() ? store.section(host()!, "shell") : undefined);
+  const ask = () => fleet()?.ask_state;
+  const question = createMemo(() => questionFor(sessions(), fleet()));
+
+  // The reducer speaks through its notices: a refused send says why in the
+  // reducer's own words (a daemon that is gone, a native picker, nothing typed),
+  // so the window shows each new one as a toast rather than a dead button.
+  createEffect(
+    on(
+      () => shell()?.notifications.length ?? 0,
+      (length, previous = 0) => {
+        const notices = shell()?.notifications ?? [];
+        // A success notice is the reducer congratulating itself ("Workspaces
+        // loaded"), and the window rescans on a cadence: only what went wrong,
+        // or what the person needs to know, becomes a toast.
+        for (const notice of notices.slice(previous < length ? previous : length)) {
+          if (notice.notification_type !== "Success") toast(notice.message);
+        }
+      },
+    ),
+  );
+  // Another surface answered first: the row reads delivered, and the winner is
+  // named once, in a toast.
+  createEffect(
+    on(
+      () => {
+        const phase = phaseOf(ask());
+        return phase.kind === "already_answered" ? [ask()?.request, phase.by].join("\n") : null;
+      },
+      (winner) => {
+        if (winner !== null) toast(`Already answered by ${winner.slice(winner.indexOf("\n") + 1)}`);
+      },
+    ),
+  );
 
   /** A tab's title: its session's name when the sidebar knows it. */
   const title = (tab: Tab) => {
@@ -359,6 +403,9 @@ function Shell() {
               )}
             </For>
           </nav>
+          <Show when={question()}>
+            {(shown) => <AnswerBanner question={shown()} ask={ask()} run={run} />}
+          </Show>
           <Show when={board()}>
             <Board
               agentStatus={agentStatus()}
