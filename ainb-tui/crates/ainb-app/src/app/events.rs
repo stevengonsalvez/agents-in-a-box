@@ -1287,6 +1287,22 @@ impl EventHandler {
         Self::is_text_input_context(state)
     }
 
+    /// Whether the `ask` pane's free-text row has the keyboard: the one test
+    /// both the typed-character route and the paste route read, so the two
+    /// cannot disagree about where a character goes.
+    ///
+    /// The focus it reads is refreshed only by an ask command (each retargets
+    /// first). A focus left at `FreeText` by a question that has since changed
+    /// sends a paste to `route_session_ask_text`, which retargets and then
+    /// drops the characters if the new question starts on its options; that is
+    /// the existing shape, and a keyed ask command re-establishes it.
+    fn ask_free_text_focused(state: &AppState) -> bool {
+        state.shell.current_screen == screen_ids::SESSION_LIST
+            && crate::components::session_tabs::resolve(state, state.shell.session_tab)
+                == crate::components::session_tabs::SessionTab::Ask
+            && state.fleet.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText
+    }
+
     fn is_text_input_context(state: &AppState) -> bool {
         use crate::app::screens::ids as screen_ids;
         use crate::app::state::NewSessionStep;
@@ -1335,10 +1351,7 @@ impl EventHandler {
         // already puts the text context on top while it has focus, and this
         // predicate is what the paste route reads, so without it a pasted
         // answer (and a renderer's `Intent::Text`) was dropped on the floor.
-        let ask_free_text_active = state.shell.current_screen == screen_ids::SESSION_LIST
-            && crate::components::session_tabs::resolve(state, state.shell.session_tab)
-                == crate::components::session_tabs::SessionTab::Ask
-            && state.fleet.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText;
+        let ask_free_text_active = Self::ask_free_text_focused(state);
         let skills_text_active = state.shell.current_screen == screen_ids::SKILLS
             && state.skills.skills_state.search_active;
         let recovery_text_active = state.shell.current_screen == screen_ids::SESSION_RECOVERY
@@ -1608,11 +1621,7 @@ impl EventHandler {
         if state.shell.current_screen == screen_ids::SESSION_LIST && state.session_tab_owns_keys() {
             return Self::route_session_composer_char(character, state);
         }
-        if state.shell.current_screen == screen_ids::SESSION_LIST
-            && crate::components::session_tabs::resolve(state, state.shell.session_tab)
-                == crate::components::session_tabs::SessionTab::Ask
-            && state.fleet.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText
-        {
+        if Self::ask_free_text_focused(state) {
             return Self::route_session_ask_text(character, state);
         }
         if state.tmux.other_tmux_rename_mode {
@@ -1714,15 +1723,17 @@ impl EventHandler {
     ) -> Option<AppEvent> {
         use UiAction::{
             PalCycleEngine, PalCycleMode, PalCycleModel, PalRetry, SessionAskBackspace,
-            SessionAskNext, SessionAskPrevious, SessionComposerBackspace, SessionComposerCancel,
-            SessionComposerDown, SessionComposerEnter, SessionComposerEscape,
-            SessionComposerFocusToggle, SessionComposerRetry, SessionComposerUp,
+            SessionAskClear, SessionAskNext, SessionAskPrevious, SessionComposerBackspace,
+            SessionComposerCancel, SessionComposerDown, SessionComposerEnter,
+            SessionComposerEscape, SessionComposerFocusToggle, SessionComposerRetry,
+            SessionComposerUp,
         };
 
         match action {
             SessionAskPrevious => Self::route_session_ask_move(-1, state),
             SessionAskNext => Self::route_session_ask_move(1, state),
             SessionAskBackspace => Self::route_session_ask_backspace(state),
+            SessionAskClear => Self::route_session_ask_clear(state),
             SessionComposerEnter => Self::route_session_composer_action(
                 ainb_plugin_hangar::screen::fleet_chat::ChatKey::Enter,
                 state,
@@ -1974,6 +1985,14 @@ impl EventHandler {
         let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
         state.fleet.ask_state.retarget(&chip);
         state.fleet.ask_state.backspace();
+        state.shell.ui_needs_refresh = true;
+        Some(AppEvent::Consumed)
+    }
+
+    fn route_session_ask_clear(state: &mut AppState) -> Option<AppEvent> {
+        let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
+        state.fleet.ask_state.retarget(&chip);
+        state.fleet.ask_state.clear_free_text();
         state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
@@ -8718,6 +8737,45 @@ mod text_input_guard_tests {
             EventHandler::is_text_input_context(&state),
             "Session recovery search_active must be treated as text input"
         );
+
+        // The ask pane's free-text row: a blocking question with no options
+        // puts the composer in focus, and only then is it text input.
+        reset_text_context_state(&mut state);
+        {
+            use crate::components::session_tabs::SessionTab;
+            use crate::fleet::attention::{AttentionKind, AttentionOption, SessionAttention};
+            let free = SessionAttention::daemon(AttentionKind::Ask, 1, "att-free".into());
+            let picked = SessionAttention::daemon(AttentionKind::Ask, 2, "att-picked".into())
+                .with_options(vec![AttentionOption {
+                    label: "yes".to_string(),
+                    description: String::new(),
+                }]);
+            let mut workspace =
+                crate::models::Workspace::new("w".to_string(), PathBuf::from("/work/w"));
+            let mut session = crate::models::Session::new("s".to_string(), "/work/w/s".to_string());
+            session.live_attention = vec![free.clone()];
+            workspace.add_session(session);
+            state.sessions.workspaces = vec![workspace];
+            state.sessions.selected_workspace_index = Some(0);
+            state.sessions.selected_session_index = Some(0);
+            state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+            state.shell.session_tab = SessionTab::Ask;
+            state.fleet.ask_state.retarget(&free);
+            assert!(
+                EventHandler::is_text_input_context(&state),
+                "the ask pane's free-text row must be treated as text input"
+            );
+            state.sessions.workspaces[0].sessions[0].live_attention = vec![picked.clone()];
+            state.fleet.ask_state.retarget(&picked);
+            assert!(
+                !EventHandler::is_text_input_context(&state),
+                "the ask pane on its options must NOT be treated as text input"
+            );
+            state.sessions.workspaces.clear();
+            state.sessions.selected_workspace_index = None;
+            state.sessions.selected_session_index = None;
+            state.shell.session_tab = SessionTab::Preview;
+        }
 
         // GitView commit-message mode.
         reset_text_context_state(&mut state);

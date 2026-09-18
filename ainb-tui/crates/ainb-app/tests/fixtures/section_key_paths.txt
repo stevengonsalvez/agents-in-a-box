@@ -730,6 +730,10 @@ sessions.workspaces[].path
 sessions.workspaces[].sessions[].agent_type
 sessions.workspaces[].sessions[].attention[].detail
 sessions.workspaces[].sessions[].attention[].kind
+sessions.workspaces[].sessions[].attention[].options[].description
+sessions.workspaces[].sessions[].attention[].options[].label
+sessions.workspaces[].sessions[].attention[].request
+sessions.workspaces[].sessions[].attention[].route
 sessions.workspaces[].sessions[].boss_prompt
 sessions.workspaces[].sessions[].branch_name
 sessions.workspaces[].sessions[].codex_model
@@ -900,6 +904,10 @@ ssh.ssh_session_rename_mode
 ssh.ssh_sessions[].agent_type
 ssh.ssh_sessions[].attention[].detail
 ssh.ssh_sessions[].attention[].kind
+ssh.ssh_sessions[].attention[].options[].description
+ssh.ssh_sessions[].attention[].options[].label
+ssh.ssh_sessions[].attention[].request
+ssh.ssh_sessions[].attention[].route
 ssh.ssh_sessions[].boss_prompt
 ssh.ssh_sessions[].branch_name
 ssh.ssh_sessions[].codex_model

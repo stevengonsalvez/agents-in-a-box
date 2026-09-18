@@ -1235,6 +1235,7 @@ pub fn defaults() -> Vec<Binding> {
         previous: "up" => KeyAction::Ui(UiAction::SessionAskPrevious),
         next: "down" => KeyAction::Ui(UiAction::SessionAskNext),
         backspace: "backspace" => KeyAction::Ui(UiAction::SessionAskBackspace),
+        clear: "ctrl+u" => KeyAction::Ui(UiAction::SessionAskClear),
     );
     append_app_rows!(rows, Context::Screen("session_recovery", super::keymap::SubContext::Named("filtered")),
         clear: "esc" => AppEvent::SessionRecoverySearchCancel,

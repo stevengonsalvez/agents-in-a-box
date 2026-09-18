@@ -10,8 +10,6 @@ import type {
   AnswerPhase_Serialize,
   AskState_Serialize,
   AttentionKind,
-  FleetView_Serialize,
-  SessionAttention_Serialize,
   SessionsView_Serialize,
   Session_Serialize,
 } from "../../../ainb-app/bindings/AppState";
@@ -21,22 +19,14 @@ import type { RendererIntent } from "./tabs.ts";
 /** The kinds that block a turn, as `AttentionKind::blocks` has it. */
 const BLOCKING: readonly AttentionKind[] = ["Ask", "Wait", "Approve"];
 
-/** `ainb_app::fleet::attention::{APPROVE_LABEL, DENY_LABEL}`. */
-export const APPROVE_LABEL = "approve";
-export const DENY_LABEL = "deny";
-
 /** How the answer would travel, as far as the window can tell. */
 export type Route = "daemon" | "broker" | "pane";
 
 /** The question the banner is showing. */
 export interface Question {
   sessionId: string;
-  /**
-   * The reducer's request id for this question when the window can know it:
-   * the daemon's attention id. A pane or broker chip's id is minted from its
-   * kind and age, which the frame does not carry.
-   */
-  request: string | null;
+  /** The reducer's request id for this chip, as `fleet.ask_state.request` names it. */
+  request: string;
   title: string;
   kind: AttentionKind;
   detail: string | null;
@@ -48,6 +38,8 @@ export interface Question {
    * a composer there would offer a send that cannot land.
    */
   freeText: boolean;
+  /** Whether any answer can be delivered from here at all. */
+  answerable: boolean;
   route: Route;
 }
 
@@ -68,56 +60,33 @@ export function selectedSession(view: SessionsView_Serialize | undefined): Sessi
   return view.workspaces[workspace]?.sessions[session];
 }
 
-/** The daemon's open rows for `session`, by the provider id the host correlated. */
-function daemonChips(session: Session_Serialize, fleet: FleetView_Serialize | undefined): SessionAttention_Serialize[] {
-  const provider = fleet?.fleet_metadata?.[session.id]?.provider_session_id;
-  if (provider === null || provider === undefined) return [];
-  return fleet?.daemon_attention?.by_session_id?.[provider] ?? [];
-}
-
 /**
  * The question the selected session is blocked on, or `null` when it is not.
  *
- * The daemon's row when it holds one, because only it carries the structured
- * options; otherwise the row's own merged chip, answered through the pane, or
- * through the approve broker for a bare APPROVE, which the reducer offers as
- * exactly `approve` and `deny`.
+ * The row's own first blocking chip, which is the chip the reducer answers
+ * (`selected_blocking` walks the same merged list in the same order), with its
+ * request id, options and route read off it. The daemon's rows are NOT read
+ * here: they are in wire order, and with two open questions on one session the
+ * window would have shown one and the reducer answered the other.
  */
-export function questionFor(
-  sessions: SessionsView_Serialize | undefined,
-  fleet: FleetView_Serialize | undefined,
-): Question | null {
+export function questionFor(sessions: SessionsView_Serialize | undefined): Question | null {
   const session = selectedSession(sessions);
   if (session === undefined) return null;
-  const title = label(session.name);
-  const daemon = daemonChips(session, fleet).find((chip) => BLOCKING.includes(chip.kind));
-  if (daemon !== undefined) {
-    return {
-      sessionId: session.id,
-      request:
-        typeof daemon.answerable === "object" && daemon.answerable.Daemon !== undefined
-          ? daemon.answerable.Daemon.attention_id
-          : null,
-      title,
-      kind: daemon.kind,
-      detail: daemon.detail === null ? null : label(daemon.detail),
-      options: daemon.options.map((option) => label(option.label)),
-      freeText: true,
-      route: "daemon",
-    };
-  }
   const mark = (session.attention ?? []).find((chip) => BLOCKING.includes(chip.kind));
   if (mark === undefined) return null;
-  const broker = mark.kind === "Approve";
+  const route: Route = mark.route === "Daemon" ? "daemon" : mark.route === "Broker" ? "broker" : "pane";
   return {
     sessionId: session.id,
-    request: null,
-    title,
+    request: mark.request,
+    title: label(session.name),
     kind: mark.kind,
     detail: mark.detail === null ? null : label(mark.detail),
-    options: broker ? [APPROVE_LABEL, DENY_LABEL] : [],
-    freeText: !broker,
-    route: broker ? "broker" : "pane",
+    options: mark.options.map((option) => label(option.label)),
+    // Not over the broker: it reads `approve` or `deny` and refuses anything
+    // else. Not where nothing can deliver an answer at all.
+    freeText: mark.route === "Daemon" || mark.route === "Pane",
+    answerable: mark.route !== "None",
+    route,
   };
 }
 
@@ -150,14 +119,15 @@ function focusIntents(question: Question): RendererIntent[] {
 }
 
 /**
- * Where the reducer's cursor is for `question`: the frame's, unless the frame
- * is pointed at a different request, in which case the retarget the first
- * intent causes puts it back at the top.
+ * Whether the frame is pointed at `question`: the reducer has retargeted its
+ * answer state to this chip, so its cursor and composer are this chip's.
+ *
+ * Anything else is refused, not corrected. Moving a cursor counted off another
+ * request's frame, or typing where another request's options sit, is exactly
+ * how a window answers a question the person did not read.
  */
-function cursorFor(question: Question, ask: AskState_Serialize | undefined): number {
-  if (ask === undefined) return 0;
-  if (question.request !== null && ask.request !== question.request) return 0;
-  return ask.cursor;
+export function pointedAt(question: Question, ask: AskState_Serialize | undefined): ask is AskState_Serialize {
+  return ask !== undefined && ask.request === question.request;
 }
 
 /** The cursor moves that take the reducer's cursor from `from` to `to`. */
@@ -167,29 +137,27 @@ function moves(from: number, to: number): RendererIntent[] {
 }
 
 /**
- * The intents that pick option `index` and send it, in order: the reducer's
- * own cursor, moved from where the frame says it is, then Enter.
+ * The intents that pick option `index` and send it, in order: the reducer's own
+ * cursor, moved from where the frame says it is, then Enter. None at all when
+ * the frame is not pointed at this question.
  */
 export function pickIntents(question: Question, ask: AskState_Serialize | undefined, index: number): RendererIntent[] {
-  return [
-    ...focusIntents(question),
-    ...moves(cursorFor(question, ask), index),
-    { Command: ["session_list.ask.enter", null] },
-  ];
+  if (!pointedAt(question, ask) || !question.answerable) return [];
+  return [...focusIntents(question), ...moves(ask.cursor, index), { Command: ["session_list.ask.enter", null] }];
 }
 
 /**
  * The intents that type `text` and send it: the cursor to the composer row
- * (after the last option), whatever the reducer's composer already holds
- * cleared, the text typed, then Enter.
+ * (after the last option), the reducer's composer cleared in one step, the text
+ * typed, then Enter. None at all when the frame is not pointed at this
+ * question, or when this route takes no typed answer.
  */
 export function typedIntents(question: Question, ask: AskState_Serialize | undefined, text: string): RendererIntent[] {
-  // What the reducer's composer holds for THIS request; a retarget empties it.
-  const held = cursorFor(question, ask) === (ask?.cursor ?? 0) && ask !== undefined ? ask.free_text_len : 0;
+  if (!pointedAt(question, ask) || !question.freeText) return [];
   return [
     ...focusIntents(question),
-    ...moves(cursorFor(question, ask), question.options.length),
-    ...Array.from({ length: held }, () => ({ Command: ["session_list.ask.backspace", null] }) as RendererIntent),
+    ...moves(ask.cursor, question.options.length),
+    { Command: ["session_list.ask.clear", null] },
     { Text: text },
     { Command: ["session_list.ask.enter", null] },
   ];

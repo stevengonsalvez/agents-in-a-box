@@ -617,10 +617,18 @@ body {
   cursor: pointer;
 }
 
-.answer-option:hover:not(:disabled),
-.answer-option:focus-visible {
+.answer-option:hover:not(:disabled) {
   border-color: var(--green);
-  outline: none;
+}
+
+/* A real ring, not only a border colour: this is where a keyboard user is
+   about to answer a question. */
+.answer-option:focus-visible,
+.answer-composer input:focus-visible,
+.answer-composer button:focus-visible {
+  border-color: var(--green);
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
 }
 
 .answer-composer {

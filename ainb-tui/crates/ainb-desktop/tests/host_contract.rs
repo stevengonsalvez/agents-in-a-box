@@ -448,6 +448,7 @@ fn the_ask_commands_send_an_answer_and_the_frame_follows_it() {
     let mut workspace = Workspace::new("api".to_string(), "/work/api".into());
     let mut session = Session::new("feat".to_string(), "/work/api/wt".to_string());
     session.live_attention = vec![chip.clone()];
+    let session_id = session.id;
     workspace.add_session(session);
     state.sessions.workspaces = vec![workspace];
     state.sessions.selected_workspace_index = Some(0);
@@ -470,7 +471,13 @@ fn the_ask_commands_send_an_answer_and_the_frame_follows_it() {
     );
     host.state().host.attention_poll_running.store(true, Ordering::Release);
 
-    // What the banner sends to pick the second option.
+    // What the banner sends to pick the second option, in its order: the row
+    // selected without attaching it, the ask pane shown, the cursor moved,
+    // then Enter.
+    let _ = host.dispatch(ainb_app::app::pointer::select_session_row(
+        &ainb_app::app::state::SessionListRowId::Session(session_id),
+        false,
+    ));
     let _ = host.dispatch(select_session_tab(SessionTab::Ask));
     let _ = host.tick();
     let _ = host.dispatch(Intent::Command(

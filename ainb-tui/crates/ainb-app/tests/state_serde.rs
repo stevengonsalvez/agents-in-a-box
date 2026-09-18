@@ -1037,6 +1037,7 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "AgentAuthStatus.has_key",
     "AnswerPhase::Failed.draft_len",
     "AnswerPhase::InFlight.draft_len",
+    "AnswerPhase::Delivered.via",
     "AnswerPhase::Failed.reason",
     "AttentionMark.detail",
     "AskState.free_text_len",
