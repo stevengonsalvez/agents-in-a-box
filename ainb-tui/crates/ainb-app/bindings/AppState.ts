@@ -4800,7 +4800,8 @@ export type TranscriptChunk_Serialize = {
 	kind: ChunkKind,
 	/**
 	 *  What the chunk says, as the daemon's classifier renders it: scrubbed,
-	 *  then cut to [`MAX_CHUNK_CHARS`], and scrubbed again on the frame.
+	 *  then cut to [`MAX_CHUNK_CHARS`] as the host folds it, and scrubbed
+	 *  again on the frame.
 	 */
 	body: string,
 	/**  Whether the body was cut. */
@@ -4825,7 +4826,10 @@ export type TranscriptStatus_Serialize =
 
 /**  The open ACP transcript, as a frame carries it. */
 export type Transcript_Serialize = {
-	/**  The Fleet session it belongs to (`acp:<id>`), an identity. */
+	/**
+	 *  The Fleet session it belongs to (`acp:<id>`), an identity the host
+	 *  resolved against its own status read, scrubbed all the same.
+	 */
 	session_key: string | null,
 	status: TranscriptStatus_Serialize,
 	/**  The newest chunks, oldest first, at most [`MAX_CHUNKS`]. */
