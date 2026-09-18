@@ -8,7 +8,7 @@ import type {
   AttentionMark_Serialize,
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
-import { phaseOf, pickIntents, questionFor, typedIntents } from "./answer.ts";
+import { phaseOf, pickIntents, questionFor, type Refusal, sendInOrder, typedIntents } from "./answer.ts";
 
 function mark(over: Partial<AttentionMark_Serialize> = {}): AttentionMark_Serialize {
   return {
@@ -158,4 +158,31 @@ test("a typed answer moves to the composer row, clears it in one step, types, se
     "text:qa",
     "session_list.ask.enter",
   ]);
+});
+
+test("a refused step stops the sequence, so Enter is never sent on the wrong option", async () => {
+  const question = questionFor(sessions(mark()))!;
+  const intents = pickIntents(question, ask({ cursor: 0 }), 1);
+  const sent: string[] = [];
+  const refusal: Refusal = { command: "session_list.ask.next", reason: "not from the window" };
+  const stopped = await sendInOrder(intents, async (intent) => {
+    const name = commands([intent])[0];
+    sent.push(name);
+    return name === refusal.command ? refusal : null;
+  });
+  assert.deepEqual(stopped, refusal);
+  assert.deepEqual(sent, ["session_list.select_row", "session_list.select_tab", "session_list.ask.next"]);
+  assert.ok(!sent.includes("session_list.ask.enter"), "Enter never went out");
+});
+
+test("with nothing refused, every intent goes out in order", async () => {
+  const question = questionFor(sessions(mark()))!;
+  const intents = pickIntents(question, ask({ cursor: 0 }), 1);
+  const sent: string[] = [];
+  const stopped = await sendInOrder(intents, async (intent) => {
+    sent.push(commands([intent])[0]);
+    return null;
+  });
+  assert.equal(stopped, null);
+  assert.deepEqual(sent, commands(intents));
 });
