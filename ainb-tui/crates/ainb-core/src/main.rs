@@ -572,6 +572,9 @@ async fn run_tui_loop(
     const STARTUP_GUARD_MS: u64 = 100;
 
     let mut slash_palette = SlashPalette::new(SlashCommandRegistry::built_ins());
+    // An event read while re-joining a split paste that was not part of it
+    // (a resize, a mouse event), handled on the next pass instead of lost.
+    let mut replayed: Option<Event> = None;
 
     loop {
         // Effects still on the outbox. dispatch, tick and apply_pending_event
@@ -707,16 +710,17 @@ async fn run_tui_loop(
         // Tolerate transient terminal-read failures: EINTR (e.g. SIGWINCH on
         // resize, common over SSH) must not crash the session. Only fatal I/O
         // errors propagate.
-        let has_event = match crossterm::event::poll(timeout) {
-            Ok(v) => v,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => false,
-            Err(e) => return Err(e.into()),
-        };
+        let has_event = replayed.is_some()
+            || match crossterm::event::poll(timeout) {
+                Ok(v) => v,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => false,
+                Err(e) => return Err(e.into()),
+            };
         if has_event {
             // Any input (key/mouse/paste/resize) warrants a repaint on the next
             // loop iteration (perf: bead `wai` dirty-gate).
             needs_redraw = true;
-            let read_event = match event::read() {
+            let read_event = match replayed.take().map_or_else(event::read, Ok) {
                 Ok(ev) => ev,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e.into()),
@@ -1235,11 +1239,31 @@ async fn run_tui_loop(
                 Event::Paste(text) => {
                     if app.state.is_interactive_pane() {
                         // Forward as a bracketed paste so the inner program
-                        // doesn't submit multi-line content line-by-line. The
-                        // payload is stripped of escapes first, so a clipboard
-                        // carrying its own terminator cannot end the paste and
-                        // type the rest as keys (#1003).
-                        let bytes = ainb_app::tmux::paste::bracketed(&text);
+                        // doesn't submit multi-line content line-by-line.
+                        //
+                        // crossterm ends a paste at the first terminator it
+                        // reads, so a clipboard carrying its own arrives as a
+                        // short paste plus the rest as keys already queued
+                        // behind it (#1003). Drain what is queued now and put
+                        // its keys back into the paste; the whole is then
+                        // stripped of escapes and wrapped once, so none of it
+                        // runs as typed input.
+                        let mut tail = Vec::new();
+                        while replayed.is_none()
+                            && crossterm::event::poll(Duration::ZERO).unwrap_or(false)
+                        {
+                            match event::read() {
+                                Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => {
+                                    tail.push(key);
+                                }
+                                Ok(Event::Key(_)) => {}
+                                Ok(other) => replayed = Some(other),
+                                Err(_) => break,
+                            }
+                        }
+                        let pasted = crate::tmux::rejoin_paste(&text, &tail);
+                        let bytes =
+                            ainb_app::tmux::paste::bracketed(&String::from_utf8_lossy(&pasted));
                         if let Some(report) = clients.write_input(&bytes) {
                             run_intent(report, app, &keymap, &mut ui, terminal, &mut clients)
                                 .await?;
