@@ -112,6 +112,8 @@ pub struct DesktopHost<S: FrameSink> {
     scanned_generation: Option<u64>,
     /// The least time after a scan before news may start the next one.
     news_floor: Duration,
+    agent_status: crate::agent_status::AgentStatusPoll,
+    read_agent_status: fn(crate::agent_status::Reports),
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -158,6 +160,8 @@ impl<S: FrameSink> DesktopHost<S> {
             rescan_every: WORKSPACE_RESCAN,
             scanned_generation: None,
             news_floor: ainb_app::AppState::workspace_rescan_floor(),
+            agent_status: crate::agent_status::AgentStatusPoll::default(),
+            read_agent_status: crate::agent_status::read_on_worker,
         }
     }
 
@@ -175,6 +179,34 @@ impl<S: FrameSink> DesktopHost<S> {
     pub const fn flooring_news_at(mut self, floor: Duration) -> Self {
         self.news_floor = floor;
         self
+    }
+
+    /// Start agent status reads with `read` instead of a daemon read on a
+    /// worker. For tests, which stand in for the worker through
+    /// [`Self::agent_status_reports`].
+    #[must_use]
+    pub fn reading_agent_status_with(mut self, read: fn(crate::agent_status::Reports)) -> Self {
+        self.read_agent_status = read;
+        self
+    }
+
+    /// The inbox agent status reads report into.
+    #[must_use]
+    pub fn agent_status_reports(&self) -> crate::agent_status::Reports {
+        self.agent_status.reports()
+    }
+
+    /// The sidecar lost its daemon: the board's rows read unreachable, rather
+    /// than standing as if current, until [`Self::daemon_connected`].
+    pub fn daemon_lost(&mut self, reason: &str) {
+        let now_ms = ainb_app::fleet::daemons::heartbeat::now_ms();
+        self.agent_status.daemon_lost(&mut self.state, reason, now_ms);
+        self.pump();
+    }
+
+    /// The sidecar has its daemon again: read the agent status at once.
+    pub fn daemon_connected(&mut self) {
+        self.agent_status.daemon_connected();
     }
 
     /// The hosted state, read-only: the host never writes it outside dispatch.
@@ -260,6 +292,12 @@ impl<S: FrameSink> DesktopHost<S> {
             self.scanned_generation = Some(generation);
             self.state.start_workspace_load();
         }
+        // Section 20, which the board draws: no other host feeds it here.
+        self.agent_status.tick(
+            &mut self.state,
+            ainb_app::fleet::daemons::heartbeat::now_ms(),
+            self.read_agent_status,
+        );
         let effects = self.state.take_effects();
         self.pump();
         effects
