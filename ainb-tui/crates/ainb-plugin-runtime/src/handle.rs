@@ -349,11 +349,14 @@ impl RuntimeHandle {
         // dropped here, before a generation is spent or the screen marked
         // dirty (#1171).
         let abi = spoken_abi(&handle.plugin);
-        if key.code.min_abi() > abi {
+        let min_abi = key.code.min_abi();
+        if min_abi > abi {
+            // The ABI numbers only: a key code can carry the typed character,
+            // and this line reaches the on-disk log.
             tracing::debug!(
                 plugin = %plugin_id,
                 abi,
-                code = ?key.code,
+                min_abi,
                 "key newer than the plugin's ABI; not sent"
             );
             return false;
