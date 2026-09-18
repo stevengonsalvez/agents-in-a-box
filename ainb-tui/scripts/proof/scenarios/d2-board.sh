@@ -15,12 +15,20 @@ EXPECT="a question raised by a separate hook process reaches the open desktop wi
 QUESTION="Ship the d2 board to which environment?"
 PROVIDER_ID="proof-d2-board"
 
+# sql_text <value>: <value> as an SQL string literal, its quotes doubled.
+sql_text() { printf "'%s'" "${1//\'/\'\'}"; }
+
 # answered_row <id>: state, answered_by and answer of one attention row, read
 # from the daemon's store by a separate process.
 answered_row() {
   sqlite3 "$AINB_HANGAR_HOME/hangar.db" \
-    "SELECT state || '|' || COALESCE(answered_by, '') || '|' || COALESCE(answer, '') FROM attention WHERE id = '$1';" \
+    "SELECT state || '|' || COALESCE(answered_by, '') || '|' || COALESCE(answer, '') FROM attention WHERE id = $(sql_text "$1");" \
     2>/dev/null
+}
+
+# answered_state_is <id> <state>: the row's state, read the same way.
+answered_state_is() {
+  test "$(sqlite3 "$AINB_HANGAR_HOME/hangar.db" "SELECT state FROM attention WHERE id = $(sql_text "$1");" 2>/dev/null)" = "$2"
 }
 
 waiting_at_least() {
@@ -54,6 +62,9 @@ scenario() {
   check "the renderer applied the agent_status section" \
     grep -q '"agent_status"' <<<"$(applied_sections)"
   observe "board columns before the question: $(applied_board)"
+  # Empty first, so the card the next check waits for is this question's and
+  # not one the column already held.
+  check "the waiting column is empty before the question" wait_for 30 waiting_is 0
 
   # Raised through the agent's own hook command, by a process that is not the
   # window, against the fixture session's worktree.
@@ -74,7 +85,7 @@ scenario() {
   # typed line is the proof it arrived.
   check "the answer reached the agent's pane" wait_for 30 fixture_says "beta"
 
-  wait_for 30 bash -c "sqlite3 '$AINB_HANGAR_HOME/hangar.db' \"SELECT state FROM attention WHERE id = '$id';\" | grep -qx answered"
+  wait_for 30 answered_state_is "$id" answered
   local row
   row="$(answered_row "$id")"
   observe "the daemon's record of $id: $row"
