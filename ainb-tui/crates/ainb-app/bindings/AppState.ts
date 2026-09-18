@@ -3396,6 +3396,12 @@ export type PluginPresence = {
 	registered: boolean,
 	/**  Its render has blown its budget, so input sent to it sits unserviced. */
 	wedged: boolean,
+	/**
+	 *  The ABI revision its manifest declares, 0 while it is not registered.
+	 *  The router sends a key only to a plugin at or past that key's
+	 *  `min_abi` (#1171).
+	 */
+	abi: number,
 };
 
 /**
