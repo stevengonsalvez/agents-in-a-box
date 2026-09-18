@@ -563,6 +563,14 @@ impl Terminals {
 
     /// Type `bytes` into the tab's pane.
     pub fn input(&self, key: &str, bytes: Vec<u8>) {
+        // A paste xterm.js wrapped in bracketed-paste markers is rebuilt from
+        // its escape-free payload, so a clipboard carrying its own terminator
+        // cannot end the paste and type the rest as keys (#1003). Every input
+        // to a pane passes here, whichever webview path sent it.
+        let bytes = match ainb_app::tmux::paste::rebracket(&bytes) {
+            std::borrow::Cow::Borrowed(_) => bytes,
+            std::borrow::Cow::Owned(rebuilt) => rebuilt,
+        };
         let (flow, input) = {
             let tabs = lock(&self.inner.tabs);
             let Some(tab) = position(&tabs, key).map(|index| &tabs[index]) else {
