@@ -191,7 +191,7 @@ impl Default for Timing {
 /// Why a held connection ended.
 enum Held {
     Shutdown,
-    Lost(String),
+    Lost { error: String, is_io: bool },
 }
 
 async fn run(
@@ -201,6 +201,7 @@ async fn run(
     state: watch::Sender<PresenceState>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
+    let socket_path = dialer().map(|c| c.socket().to_path_buf()).ok();
     let mut backoff = BACKOFF_INITIAL;
     loop {
         let attempt = async {
@@ -209,12 +210,12 @@ async fn run(
             let (reader, writer) = tokio::time::timeout(RPC_TIMEOUT, client.dial_presence())
                 .await
                 .map_err(|_| DaemonError::Timeout(RPC_TIMEOUT))??;
-            Ok::<_, DaemonError>((client.socket().to_path_buf(), reader, writer))
+            Ok::<_, DaemonError>((reader, writer))
         };
         let error = tokio::select! {
             _ = &mut shutdown => break,
             dialed = attempt => match dialed {
-                Ok((socket, reader, writer)) => {
+                Ok((reader, writer)) => {
                     state.send_replace(PresenceState::Connected);
                     let connected_at = tokio::time::Instant::now();
                     let held = hold(reader, writer, timing, &mut shutdown).await;
@@ -223,18 +224,17 @@ async fn run(
                     }
                     match held {
                         Held::Shutdown => break,
-                        Held::Lost(error) => {
-                            crate::reset_host_id(&socket);
+                        Held::Lost { error, is_io } => {
+                            if is_io {
+                                if let Some(ref socket) = socket_path {
+                                    crate::reset_host_id(socket);
+                                }
+                            }
                             error
                         }
                     }
                 }
-                Err(error) => {
-                    if let Ok(client) = dialer() {
-                        crate::reset_host_id(client.socket());
-                    }
-                    error.to_string()
-                }
+                Err(error) => error.to_string(),
             },
         };
         state.send_replace(PresenceState::Waiting { error: Some(error) });
@@ -295,22 +295,38 @@ async fn hold(
                         }
                     }
                 }
-                Some(Err(error)) => return Held::Lost(error.to_string()),
-                None => return Held::Lost("daemon connection closed".to_string()),
+                Some(Err(error)) => {
+                    return Held::Lost {
+                        is_io: matches!(error, DaemonError::Io(_)),
+                        error: error.to_string(),
+                    };
+                }
+                None => {
+                    return Held::Lost {
+                        is_io: true,
+                        error: "daemon connection closed".to_string(),
+                    };
+                }
             },
             _ = ping.tick(), if pending.is_none() => {
                 let id = next_id;
                 next_id += 1;
                 if let Err(error) = write_frame(&mut writer, methods::PING, json!({}), id).await {
-                    return Held::Lost(error.to_string());
+                    return Held::Lost {
+                        is_io: matches!(error, DaemonError::Io(_)),
+                        error: error.to_string(),
+                    };
                 }
                 pending = Some((id, tokio::time::Instant::now() + timing.ping_timeout));
             }
             () = overdue => {
-                return Held::Lost(format!(
-                    "daemon did not answer ping within {:?}",
-                    timing.ping_timeout
-                ));
+                return Held::Lost {
+                    is_io: false,
+                    error: format!(
+                        "daemon did not answer ping within {:?}",
+                        timing.ping_timeout
+                    ),
+                };
             }
         }
     }
