@@ -177,6 +177,13 @@ pub struct RuntimeConfig {
     pub quarantine_failure_threshold: usize,
     /// Default render request timeout when caller doesn't override.
     pub default_render_timeout: Duration,
+    /// How long one frame write to a plugin's stdin may take (#1118).
+    ///
+    /// A plugin that stops reading its stdin fills the pipe, and a write that
+    /// never completes parks the plugin's task: no deadline fires, no key is
+    /// drained, and the host keeps forwarding Esc into a plugin that cannot
+    /// take it. A write past this bound is treated as a dead plugin.
+    pub frame_write_timeout: Duration,
     /// The surface kind this runtime's host process is (`tui`, `desktop`),
     /// handed to every plugin at init with the host pid (#1040).
     pub host_kind: &'static str,
@@ -194,6 +201,10 @@ impl Default for RuntimeConfig {
             failure_window: Duration::from_secs(60),
             quarantine_failure_threshold: 3,
             default_render_timeout: Duration::from_secs(2),
+            // Tracks `default_render_timeout` above: a plugin that cannot take a
+            // write in the time it is given to paint is as stuck as one that
+            // cannot paint. Retune the two together.
+            frame_write_timeout: Duration::from_secs(2),
             host_kind: "tui",
         }
     }

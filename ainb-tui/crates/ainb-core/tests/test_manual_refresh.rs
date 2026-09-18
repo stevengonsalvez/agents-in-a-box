@@ -30,7 +30,7 @@ async fn test_manual_refresh_key() {
     // Simulate pressing 'f' for refresh
     let refresh_key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
     if let Some(event) = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&refresh_key).expect("mapped key"),
+        ainb::app::screens::builtin::chord_from_key_event(&refresh_key).expect("mapped key"),
         &mut app.state,
     ) {
         EventHandler::process_event(event, &mut app.state);
@@ -81,7 +81,7 @@ async fn test_refresh_from_session_list_view() {
     // Press 'f' to refresh
     let refresh_key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
     if let Some(event) = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&refresh_key).expect("mapped key"),
+        ainb::app::screens::builtin::chord_from_key_event(&refresh_key).expect("mapped key"),
         &mut app.state,
     ) {
         EventHandler::process_event(event, &mut app.state);
@@ -136,7 +136,7 @@ async fn test_multiple_refreshes() {
         // Press 'f' to refresh
         let refresh_key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
         if let Some(event) = EventHandler::handle_key_event(
-            ainb::app::terminal_keys::chord_from_key_event(&refresh_key).expect("mapped key"),
+            ainb::app::screens::builtin::chord_from_key_event(&refresh_key).expect("mapped key"),
             &mut app.state,
         ) {
             EventHandler::process_event(event, &mut app.state);
@@ -177,7 +177,7 @@ async fn test_refresh_doesnt_interfere_with_help() {
     // Show help first
     let help_key = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
     if let Some(event) = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&help_key).expect("mapped key"),
+        ainb::app::screens::builtin::chord_from_key_event(&help_key).expect("mapped key"),
         &mut app.state,
     ) {
         EventHandler::process_event(event, &mut app.state);
@@ -187,7 +187,7 @@ async fn test_refresh_doesnt_interfere_with_help() {
     // Try to refresh while help is visible - should not trigger refresh in help mode
     let refresh_key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
     let event_option = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&refresh_key).expect("mapped key"),
+        ainb::app::screens::builtin::chord_from_key_event(&refresh_key).expect("mapped key"),
         &mut app.state,
     );
 
@@ -200,7 +200,7 @@ async fn test_refresh_doesnt_interfere_with_help() {
     // Close help
     let esc_key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
     if let Some(event) = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&esc_key).expect("mapped key"),
+        ainb::app::screens::builtin::chord_from_key_event(&esc_key).expect("mapped key"),
         &mut app.state,
     ) {
         EventHandler::process_event(event, &mut app.state);
@@ -210,7 +210,7 @@ async fn test_refresh_doesnt_interfere_with_help() {
     // Now refresh should work
     let refresh_key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
     if let Some(event) = EventHandler::handle_key_event(
-        ainb::app::terminal_keys::chord_from_key_event(&refresh_key).expect("mapped key"),
+        ainb::app::screens::builtin::chord_from_key_event(&refresh_key).expect("mapped key"),
         &mut app.state,
     ) {
         EventHandler::process_event(event, &mut app.state);

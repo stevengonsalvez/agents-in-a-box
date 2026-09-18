@@ -289,7 +289,7 @@ fn legacy_classify_primary() -> bool {
 /// old `ainb fleet needs` subprocess (which cold-booted a plugin runtime and
 /// capture-paned every session) is gone.
 async fn daemon_needs() -> Vec<WebNeedCard> {
-    match crate::daemon::DaemonClient::from_env() {
+    match crate::daemon::web_client() {
         Ok(client) => match client.attention_list_fleet().await {
             Ok(rows) => {
                 // D14: stamp every card from the daemon's one status read, so

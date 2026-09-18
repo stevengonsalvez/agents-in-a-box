@@ -1198,3 +1198,48 @@ jobs:
       - uses: bnjbvr/cargo-machete@main
         with:
           manifest-path: ainb-tui/Cargo.toml
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Web Playwright journey (C2 web leg, CC18). Stands up the converged stack
+  # (real daemon + real tmux last-mile target + ainb web dashboard) and drives
+  # Playwright headless chromium to prove an AskUserQuestion can be answered
+  # end to end from the browser.
+  # ────────────────────────────────────────────────────────────────────────────
+  web-e2e:
+    name: web-e2e
+    permissions:
+      contents: read
+    needs: changes
+    if: >-
+      !cancelled() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "ainb-tui -> target"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ainb-tui/crates/ainb-web/e2e/package-lock.json
+      - name: Install system dependencies (tmux, sqlite3)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux sqlite3
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('ainb-tui/crates/ainb-web/e2e/package-lock.json') }}
+      - name: Install Playwright Chromium and dependencies
+        working-directory: ainb-tui/crates/ainb-web/e2e
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: Run Web e2e Playwright journey
+        run: bash scripts/hangar/run_web_e2e.sh
