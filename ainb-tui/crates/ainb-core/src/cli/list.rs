@@ -3,9 +3,10 @@
 // Lists sessions from ~/.agents-in-a-box/sessions.json
 // Shows: session ID, workspace, status (Claude running, idle, stopped), tmux session name
 
+use super::util::load_session_store;
 use super::{ListArgs, OutputFormat};
 use crate::config::SessionLabelStore;
-use crate::interactive::session_manager::{SessionMetadata, SessionStore};
+use crate::interactive::session_manager::SessionMetadata;
 use crate::tmux::ClaudeProcessDetector;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -104,7 +105,7 @@ pub async fn execute(args: ListArgs, format: OutputFormat) -> Result<()> {
 /// List sessions with filtering applied
 #[allow(clippy::unused_async)] // Async for consistency with other CLI commands
 pub async fn list_sessions(args: &ListArgs) -> Result<Vec<SessionInfo>> {
-    let store = SessionStore::load();
+    let store = load_session_store();
     let labels = SessionLabelStore::load();
     let detector = ClaudeProcessDetector::new();
 
