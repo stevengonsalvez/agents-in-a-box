@@ -42,7 +42,13 @@ export function AnswerBanner(props: Props) {
   };
 
   return (
-    <section class="answer-banner" role="region" aria-label="Answer" data-kind={props.question.kind}>
+    <section
+      class="answer-banner"
+      role="region"
+      aria-label="Answer"
+      data-kind={props.question.kind}
+      data-request={props.question.request}
+    >
       <header>
         <span class="row-kind">{props.question.kind}</span>
         <span class="answer-title">{props.question.title}</span>
