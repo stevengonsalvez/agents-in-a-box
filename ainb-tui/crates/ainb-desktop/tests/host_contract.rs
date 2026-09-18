@@ -558,3 +558,36 @@ fn text_typed_at_the_composer_row_lands_in_the_reducers_composer() {
 
     assert_eq!(host.state().fleet.ask_state.free_text(), "qa");
 }
+
+/// Seam 4 reaches the desktop: the host's own tick opens the conversation the
+/// open tab names and frames it. The terminal used to open and tick chat hosts
+/// only while drawing, so on this shell `fleet.conversation` stayed the default
+/// forever.
+#[test]
+fn a_desktop_tick_frames_the_open_conversation() {
+    use ainb_app::app::pointer::select_session_tab;
+    use ainb_app::components::session_tabs::SessionTab;
+    use ainb_app::fleet::conversation::{Conversation, ConversationTopic};
+
+    let log = Log::default();
+    let mut host = host(&[SectionId::Fleet], &log);
+    let mut recorder = Recorder(Rc::clone(&log));
+    host.open_sessions(&mut recorder);
+    let _ = host.dispatch(select_session_tab(SessionTab::Pal));
+    log.borrow_mut().clear();
+
+    let _ = host.tick();
+
+    let conversation = &host.state().fleet.conversation;
+    assert_ne!(
+        *conversation,
+        Conversation::default(),
+        "the tick projected it"
+    );
+    assert_eq!(conversation.topic, ConversationTopic::Pal);
+    assert!(
+        log.borrow().iter().any(|frame| frame == "frame fleet"),
+        "and framed it: {:?}",
+        log.borrow()
+    );
+}

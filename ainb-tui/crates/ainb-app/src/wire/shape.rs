@@ -535,6 +535,11 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
         let failed = Err(seed.text("fleet.broadcast.failure", Captured));
         fleet.broadcast.publish_outcome(pick(vec![sent, failed], round));
         fleet.broadcast.tick();
+        // The conversation's other text-free status, so the leak walk sees the
+        // `Opening` leaf as well as the `Unavailable` one the base sample holds.
+        fleet.conversation.status = crate::fleet::conversation::ConversationStatus::Opening {
+            call: "fleet/channel_create".to_string(),
+        };
     }
 
     // ---- session labels: every attachable ref, as menu target and rename target
@@ -1161,6 +1166,7 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
                         detail: seed.text("fleet.conversation.card_detail", Captured),
                     },
                 ],
+                cards_held: 2,
                 send_block: seed.text("fleet.conversation.send_block", Captured),
                 composer: seed.text("fleet.conversation.composer", Typed),
             };
@@ -1395,6 +1401,13 @@ fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
         );
         shell.preview_content = Some(seed.text("session.shell.preview_content", Captured));
         state.sessions.get_mut().workspaces[0].shell_session = Some(shell);
+        // One hidden row, so the verdict's leaf reaches the leak walk: ids
+        // only, and the walk proves it.
+        let hidden = state.sessions.get_mut().workspaces[0]
+            .sessions
+            .first()
+            .map(|session| session.id);
+        state.sessions.get_mut().hidden_sessions.extend(hidden);
     }
     {
         let tmux = state.tmux.get_mut();

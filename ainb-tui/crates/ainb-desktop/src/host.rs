@@ -110,6 +110,8 @@ pub struct DesktopHost<S: FrameSink> {
     /// AGAIN, and a host that has never asked for a list has nothing to
     /// refresh.
     scanned_generation: Option<u64>,
+    /// The least time after a scan before news may start the next one.
+    news_floor: Duration,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -155,6 +157,7 @@ impl<S: FrameSink> DesktopHost<S> {
             scanned_at: Instant::now(),
             rescan_every: WORKSPACE_RESCAN,
             scanned_generation: None,
+            news_floor: ainb_app::AppState::workspace_rescan_floor(),
         }
     }
 
@@ -163,6 +166,14 @@ impl<S: FrameSink> DesktopHost<S> {
     #[must_use]
     pub const fn rescanning_every(mut self, every: Duration) -> Self {
         self.rescan_every = every;
+        self
+    }
+
+    /// Let news start a scan `floor` after the last one instead of after the
+    /// state's own scan budget. For tests, as [`Self::rescanning_every`] is.
+    #[must_use]
+    pub const fn flooring_news_at(mut self, floor: Duration) -> Self {
+        self.news_floor = floor;
         self
     }
 
@@ -227,7 +238,7 @@ impl<S: FrameSink> DesktopHost<S> {
         // this window would leave the row reading SENT for as long as the shell
         // is open: the worker reports into the state, and this is the only
         // thing in this process that folds it.
-        self.state.tick_surfaces();
+        self.state.tick_surfaces(ainb_app::fleet::daemons::heartbeat::now_ms());
         // A session another process created is found by a scan and by nothing
         // else, so the window keeps asking for one. Never two at once: the
         // reducer owns the load and reports it running.
@@ -238,7 +249,11 @@ impl<S: FrameSink> DesktopHost<S> {
         // on the timer. The counter is recorded at the START of the scan, so
         // news that arrives while it runs is still news when it finishes.
         let generation = self.daemon_generation();
-        let news = self.scanned_generation.is_some_and(|seen| seen != generation);
+        // News is floored too, on the state's own scan budget, so a daemon
+        // publishing while a scan runs cannot queue the next one the moment it
+        // ends.
+        let news = self.scanned_generation.is_some_and(|seen| seen != generation)
+            && self.scanned_at.elapsed() >= self.news_floor;
         if !self.state.workspace_scan_running()
             && (news || self.scanned_at.elapsed() >= self.rescan_every)
         {

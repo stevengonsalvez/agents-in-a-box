@@ -1019,6 +1019,14 @@ pub type BranchRefreshPayload = (
     Result<Vec<crate::git::branch_list::BranchEntry>, String>,
 );
 
+/// What `AppState::project_conversation` last read: the open topic, its
+/// composer's length in characters, and its send refusal.
+pub(crate) type ConversationMark = (
+    ainb_plugin_hangar::screen::fleet_chat::ChatTopic,
+    usize,
+    Option<String>,
+);
+
 /// What only the process running the reducer can use: channels and task
 /// handles, worker liveness flags, the handles background workers write
 /// through, and the timers that pace the tick.
@@ -1149,6 +1157,11 @@ pub struct HostOnlyState {
     /// from is not being read, and keeping N of them alive means N poll loops
     /// against the daemon for conversations nobody is looking at.
     pub session_chat: Option<(String, crate::fleet::chat_host::ChatHost)>,
+    /// What the framed conversation was last projected from: the open topic,
+    /// its composer's length and its send refusal. A tick that reports no news
+    /// and finds this unchanged leaves `fleet.conversation` alone rather than
+    /// rebuilding fifty rows to compare them.
+    pub(crate) conversation_mark: Option<ConversationMark>,
     /// Whether the attention poller thread is alive, so the render loop can
     /// start one without having to remember whether it already did.
     pub attention_poll_running: Arc<std::sync::atomic::AtomicBool>,
@@ -1205,6 +1218,7 @@ impl Default for HostOnlyState {
             pal_dial: crate::fleet::pal_dial::PalDial::new(),
             daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta::default(),
             session_chat: None,
+            conversation_mark: None,
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             attention_attached_at: HashMap::new(),

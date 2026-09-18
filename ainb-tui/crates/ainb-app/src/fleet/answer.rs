@@ -122,6 +122,14 @@ pub struct AskState {
     /// cannot be attributed to whatever question is on screen when it lands.
     #[serde(skip)]
     inbox: Arc<Mutex<Vec<(String, AnswerPhase)>>>,
+    /// What was typed and not sent, keyed by the request it was typed for.
+    ///
+    /// The retarget runs on every tick, whichever pane is showing, and it
+    /// empties the composer when the request changes. Without this, typing an
+    /// answer, looking at another row and coming back lost the answer. Never
+    /// on a frame: it is the operator's own unsent text.
+    #[serde(skip)]
+    drafts: Vec<(String, String)>,
 }
 
 /// How many requests keep an outcome. Bounds a session that answers questions
@@ -137,6 +145,7 @@ impl Default for AskState {
             free_text: String::new(),
             phases: Vec::new(),
             inbox: Arc::new(Mutex::new(Vec::new())),
+            drafts: Vec::new(),
         }
     }
 }
@@ -167,10 +176,21 @@ impl AskState {
         if self.request.as_deref() == Some(id.as_str()) {
             return false;
         }
+        // What was typed for the question being left is kept under ITS id, so
+        // coming back to it puts it back; it is never carried to this one.
+        if let Some(left) = self.request.take() {
+            self.drafts.retain(|(request, _)| *request != left);
+            if !self.free_text.is_empty() {
+                if self.drafts.len() >= MAX_TRACKED_PHASES {
+                    self.drafts.remove(0);
+                }
+                self.drafts.push((left, std::mem::take(&mut self.free_text)));
+            }
+        }
         // A cursor or a half-typed answer left over from the previous question
         // would pre-load a reply to a question nobody has read, so the per-view
         // fields reset.
-        self.request = Some(id);
+        self.request = Some(id.clone());
         // A request with no structured options has only one place an answer can
         // come from, so start there. Defaulting to the option list leaves the
         // operator on an empty list, typing into a composer that is not focused
@@ -192,6 +212,12 @@ impl AskState {
         // a failure they happened to be watching, so walking away from a slow
         // send — the very sends that fail — lost what they had typed.
         self.restore_failed_draft();
+        // An unsent draft is newer than any failed send's, so it wins.
+        if let Some(at) = self.drafts.iter().position(|(request, _)| *request == id) {
+            self.free_text = self.drafts.remove(at).1;
+            self.cursor = chip.options.len();
+            self.focus = AskFocus::FreeText;
+        }
         true
     }
 

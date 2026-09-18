@@ -1,6 +1,6 @@
 // ABOUTME: The reducer's own answer tick: the outcome a send worker reports
 // lands, the session tab is reconciled against what is available, and the
-// composer is pointed at the request being shown — all without a renderer in
+// composer is pointed at the request being shown, all without a renderer in
 // the process, because the desktop shell has none of the terminal's draw loop.
 
 use ainb_app::AppState;
@@ -43,7 +43,7 @@ fn the_outcome_a_send_worker_reports_lands_with_no_renderer() {
     // long as its window is open.
     let chip = ask(&["Focused"]);
     let mut state = waiting_on(chip.clone());
-    state.tick_surfaces();
+    state.tick_surfaces(0);
 
     state.fleet.ask_state.reports().lock().expect("inbox").push((
         request_id(&chip),
@@ -52,7 +52,7 @@ fn the_outcome_a_send_worker_reports_lands_with_no_renderer() {
         },
     ));
     let before = state.versions();
-    state.tick_surfaces();
+    state.tick_surfaces(0);
 
     assert!(
         matches!(state.fleet.ask_state.phase(), Some(AnswerPhase::Delivered { via }) if via.contains("feat-login")),
@@ -70,7 +70,7 @@ fn a_tab_that_goes_dead_under_the_operator_is_reconciled() {
     let chip = ask(&["Focused"]);
     let mut state = waiting_on(chip);
     state.shell.session_tab = SessionTab::Ask;
-    state.tick_surfaces();
+    state.tick_surfaces(0);
     assert_eq!(
         state.shell.session_tab,
         SessionTab::Ask,
@@ -80,7 +80,7 @@ fn a_tab_that_goes_dead_under_the_operator_is_reconciled() {
     // Answered elsewhere: the chip is gone on the next refresh, and the pane
     // that answers it can no longer act on anything.
     state.sessions.workspaces[0].sessions[0].live_attention.clear();
-    state.tick_surfaces();
+    state.tick_surfaces(0);
 
     assert_eq!(state.shell.session_tab, SessionTab::Preview);
 }
@@ -93,7 +93,7 @@ fn the_composer_is_pointed_at_the_request_before_the_first_key() {
     // composer.
     let mut state = waiting_on(ask(&[]));
 
-    state.tick_surfaces();
+    state.tick_surfaces(0);
 
     assert_eq!(state.fleet.ask_state.focus(), AskFocus::FreeText);
 }
@@ -116,7 +116,7 @@ fn the_frame_says_which_rows_the_filter_hides() {
     state.sessions.workspaces[0].sessions[0].status = SessionStatus::Running;
 
     state.sessions.session_filter = SessionFilter::ActiveOnly;
-    state.tick_surfaces();
+    state.tick_surfaces(0);
     assert_eq!(
         state.sessions.hidden_sessions,
         std::collections::HashSet::from([stopped_id]),
@@ -129,17 +129,57 @@ fn the_frame_says_which_rows_the_filter_hides() {
     );
 
     state.sessions.session_filter = SessionFilter::All;
-    state.tick_surfaces();
+    state.tick_surfaces(0);
     assert!(state.sessions.hidden_sessions.is_empty());
+}
+
+#[test]
+fn an_unsent_answer_survives_looking_at_another_question() {
+    // Typed on one row, not sent, then the cursor moved to another blocking
+    // row: the tick retargets on every pass, whichever pane is showing, so
+    // without a draft per request the answer was gone on the way back.
+    let first = ask(&[]);
+    let mut state = waiting_on(first);
+    let mut second_session = Session::new("spike".to_string(), "/parity/api/two".to_string());
+    second_session.live_attention = vec![SessionAttention::daemon(
+        AttentionKind::Ask,
+        2_000,
+        "att-2".into(),
+    )];
+    state.sessions.workspaces[0].add_session(second_session);
+    state.tick_surfaces(0);
+    for c in "staging".chars() {
+        state.fleet.update(|fleet| {
+            fleet.ask_state.push_char(c);
+            true
+        });
+    }
+
+    state.sessions.selected_session_index = Some(1);
+    state.tick_surfaces(0);
+    assert_eq!(
+        state.fleet.ask_state.free_text(),
+        "",
+        "the other question starts empty"
+    );
+
+    state.sessions.selected_session_index = Some(0);
+    state.tick_surfaces(0);
+    assert_eq!(
+        state.fleet.ask_state.free_text(),
+        "staging",
+        "and the first one kept its answer"
+    );
+    assert_eq!(state.fleet.ask_state.focus(), AskFocus::FreeText);
 }
 
 #[test]
 fn a_tick_with_nothing_outstanding_writes_nothing() {
     let mut state = waiting_on(ask(&["Focused"]));
-    state.tick_surfaces();
+    state.tick_surfaces(0);
     let before = state.versions();
 
-    state.tick_surfaces();
+    state.tick_surfaces(0);
 
     assert_eq!(
         before,

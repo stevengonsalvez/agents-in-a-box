@@ -700,6 +700,10 @@ const DENY_TYPES: &[(&str, &str)] = &[
 /// Fields of a denied type that stay on the wire, each with its reason.
 const TYPE_ALLOW: &[(&str, &str)] = &[
     (
+        "SessionsView.hidden_sessions",
+        "uuids of the session rows the filter hides; ids only, bounded by the session list itself",
+    ),
+    (
         "ConversationCard.arguments",
         "a held tool call's arguments as the provider sent them; bounded by MAX_ARGUMENT_BYTES at projection time and every string scrubbed by scrub_json",
     ),

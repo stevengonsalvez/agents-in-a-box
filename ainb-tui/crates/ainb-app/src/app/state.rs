@@ -4341,14 +4341,9 @@ impl AppState {
         self.ssh.selected_ssh_session_index = None;
         self.tmux.selected_other_tmux_index = None;
 
-        // The row the operator chose, wherever it is now (#1155).
-        if self.restore_selected_row(keep) {
-            self.queue_logs_fetch();
-            return;
-        }
-
-        // Set initial selection from rows visible under the active filter.
-        if !self.select_first_visible_workspace_item_from(0) {
+        // The row the operator chose, wherever it is now (#1155); the first
+        // visible row under the active filter only when that row has left.
+        if !self.restore_selected_row(keep) && !self.select_first_visible_workspace_item_from(0) {
             if !self.ssh.ssh_sessions.is_empty() {
                 // No workspaces but there are SSH sessions - select the first one
                 self.ssh.selected_ssh_session_index = Some(0);
@@ -11864,48 +11859,18 @@ impl AppState {
         host.is_some_and(|host| host.state().is_capturing_text())
     }
 
-    /// The chat host backing a tab, opening or re-targeting it as needed.
+    /// The chat host backing a tab, opening or re-targeting it as needed and
+    /// ticking it at the wall clock.
     ///
-    /// Called from the render path, which is what makes both conversations
-    /// live: the host's own tick asks the daemon for the next page, so a reply
-    /// lands without the operator pressing anything.
+    /// Every host's tick already opens and ticks the open tab's host through
+    /// [`Self::tick_surfaces`]; this is for a caller that needs a named tab's
+    /// host in hand, and it opens through the same one place.
     pub fn chat_host_for(
         &mut self,
         tab: crate::components::session_tabs::SessionTab,
     ) -> Option<&crate::fleet::chat_host::ChatHost> {
-        use crate::components::session_tabs::SessionTab;
-        use crate::fleet::chat_host::ChatHost;
-
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        match tab {
-            SessionTab::Pal => {
-                // The conversation is host-only state, so running it every frame
-                // bumps no section; a tick that moved it asks for a repaint.
-                let ticked = self.host.pal_chat.get_or_insert_with(ChatHost::pal).tick(now_ms);
-                if ticked {
-                    self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
-                }
-                self.chat_host(tab)
-            }
-            SessionTab::Thread => {
-                let key = self.selected_session_chat_key()?;
-                // Re-target when the cursor moves to a different session. The
-                // old conversation is dropped rather than cached: nobody is
-                // reading it, and a cached host keeps polling the daemon for it.
-                let stale =
-                    self.host.session_chat.as_ref().is_none_or(|(existing, _)| *existing != key);
-                if stale {
-                    self.host.session_chat = Some((key.clone(), ChatHost::thread(key)));
-                }
-                let ticked =
-                    self.host.session_chat.as_mut().is_some_and(|(_, host)| host.tick(now_ms));
-                if ticked {
-                    self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
-                }
-                self.chat_host(tab)
-            }
-            SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
-        }
+        self.tick_chat_host(tab, chrono::Utc::now().timestamp_millis());
+        self.chat_host(tab)
     }
 
     /// The chat host a tab is showing, WITHOUT opening or ticking it.
@@ -12218,7 +12183,13 @@ impl AppState {
     ///
     /// Writes only what moved, so a tick with nothing outstanding bumps no
     /// version and frames nothing.
-    pub fn tick_surfaces(&mut self) {
+    ///
+    /// The order inside is load-bearing: the tab is reconciled FIRST, because
+    /// every later step reads the `shell.session_tab` it wrote (the retarget
+    /// asks which chip is blocking, the conversation step which host is open,
+    /// the projection which host to read). `now_ms` is the caller's clock, as
+    /// [`Self::refresh_attention`] takes it.
+    pub fn tick_surfaces(&mut self, now_ms: i64) {
         use crate::components::session_tabs;
 
         // A tab can go dead under the operator (the ASK is answered, the cursor
@@ -12247,8 +12218,70 @@ impl AppState {
             self.fleet.update(|fleet| fleet.ask_state.retarget(&chip));
         }
 
-        self.project_conversation();
+        let moved = self.tick_conversation(now_ms);
+        self.project_conversation(moved);
         self.refresh_row_visibility();
+    }
+
+    /// Open and tick the chat host for the tab that is showing, reporting
+    /// whether its conversation moved.
+    ///
+    /// A reducer step so every host runs it: the terminal used to open and
+    /// tick these only while drawing, so on the desktop `pal_chat` and
+    /// `session_chat` stayed empty and the framed conversation was the default
+    /// forever. Opening dials the daemon, which is why only the tab a person
+    /// chose is opened, never one nobody is looking at; a thread with rows
+    /// checked is a broadcast, whose composer is `fleet.broadcast`.
+    fn tick_conversation(&mut self, now_ms: i64) -> bool {
+        use crate::components::session_tabs::SessionTab;
+
+        // Only while the session list is showing: a remembered Pal tab behind
+        // the settings screen is not a conversation anyone is reading, and
+        // ticking it would poll the daemon for nobody.
+        if self.shell.current_screen != screen_ids::SESSION_LIST {
+            return false;
+        }
+        let tab = self.shell.session_tab;
+        if tab == SessionTab::Thread && !self.broadcast_targets().is_empty() {
+            return false;
+        }
+        self.tick_chat_host(tab, now_ms)
+    }
+
+    /// Open `tab`'s chat host if it has one and tick it at `now_ms`, reporting
+    /// whether its conversation moved. The one place a chat host is opened.
+    fn tick_chat_host(
+        &mut self,
+        tab: crate::components::session_tabs::SessionTab,
+        now_ms: i64,
+    ) -> bool {
+        use crate::components::session_tabs::SessionTab;
+        use crate::fleet::chat_host::ChatHost;
+
+        let moved = match tab {
+            SessionTab::Pal => self.host.pal_chat.get_or_insert_with(ChatHost::pal).tick(now_ms),
+            SessionTab::Thread => {
+                let Some(key) = self.selected_session_chat_key() else {
+                    return false;
+                };
+                // Re-target when the cursor moves to a different session. The
+                // old conversation is dropped rather than cached: nobody is
+                // reading it, and a cached host keeps polling the daemon.
+                let stale =
+                    self.host.session_chat.as_ref().is_none_or(|(existing, _)| *existing != key);
+                if stale {
+                    self.host.session_chat = Some((key.clone(), ChatHost::thread(key)));
+                }
+                let ticked =
+                    self.host.session_chat.as_mut().is_some_and(|(_, host)| host.tick(now_ms));
+                stale || ticked
+            }
+            SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => false,
+        };
+        if moved {
+            self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
+        }
+        moved
     }
 
     /// Recompute which session rows the filter hides, as a set of ids beside
@@ -12270,24 +12303,25 @@ impl AppState {
             .filter(|session| !self.session_passes_filter(session))
             .map(|session| session.id)
             .collect();
-        if self.sessions.hidden_sessions != hidden {
-            self.sessions.hidden_sessions = hidden;
-        }
+        self.sessions.set_if_changed(|sessions| &mut sessions.hidden_sessions, hidden);
     }
 
     /// Write the open conversation's bounded, scrubbed window onto the Fleet
     /// section, so a renderer in another process draws the thread without
     /// holding the chat host.
     ///
-    /// The host stays in `HostOnlyState`: it owns a poll loop, an inbox shared
-    /// with workers and the operator's unsent draft. What crosses is this
-    /// projection, written here for the reason the attention merge is (#1131),
-    /// and written only when it changed, so an idle conversation frames
-    /// nothing.
+    /// Unlike the attention merge (#1131), this framed field is read from
+    /// `HostOnlyState`: the chat hosts live there, with their poll loops, their
+    /// worker inboxes and the operator's unsent draft, and none of that crosses
+    /// a process boundary. So a replay of the section log alone (#1079)
+    /// reproduces an empty conversation; the projection exists only on a host
+    /// that holds the chat host.
     ///
-    /// Only what is already open is projected. Opening a conversation dials the
-    /// daemon, and a tick that opened one would page a thread nobody asked for.
-    fn project_conversation(&mut self) {
+    /// Rebuilt only when something it reads can have moved: the host's own
+    /// tick reported news (`moved`), or the open conversation, its composer's
+    /// length or its send refusal is not the one last projected. Fifty rows
+    /// are not rebuilt and compared on a tick where nothing happened.
+    fn project_conversation(&mut self, moved: bool) {
         use crate::components::session_tabs::SessionTab;
 
         let open = match self.shell.session_tab {
@@ -12295,14 +12329,20 @@ impl AppState {
             SessionTab::Thread => self.host.session_chat.as_ref().map(|(_, chat)| chat),
             _ => None,
         };
-        let projected = open.map(crate::fleet::conversation::project).unwrap_or_default();
-        self.fleet.update(|fleet| {
-            if fleet.conversation == projected {
-                return false;
-            }
-            fleet.conversation = projected;
-            true
+        let mark = open.map(|chat| {
+            let state = chat.state();
+            (
+                chat.topic().clone(),
+                state.composer().chars().count(),
+                state.send_block(),
+            )
         });
+        if !moved && self.host.conversation_mark == mark {
+            return;
+        }
+        let projected = open.map(crate::fleet::conversation::project).unwrap_or_default();
+        self.host.conversation_mark = mark;
+        self.fleet.set_if_changed(|fleet| &mut fleet.conversation, projected);
     }
 
     /// The merge itself, at the caller's clock. See [`Self::refresh_attention`],

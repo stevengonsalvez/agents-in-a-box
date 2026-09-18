@@ -1577,8 +1577,13 @@ export type Conversation_Serialize = {
 	 *  rather than the whole conversation.
 	 */
 	rows_held: number,
-	/**  Held tool calls, at most [`MAX_CARDS`]. */
+	/**  The newest held tool calls, at most [`MAX_CARDS`]. */
 	cards: ConversationCard_Serialize[],
+	/**
+	 *  How many cards the host holds, so a surface can say the window is the
+	 *  newest of them rather than all of them.
+	 */
+	cards_held: number,
 	/**
 	 *  Why a send would be refused right now, in the refusing surface's own
 	 *  words, or empty when it would not. A composer over a conversation that
