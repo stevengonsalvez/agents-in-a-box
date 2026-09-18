@@ -241,7 +241,10 @@ export type AnswerPhase_Serialize =
  *  when the producer stops reporting the row.
  */
 ({ Delivered: {
-	/**  How it was delivered, e.g. `tmux (session-name)`. */
+	/**
+	 *  How it was delivered, e.g. `tmux (session-name)`, scrubbed as the
+	 *  failure's reason is: it echoes transport text.
+	 */
 	via: string,
 } }) & { Failed?: never; InFlight?: never } | 
 /**  Nothing was delivered. The chip goes BACK to ASK and this is why. */
