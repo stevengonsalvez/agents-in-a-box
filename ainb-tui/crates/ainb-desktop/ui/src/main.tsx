@@ -34,6 +34,13 @@ const HEADER_COUNTS = [
   [ROOT_SELECTORS.errCount, "ERR"],
 ] as const;
 
+/**
+ * `ainb_desktop::intent::Refusal`: an intent the host did not apply, with the
+ * row it would have run and why. Keys that write outside ainb run only from
+ * the TUI or the CLI.
+ */
+type Refusal = { command: string; reason: string };
+
 /** How long a toast stays up. */
 const TOAST_MS = 5000;
 
@@ -96,7 +103,12 @@ function Shell() {
     if (view.focus !== null) activate(view.focus);
     else if (!view.tabs.some((tab) => tab.key === active())) activate(view.tabs[0]?.key ?? null);
   };
-  const dispatch = (intent: RendererIntent) => void invoke("dispatch", { intent });
+  // A refused intent comes back with the row and the reason: say so, or a
+  // key the window may not use (onboarding installs, a commit) looks dead.
+  const dispatch = (intent: RendererIntent) =>
+    void invoke<Refusal | null>("dispatch", { intent }).then((refusal) => {
+      if (refusal) toast(`${refusal.command} is not run from the window: ${refusal.reason}`);
+    });
   /** Select a session-list row and attach it, so the reducer marks it attached. */
   const openRow = (row: RowId) => dispatch(openRowIntent(row));
 

@@ -37,8 +37,8 @@ pub use events::{AppEvent, EventHandler};
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) use events::{AppEvent, EventHandler};
 pub use events::{
-    KEY_ONLY_COMMANDS, NoRenderer, RendererHost, is_in_text_input_context,
-    skill_manager_overlay_open, slash_command_intent,
+    NoRenderer, RendererHost, is_in_text_input_context, skill_manager_overlay_open,
+    slash_command_intent,
 };
 pub use intent::{Args, Btn, Intent, Pos, dispatch};
 pub use keymap::{Chord, CommandId, Key, Keymap, Mods};

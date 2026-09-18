@@ -122,6 +122,14 @@ pub struct AskState {
     /// cannot be attributed to whatever question is on screen when it lands.
     #[serde(skip)]
     inbox: Arc<Mutex<Vec<(String, AnswerPhase)>>>,
+    /// What was typed and not sent, keyed by the request it was typed for.
+    ///
+    /// The retarget runs on every tick, whichever pane is showing, and it
+    /// empties the composer when the request changes. Without this, typing an
+    /// answer, looking at another row and coming back lost the answer. Never
+    /// on a frame: it is the operator's own unsent text.
+    #[serde(skip)]
+    drafts: Vec<(String, String)>,
 }
 
 /// How many requests keep an outcome. Bounds a session that answers questions
@@ -137,6 +145,7 @@ impl Default for AskState {
             free_text: String::new(),
             phases: Vec::new(),
             inbox: Arc::new(Mutex::new(Vec::new())),
+            drafts: Vec::new(),
         }
     }
 }
@@ -167,10 +176,21 @@ impl AskState {
         if self.request.as_deref() == Some(id.as_str()) {
             return false;
         }
+        // What was typed for the question being left is kept under ITS id, so
+        // coming back to it puts it back; it is never carried to this one.
+        if let Some(left) = self.request.take() {
+            self.drafts.retain(|(request, _)| *request != left);
+            if !self.free_text.is_empty() {
+                if self.drafts.len() >= MAX_TRACKED_PHASES {
+                    self.drafts.remove(0);
+                }
+                self.drafts.push((left, std::mem::take(&mut self.free_text)));
+            }
+        }
         // A cursor or a half-typed answer left over from the previous question
         // would pre-load a reply to a question nobody has read, so the per-view
         // fields reset.
-        self.request = Some(id);
+        self.request = Some(id.clone());
         // A request with no structured options has only one place an answer can
         // come from, so start there. Defaulting to the option list leaves the
         // operator on an empty list, typing into a composer that is not focused
@@ -192,6 +212,12 @@ impl AskState {
         // a failure they happened to be watching, so walking away from a slow
         // send — the very sends that fail — lost what they had typed.
         self.restore_failed_draft();
+        // An unsent draft is newer than any failed send's, so it wins.
+        if let Some(at) = self.drafts.iter().position(|(request, _)| *request == id) {
+            self.free_text = self.drafts.remove(at).1;
+            self.cursor = chip.options.len();
+            self.focus = AskFocus::FreeText;
+        }
         true
     }
 
@@ -289,6 +315,17 @@ impl AskState {
         matches!(self.phase(), Some(AnswerPhase::InFlight { .. }))
     }
 
+    /// The channel a send worker reports its outcome through.
+    ///
+    /// Shared by design: the worker outlives the pane that started it, and
+    /// [`Self::tick`] is what drains this. A host test holds it to stand in for
+    /// a worker, which is how "the outcome lands with no renderer in the
+    /// process" is provable without a daemon on the box.
+    #[must_use]
+    pub fn reports(&self) -> Arc<Mutex<Vec<(String, AnswerPhase)>>> {
+        Arc::clone(&self.inbox)
+    }
+
     /// Move the option cursor, wrapping. A free-text row sits after the last
     /// option, which is how the operator reaches the composer with the arrows
     /// alone.
@@ -371,7 +408,11 @@ impl AskState {
         changed
     }
 
-    /// Send the current answer for `chip`.
+    /// Send the current answer for `chip`, as the surface `surface` names.
+    ///
+    /// The kind rides down to the daemon transport, which records the row as
+    /// answered by it: the surface a person sat at, not whichever surface this
+    /// code was written for first.
     ///
     /// # Errors
     ///
@@ -382,6 +423,7 @@ impl AskState {
         chip: &SessionAttention,
         session_id: &str,
         cwd: &str,
+        surface: ainb_hangar_proto::connections::SurfaceKind,
     ) -> Result<(), String> {
         // One outstanding send at a time. Key-repeat on Enter would otherwise
         // deliver the same answer N times into an agent's open picker, and the
@@ -408,7 +450,7 @@ impl AskState {
         let spawned = std::thread::Builder::new().name("ainb-ask-send".into()).spawn(move || {
             let outcome = match route {
                 Answerable::Daemon { attention_id } => {
-                    crate::fleet::control::answer_via_daemon_blocking(attention_id, sent)
+                    crate::fleet::control::answer_via_daemon_blocking(attention_id, sent, surface)
                 }
                 Answerable::Tmux => {
                     crate::fleet::control::answer_via_tmux_blocking(&session_id, &cwd, &sent)
@@ -479,6 +521,7 @@ impl AskState {
 mod tests {
     use super::*;
     use crate::fleet::attention::{AttentionKind, AttentionOption, Unanswerable};
+    use ainb_hangar_proto::connections::SurfaceKind;
 
     fn ask_with_options(labels: &[&str]) -> SessionAttention {
         SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into()).with_options(
@@ -609,13 +652,22 @@ mod tests {
     }
 
     #[test]
+    fn a_host_that_names_no_surface_answers_as_the_terminal() {
+        // The kind rides from the state to `attention/answer`, so the default
+        // decides what an unnamed host is recorded as. The terminal is what
+        // every answer was stamped before the kind came from the surface, so
+        // no existing host changes provenance by the field arriving.
+        assert_eq!(crate::app::AppState::new().host.surface, SurfaceKind::Tui);
+    }
+
+    #[test]
     fn a_row_with_no_transport_refuses_with_its_own_reason() {
         let chip =
             SessionAttention::local(AttentionKind::Ask, 0).unanswerable(Unanswerable::DaemonGone);
         let mut state = AskState::default();
         state.push_char('y');
         state.focus = AskFocus::FreeText;
-        let refused = state.send(&chip, "s", "/w").expect_err("must refuse");
+        let refused = state.send(&chip, "s", "/w", SurfaceKind::Tui).expect_err("must refuse");
         assert!(
             refused.contains("attention/answer"),
             "and name the call that is unavailable: {refused}"
@@ -637,7 +689,7 @@ mod tests {
         // is filed under the question, not under whatever the pane shows.
         latch(&mut state, &chip, None);
         assert_eq!(
-            state.send(&chip, "s", "/w"),
+            state.send(&chip, "s", "/w", SurfaceKind::Tui),
             Err("an answer is already in flight".to_string())
         );
     }
@@ -770,7 +822,7 @@ mod tests {
             "returning to A must still refuse a second send"
         );
         assert_eq!(
-            state.send(&a, "sid", "/work").unwrap_err(),
+            state.send(&a, "sid", "/work", SurfaceKind::Tui).unwrap_err(),
             "an answer is already in flight"
         );
     }

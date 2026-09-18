@@ -99,6 +99,12 @@ jobs:
         working-directory: ainb-tui/crates/ainb-desktop
         env:
           AINB_CODEX_MANAGED: "0"
+      # The two shapes that cross the IPC seam are generated, not hand-written,
+      # so renaming a variant or a field in Rust cannot leave the window
+      # compiling and wrong (#1158). The feature is off in every normal build.
+      - name: Assert bindings/Desktop.ts is up to date
+        run: cargo test --features typescript-bindings --test bindings
+        working-directory: ainb-tui/crates/ainb-desktop
 
   # The DOM journey: the shell launched for real, driving a real daemon and
   # real tmux sessions in a private world. The app under test is a debug build
