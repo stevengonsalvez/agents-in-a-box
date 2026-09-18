@@ -169,6 +169,9 @@ pub enum AppEvent {
     /// Show the session tab a click names, the pointer's half of the key that
     /// cycles the strip.
     SessionListSelectTab(crate::components::session_tabs::SessionTab),
+    /// Open an ACP session's transcript by its Fleet session key, or close the
+    /// open one.
+    SessionListOpenTranscript(Option<String>),
     /// Persist the sessions pane's width, as a fraction of its row, and its
     /// collapsed flag as preferences.
     SaveSessionsPaneLayout {
@@ -3254,6 +3257,18 @@ impl EventHandler {
                 // toggled by a second key.
                 state.shell.focused_pane = Self::pane_for_tab(state.shell.session_tab);
                 state.shell.ui_needs_refresh = true;
+            }
+            AppEvent::SessionListOpenTranscript(key) => {
+                use crate::fleet::transcript::TranscriptHost;
+                // The same session again keeps its host, and its cursor: a
+                // second click must not re-read a run from the start.
+                let same = matches!(
+                    (&state.host.transcript, &key),
+                    (Some(open), Some(key)) if open.session_key() == key
+                );
+                if !same {
+                    state.host.transcript = key.map(TranscriptHost::new);
+                }
             }
             AppEvent::SessionListSelectTab(tab) => {
                 use crate::components::session_tabs::resolve;
