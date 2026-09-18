@@ -4398,16 +4398,38 @@ impl AppState {
         changed
     }
 
-    /// The shortest a host's own rescan cadence may be.
+    /// How often a host that keeps its session list fresh asks for a scan
+    /// ([`Self::pace_workspace_load`]).
     ///
-    /// A host that asks for a scan on a timer keeps its interval strictly
-    /// longer than this, so a scan that spends the whole budget and times out
-    /// is not followed by the next one starting as it gives up. The desktop
-    /// reads it for its own `WORKSPACE_RESCAN`; the budget itself stays the
-    /// state's.
-    #[must_use]
-    pub const fn workspace_rescan_floor() -> std::time::Duration {
-        std::time::Duration::from_secs(Self::DOCKER_TIMEOUT_SECS)
+    /// A session another process creates is found by a scan and by nothing
+    /// else. Strictly longer than the scan's own budget, and measured from the
+    /// end of a scan, so a scan that times out is followed by a gap instead of
+    /// the next one starting as it gives up.
+    pub const WORKSPACE_RESCAN: Duration = Duration::from_secs(Self::DOCKER_TIMEOUT_SECS + 5);
+
+    /// Apply a workspace scan that finished, and start the next one once
+    /// `rescan_every` has passed since the last one ended (or since the state
+    /// was created, before any has). Returns whether a scan's workspaces were
+    /// applied.
+    ///
+    /// The one load seam a host ticks, beside [`Self::start_workspace_load`]:
+    /// the pacing is the state's, so no host re-implements it. `None` never
+    /// rescans (the TUI refreshes on its own events); a host that must find
+    /// sessions other processes create passes [`Self::WORKSPACE_RESCAN`].
+    /// Never starts a scan while one runs. Must be called inside a tokio
+    /// runtime when `rescan_every` is set.
+    pub fn pace_workspace_load(&mut self, rescan_every: Option<Duration>) -> bool {
+        let was_running = self.workspace_scan_running();
+        let applied = self.check_workspace_loading_complete();
+        if was_running && !self.workspace_scan_running() {
+            self.host.workspace_rescan_from = Instant::now();
+        }
+        let due =
+            rescan_every.is_some_and(|every| self.host.workspace_rescan_from.elapsed() >= every);
+        if due && !self.workspace_scan_running() {
+            self.start_workspace_load();
+        }
+        applied
     }
 
     /// Whether a workspace scan is running.
@@ -4421,8 +4443,9 @@ impl AppState {
     }
 
     /// Check for completed background workspace loading and apply results
-    /// Returns true if workspaces were updated
-    pub fn check_workspace_loading_complete(&mut self) -> bool {
+    /// Returns true if workspaces were updated. Private: hosts tick
+    /// [`Self::pace_workspace_load`].
+    fn check_workspace_loading_complete(&mut self) -> bool {
         if let Some(ref mut receiver) = self.host.workspace_load_receiver {
             match receiver.try_recv() {
                 Ok(result) => {
