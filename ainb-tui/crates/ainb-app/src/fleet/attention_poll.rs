@@ -89,23 +89,34 @@ pub fn spawn(
             // because one read timed out is a request nobody answers.
             let mut last_good = DaemonAttention::default();
             let mut last_snapshot: Vec<FleetSession> = Vec::new();
+            // What the last publish carried, so a poll that found the same
+            // picture publishes nothing.
+            let mut published: Option<(DaemonAttention, Vec<FleetSession>)> = None;
             loop {
                 let next = poll_once(&last_good).await;
                 if next.reachable {
                     last_good = next.clone();
                 }
-                if let Ok(mut cell) = shared.lock() {
-                    *cell = next;
-                }
                 if let Some(snapshot) = poll_snapshot_once().await {
                     last_snapshot = snapshot;
                 }
-                if let Ok(mut cell) = snapshot_shared.lock() {
-                    *cell = last_snapshot.clone();
+                // The generation means "the daemon's picture changed". Every
+                // host treats a bump as news (the attention merge runs at once,
+                // the desktop rescans), so counting polls instead of changes
+                // turned a 15 s rescan cadence into one scan every poll.
+                let changed = changed_since(published.as_ref(), &next, &last_snapshot);
+                if changed {
+                    if let Ok(mut cell) = shared.lock() {
+                        *cell = next.clone();
+                    }
+                    if let Ok(mut cell) = snapshot_shared.lock() {
+                        *cell = last_snapshot.clone();
+                    }
+                    // Published AFTER both cells, so a render that sees the
+                    // new generation sees the rows that go with it.
+                    generation.fetch_add(1, Ordering::Release);
+                    published = Some((next, last_snapshot.clone()));
                 }
-                // Published AFTER both cells, so a render that sees the new
-                // generation sees the rows that go with it.
-                generation.fetch_add(1, Ordering::Release);
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
         });
@@ -114,6 +125,20 @@ pub fn spawn(
         tracing::warn!(%error, "attention poller thread spawn failed");
         spawn_err_flag.store(false, Ordering::Release);
     }
+}
+
+/// Whether a poll found a picture other than the last one published.
+///
+/// The generation means "the daemon's picture changed": every host treats a
+/// bump as news (the attention merge runs at once, the desktop rescans), so a
+/// poller that counted polls instead of changes turned a 15 s rescan cadence
+/// into one scan every poll. The first poll always publishes.
+fn changed_since(
+    published: Option<&(DaemonAttention, Vec<FleetSession>)>,
+    attention: &DaemonAttention,
+    snapshot: &[FleetSession],
+) -> bool {
+    published.is_none_or(|(was, rows)| was != attention || rows.as_slice() != snapshot)
 }
 
 /// Read Fleet metadata without changing attention reachability.
@@ -289,6 +314,25 @@ mod tests {
 
     use super::*;
     use crate::fleet::attention::{Answerable, AttentionKind, AttentionSource};
+
+    #[test]
+    fn a_poll_that_found_the_same_picture_is_not_news() {
+        let quiet = DaemonAttention::default();
+        assert!(
+            changed_since(None, &quiet, &[]),
+            "the first poll always publishes"
+        );
+        let published = (quiet.clone(), Vec::new());
+        assert!(
+            !changed_since(Some(&published), &quiet, &[]),
+            "the same picture again publishes nothing"
+        );
+        let down = DaemonAttention::down_cached(quiet.clone(), "socket gone".to_string(), true);
+        assert!(
+            changed_since(Some(&published), &down, &[]),
+            "a daemon going away is news"
+        );
+    }
 
     fn wire(id: &str, kind: &str, cwd: &str, payload: serde_json::Value) -> WireRow {
         WireRow {
