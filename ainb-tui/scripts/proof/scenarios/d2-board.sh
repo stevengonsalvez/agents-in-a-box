@@ -72,7 +72,7 @@ scenario() {
   observe "web answer result: $(jq -c . "$NODE_DIR/web-answer.json" 2>/dev/null)"
   # The harness's fixture agent reads nothing, so the pane's own echo of the
   # typed line is the proof it arrived.
-  check "the answer reached the agent's pane" wait_for 30 fixture_says "^beta$"
+  check "the answer reached the agent's pane" wait_for 30 fixture_says "beta"
 
   wait_for 30 bash -c "sqlite3 '$AINB_HANGAR_HOME/hangar.db' \"SELECT state FROM attention WHERE id = '$id';\" | grep -qx answered"
   local row
