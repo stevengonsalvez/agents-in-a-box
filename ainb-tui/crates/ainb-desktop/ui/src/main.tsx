@@ -3,7 +3,8 @@ import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-j
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
-import { createFrameStore, type SectionName } from "./store.ts";
+import { createFrameStore } from "./store.ts";
+import { shellSessions, SUBSCRIBED } from "./subscription.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { Palette } from "./palette.tsx";
@@ -21,23 +22,6 @@ import {
 } from "./tabs.ts";
 import { TerminalView } from "./terminal.tsx";
 import "./shell.css";
-
-/**
- * The one list of sections this window subscribes to; `subscribe` hands it to
- * the host. Sessions feeds the sidebar and the header counts (its rows carry
- * the merged attention), and WorkspaceLoad the sidebar's loading state. Shell,
- * Tmux, Fleet, Config and AgentStatus are subscribed ahead of their readers
- * (the attention list and agent cards in D2, settings in D3).
- */
-const SUBSCRIBED: SectionName[] = [
-  "sessions",
-  "workspace_load",
-  "shell",
-  "tmux",
-  "fleet",
-  "config",
-  "agent_status",
-];
 
 /** How long batches gather before one drain applies them all. */
 const DRAIN_MS = 16;
@@ -229,7 +213,7 @@ function Shell() {
 
   // In this node the window holds exactly one host: this machine's daemon.
   const host = peer;
-  const sessions = () => (host() ? store.section(host()!, "sessions") : undefined);
+  const sessions = () => shellSessions(store, host());
   const counts = HEADER_COUNTS.map(([select, label]) => ({
     label,
     count: createMemo(() => select(store, host())),
@@ -276,6 +260,12 @@ function Shell() {
             )}
           </For>
           <span class="count">{idle()} IDLE</span>
+          {/* A development build shows frames the store refused (#1132). */}
+          <Show when={import.meta.env.DEV && store.framesIgnored() > 0}>
+            <span class="count ignored" title="Frames the store ignored">
+              {store.framesIgnored()} ignored
+            </span>
+          </Show>
         </span>
         {/* ponytail: the settings page is D3; the entry is drawn and inert until then. */}
         <button type="button" class="settings" disabled title="Settings">

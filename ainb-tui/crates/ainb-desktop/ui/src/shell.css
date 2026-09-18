@@ -45,6 +45,12 @@ body {
   color: var(--gold);
 }
 
+/* Development builds only: frames the store refused (#1132). */
+.header .count.ignored {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .header .settings {
   background: transparent;
   border: 1px solid var(--border);
