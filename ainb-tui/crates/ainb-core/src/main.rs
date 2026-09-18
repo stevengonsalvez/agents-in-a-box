@@ -1235,11 +1235,11 @@ async fn run_tui_loop(
                 Event::Paste(text) => {
                     if app.state.is_interactive_pane() {
                         // Forward as a bracketed paste so the inner program
-                        // doesn't submit multi-line content line-by-line.
-                        let mut bytes = Vec::with_capacity(text.len() + 12);
-                        bytes.extend_from_slice(b"\x1b[200~");
-                        bytes.extend_from_slice(text.as_bytes());
-                        bytes.extend_from_slice(b"\x1b[201~");
+                        // doesn't submit multi-line content line-by-line. The
+                        // payload is stripped of escapes first, so a clipboard
+                        // carrying its own terminator cannot end the paste and
+                        // type the rest as keys (#1003).
+                        let bytes = ainb_app::tmux::paste::bracketed(&text);
                         if let Some(report) = clients.write_input(&bytes) {
                             run_intent(report, app, &keymap, &mut ui, terminal, &mut clients)
                                 .await?;
