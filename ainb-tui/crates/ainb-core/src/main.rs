@@ -1262,8 +1262,7 @@ async fn run_tui_loop(
                             }
                         }
                         let pasted = crate::tmux::rejoin_paste(&text, &tail);
-                        let bytes =
-                            ainb_app::tmux::paste::bracketed(&String::from_utf8_lossy(&pasted));
+                        let bytes = ainb_app::tmux::paste::bracketed(&pasted);
                         if let Some(report) = clients.write_input(&bytes) {
                             run_intent(report, app, &keymap, &mut ui, terminal, &mut clients)
                                 .await?;
