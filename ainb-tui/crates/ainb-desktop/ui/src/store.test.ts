@@ -210,6 +210,49 @@ test("an evicted host does not consume a MAX_HOSTS slot", () => {
   });
 });
 
+test("framesIgnored counts every frame that applied nothing, and nothing else", () => {
+  withStore(["sessions"], (store) => {
+    assert.equal(store.framesIgnored(), 0);
+
+    // Applied: one fresh frame, and a same-section frame it replaces in one drain.
+    drain(store, "local", frame("local", "sessions", 5, 1, sessions("a")), frame("local", "sessions", 5, 2, sessions("b")));
+    assert.equal(store.framesIgnored(), 0, "a frame replaced within a drain is not ignored");
+
+    drain(store, "local", frame("local", "shell", 5, 3, {}));
+    assert.equal(store.framesIgnored(), 1, "an unsubscribed section");
+    drain(store, "local", frame("peer", "sessions", 5, 3, sessions("c")));
+    assert.equal(store.framesIgnored(), 2, "a host other than the peer");
+    drain(store, "local", frame("local", "sessions", 4, 9, sessions("d")));
+    assert.equal(store.framesIgnored(), 3, "an older epoch");
+    drain(store, "local", frame("local", "sessions", 5, 2, sessions("e")));
+    assert.equal(store.framesIgnored(), 4, "a version already held");
+    assert.deepEqual(names(store, "local"), ["b"]);
+
+    for (let i = 1; i < MAX_HOSTS; i++) drain(store, `h${i}`, frame(`h${i}`, "sessions", 1, 1, sessions("x")));
+    assert.equal(store.framesIgnored(), 4);
+    store.applyDrain("late", [
+      { frames: [frame("late", "sessions", 1, 1, sessions("y")), frame("late", "sessions", 1, 2, sessions("z"))] },
+    ]);
+    assert.equal(store.framesIgnored(), 6, "every frame of a drain past MAX_HOSTS");
+  });
+});
+
+test("framesIgnored wakes its reader once per drain", () => {
+  withStore(["sessions"], (store) => {
+    const seen: number[] = [];
+    const dispose = createRoot((dispose) => {
+      createEffect(() => seen.push(store.framesIgnored()));
+      return dispose;
+    });
+    try {
+      drain(store, "local", frame("local", "shell", 1, 1, {}), frame("peer", "sessions", 1, 1, sessions("a")));
+      assert.deepEqual(seen, [0, 2]);
+    } finally {
+      dispose();
+    }
+  });
+});
+
 test("an oversize section is stale until the host frames it again, and keeps its body", () => {
   withStore(["sessions"], (store) => {
     drain(store, "local", frame("local", "sessions", 1, 1, sessions("a")));

@@ -24,9 +24,21 @@ use ainb_hangar_proto::connections::{SurfaceInfo, SurfaceKind};
 /// Every dial from a TUI pane goes through here, so "is a TUI connected" has
 /// exactly one answer rather than one per call site.
 pub fn tui_client() -> Result<DaemonClient, DaemonError> {
+    surface_client(SurfaceKind::Tui)
+}
+
+/// A daemon client that announces itself as `kind`.
+///
+/// The daemon stamps provenance from the connection, never from the request
+/// body (`ainb_hangar_daemon::answer::answered_by`), so the kind a call dials
+/// with is the kind an answer is recorded under. A surface that dials as the
+/// TUI is recorded as the TUI however it names itself in the payload, which is
+/// why the answer path takes the kind from the surface that is sending rather
+/// than from a constant here.
+pub fn surface_client(kind: SurfaceKind) -> Result<DaemonClient, DaemonError> {
     let mut client = DaemonClient::from_env()?;
     client.set_surface(SurfaceInfo {
-        kind: SurfaceKind::Tui,
+        kind,
         pid: std::process::id(),
     });
     Ok(client)

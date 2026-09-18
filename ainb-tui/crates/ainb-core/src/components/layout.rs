@@ -503,25 +503,20 @@ impl LayoutComponent {
             state.hangar.daemons_state.tick();
         }
 
+        // The reducer's own tick step: the tab reconcile, the answer fold, the
+        // composer's retarget, the open conversation's host and its projection,
+        // and the rows the filter hides. Every host runs it, so none of it can
+        // depend on this draw loop; and it runs BEFORE the registry-screen
+        // return below, or an answer sent before opening a registry screen
+        // would sit unfolded until the operator came back. Its reasons are on
+        // `AppState::tick_surfaces`.
+        state.tick_surfaces(chrono::Utc::now().timestamp_millis());
+
         // Registry-routed screens return before any of this in `render`.
         if self.screens.contains(&state.shell.current_screen) {
             return;
         }
-
-        // The active tab, reconciled against what is actually available: a tab
-        // can go dead under the operator (the ASK is answered, the cursor moves
-        // off a session row) and leaving them on a stale pane shows a question
-        // they can no longer act on.
-        let active = session_tabs::resolve(state, state.shell.session_tab);
-        state.shell.set_if_changed(|shell| &mut shell.session_tab, active);
-
-        // Fold in whatever the answer worker reported. EVERY frame, not only on
-        // the `ask` tab: the row's `SENT` chip is painted by the session list,
-        // so an operator who sends and then switches tabs would otherwise watch
-        // that chip stay SENT forever.
-        if state.fleet.update(|fleet| fleet.ask_state.tick()) {
-            state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
-        }
+        let active = state.shell.session_tab;
 
         // An attached embed owns the right pane outright, and `preview` is a
         // tmux mirror with no state machine of its own.
@@ -530,17 +525,9 @@ impl LayoutComponent {
         }
 
         match active {
-            SessionTab::Preview | SessionTab::Err => {}
-            SessionTab::Ask => {
-                // Point the pane at the request it is showing BEFORE painting.
-                // Without this the focus is only initialised by the first key
-                // press, so a request with no options opens with the composer
-                // unfocused — no cursor, no caret, and the operator's first
-                // characters fall through to the session shortcuts.
-                if let Some(chip) = session_tabs::selected_blocking(state).cloned() {
-                    state.fleet.update(|fleet| fleet.ask_state.retarget(&chip));
-                }
-            }
+            // `ask` needs nothing here: the reducer's tick has already pointed
+            // its composer at the request being shown.
+            SessionTab::Preview | SessionTab::Err | SessionTab::Ask => {}
             SessionTab::Log => {
                 // Started here rather than at construction, for the same reason
                 // the attention poller is: an `ainb` invocation that never opens
@@ -558,16 +545,17 @@ impl LayoutComponent {
                 if state.host.pal_dial.tick() {
                     state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
-                let _ = state.chat_host_for(active);
+                // The conversation itself is the reducer's tick's, above.
             }
             SessionTab::Thread => {
                 // Checked rows win over the cursor, the same rule `Enter` and
                 // `r` follow on this screen: with a multi-select active this
                 // pane is a broadcast to the checked set, not one session's
                 // private thread.
-                if state.broadcast_targets().is_empty() {
-                    let _ = state.chat_host_for(active);
-                } else if state.fleet.update(|fleet| fleet.broadcast.tick()) {
+                // The thread's own conversation is the reducer's tick's.
+                if !state.broadcast_targets().is_empty()
+                    && state.fleet.update(|fleet| fleet.broadcast.tick())
+                {
                     state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
             }

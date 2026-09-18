@@ -38,10 +38,6 @@ pub trait RendererHost {
     fn pointer(&mut self, state: &AppState, pos: Pos, btn: Btn) -> Option<Intent>;
 }
 
-/// Rows that write outside ainb (`global.wire_statusline` edits Claude Code's
-/// settings), so they run from a key press and never from `Intent::Command`.
-pub const KEY_ONLY_COMMANDS: &[&str] = &["global.wire_statusline"];
-
 /// A [`RendererHost`] with no renderer: layout work is dropped and nothing is
 /// under the pointer.
 #[derive(Debug, Default, Clone, Copy)]
@@ -166,6 +162,9 @@ pub enum AppEvent {
     },
     /// Focus a pane of the session list.
     SessionListFocusPane(crate::app::state::FocusedPane),
+    /// Show the session tab a click names, the pointer's half of the key that
+    /// cycles the strip.
+    SessionListSelectTab(crate::components::session_tabs::SessionTab),
     /// Persist the sessions pane's width, as a fraction of its row, and its
     /// collapsed flag as preferences.
     SaveSessionsPaneLayout {
@@ -964,6 +963,23 @@ impl PersistOutcome {
 }
 
 impl EventHandler {
+    /// Which pane owns the keyboard when `tab` is showing.
+    ///
+    /// Focus follows the tab: the composer tabs take typed input, so the right
+    /// pane owns the keyboard there, and the read-only ones leave it with the
+    /// list. The cycle key and a click that names a tab share this, so the two
+    /// cannot disagree about where focus went.
+    fn pane_for_tab(
+        tab: crate::components::session_tabs::SessionTab,
+    ) -> crate::app::state::FocusedPane {
+        use crate::app::state::FocusedPane;
+        use crate::components::session_tabs::SessionTab;
+        match tab {
+            SessionTab::Ask | SessionTab::Thread | SessionTab::Pal => FocusedPane::LiveLogs,
+            SessionTab::Preview | SessionTab::Err | SessionTab::Log => FocusedPane::Sessions,
+        }
+    }
+
     /// Queue a full-screen attach. The attach owns terminal size and input, so
     /// the in-place pane's tmux client is released first and tmux has one
     /// authority; the preview reconnects after the user comes back.
@@ -1522,8 +1538,12 @@ impl EventHandler {
                 // runs only while its context is active and no overlay covers
                 // it, so a click resolved on one screen cannot act after the
                 // user has left it or opened a dialog over it.
-                if KEY_ONLY_COMMANDS.contains(&id.as_str()) {
+                if binding.key_only() {
                     tracing::warn!("command `{id}` runs only from its key");
+                    return None;
+                }
+                if let Some(why) = state.remote_command_refusal(&binding.action) {
+                    tracing::warn!("command `{id}` refused: {why}");
                     return None;
                 }
                 let host_authored = crate::app::reports::ids::ALL.contains(&id.as_str())
@@ -3214,8 +3234,7 @@ impl EventHandler {
             // The surface already folded the key in; nothing left to reduce.
             AppEvent::Consumed => {}
             AppEvent::SessionTabNext | AppEvent::SessionTabPrev => {
-                use crate::app::state::FocusedPane;
-                use crate::components::session_tabs::{SessionTab, cycle, resolve};
+                use crate::components::session_tabs::{cycle, resolve};
                 let forward = matches!(event, AppEvent::SessionTabNext);
                 let from = resolve(state, state.shell.session_tab);
                 state.shell.session_tab = cycle(state, from, forward);
@@ -3224,12 +3243,16 @@ impl EventHandler {
                 // do not, so the list keeps it. This is the whole of what
                 // `SwitchPaneFocus` used to provide, now derived rather than
                 // toggled by a second key.
-                state.shell.focused_pane = match state.shell.session_tab {
-                    SessionTab::Ask | SessionTab::Thread | SessionTab::Pal => FocusedPane::LiveLogs,
-                    SessionTab::Preview | SessionTab::Err | SessionTab::Log => {
-                        FocusedPane::Sessions
-                    }
-                };
+                state.shell.focused_pane = Self::pane_for_tab(state.shell.session_tab);
+                state.shell.ui_needs_refresh = true;
+            }
+            AppEvent::SessionListSelectTab(tab) => {
+                use crate::components::session_tabs::resolve;
+                // Through `resolve`, exactly as the cycle key is: a tab a click
+                // names is still subject to the strip's own rules, so naming a
+                // disabled pane lands on the one the reducer would have shown.
+                state.shell.session_tab = resolve(state, tab);
+                state.shell.focused_pane = Self::pane_for_tab(state.shell.session_tab);
                 state.shell.ui_needs_refresh = true;
             }
             AppEvent::SessionAskSend => {
@@ -3251,8 +3274,12 @@ impl EventHandler {
                         )
                     },
                 );
+                // Read before the send borrows the Fleet section: the answer is
+                // recorded under the surface this process is, whichever that is.
+                let surface = state.host.surface;
                 state.fleet.ask_state.retarget(&chip);
-                if let Err(refusal) = state.fleet.ask_state.send(&chip, &session_id, &cwd) {
+                if let Err(refusal) = state.fleet.ask_state.send(&chip, &session_id, &cwd, surface)
+                {
                     // Refusals are shown, never swallowed: a send that silently
                     // does nothing is the failure mode this screen exists to
                     // remove.
@@ -3319,14 +3346,7 @@ impl EventHandler {
             }
             AppEvent::ConfirmationConfirm => {
                 if let Some(dialog) = state.shell.confirmation_dialog.take() {
-                    let action = if let Some(options) = dialog.options.as_ref() {
-                        // Tri-option mode: pick the highlighted option's action.
-                        options.get(dialog.selected_index).map(|o| o.action.clone())
-                    } else if dialog.selected_option {
-                        Some(dialog.confirm_action.clone())
-                    } else {
-                        None
-                    };
+                    let action = dialog.selected_action().cloned();
 
                     if let Some(action) = action {
                         match action {

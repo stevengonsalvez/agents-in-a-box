@@ -3,14 +3,16 @@
 
 use std::time::Duration;
 
+use ainb_app::app::RendererHost;
 use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
 use ainb_app::app::state::WorkspaceRescan;
-use ainb_app::app::{KEY_ONLY_COMMANDS, RendererHost};
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
-use ainb_app::{AppState, Chord, CommandId, Effect, Intent, Keymap};
+use ainb_app::{AppState, CommandId, Effect, Intent, Keymap};
 use serde::Serialize;
+
+use crate::intent::Refusal;
 
 /// Where framed state goes: the Tauri channel in the app, a recorder in tests.
 pub trait FrameSink {
@@ -63,7 +65,9 @@ const MAX_REPORT_ROUNDS: usize = 32;
 
 /// One row the palette offers: a command the webview may send by name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct PaletteEntry {
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub id: CommandId,
     /// What the row does, as the keymap documents it.
     pub doc: &'static str,
@@ -84,7 +88,8 @@ pub struct DesktopHost<S: FrameSink> {
     layout: DesktopLayout,
     mirror: Mirror,
     sink: S,
-    /// How the tick asks the state to keep the session list fresh.
+    /// How the tick asks the state to keep the session list fresh: the
+    /// cadence, and the floor under daemon news (#1156).
     rescan: WorkspaceRescan,
 }
 
@@ -99,8 +104,13 @@ impl<S: FrameSink> DesktopHost<S> {
         subscription: Subscription,
         sink: S,
     ) -> Self {
+        let mut state = AppState::with_config(config);
+        // This shell is the surface a person sits at, so an answer sent from
+        // this window is recorded as the desktop's. The sidecar already tells
+        // the daemon the same thing about this process (`sidecar::surface`).
+        state.host.surface = ainb_hangar_proto::connections::SurfaceKind::Desktop;
         Self {
-            state: AppState::with_config(config),
+            state,
             keymap,
             layout: DesktopLayout::default(),
             mirror: Mirror::new(host_id, subscription),
@@ -114,6 +124,14 @@ impl<S: FrameSink> DesktopHost<S> {
     #[must_use]
     pub const fn rescanning_every(mut self, every: Duration) -> Self {
         self.rescan.every = every;
+        self
+    }
+
+    /// Let news start a scan `floor` after the last one instead of after the
+    /// state's own scan budget. For tests, as [`Self::rescanning_every`] is.
+    #[must_use]
+    pub const fn flooring_news_at(mut self, floor: Duration) -> Self {
+        self.rescan.news_floor = floor;
         self
     }
 
@@ -144,7 +162,9 @@ impl<S: FrameSink> DesktopHost<S> {
     #[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
     pub fn tick(&mut self) -> Vec<Effect> {
         // A session another process created is found by a scan and by nothing
-        // else, so the window keeps asking for one; the pacing is the state's.
+        // else, so the window keeps asking for one: on daemon news once the
+        // news floor has passed, else on the cadence. The pacing is the
+        // state's (#1107, #1156).
         self.state.pace_workspace_load(Some(self.rescan));
         // The poller is idempotent by an atomic, so starting it every tick is
         // its documented use. Every read here is by shared reference: a `&mut`
@@ -159,6 +179,12 @@ impl<S: FrameSink> DesktopHost<S> {
         // reducer paces it: at once on daemon news, otherwise on its own
         // cadence, and a merge that finds nothing new bumps nothing.
         self.state.refresh_attention(ainb_app::fleet::daemons::heartbeat::now_ms());
+        // What the answer worker reported, the tab reconciled, and the composer
+        // pointed at the request it is showing. Without it an answer sent from
+        // this window would leave the row reading SENT for as long as the shell
+        // is open: the worker reports into the state, and this is the only
+        // thing in this process that folds it.
+        self.state.tick_surfaces(ainb_app::fleet::daemons::heartbeat::now_ms());
         let effects = self.state.take_effects();
         self.pump();
         effects
@@ -212,7 +238,7 @@ impl<S: FrameSink> DesktopHost<S> {
         let contexts = ainb_app::app::keymap::command_contexts(&self.state);
         self.keymap
             .commands()
-            .filter(|(id, row)| crate::intent::palette_offers(id, row))
+            .filter(|(id, row)| crate::intent::palette_offers(&self.keymap, id, row))
             .map(|(id, row)| PaletteEntry {
                 id,
                 doc: row.doc,
@@ -223,19 +249,39 @@ impl<S: FrameSink> DesktopHost<S> {
             .collect()
     }
 
-    /// The key-only row `chord` runs in the current state, if it runs one.
+    /// The row `intent` would run now and why the webview may not run it, for
+    /// the webview to show, or `None` when it may (or when the intent names no
+    /// row).
     ///
-    /// Those rows write outside ainb (`global.wire_statusline` edits Claude
-    /// Code's settings), so the reducer runs them only from a key. A chord the
-    /// webview sends is script-reachable, so the shell refuses it there.
+    /// A key or a name the webview sends is script-reachable, so one judgement
+    /// covers both: a row that writes outside ainb runs only from a key the
+    /// host reads ([`Keymap::is_key_only`]), and a row whose effect depends on
+    /// state is refused while that state makes it write outside ainb
+    /// ([`AppState::remote_command_refusal`]): Enter on a dialog holding the
+    /// hook install or the abtop setup, Next on onboarding with telemetry set
+    /// up.
     #[must_use]
-    pub fn key_only_command(&self, chord: &Chord) -> Option<CommandId> {
-        let (ctx, _) = self.keymap.resolve_with_context(&active_contexts(&self.state), chord)?;
-        self.keymap
-            .commands()
-            .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))
-            .map(|(id, _)| id)
-            .filter(|id| KEY_ONLY_COMMANDS.contains(&id.as_str()))
+    pub fn refused_from_renderer(&self, intent: &Intent) -> Option<Refusal> {
+        let (id, row) = match intent {
+            Intent::Key(chord) => {
+                let (ctx, _) =
+                    self.keymap.resolve_with_context(&active_contexts(&self.state), chord)?;
+                self.keymap
+                    .commands()
+                    .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))?
+            }
+            Intent::Command(id, _) => (id.clone(), self.keymap.command(id)?),
+            _ => return None,
+        };
+        let why = if self.keymap.is_key_only(&id) {
+            Some("it writes outside ainb, so it runs only from its key")
+        } else {
+            self.state.remote_command_refusal(&row.action)
+        };
+        why.map(|reason| Refusal {
+            command: id,
+            reason,
+        })
     }
 
     /// Layout work for the webview queued since the last call.

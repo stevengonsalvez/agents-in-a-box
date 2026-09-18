@@ -239,6 +239,26 @@ const DENY_WORDS: &[&str] = &[
 /// the text is safe on the wire. Keyed by the traced `Owner.field`.
 const NAME_ALLOW: &[(&str, &str)] = &[
     (
+        "Conversation.scope_key",
+        "the daemon's scope for the open thread (`session:<key>`, `channel:<id>`), an identity a second surface reads the same conversation by",
+    ),
+    (
+        "Conversation.target_session_key",
+        "stable `provider:session-id` identity of the session the thread reaches, not a credential",
+    ),
+    (
+        "ConversationCard.arguments{}",
+        "a held tool call's arguments, every string scrubbed through scrub_json and the whole call withheld past MAX_ARGUMENT_BYTES; the shape is what an operator decides on",
+    ),
+    (
+        "ConversationCard.detail",
+        "why a confirm card could not be decoded, scrubbed through redact::scrub",
+    ),
+    (
+        "ConversationStatus::Unavailable.detail",
+        "the daemon's own reason the conversation could not open, scrubbed through redact::scrub",
+    ),
+    (
         "AgentCardFrame.host_id",
         "the host a status row was derived on (`local` today), an identity, not an address",
     ),
@@ -680,6 +700,14 @@ const DENY_TYPES: &[(&str, &str)] = &[
 /// Fields of a denied type that stay on the wire, each with its reason.
 const TYPE_ALLOW: &[(&str, &str)] = &[
     (
+        "SessionsView.hidden_sessions",
+        "uuids of the session rows the filter hides; ids only, bounded by the session list itself",
+    ),
+    (
+        "ConversationCard.arguments",
+        "a held tool call's arguments as the provider sent them; bounded by MAX_ARGUMENT_BYTES at projection time and every string scrubbed by scrub_json",
+    ),
+    (
         "ConfirmAction::BulkDeleteSessions.0",
         "ids of the sessions a bulk delete names; uuids, not text",
     ),
@@ -1010,6 +1038,12 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "BranchPickerState.error",
     "BranchPickerState.filter_len",
     "Broadcast.text_len",
+    "Conversation.composer_len",
+    "Conversation.send_block",
+    "ConversationCard.arguments",
+    "ConversationCard.detail",
+    "ConversationRow.body",
+    "ConversationStatus::Unavailable.detail",
     "BrowseRow.install_uri",
     "BrowseViewState.query_len",
     "BrowseViewState.status",

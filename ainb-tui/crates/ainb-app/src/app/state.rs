@@ -765,6 +765,95 @@ pub enum ConfirmAction {
     Cancel,            // No-op terminator for tri-option dialogs
 }
 
+impl ConfirmAction {
+    /// Whether confirming this action must come from a key press (#1080): it
+    /// writes outside ainb, so a remote surface may not confirm it by name.
+    /// Exhaustive on purpose, so a new action is judged when it is added.
+    #[must_use]
+    pub const fn runs_only_from_key(&self) -> bool {
+        match self {
+            // Kills tmux sessions ainb did not start.
+            Self::KillOtherTmux(_)
+            | Self::KillOtherTmuxSessions(_)
+            // Writes Claude Code and Codex hook config, and runs
+            // `claude plugin install`.
+            | Self::InstallNotifyHooks
+            // Runs `abtop --setup`, which edits Claude Code's statusline hook.
+            | Self::SetupAbtopRateLimits => true,
+            // ainb's own sessions, shells, pool and preferences, or nothing.
+            Self::DeleteSession(_)
+            | Self::StopSession(_)
+            | Self::BulkDeleteSessions(_)
+            | Self::BulkStopSessions(_)
+            | Self::KillWorkspaceShell(_)
+            | Self::DismissNotifyPrompt
+            | Self::McpStopServer(_)
+            | Self::McpStopDaemon
+            | Self::OpenAbtopSkipSetup
+            | Self::DismissAbtopSetup
+            | Self::Cancel => false,
+        }
+    }
+}
+
+impl AppState {
+    /// Why `action` must not run from a remote surface right now, or `None`
+    /// (#1080). The reason is for the surface to show, not only to log.
+    ///
+    /// An action that writes outside ainb ([`KeyAction::writes_outside_ainb`])
+    /// is always refused. Two more do something different depending on state:
+    /// - Confirm runs whatever the open dialog holds, so it is judged by that
+    ///   action ([`ConfirmAction::runs_only_from_key`]);
+    /// - Next and Finish on the onboarding wizard complete it, and completing
+    ///   with OpenTelemetry opted into writes Claude Code's settings and the
+    ///   user's shell rc.
+    ///
+    /// [`KeyAction::writes_outside_ainb`]: crate::app::keymap::KeyAction::writes_outside_ainb
+    #[must_use]
+    pub fn remote_command_refusal(
+        &self,
+        action: &crate::app::keymap::KeyAction,
+    ) -> Option<&'static str> {
+        use crate::app::events::AppEvent;
+        use crate::app::keymap::KeyAction;
+        match action {
+            action if action.writes_outside_ainb() => {
+                Some("it writes outside ainb, so it runs only from its key")
+            }
+            KeyAction::App(AppEvent::ConfirmationConfirm)
+                if self
+                    .shell
+                    .confirmation_dialog
+                    .as_ref()
+                    .and_then(ConfirmationDialog::selected_action)
+                    .is_some_and(ConfirmAction::runs_only_from_key) =>
+            {
+                Some("it would confirm an action that runs only from its key")
+            }
+            KeyAction::App(AppEvent::OnboardingNext | AppEvent::OnboardingFinish)
+                if self.onboarding.onboarding_state.as_ref().is_some_and(
+                    crate::components::onboarding::OnboardingState::otel_should_setup,
+                ) =>
+            {
+                Some("it could finish onboarding with telemetry set up outside ainb")
+            }
+            _ => None,
+        }
+    }
+}
+
+impl ConfirmationDialog {
+    /// The action Confirm would run now: the highlighted option's in
+    /// tri-option mode, the dialog's own when Yes is selected, else none.
+    #[must_use]
+    pub fn selected_action(&self) -> Option<&ConfirmAction> {
+        self.options.as_ref().map_or_else(
+            || self.selected_option.then_some(&self.confirm_action),
+            |options| options.get(self.selected_index).map(|option| &option.action),
+        )
+    }
+}
+
 /// Assemble the shared Stop / Delete / Cancel dialog.
 ///
 /// One builder for the single-row and the bulk path, so a future safety change
@@ -2996,6 +3085,76 @@ pub enum WorkspaceLoadResult {
 
 /// Load workspaces asynchronously (standalone function for use in spawned tasks)
 /// This is called from background task to avoid blocking the main thread
+/// Add the STOPPED sessions to `workspaces`: entries persisted in
+/// `sessions.json` whose tmux session is gone but whose worktree is still on
+/// disk. `live_tmux_names` are the sessions the tmux discovery already found.
+///
+/// Shared by the background scan and the full refresh, so both surface the same
+/// rows. It used to belong to the refresh alone, which the TUI reaches through
+/// a queued `AsyncAction::RefreshWorkspaces` and no other host is obliged to
+/// run, so on the desktop a stopped session never reached the sidebar at all
+/// (#1159). It reads a file and canonicalizes paths, which is why it is a
+/// function on the scan's own thread rather than work on a render path.
+///
+/// A worktree that exists but sits inside NO git repository is skipped: those
+/// are leftovers (a `.vite/` cache keeping the directory alive), and adding
+/// them fabricates a phantom workspace named after the directory. They are
+/// surfaced by `/recover-sessions` instead.
+fn add_stopped_sessions(
+    workspaces: &mut Vec<Workspace>,
+    live_tmux_names: &HashSet<String>,
+    labels: &SessionLabelStore,
+) {
+    let canonical_key =
+        |p: &std::path::Path| -> PathBuf { p.canonicalize().unwrap_or_else(|_| p.to_path_buf()) };
+    let store = crate::interactive::SessionStore::load();
+    for metadata in store.sessions().values() {
+        if live_tmux_names.contains(&metadata.tmux_session_name) {
+            continue;
+        }
+        if !metadata.worktree_path.exists() {
+            continue;
+        }
+
+        let Some(source_repo) =
+            crate::interactive::InteractiveSessionManager::get_source_repository(
+                &metadata.worktree_path,
+            )
+        else {
+            debug!(
+                "Skipping stopped session {}: worktree {:?} is inside no git repository (broken). Use /recover-sessions to clean up.",
+                metadata.session_id, metadata.worktree_path
+            );
+            continue;
+        };
+
+        let stopped = AppState::stopped_session_from_metadata(metadata, labels);
+        // Grouped by the actual source repository, as the live pass groups.
+        // The old `worktree_path.parent()` key was always the shared
+        // `~/.agents-in-a-box/worktrees/` dir, which collapsed every stopped
+        // session into one bucket.
+        let workspace_key = canonical_key(&source_repo);
+
+        if let Some(workspace) = workspaces
+            .iter_mut()
+            .find(|w| canonical_key(std::path::Path::new(&w.path)) == workspace_key)
+        {
+            if !workspace.sessions.iter().any(|s| s.id == metadata.session_id) {
+                workspace.sessions.push(stopped);
+            }
+        } else {
+            let workspace_name =
+                crate::interactive::InteractiveSessionManager::derive_workspace_name(
+                    &metadata.worktree_path,
+                    &source_repo,
+                );
+            let mut workspace = Workspace::new(workspace_name, source_repo);
+            workspace.sessions.push(stopped);
+            workspaces.push(workspace);
+        }
+    }
+}
+
 async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
     info!("load_workspaces_async: Starting");
 
@@ -3030,7 +3189,9 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
         .collect();
 
     let session_label_store = SessionLabelStore::load();
+    let mut live_tmux_names: HashSet<String> = HashSet::new();
     for interactive_session in interactive_sessions {
+        live_tmux_names.insert(interactive_session.tmux_session_name.clone());
         let mut session = interactive_session.to_session_model();
         if let Some(label) = session_label_store.get(&interactive_session.tmux_session_name) {
             session.display_name = Some(label.clone());
@@ -3048,6 +3209,11 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
             workspaces.push(workspace);
         }
     }
+
+    // A session the operator stopped is still theirs: its worktree is on disk
+    // and the row is how they resume it. The scan is the only thing that runs
+    // on every host, so the pass belongs here (#1159).
+    add_stopped_sessions(&mut workspaces, &live_tmux_names, &session_label_store);
 
     info!(
         "load_workspaces_async: Complete with {} workspaces",
@@ -4166,6 +4332,10 @@ impl AppState {
     pub async fn load_real_workspaces(&mut self) {
         info!("Loading active sessions (both Docker and Interactive)");
 
+        // Before the list goes: the selection is restored by identity below, so
+        // a refresh does not move the operator off the row they chose (#1155).
+        let keep = self.selected_row_identity();
+
         // Preserve shell_sessions before clearing workspaces
         // Map workspace path -> shell_session for restoration after reload
         let preserved_shells: std::collections::HashMap<
@@ -4279,8 +4449,9 @@ impl AppState {
         self.ssh.selected_ssh_session_index = None;
         self.tmux.selected_other_tmux_index = None;
 
-        // Set initial selection from rows visible under the active filter.
-        if !self.select_first_visible_workspace_item_from(0) {
+        // The row the operator chose, wherever it is now (#1155); the first
+        // visible row under the active filter only when that row has left.
+        if !self.restore_selected_row(keep) && !self.select_first_visible_workspace_item_from(0) {
             if !self.ssh.ssh_sessions.is_empty() {
                 // No workspaces but there are SSH sessions - select the first one
                 self.ssh.selected_ssh_session_index = Some(0);
@@ -4550,6 +4721,13 @@ impl AppState {
                                 return false;
                             }
 
+                            // Taken before the write, restored by identity
+                            // after it: a scan that found a change reorders
+                            // rows, and the desktop asks for one whenever the
+                            // daemon reports news, so an index restored here
+                            // would land on whatever took the row's place
+                            // (#1155).
+                            let keep = self.selected_row_identity();
                             self.host.workspaces_applied = true;
                             self.sessions.workspaces = workspaces;
                             self.ssh.ssh_sessions = ssh_sessions;
@@ -4594,7 +4772,11 @@ impl AppState {
                             self.ssh.selected_ssh_session_index = None;
                             self.tmux.selected_other_tmux_index = None;
 
-                            if !self.select_first_visible_workspace_item_from(0) {
+                            // The operator's row first, the first visible row
+                            // only when that row has left the list.
+                            if !self.restore_selected_row(keep)
+                                && !self.select_first_visible_workspace_item_from(0)
+                            {
                                 if !self.ssh.ssh_sessions.is_empty() {
                                     // No workspaces but there are SSH sessions - select the first one
                                     self.ssh.selected_ssh_session_index = Some(0);
@@ -5395,58 +5577,11 @@ impl AppState {
         // Plain checkouts and subdirectories of a checkout resolve fine (see
         // `get_source_repository`), so a stopped session created with
         // `ainb run --repo <clone>` stays visible here instead of vanishing.
-        let store = SessionStore::load();
-        for metadata in store.sessions().values() {
-            if live_tmux_names.contains(&metadata.tmux_session_name) {
-                continue;
-            }
-            if !metadata.worktree_path.exists() {
-                continue;
-            }
-
-            let Some(source_repo) =
-                crate::interactive::InteractiveSessionManager::get_source_repository(
-                    &metadata.worktree_path,
-                )
-            else {
-                debug!(
-                    "Skipping stopped session {}: worktree {:?} is inside no git repository (broken). Use /recover-sessions to clean up.",
-                    metadata.session_id, metadata.worktree_path
-                );
-                continue;
-            };
-
-            let stopped = Self::stopped_session_from_metadata(
-                metadata,
-                &self.session_labels.session_label_store,
-            );
-            // Group by the actual source repository (matches Phase 1's
-            // grouping above). The previous `worktree_path.parent()` key was
-            // always the shared `~/.agents-in-a-box/worktrees/` dir, which
-            // collapsed every stopped session into one bucket.
-            let workspace_path = source_repo.clone();
-            let workspace_key = canonical_key(&workspace_path);
-
-            if let Some(workspace) = self
-                .sessions
-                .workspaces
-                .iter_mut()
-                .find(|w| canonical_key(std::path::Path::new(&w.path)) == workspace_key)
-            {
-                if !workspace.sessions.iter().any(|s| s.id == metadata.session_id) {
-                    workspace.sessions.push(stopped);
-                }
-            } else {
-                let workspace_name =
-                    crate::interactive::InteractiveSessionManager::derive_workspace_name(
-                        &metadata.worktree_path,
-                        &source_repo,
-                    );
-                let mut workspace = crate::models::Workspace::new(workspace_name, workspace_path);
-                workspace.sessions.push(stopped);
-                self.sessions.workspaces.push(workspace);
-            }
-        }
+        add_stopped_sessions(
+            &mut self.sessions.workspaces,
+            &live_tmux_names,
+            &self.session_labels.session_label_store,
+        );
     }
 
     /// Build a `Session` model in `Stopped` state from persisted metadata.
@@ -6171,6 +6306,51 @@ impl AppState {
     /// Where the row `id` names sits in the current list, or `None` when it is
     /// gone.
     #[must_use]
+    /// What is selected in the session list, as an identity rather than a set
+    /// of indices.
+    ///
+    /// Taken before a scan replaces the list, so the row the operator chose can
+    /// be found again wherever it now sits (#1155). An index cannot survive
+    /// that: a session created anywhere on the box reorders the list, and
+    /// restoring the old index lands on whatever took the row's place.
+    #[must_use]
+    pub fn selected_row_identity(&self) -> Option<SessionListRowId> {
+        if let Some(index) = self.ssh.selected_ssh_session_index {
+            return Some(SessionListRowId::SshSession(
+                self.ssh.ssh_sessions.get(index)?.id,
+            ));
+        }
+        if let Some(index) = self.tmux.selected_other_tmux_index {
+            return Some(SessionListRowId::OtherTmux(
+                self.tmux.other_tmux_sessions.get(index)?.name.clone(),
+            ));
+        }
+        let workspace = self.sessions.workspaces.get(self.sessions.selected_workspace_index?)?;
+        if self.sessions.shell_selected {
+            return Some(SessionListRowId::WorkspaceShell(workspace.path.clone()));
+        }
+        match self.sessions.selected_session_index {
+            Some(index) => Some(SessionListRowId::Session(workspace.sessions.get(index)?.id)),
+            None => Some(SessionListRowId::Workspace(workspace.path.clone())),
+        }
+    }
+
+    /// Put the selection back on the row `keep` names, reporting whether that
+    /// row is still in the list.
+    ///
+    /// The pane keeps the focus it had: a scan is not the operator asking for
+    /// the sidebar, and a window whose composer had the keyboard must not lose
+    /// it because something elsewhere on the box started a session.
+    fn restore_selected_row(&mut self, keep: Option<SessionListRowId>) -> bool {
+        let Some(target) = keep.and_then(|id| self.session_list_row_target_for(&id)) else {
+            return false;
+        };
+        let pane = self.shell.focused_pane.clone();
+        self.select_session_list_row(target);
+        self.shell.set_if_changed(|shell| &mut shell.focused_pane, pane);
+        true
+    }
+
     pub fn session_list_row_target_for(
         &self,
         id: &SessionListRowId,
@@ -11866,48 +12046,18 @@ impl AppState {
         host.is_some_and(|host| host.state().is_capturing_text())
     }
 
-    /// The chat host backing a tab, opening or re-targeting it as needed.
+    /// The chat host backing a tab, opening or re-targeting it as needed and
+    /// ticking it at the wall clock.
     ///
-    /// Called from the render path, which is what makes both conversations
-    /// live: the host's own tick asks the daemon for the next page, so a reply
-    /// lands without the operator pressing anything.
+    /// Every host's tick already opens and ticks the open tab's host through
+    /// [`Self::tick_surfaces`]; this is for a caller that needs a named tab's
+    /// host in hand, and it opens through the same one place.
     pub fn chat_host_for(
         &mut self,
         tab: crate::components::session_tabs::SessionTab,
     ) -> Option<&crate::fleet::chat_host::ChatHost> {
-        use crate::components::session_tabs::SessionTab;
-        use crate::fleet::chat_host::ChatHost;
-
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        match tab {
-            SessionTab::Pal => {
-                // The conversation is host-only state, so running it every frame
-                // bumps no section; a tick that moved it asks for a repaint.
-                let ticked = self.host.pal_chat.get_or_insert_with(ChatHost::pal).tick(now_ms);
-                if ticked {
-                    self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
-                }
-                self.chat_host(tab)
-            }
-            SessionTab::Thread => {
-                let key = self.selected_session_chat_key()?;
-                // Re-target when the cursor moves to a different session. The
-                // old conversation is dropped rather than cached: nobody is
-                // reading it, and a cached host keeps polling the daemon for it.
-                let stale =
-                    self.host.session_chat.as_ref().is_none_or(|(existing, _)| *existing != key);
-                if stale {
-                    self.host.session_chat = Some((key.clone(), ChatHost::thread(key)));
-                }
-                let ticked =
-                    self.host.session_chat.as_mut().is_some_and(|(_, host)| host.tick(now_ms));
-                if ticked {
-                    self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
-                }
-                self.chat_host(tab)
-            }
-            SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
-        }
+        self.tick_chat_host(tab, chrono::Utc::now().timestamp_millis());
+        self.chat_host(tab)
     }
 
     /// The chat host a tab is showing, WITHOUT opening or ticking it.
@@ -12203,6 +12353,183 @@ impl AppState {
         }
         self.host.last_attention_refresh = Some(Instant::now());
         self.merge_attention(now_ms);
+    }
+
+    /// Every host calls this on its tick: the answer machine is folded, the
+    /// session tab is reconciled against what is available, the composer is
+    /// pointed at the request it is showing, the open conversation is projected
+    /// onto the wire and the filter's verdict on each row is recomputed.
+    ///
+    /// A reducer step rather than a renderer's, for the reason
+    /// [`Self::refresh_attention`] became one (#1131): the send worker reports
+    /// into the state, not into a frame, and a host that folded it only while
+    /// drawing would leave an answered row reading `SENT` forever on any
+    /// surface whose draw loop does not run this code. The three pieces travel
+    /// together because each is about the request the operator is answering
+    /// right now.
+    ///
+    /// Writes only what moved, so a tick with nothing outstanding bumps no
+    /// version and frames nothing.
+    ///
+    /// The order inside is load-bearing: the tab is reconciled FIRST, because
+    /// every later step reads the `shell.session_tab` it wrote (the retarget
+    /// asks which chip is blocking, the conversation step which host is open,
+    /// the projection which host to read). `now_ms` is the caller's clock, as
+    /// [`Self::refresh_attention`] takes it.
+    pub fn tick_surfaces(&mut self, now_ms: i64) {
+        use crate::components::session_tabs;
+
+        // A tab can go dead under the operator (the ASK is answered, the cursor
+        // moves off a session row), and a stale pane shows a question they can
+        // no longer act on.
+        let active = session_tabs::resolve(self, self.shell.session_tab);
+        self.shell.set_if_changed(|shell| &mut shell.session_tab, active);
+
+        // Whatever the answer worker reported, on EVERY tick rather than only
+        // while the `ask` surface is open: the row's `SENT` chip is painted by
+        // the session list, so an operator who sends and then looks elsewhere
+        // would otherwise watch that chip stay SENT forever.
+        if self.fleet.update(|fleet| fleet.ask_state.tick()) {
+            self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
+        }
+
+        // Point the composer at the request it is showing BEFORE the first key
+        // press. Without this the focus is only initialised by that key, so a
+        // request with no options opens with the composer unfocused and the
+        // first characters fall through to the screen's shortcuts.
+        //
+        // Not gated on the `ask` tab being the open one: the desktop answers
+        // from a banner beside the board, with no tab strip involved, and the
+        // retarget is a no-op while the request has not changed.
+        if let Some(chip) = session_tabs::selected_blocking(self).cloned() {
+            self.fleet.update(|fleet| fleet.ask_state.retarget(&chip));
+        }
+
+        let moved = self.tick_conversation(now_ms);
+        self.project_conversation(moved);
+        self.refresh_row_visibility();
+    }
+
+    /// Open and tick the chat host for the tab that is showing, reporting
+    /// whether its conversation moved.
+    ///
+    /// A reducer step so every host runs it: the terminal used to open and
+    /// tick these only while drawing, so on the desktop `pal_chat` and
+    /// `session_chat` stayed empty and the framed conversation was the default
+    /// forever. Opening dials the daemon, which is why only the tab a person
+    /// chose is opened, never one nobody is looking at; a thread with rows
+    /// checked is a broadcast, whose composer is `fleet.broadcast`.
+    fn tick_conversation(&mut self, now_ms: i64) -> bool {
+        use crate::components::session_tabs::SessionTab;
+
+        // Only while the session list is showing: a remembered Pal tab behind
+        // the settings screen is not a conversation anyone is reading, and
+        // ticking it would poll the daemon for nobody.
+        if self.shell.current_screen != screen_ids::SESSION_LIST {
+            return false;
+        }
+        let tab = self.shell.session_tab;
+        if tab == SessionTab::Thread && !self.broadcast_targets().is_empty() {
+            return false;
+        }
+        self.tick_chat_host(tab, now_ms)
+    }
+
+    /// Open `tab`'s chat host if it has one and tick it at `now_ms`, reporting
+    /// whether its conversation moved. The one place a chat host is opened.
+    fn tick_chat_host(
+        &mut self,
+        tab: crate::components::session_tabs::SessionTab,
+        now_ms: i64,
+    ) -> bool {
+        use crate::components::session_tabs::SessionTab;
+        use crate::fleet::chat_host::ChatHost;
+
+        let moved = match tab {
+            SessionTab::Pal => self.host.pal_chat.get_or_insert_with(ChatHost::pal).tick(now_ms),
+            SessionTab::Thread => {
+                let Some(key) = self.selected_session_chat_key() else {
+                    return false;
+                };
+                // Re-target when the cursor moves to a different session. The
+                // old conversation is dropped rather than cached: nobody is
+                // reading it, and a cached host keeps polling the daemon.
+                let stale =
+                    self.host.session_chat.as_ref().is_none_or(|(existing, _)| *existing != key);
+                if stale {
+                    self.host.session_chat = Some((key.clone(), ChatHost::thread(key)));
+                }
+                let ticked =
+                    self.host.session_chat.as_mut().is_some_and(|(_, host)| host.tick(now_ms));
+                stale || ticked
+            }
+            SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => false,
+        };
+        if moved {
+            self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
+        }
+        moved
+    }
+
+    /// Recompute which session rows the filter hides, as a set of ids beside
+    /// the list (#1157).
+    ///
+    /// The rule lives here, where the reducer's own navigation reads it, rather
+    /// than in each renderer: a filter that grows a case in Rust was silently
+    /// wrong in a window carrying its own copy. The list keeps its order and
+    /// its indices, because the selection is expressed in them.
+    ///
+    /// Written only when the set changed, so a tick over a steady list frames
+    /// nothing.
+    fn refresh_row_visibility(&mut self) {
+        let hidden: std::collections::HashSet<Uuid> = self
+            .sessions
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.sessions.iter())
+            .filter(|session| !self.session_passes_filter(session))
+            .map(|session| session.id)
+            .collect();
+        self.sessions.set_if_changed(|sessions| &mut sessions.hidden_sessions, hidden);
+    }
+
+    /// Write the open conversation's bounded, scrubbed window onto the Fleet
+    /// section, so a renderer in another process draws the thread without
+    /// holding the chat host.
+    ///
+    /// Unlike the attention merge (#1131), this framed field is read from
+    /// `HostOnlyState`: the chat hosts live there, with their poll loops, their
+    /// worker inboxes and the operator's unsent draft, and none of that crosses
+    /// a process boundary. So a replay of the section log alone (#1079)
+    /// reproduces an empty conversation; the projection exists only on a host
+    /// that holds the chat host.
+    ///
+    /// Rebuilt only when something it reads can have moved: the host's own
+    /// tick reported news (`moved`), or the open conversation, its composer's
+    /// length or its send refusal is not the one last projected. Fifty rows
+    /// are not rebuilt and compared on a tick where nothing happened.
+    fn project_conversation(&mut self, moved: bool) {
+        use crate::components::session_tabs::SessionTab;
+
+        let open = match self.shell.session_tab {
+            SessionTab::Pal => self.host.pal_chat.as_ref(),
+            SessionTab::Thread => self.host.session_chat.as_ref().map(|(_, chat)| chat),
+            _ => None,
+        };
+        let mark = open.map(|chat| {
+            let state = chat.state();
+            (
+                chat.topic().clone(),
+                state.composer().chars().count(),
+                state.send_block(),
+            )
+        });
+        if !moved && self.host.conversation_mark == mark {
+            return;
+        }
+        let projected = open.map(crate::fleet::conversation::project).unwrap_or_default();
+        self.host.conversation_mark = mark;
+        self.fleet.set_if_changed(|fleet| &mut fleet.conversation, projected);
     }
 
     /// The merge itself, at the caller's clock. See [`Self::refresh_attention`],
@@ -14615,5 +14942,86 @@ mod codex_degrade_notice_tests {
             added, 2,
             "two distinct sessions must each be announced once"
         );
+    }
+}
+
+#[cfg(test)]
+mod scan_selection_tests {
+    //! What a scan does to the operator's selection (#1155).
+    //!
+    //! The row is remembered as an identity and looked up again in the list the
+    //! scan produced. An index cannot do this job: a session created anywhere
+    //! on the box reorders the list, and the desktop asks for a scan whenever
+    //! the daemon reports news, so restoring an index moved the sidebar under
+    //! the operator's hands.
+
+    use super::{AppState, FocusedPane, SessionListRowId};
+    use crate::models::{Session, Workspace};
+
+    /// Two workspaces, one session each, with the second one's session chosen.
+    fn with_the_second_session_selected() -> (AppState, uuid::Uuid) {
+        let mut state = AppState::new();
+        let mut first = Workspace::new("api".to_string(), "/scan/api".into());
+        first.add_session(Session::new(
+            "feat-login".to_string(),
+            "/scan/api/wt".to_string(),
+        ));
+        let mut second = Workspace::new("web".to_string(), "/scan/web".into());
+        second.add_session(Session::new(
+            "spike-ssr".to_string(),
+            "/scan/web/wt".to_string(),
+        ));
+        let chosen = second.sessions[0].id;
+        state.sessions.workspaces = vec![first, second];
+        state.sessions.selected_workspace_index = Some(1);
+        state.sessions.selected_session_index = Some(0);
+        (state, chosen)
+    }
+
+    #[test]
+    fn a_scan_that_reorders_the_list_keeps_the_row_the_operator_chose() {
+        let (mut state, chosen) = with_the_second_session_selected();
+        let keep = state.selected_row_identity();
+        assert_eq!(keep, Some(SessionListRowId::Session(chosen)));
+        // The scan's new list: the workspace above the chosen row has gone, so
+        // every index below it has moved up.
+        state.sessions.workspaces.remove(0);
+        state.sessions.selected_workspace_index = None;
+        state.sessions.selected_session_index = None;
+
+        assert!(state.restore_selected_row(keep));
+
+        assert_eq!(state.sessions.selected_workspace_index, Some(0));
+        assert_eq!(
+            state.sessions.workspaces[0].sessions[0].id, chosen,
+            "the session the operator chose, not whatever took its place"
+        );
+    }
+
+    #[test]
+    fn a_scan_that_removed_the_chosen_row_restores_nothing() {
+        let (mut state, _) = with_the_second_session_selected();
+        let keep = state.selected_row_identity();
+        // The session ended somewhere else on the box.
+        state.sessions.workspaces.remove(1);
+
+        assert!(
+            !state.restore_selected_row(keep),
+            "so the caller falls back to the first visible row"
+        );
+    }
+
+    #[test]
+    fn restoring_the_selection_does_not_take_the_focus() {
+        // A scan is not the operator asking for the sidebar. A window whose
+        // composer had the keyboard must not lose it because something
+        // elsewhere on the box started a session.
+        let (mut state, _) = with_the_second_session_selected();
+        let keep = state.selected_row_identity();
+        state.shell.focused_pane = FocusedPane::LiveLogs;
+
+        assert!(state.restore_selected_row(keep));
+
+        assert_eq!(state.shell.focused_pane, FocusedPane::LiveLogs);
     }
 }
