@@ -241,24 +241,26 @@ fn subscribe(
 /// is not applied, and the answer says which row and why, for a toast.
 #[tauri::command]
 fn dispatch(window: tauri::State<'_, Window>, intent: RendererIntent) -> Option<Refusal> {
-    // What the webview asked for, so a reader of the log can tell what the
-    // window authored: a command's id, never its arguments, and never a key's
-    // chord or a text's characters, which are what a person typed.
-    match &intent {
-        RendererIntent::Command(id, _) => tracing::info!(command = id.as_str(), "renderer intent"),
-        RendererIntent::Key(_) => tracing::info!(kind = "key", "renderer intent"),
-        RendererIntent::Text(text) => {
-            tracing::info!(
-                kind = "text",
-                chars = text.chars().count(),
-                "renderer intent"
-            );
-        }
-    }
-    match Intent::try_from(intent) {
+    // What the webview asked for and what became of it, so a reader of the log
+    // can tell what the window authored and what the host actually applied: a
+    // command's id, never its arguments, and never a key's chord or a text's
+    // characters, which are what a person typed.
+    let asked = match &intent {
+        RendererIntent::Command(id, _) => id.as_str().to_string(),
+        RendererIntent::Key(_) => "key".to_string(),
+        RendererIntent::Text(text) => format!("text({} chars)", text.chars().count()),
+    };
+    let refusal = match Intent::try_from(intent) {
         Ok(intent) => window.shell.dispatch_renderer(intent),
         Err(refusal) => Some(refusal),
-    }
+    };
+    let outcome = if refusal.is_some() {
+        "refused"
+    } else {
+        "dispatched"
+    };
+    tracing::info!(command = %asked, outcome, "renderer intent");
+    refusal
 }
 
 /// Where the daemon connection stands, for the banner on first paint.
