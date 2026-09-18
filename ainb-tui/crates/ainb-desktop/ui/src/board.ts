@@ -22,6 +22,7 @@ import type {
   Session_Serialize,
 } from "../../../ainb-app/bindings/AppState";
 import { allSessions, ATTENTION_ORDER, label } from "./sessions.ts";
+import type { RendererIntent } from "./tabs.ts";
 
 /**
  * What each column is called, in the operator's words rather than the wire's,
@@ -221,4 +222,16 @@ export function elsewhereCount(fleet: FleetView_Serialize | undefined): number {
 /** Whether the daemon answered the last attention poll. */
 export function daemonReachable(fleet: FleetView_Serialize | undefined): boolean {
   return fleet?.daemon_attention?.reachable ?? false;
+}
+
+/**
+ * What a click on a card or an attention row sends: its session list row
+ * selected WITHOUT attaching it (a terminal is a decision of its own), then the
+ * pane the click is about, which is `ask` when something is open on that agent.
+ */
+export function showIntents(sessionId: string, openRequest: boolean): RendererIntent[] {
+  return [
+    { Command: ["session_list.select_row", { target: { session: sessionId }, open: false }] },
+    { Command: ["session_list.select_tab", { tab: openRequest ? "Ask" : "Preview" }] },
+  ];
 }
