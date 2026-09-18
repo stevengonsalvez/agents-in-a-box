@@ -50,6 +50,13 @@ pub fn daemon_host_id(socket: &std::path::Path) -> Option<String> {
         .cloned()
 }
 
+/// Clear the recorded host id for `socket`, so a restarted daemon at that socket
+/// can legitimately establish a new identity (#1066).
+pub fn reset_host_id(socket: &std::path::Path) {
+    let mut held = OBSERVED_HOST_IDS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.remove(socket);
+}
+
 /// Record the host the daemon at `socket` named, keeping the FIRST id that
 /// socket gave for the life of the process (#1066).
 ///
@@ -1060,14 +1067,28 @@ impl DaemonClient {
         )
         .map_err(|error| DaemonError::Decode(format!("decoding auth/hello: {error}")))?;
         if let Some(expected) = daemon_host_id(&self.socket) {
-            if hello.host_id.as_deref() != Some(expected.as_str()) {
-                return Err(DaemonError::Decode(format!(
-                    "daemon host identity mismatch: expected {expected}, got {:?}",
-                    hello.host_id
-                )));
+            match hello.host_id.as_deref() {
+                Some(id) if is_host_id(id) => {
+                    if id != expected.as_str() {
+                        tracing::info!(
+                            socket = %self.socket.display(),
+                            previous = %expected,
+                            current = %id,
+                            "daemon host identity changed on reconnect; updating observed host"
+                        );
+                        reset_host_id(&self.socket);
+                        remember_host_id(&self.socket, Some(id));
+                    }
+                }
+                other => {
+                    return Err(DaemonError::Decode(format!(
+                        "daemon host identity mismatch: expected {expected}, got {other:?}"
+                    )));
+                }
             }
+        } else {
+            remember_host_id(&self.socket, hello.host_id.as_deref());
         }
-        remember_host_id(&self.socket, hello.host_id.as_deref());
 
         write_frame(
             &mut writer,
@@ -1418,5 +1439,96 @@ mod tests {
             FleetStreamEvent::Revision(FleetEvent { revision: 42, .. })
         ));
         server.await.expect("fake server completes");
+    }
+
+    /// A restarted daemon establishing a new identity after reset_host_id.
+    #[tokio::test]
+    async fn reset_host_id_allows_restarted_daemon_to_establish_new_id() {
+        const FIRST: &str = "01K5A0000000000000000AAAAA";
+        const SECOND: &str = "01K5A0000000000000000BBBBB";
+        let (_temp, socket) = serve_hellos(vec![
+            json!({"host_id": FIRST}),
+            json!({"host_id": SECOND}),
+        ]);
+        let client = DaemonClient::with_parts(socket.clone(), "test-token".into());
+
+        client.hello().await.expect("hello");
+        assert_eq!(daemon_host_id(&socket).as_deref(), Some(FIRST));
+
+        reset_host_id(&socket);
+        assert_eq!(daemon_host_id(&socket), None);
+
+        client.hello().await.expect("hello");
+        assert_eq!(daemon_host_id(&socket).as_deref(), Some(SECOND));
+    }
+
+    #[tokio::test]
+    async fn open_fleet_subscription_updates_host_id_on_legitimate_restart() {
+        const FIRST: &str = "01K5A0000000000000000AAAAA";
+        const SECOND: &str = "01K5A0000000000000000BBBBB";
+        let temp = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temp.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake hangar socket");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let (read_half, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let _hello = read_frame(&mut reader).await.expect("read auth request");
+            write_test_frame(
+                &mut writer,
+                &json!({"jsonrpc": "2.0", "id": 1, "result": {"host_id": SECOND}}),
+            )
+            .await;
+            let _sub = read_frame(&mut reader).await.expect("read subscribe");
+            write_test_frame(
+                &mut writer,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "snapshot": {"head_revision": 1, "sessions": []},
+                        "replay": [],
+                        "replay_state": {"state": "complete"}
+                    }
+                }),
+            )
+            .await;
+        });
+
+        remember_host_id(&socket, Some(FIRST));
+        assert_eq!(daemon_host_id(&socket).as_deref(), Some(FIRST));
+
+        let client = DaemonClient::with_parts(socket.clone(), "test-token".into());
+        let (initial, _sub) = client.open_fleet_subscription(0).await.expect("subscribe succeeds");
+        assert_eq!(initial.snapshot.head_revision, 1);
+        assert_eq!(daemon_host_id(&socket).as_deref(), Some(SECOND));
+    }
+
+    #[tokio::test]
+    async fn open_fleet_subscription_fails_closed_when_reconnect_omits_host_id() {
+        const FIRST: &str = "01K5A0000000000000000AAAAA";
+        let temp = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temp.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake hangar socket");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let (read_half, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let _hello = read_frame(&mut reader).await.expect("read auth request");
+            write_test_frame(
+                &mut writer,
+                &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            )
+            .await;
+        });
+
+        remember_host_id(&socket, Some(FIRST));
+        assert_eq!(daemon_host_id(&socket).as_deref(), Some(FIRST));
+
+        let client = DaemonClient::with_parts(socket.clone(), "test-token".into());
+        let Err(err) = client.open_fleet_subscription(0).await else {
+            panic!("should fail closed");
+        };
+        assert!(matches!(err, DaemonError::Decode(_)), "expected Decode error, got {err:?}");
     }
 }
