@@ -12,6 +12,7 @@ import { AnswerBanner } from "./answer.tsx";
 import { phaseOf, questionFor } from "./answer.ts";
 import { newNotices, noticeKey } from "./notices.ts";
 import { Board } from "./board.tsx";
+import { boardColumns } from "./board.ts";
 import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
 import {
@@ -257,6 +258,11 @@ function Shell() {
         void invoke("renderer_applied", {
           sections: applied,
           sessions: allSessions(store.section(host, "sessions")).length,
+          board: boardColumns(
+            store.section(host, "agent_status"),
+            store.section(host, "fleet"),
+            store.section(host, "sessions"),
+          ).map((column) => [column.state, column.cards.length]),
         });
       }
     };
