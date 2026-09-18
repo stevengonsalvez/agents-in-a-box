@@ -134,6 +134,7 @@ dependencies = [
 name = "ainb"
 version = "1.28.2"
 dependencies = [
+ "ainb-acp",
  "ainb-app",
  "ainb-cli",
  "ainb-fleet-core",
