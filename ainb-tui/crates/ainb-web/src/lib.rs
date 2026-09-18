@@ -47,9 +47,7 @@ pub mod terminal;
 use std::sync::Arc;
 
 pub use config::{BindError, WebConfig};
-pub use daemon::{
-    Answerer, DaemonAnswerer, DaemonClient, DaemonError, web_client, web_surface,
-};
+pub use daemon::{Answerer, DaemonAnswerer, DaemonClient, DaemonError, web_client, web_surface};
 pub use data::{AinbCliSource, DataError, DataSource, FleetSnapshot};
 pub use routes::{AppState, router};
 
