@@ -193,6 +193,18 @@ describe("reviewing from the window", () => {
     });
     await click(".settings-head .close", 30_000);
 
+    // #1221's line, asserted rather than only recorded: the window draws the
+    // rows around the reducer's offset, so neither figure and neither DOM may
+    // grow with the diff. The redraw is the window alone, with the frame
+    // already in the store; the first render also carries the reducer reading
+    // the diff and the frame crossing the channel.
+    assert.ok(
+      nodes < 2_000,
+      `the review tab built ${nodes} nodes for ${rows} rows: a DOM that grows with the diff, not with the viewport`,
+    );
+    assert.ok(remountMs < 200, `the window redrew in ${remountMs} ms, over the 200 ms line #1221 set`);
+    assert.ok(drawnMs < 200, `the first render took ${drawnMs} ms, over the 200 ms line #1221 set`);
+
     writeFileSync(
       REPORT,
       `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, drawnMs, remountMs }, null, 2)}\n`,
