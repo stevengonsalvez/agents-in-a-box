@@ -444,10 +444,24 @@ async fn a_pass_never_overwrites_a_table_row_with_its_file_row() {
     assert_eq!(table(pool).await, vec![current]);
 }
 
-/// A session deleted through the new stack loses its file row and its table
-/// row, so a later pass has nothing to bring back.
+/// KNOWN GAP, pinned until P6e-2 and P6e-4: a delete through the real
+/// `workspace/session_delete` RPC removes the table row only, so the file row
+/// survives and the next reconcile pass brings the session back.
+///
+/// The handler cannot remove the file row itself: the CLI's daemon path holds
+/// the `sessions.json` flock across this RPC (`ainb-app/src/cli/util.rs`),
+/// so a handler waiting on that flock would time out every delete. The goal's
+/// fix is on the client, which deletes the file row under the flock it
+/// already holds and then calls this RPC. When that lands, this test turns
+/// red and is rewritten to assert the session stays deleted. It is reachable
+/// only through the dark capability until then.
 #[tokio::test]
-async fn a_session_deleted_through_the_new_stack_stays_deleted() {
+async fn a_table_only_delete_comes_back_until_clients_delete_the_file_row() {
+    use ainb_hangar_daemon::events::EventBroker;
+    use ainb_hangar_daemon::health_stats::HealthStats;
+    use ainb_hangar_daemon::rpc::{self, DaemonHealth};
+    use ainb_hangar_proto::{RpcId, RpcRequest, methods};
+
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_in(dir.path()).await.unwrap();
     let pool = store.pool();
@@ -463,12 +477,33 @@ async fn a_session_deleted_through_the_new_stack_stays_deleted() {
     import_sessions_if_needed(pool, &sessions_path).await.unwrap();
     reconcile_sessions(pool, &sessions_path).await.unwrap();
 
-    // The new stack's delete: the file row under the flock, then the table.
-    sessions_file(&sessions_path, &[(kept, "ainb-kept", "ws")]);
-    assert!(SessionsRepo::delete_by_id(pool, gone).await.unwrap());
+    let health = DaemonHealth {
+        socket_path: "/tmp/it-session-delete.sock".into(),
+        pid: 1,
+        started_at: std::time::Instant::now(),
+        version: "0.1.0".into(),
+        stats: std::sync::Arc::new(HealthStats::default()),
+    };
+    let delete = RpcRequest {
+        jsonrpc: ainb_hangar_proto::jsonrpc_version(),
+        id: RpcId::Number(1),
+        method: methods::WORKSPACE_SESSION_DELETE.into(),
+        params: serde_json::json!({ "session_id": gone }),
+    };
+    let resp = rpc::dispatch(pool, &delete, &health, &EventBroker::new().sink()).await;
+    assert_eq!(resp.result.unwrap()["deleted"], true);
+    assert_eq!(ids(&table(pool).await), vec![kept]);
+    assert!(
+        fs::read_to_string(&sessions_path).unwrap().contains("ainb-gone"),
+        "the RPC now removes the file row: the gap is closed, rewrite this test"
+    );
 
     reconcile_sessions(pool, &sessions_path).await.unwrap();
-    assert_eq!(ids(&table(pool).await), vec![kept]);
+    assert_eq!(
+        ids(&table(pool).await),
+        vec![gone, kept],
+        "the pass no longer brings the session back: the gap is closed, rewrite this test"
+    );
 }
 
 /// A previous release appends to the file after a pass. The watcher sees the
