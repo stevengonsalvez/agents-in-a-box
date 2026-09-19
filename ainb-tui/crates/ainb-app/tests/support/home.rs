@@ -57,15 +57,18 @@ use std::thread::ThreadId;
 /// Prefer [`ScopedHome`] when a test reads back what it wrote, because then a
 /// home of its own is the point.
 pub fn shared() -> &'static Path {
-    static SHARED: std::sync::OnceLock<ScopedHome> = std::sync::OnceLock::new();
+    // A `ScopedHome` cannot live in a static, because the lock guard it holds is
+    // not `Send`, and it should not: this home is never given back. The lock is
+    // held only while the environment is pointed at it, which is the moment a
+    // test could see it half done.
+    static SHARED: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     SHARED
         .get_or_init(|| {
-            let mut home = ScopedHome::new();
-            // The lock is dropped and the guard kept: the environment stays
-            // pointed at this directory for the rest of the binary, and the
-            // tests that take a `ScopedHome` can still take the lock.
-            drop(home.lock.take());
-            home
+            let _lock = HOME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let dir = tempfile::tempdir().expect("a temporary home directory");
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("AINB_HOME", dir.path());
+            dir
         })
         .path()
 }
