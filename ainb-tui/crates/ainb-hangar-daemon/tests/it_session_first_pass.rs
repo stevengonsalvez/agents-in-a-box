@@ -216,17 +216,24 @@ async fn no_session_rpc_touches_the_table_before_the_first_pass() {
         "the wait was not bounded: {waited:?}"
     );
 
-    // With the lock free, a pass commits and reads are served, NEW included.
+    // With the lock free, the watcher's retry (backoff from 1 s, not the
+    // 30 s tick) commits the first pass on its own, and reads are served,
+    // NEW included. No reconcile RPC here: the boot pass must recover alone.
     drop(lock);
-    client
-        .workspace_session_reconcile()
-        .await
-        .expect("reconcile once the lock is free");
-    let ready = client
-        .workspace_session_list(WorkspaceSessionListParams::default())
-        .await
-        .unwrap();
-    assert!(ready.import_complete);
+    let freed = Instant::now();
+    let ready = loop {
+        let answer = client
+            .workspace_session_list(WorkspaceSessionListParams::default())
+            .await
+            .unwrap();
+        if answer.import_complete {
+            break answer;
+        }
+        assert!(
+            freed.elapsed() < Duration::from_secs(10),
+            "the first pass was not retried within 10 s of the lock freeing"
+        );
+    };
     assert_eq!(
         ids(&ready.sessions),
         vec![KEPT, NEW],
