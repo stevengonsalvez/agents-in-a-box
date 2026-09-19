@@ -33,18 +33,22 @@ export interface FileRow {
 }
 
 /**
- * One line of the diff body: a file's heading, a hunk's header, or a row.
+ * One line of the diff body: a file's heading, a hunk's header, an expand
+ * affordance, or a row.
  *
- * Every file is drawn, one after another, because that is the body the
- * reducer's own offsets describe: `review_ui.scroll` is a row index across
- * the whole review and `current_hunk` counts hunks across every file. A tab
- * that drew only the open file would be scrolling something the reducer is
- * not counting, and the terminal beside it would be showing another thing.
+ * `index` is the reducer's OWN virtual-row index (`flatten`,
+ * `ainb-app/src/components/code_review/render.rs:112`), which is what
+ * `review_ui.scroll` counts: a row per file heading, a row per hidden gap, a
+ * row per code line, and nothing for a collapsed or binary file beyond its
+ * heading. A hunk's `@@` header has no index because the terminal does not
+ * draw one; it is decoration here, and counting it would put this window's
+ * offsets half a screen away from the terminal's.
  */
 export type BodyLine =
-  | { kind: "file"; key: string; file: ReviewFileFrame_Serialize; open: boolean }
-  | { kind: "hunk"; key: string; header: string; hidden: number }
-  | { kind: "row"; key: string; row: DiffRow_Serialize };
+  | { kind: "file"; key: string; index: number; file: ReviewFileFrame_Serialize; open: boolean }
+  | { kind: "hunk"; key: string; index: undefined; header: string; current: boolean }
+  | { kind: "expand"; key: string; index: number; hidden: number }
+  | { kind: "row"; key: string; index: number; row: DiffRow_Serialize };
 
 /** The framed git view, or undefined when the section has not arrived. */
 export function gitView(section: GitViewView_Serialize | undefined) {
@@ -83,26 +87,95 @@ export function bodyLines(section: GitViewView_Serialize | undefined): BodyLine[
   const view = gitView(section);
   if (view === undefined) return [];
   const lines: BodyLine[] = [];
+  let index = 0;
+  let hunkOrdinal = 0;
   view.review.files.forEach((file, fileIndex) => {
     lines.push({
       kind: "file",
       key: `${file.path}:file`,
+      index: index++,
       file,
       open: fileIndex === view.review_ui.selected_file,
     });
-    file.hunks.forEach((hunk, index) => {
+    // A collapsed or binary file is its heading and nothing else, as the
+    // reducer flattens it.
+    if (file.collapsed || file.binary) return;
+    file.hunks.forEach((hunk, hunkIndex) => {
       lines.push({
         kind: "hunk",
-        key: `${file.path}:hunk:${index}`,
+        key: `${file.path}:hunk:${hunkIndex}`,
+        index: undefined,
         header: hunkHeader(hunk),
-        hidden: hunk.gap_before - hunk.expanded_before,
+        current: hunkOrdinal === view.review_ui.current_hunk,
       });
+      hunkOrdinal += 1;
+      const before = hunk.gap_before - hunk.expanded_before;
+      if (before > 0) {
+        lines.push({
+          kind: "expand",
+          key: `${file.path}:${hunkIndex}:before`,
+          index: index++,
+          hidden: before,
+        });
+      }
       hunk.rows.forEach((row, rowIndex) => {
-        lines.push({ kind: "row", key: `${file.path}:${index}:${rowIndex}`, row });
+        lines.push({
+          kind: "row",
+          key: `${file.path}:${hunkIndex}:${rowIndex}`,
+          index: index++,
+          row,
+        });
       });
+      const after = hunk.gap_after - hunk.expanded_after;
+      if (after > 0) {
+        lines.push({
+          kind: "expand",
+          key: `${file.path}:${hunkIndex}:after`,
+          index: index++,
+          hidden: after,
+        });
+      }
     });
   });
   return lines;
+}
+
+/**
+ * The height of one body row in pixels, which is what a wheel delta is
+ * measured against before it becomes a row count for the reducer.
+ *
+ * It matches `.review-row`'s line box in `shell.css`. A few pixels out only
+ * changes how far one flick of a wheel travels, never what the reducer and
+ * this window agree the offset is: the reducer owns that, and the window draws
+ * what comes back.
+ */
+export const ROW_PX = 20;
+
+/** A wheel event's deltas, as the browser reports them. */
+export interface Wheel {
+  deltaY: number;
+  /** 0 pixels, 1 lines, 2 pages, as `WheelEvent.deltaMode` gives it. */
+  deltaMode: number;
+}
+
+/**
+ * How many whole rows `wheel` asks for, given the pixels left over from the
+ * wheels before it, and what is left over after.
+ *
+ * Accumulated rather than truncated per event: a trackpad sends deltas of a
+ * pixel or two and a line-mode mouse sends 3, and truncating each one on its
+ * own rounds every single one of them to no rows at all.
+ */
+export function wheelRows(pending: number, wheel: Wheel): { rows: number; pending: number } {
+  const pixels =
+    wheel.deltaMode === 1
+      ? wheel.deltaY * ROW_PX
+      : wheel.deltaMode === 2
+        ? wheel.deltaY * ROW_PX * 20
+        : wheel.deltaY;
+  const total = pending + pixels;
+  const rows = Math.trunc(total / ROW_PX);
+  return { rows, pending: total - rows * ROW_PX };
 }
 
 /** `@@ -old +new @@`, as a diff names a hunk. */
