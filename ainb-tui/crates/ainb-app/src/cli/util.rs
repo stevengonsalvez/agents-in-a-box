@@ -760,8 +760,9 @@ pub async fn session_source_notice() -> Option<SessionSourceNotice> {
     }
 }
 
-/// Start [`reresolve_while_degraded`] on the current tokio runtime, once per
-/// process, if this process is degraded. For a long-lived surface's load
+/// Start [`reresolve_while_degraded`] once per process, if it is degraded.
+///
+/// Spawned on the current tokio runtime, for a long-lived surface's load
 /// path; a no-op outside a runtime and on every call after the first.
 pub async fn watch_degraded_session_source() {
     static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
