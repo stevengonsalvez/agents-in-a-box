@@ -2,7 +2,7 @@
 
 use ainb_hangar_daemon::session_import::{
     ImportReport, ReconcileWatch, import_sessions_from, import_sessions_if_needed,
-    reconcile_sessions,
+    reconcile_sessions, reconcile_sessions_bounded,
 };
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::sessions::{SessionRow, SessionsRepo, reconcile_key};
@@ -646,59 +646,91 @@ async fn a_writer_blocked_during_a_pass_is_inserted_by_the_next_pass() {
     );
 }
 
-/// `workspace/session_reconcile` runs a pass on the daemon's own file and
-/// answers once it has committed; `session_list` then reports the table
-/// authoritative. The only test in this binary that reads `AINB_HOME`.
+/// A pass whose store write is stuck behind another writer gives up at its
+/// bound instead of holding the flock: the flock is free again at once, and
+/// no marker is written. Every CLI writer blocks on that flock meanwhile.
 #[tokio::test]
-async fn the_reconcile_rpc_runs_a_pass_on_the_daemons_file() {
-    use ainb_hangar_daemon::events::EventBroker;
-    use ainb_hangar_daemon::health_stats::HealthStats;
-    use ainb_hangar_daemon::rpc::{self, DaemonHealth};
-    use ainb_hangar_proto::{RpcId, RpcRequest, methods};
-
-    let home = tempfile::tempdir().unwrap();
-    std::env::set_var("AINB_HOME", home.path());
-    let sessions_path = ainb_fleet_core::session_registry::sessions_json_path();
-    assert!(sessions_path.starts_with(home.path()));
-    fs::create_dir_all(sessions_path.parent().unwrap()).unwrap();
-    let id = "00000000-0000-0000-0000-0000000000c9";
-    sessions_file(&sessions_path, &[(id, "ainb-rpc", "ws")]);
-
+async fn a_stuck_store_write_releases_the_flock_at_its_bound() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_in(dir.path()).await.unwrap();
     let pool = store.pool();
-    let health = DaemonHealth {
-        socket_path: "/tmp/it-session-reconcile.sock".into(),
-        pid: 1,
-        started_at: std::time::Instant::now(),
-        version: "0.1.0".into(),
-        stats: std::sync::Arc::new(HealthStats::default()),
-    };
-    let sink = EventBroker::new().sink();
-    let call = |method: &str| RpcRequest {
-        jsonrpc: ainb_hangar_proto::jsonrpc_version(),
-        id: RpcId::Number(1),
-        method: method.into(),
-        params: serde_json::Value::Null,
-    };
+    let sessions_path = dir.path().join("sessions.json");
+    sessions_file(
+        &sessions_path,
+        &[("00000000-0000-0000-0000-0000000000b9", "ainb-stuck", "ws")],
+    );
 
-    let before = rpc::dispatch(pool, &call(methods::WORKSPACE_SESSION_LIST), &health, &sink).await;
-    assert_eq!(before.result.unwrap()["import_complete"], false);
-
-    let done = rpc::dispatch(
+    let mut blocker = pool.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *blocker).await.unwrap();
+    let started = std::time::Instant::now();
+    let err = reconcile_sessions_bounded(
         pool,
-        &call(methods::WORKSPACE_SESSION_RECONCILE),
-        &health,
-        &sink,
+        &sessions_path,
+        1024 * 1024,
+        Duration::from_millis(200),
     )
-    .await;
-    assert!(done.error.is_none(), "{done:?}");
-    assert!(done.result.unwrap()["completed_at"].as_i64().unwrap() > 0);
+    .await
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("did not finish"), "{err:#}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        ainb_fleet_core::session_registry::try_lock_sessions_store_at(dir.path())
+            .unwrap()
+            .is_some(),
+        "the flock outlived the pass"
+    );
+    sqlx::query("ROLLBACK").execute(&mut *blocker).await.unwrap();
+    drop(blocker);
 
-    let after = rpc::dispatch(pool, &call(methods::WORKSPACE_SESSION_LIST), &health, &sink)
-        .await
-        .result
+    let source = marker_key(&sessions_path);
+    assert!(
+        SessionsRepo::import_marker(pool, &reconcile_key(&source))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(table(pool).await.is_empty());
+}
+
+/// A rewrite that keeps the file's mtime (`cp -p`, a restore) is still a
+/// change: the watcher also compares length and inode.
+#[tokio::test]
+async fn a_rewrite_that_keeps_the_mtime_still_runs_a_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    sessions_file(
+        &sessions_path,
+        &[("00000000-0000-0000-0000-0000000000e7", "ainb-one", "ws")],
+    );
+    let mtime = fs::metadata(&sessions_path).unwrap().modified().unwrap();
+
+    let mut watch = ReconcileWatch::new(&sessions_path);
+    assert!(watch.tick(pool).await.unwrap().is_ok());
+
+    sessions_file(
+        &sessions_path,
+        &[
+            ("00000000-0000-0000-0000-0000000000e7", "ainb-one", "ws"),
+            ("00000000-0000-0000-0000-0000000000e8", "ainb-two", "ws"),
+        ],
+    );
+    fs::File::options()
+        .write(true)
+        .open(&sessions_path)
+        .unwrap()
+        .set_modified(mtime)
         .unwrap();
-    assert_eq!(after["import_complete"], true);
-    assert_eq!(after["sessions"][0]["session_id"], id);
+    assert_eq!(
+        fs::metadata(&sessions_path).unwrap().modified().unwrap(),
+        mtime
+    );
+
+    let outcome = watch.tick(pool).await.expect("a same-mtime rewrite runs a pass").unwrap();
+    assert_eq!(outcome.marker.imported, 1);
 }
