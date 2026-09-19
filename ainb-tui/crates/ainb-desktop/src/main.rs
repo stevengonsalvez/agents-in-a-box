@@ -491,20 +491,9 @@ async fn update_apply(app: tauri::AppHandle) -> Result<(), String> {
     app.restart();
 }
 
-/// Put the previous version back and restart into it.
-#[tauri::command]
-async fn update_rollback(app: tauri::AppHandle) -> Result<(), String> {
-    update_gate(update::ROLLBACK)?;
-    run_update_rollback().await?;
-    app.restart();
-}
-
-/// Remove the previous version, the one rollback slot.
-#[tauri::command]
-async fn update_discard_previous() -> Result<(), String> {
-    update_gate(update::DISCARD_PREVIOUS)?;
-    run_update_discard_previous().await
-}
+// Rolling back and removing the previous have no command: a page script
+// could force a downgrade or delete the only recovery copy. They run from
+// the native menu only (`menu::UPDATE_ROLLBACK`, `menu::UPDATE_DISCARD_PREVIOUS`).
 
 /// The updater's local settings, to read. They are set in the terminal or
 /// the config file: there is no command that writes them.
@@ -814,8 +803,6 @@ fn main() {
             terminal_close,
             update_check,
             update_apply,
-            update_rollback,
-            update_discard_previous,
             update_settings
         ])
         .run(tauri::generate_context!())
