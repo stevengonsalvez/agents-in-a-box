@@ -9,8 +9,9 @@ use ainb_app::app::keymap::{HostAction, active_contexts};
 use ainb_app::app::state::WorkspaceRescan;
 use ainb_app::config::AppConfig;
 use ainb_app::fleet::agent_status_reader::{AgentStatusReader, Dialer};
+use ainb_app::fleet::usage_reader::UsageReader;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
-use ainb_app::{AppState, CommandId, Effect, Intent, Keymap};
+use ainb_app::{AppState, CommandId, Effect, Intent, Keymap, SectionId};
 use ainb_hangar_proto::connections::SurfaceKind;
 use serde::Serialize;
 
@@ -116,6 +117,13 @@ pub struct DesktopHost<S: FrameSink> {
     /// The agent status reader both hosts share (#1188), once
     /// [`Self::start_agent_status`] has started it.
     agent_status: Option<AgentStatusReader>,
+    /// How to dial the daemon for section 21, once [`Self::enable_usage`]
+    /// named one; taken when the reader starts.
+    usage_dialer: Option<Dialer>,
+    /// The usage reader behind section 21, the stats tab. Started by the tick
+    /// on the first subscription that names `usage`, so a window that never
+    /// opens the tab never asks the daemon (D3p-e).
+    usage: Option<UsageReader>,
     /// Whether the tick starts the daemon attention poller. A test that is
     /// about the reducer turns it off: the poller is a thread on a real
     /// socket, and its first publish is news whenever it lands.
@@ -170,6 +178,8 @@ impl<S: FrameSink> DesktopHost<S> {
             sink,
             rescan: WorkspaceRescan::default(),
             agent_status: None,
+            usage_dialer: None,
+            usage: None,
             poll_attention: true,
         }
     }
@@ -197,6 +207,14 @@ impl<S: FrameSink> DesktopHost<S> {
     /// called inside a tokio runtime; the tick folds what it reports.
     pub fn start_agent_status(&mut self, dialer: Dialer, legacy_panel: bool) {
         self.agent_status = Some(AgentStatusReader::spawn(dialer, legacy_panel));
+    }
+
+    /// Let the tick start the usage reader behind section 21, the stats tab,
+    /// dialing with `dialer`, once a subscription names `usage` (D3p-e). Until
+    /// then nothing reads: a window that never opens the tab costs the daemon
+    /// nothing.
+    pub fn enable_usage(&mut self, dialer: Dialer) {
+        self.usage_dialer = Some(dialer);
     }
 
     /// Never start the daemon attention poller on a tick. For tests: the
@@ -262,6 +280,16 @@ impl<S: FrameSink> DesktopHost<S> {
         self.state.tick_surfaces(ainb_app::fleet::daemons::heartbeat::now_ms());
         // Section 20, which the board draws, from the shared reader.
         if let Some(reader) = &mut self.agent_status {
+            reader.drain_into(&mut self.state);
+        }
+        // Section 21, which the stats tab draws: started by the first
+        // subscription that names it, then drained like section 20.
+        if self.usage.is_none() && self.mirror.subscription().contains(SectionId::Usage) {
+            if let Some(dialer) = self.usage_dialer.take() {
+                self.usage = Some(UsageReader::spawn(dialer));
+            }
+        }
+        if let Some(reader) = &mut self.usage {
             reader.drain_into(&mut self.state);
         }
         let effects = self.state.take_effects();
