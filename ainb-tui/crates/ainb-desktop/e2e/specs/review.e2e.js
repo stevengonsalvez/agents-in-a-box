@@ -113,13 +113,17 @@ describe("reviewing from the window", () => {
 
     const rows = (await $$(".review-row")).length;
     const nodes = await browser.execute(() => document.querySelectorAll(".review *").length);
-    const cut = await browser.execute(() => {
-      const banner = document.querySelector(".review-cut");
-      return banner === null ? null : banner.textContent.trim();
-    });
+    const banners = await browser.execute(() =>
+      [...document.querySelectorAll(".review-cut")].map((banner) => banner.textContent.trim()),
+    );
     // The diff is past the frame's row bound, so the section says what it left
-    // out rather than reading as a short diff.
-    assert.ok(cut !== null, `a diff of ${bytes} bytes framed with no cut banner: ${rows} rows drawn`);
+    // out rather than reading as a short diff. Two banners wear this class,
+    // the section's counters and the scroll_cut note, so the assertion is on
+    // the counters' own words: a regression that stopped summing the per-file
+    // rows would otherwise stay green behind the other banner.
+    const cut = banners.find((line) => line.startsWith("Over the frame's budget"));
+    assert.ok(cut, `a diff of ${bytes} bytes framed no budget banner: ${rows} rows drawn, banners ${JSON.stringify(banners)}`);
+    assert.match(cut, /^Over the frame's budget: \d+ rows(, \d+ hunks)?.* not sent$/);
 
     // A selection sent from the window lands on the file the frame names: the
     // click carries the path, the reducer decides, and the next frame says so.
