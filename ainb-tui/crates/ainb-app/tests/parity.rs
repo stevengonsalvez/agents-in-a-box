@@ -86,17 +86,9 @@ fn every_expected_fact_is_on_the_screen_the_ratatui_half_drew() {
     assert!(checked > 0, "no fixture has an expected-facts list");
 }
 
-/// The check has to be able to fail, or a stubbed renderer passes it: one fact
-/// taken out of what a renderer drew is one fact the suite reports.
-#[test]
-fn a_fact_missing_from_the_drawing_is_caught() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
-    let list = std::fs::read_to_string(dir.join("facts/git_review.txt")).expect("the facts list");
-    let drawn = std::fs::read_to_string(dir.join("git_review.snap")).expect("the snapshot");
-
-    let dropped = facts(&list)[0];
-    let mutated = drawn.replace(dropped, "");
-
-    assert_eq!(missing(&mutated, &list), vec![dropped]);
-    assert_eq!(missing(&drawn, &list), Vec::<&str>::new());
-}
+// The check that the facts list can FAIL lives with the renderers, because
+// only they can lose a fact: `ainb-core/tests/parity_snapshots.rs`
+// (`a_renderer_that_loses_a_file_fails_the_facts`) takes a file out of what
+// the ratatui half is given, and `ainb-desktop/ui/src/parity.test.ts` takes it
+// out of the frame the webview half is given. Editing a drawing after it was
+// drawn would only prove the comparator works.
