@@ -886,6 +886,16 @@ body {
   color: var(--border);
 }
 
+.review-hunk.current {
+  color: var(--gold);
+}
+
+.review-expand {
+  margin: 0;
+  padding: 2px 10px;
+  color: var(--muted);
+}
+
 .review-hidden {
   color: var(--muted);
 }
