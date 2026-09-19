@@ -39,8 +39,10 @@ impl World {
     }
 
     fn config(&self) -> SidecarConfig {
-        let mut config =
-            SidecarConfig::new(self.home(), recording_daemon(self.dir.path(), &self.spawned));
+        let mut config = SidecarConfig::new(
+            self.home(),
+            recording_daemon(self.dir.path(), &self.spawned),
+        );
         config.grace = Duration::from_millis(300);
         config.hello_budget = Duration::from_secs(2);
         config
@@ -100,7 +102,10 @@ async fn daemon_n_minus_1_frames_connect_with_no_version_and_the_legacy_range() 
     assert!(!spawned, "the listener owned the home");
     assert_eq!(daemon_version, None, "a daemon that cannot say its version");
     assert_eq!(protocol, ProtocolRange::legacy());
-    assert!(!world.daemon_was_run(), "a daemon answered, so none was started");
+    assert!(
+        !world.daemon_was_run(),
+        "a daemon answered, so none was started"
+    );
 
     let view = serde_json::to_value(state.borrow().view()).expect("view serialises");
     assert_eq!(view["state"], "connected");
@@ -137,13 +142,21 @@ async fn a_daemon_from_the_future_is_incompatible_at_once_and_nothing_is_spawned
         "read on the first frame, not after {:?}",
         started.elapsed()
     );
-    assert!(daemon_is_newer, "5-6 sits above {:?}", ProtocolRange::supported());
     assert!(
-        message.contains("daemon protocol 5-6") && message.contains("restart from the newer binary"),
+        daemon_is_newer,
+        "5-6 sits above {:?}",
+        ProtocolRange::supported()
+    );
+    assert!(
+        message.contains("daemon protocol 5-6")
+            && message.contains("restart from the newer binary"),
         "the daemon's own sentence, verbatim: {message}"
     );
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(!world.daemon_was_run(), "the daemon binary must never run on a refusal");
+    assert!(
+        !world.daemon_was_run(),
+        "the daemon binary must never run on a refusal"
+    );
 }
 
 /// A daemon from the past refuses the same way, and the app knows it is the
@@ -170,7 +183,11 @@ async fn a_daemon_from_the_past_is_incompatible_and_the_app_is_the_newer_side() 
     else {
         unreachable!("matched incompatible");
     };
-    assert!(!daemon_is_newer, "0-0 sits below {:?}", ProtocolRange::supported());
+    assert!(
+        !daemon_is_newer,
+        "0-0 sits below {:?}",
+        ProtocolRange::supported()
+    );
     assert!(!world.daemon_was_run());
 }
 
