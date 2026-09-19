@@ -431,7 +431,7 @@ struct Canned {
 /// paths asked, and closes the connection. `Content-Length` is the body's
 /// unless a header overrides it.
 fn respond(
-    handler: impl Fn(&str) -> Canned + Send + 'static,
+    handler: impl Fn(&str, u16) -> Canned + Send + 'static,
 ) -> (u16, std::sync::mpsc::Receiver<String>) {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -445,7 +445,7 @@ fn respond(
             let request = String::from_utf8_lossy(&buf[..n]).to_string();
             let path =
                 request.lines().next().unwrap_or("").split(' ').nth(1).unwrap_or("").to_string();
-            let canned = handler(&path);
+            let canned = handler(&path, port);
             let has_length = canned
                 .headers
                 .iter()
@@ -516,7 +516,7 @@ async fn the_manifest_fetch_and_the_download_pin_https() {
 /// refused rather than buffered.
 #[tokio::test]
 async fn an_oversized_manifest_is_refused() {
-    let (port, _) = respond(|path| {
+    let (port, _) = respond(|path, _| {
         if path.ends_with("/release-manifest.json") {
             Canned {
                 status: "200 OK",
@@ -542,7 +542,7 @@ async fn an_oversized_manifest_is_refused() {
 /// the release host's own asset hosts); a cross-host redirect is refused.
 #[tokio::test]
 async fn a_cross_host_redirect_is_refused_and_a_same_host_one_is_followed() {
-    let (port, paths) = respond(move |path| {
+    let (port, paths) = respond(|path, port| {
         if path == "/elsewhere/release-manifest.json" {
             Canned {
                 status: "302 Found",
@@ -614,7 +614,7 @@ async fn a_download_streams_hashes_and_refuses_an_oversized_body() {
     let body: Vec<u8> = (0..(100 * 1024)).map(|i| (i % 251) as u8).collect();
     let expected = format!("{:x}", Sha256::digest(&body));
     let served = body.clone();
-    let (port, _) = respond(move |path| {
+    let (port, _) = respond(move |path, _| {
         if path == "/bundle.dmg" {
             Canned {
                 status: "200 OK",
