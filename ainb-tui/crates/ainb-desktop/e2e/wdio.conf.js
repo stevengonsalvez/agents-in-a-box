@@ -15,6 +15,7 @@
 // under the other.
 
 import { APP_BIN, down, up } from "./world.js";
+import { cleanUpBeforeRun } from "./cleanup.js";
 
 export const config = {
   runner: "local",
@@ -39,6 +40,8 @@ export const config = {
 
   onPrepare(config, capabilities) {
     refuseConcurrentRuns(config, capabilities);
+    // What earlier runs left: their worlds and this worktree's daemons.
+    cleanUpBeforeRun();
     up(2);
   },
   onComplete() {
