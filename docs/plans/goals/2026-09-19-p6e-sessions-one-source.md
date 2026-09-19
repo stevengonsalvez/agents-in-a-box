@@ -127,13 +127,14 @@
 
 5. **What counts as "every combination" for `p6-concurrent`?** Recommended: the four combinations `scripts/surface-combo-smoke.sh:10` already defines, each with a CLI leg added, rather than a fresh matrix; the scenario reuses that script's fail-closed setup.
 
-6. **The snapshot path (`snapshot.rs:92-95`) copies `sessions.json`.** Recommended: file it as a follow-up for the snapshots-index move base spec `:286` names next, and have the snapshot write the table's rows as `sessions.json` in the same format in the meantime, so a restore still has sessions.
+6. **The snapshot path (`snapshot.rs:92-95`) copies `sessions.json`.** Decided: no interim mirror. The file stays current after the flip ("Mixed versions"), so the verbatim copy keeps working; moving snapshots onto the table is filed as #1213 for the snapshots-index move base spec `:286` names next.
 
 ─ FOLLOW-UPS TO FILE, NOT TO SOLVE ─
 
 · Removing the downgrade file write (open question 2) once a release has shipped with the table authoritative.
 · The thirteen fields spelled out in the repo row, the wire entry and the converters (P6d review, minor).
 · Gating the sessions handlers on the capability server-side, together with the other `hangar.*` capabilities.
+· Snapshots taking the table's rows instead of the file: #1213.
 
 ─ FINAL DELIVERABLE ─
 
