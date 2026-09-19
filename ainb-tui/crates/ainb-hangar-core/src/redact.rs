@@ -63,7 +63,7 @@ static PEM_PRIVATE_KEY: LazyLock<Regex> = LazyLock::new(|| {
 /// Anthropic API and admin keys.
 static ANTHROPIC_KEY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"sk-ant-[A-Za-z0-9_-]{20,}").expect("valid anthropic key regex"));
-/// openai keys, legacy `sk-…` and project, service-account and admin
+/// `OpenAI` keys, legacy `sk-…` and project, service-account and admin
 /// forms. Word-anchored: without `\b` a session id like `ainb-task-<uuid>`
 /// or a branch like `fix-risk-assessment-…` matched from the `sk-` inside it.
 static OPENAI_KEY: LazyLock<Regex> = LazyLock::new(|| {
@@ -86,7 +86,7 @@ static STRIPE_KEY: LazyLock<Regex> = LazyLock::new(|| {
 /// npm access tokens.
 static NPM_TOKEN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bnpm_[A-Za-z0-9]{36}\b").expect("valid npm token regex"));
-/// pypi upload tokens (a macaroon, always `pypi-AgEIcHlwaS5vcmc…`).
+/// `PyPI` upload tokens (a macaroon, always `pypi-AgEIcHlwaS5vcmc…`).
 static PYPI_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}").expect("valid pypi token regex")
 });
@@ -94,11 +94,11 @@ static PYPI_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
 static HUGGING_FACE_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bhf_[A-Za-z0-9]{34,}\b").expect("valid hugging face token regex")
 });
-/// digitalocean personal access tokens.
+/// `DigitalOcean` personal access tokens.
 static DIGITALOCEAN_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bdo[por]_v1_[a-f0-9]{64}\b").expect("valid digitalocean token regex")
 });
-/// sendgrid API keys: `SG.<22>.<43>`.
+/// `SendGrid` API keys: `SG.<22>.<43>`.
 static SENDGRID_KEY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b").expect("valid sendgrid key regex")
 });
