@@ -12,10 +12,15 @@ import {
   OPEN_SETTINGS,
   REDACTED,
   rowEdit,
+  searchIntents,
+  searching,
+  selectNode,
   SET_ROW,
   settingCount,
-  settingsCategories,
-  settingsLines,
+  settingsRows,
+  settingsTitle,
+  settingsTree,
+  toggleNode,
 } from "./settings.ts";
 
 /** A config frame with two categories and one row of each kind. */
@@ -66,9 +71,28 @@ function config(dirty: string[] = []): ConfigView_Serialize {
         { category: "Workspace", path: "workspace.defaults", label: "Defaults", depth: 1, has_children: false, rows: [0, 1] },
         { category: "Usage", path: "usage", label: "Usage", depth: 0, has_children: false, rows: [0] },
       ],
+      // Workspace is collapsed: its Defaults child is not on screen.
+      visible_nodes: [0, 1, 3],
+      expanded: [],
+      selected_node: 1,
+      // The selected node's subtree, as the reducer computed it.
+      visible_rows: [["Workspace", 0], ["Workspace", 1], ["Workspace", 2]],
+      selected_setting: 1,
+      search_len: null,
       dirty,
     },
   } as unknown as ConfigView_Serialize;
+}
+
+/** Every row of every category, for the tests that reason about kinds. */
+function allRows(view: ConfigView_Serialize) {
+  const screen = view.config_screen_state;
+  return screen.categories.flatMap((category) =>
+    (screen.settings[category] ?? []).map((_, index) => {
+      const shown = { ...view, config_screen_state: { ...screen, visible_rows: [[category, index]], selected_setting: 0 } };
+      return settingsRows(shown as ConfigView_Serialize)[0]!;
+    }),
+  );
 }
 
 function hangar(rows: unknown[], hook_health: unknown = null): HangarView_Serialize {
@@ -78,74 +102,109 @@ function hangar(rows: unknown[], hook_health: unknown = null): HangarView_Serial
   } as unknown as HangarView_Serialize;
 }
 
-test("the categories are the frame's, labelled by their tree root, with the reducer's rows", () => {
-  const categories = settingsCategories(config(["workspace_defaults.branch_prefix"]));
+test("the tree is the reducer's visible nodes, and the rows are its visible rows", () => {
+  const view = config(["workspace_defaults.branch_prefix"]);
+  const tree = settingsTree(view);
   assert.deepEqual(
-    categories.map((category) => [category.label, category.rows.length]),
+    tree.map((node) => [node.id, node.depth, node.hasChildren, node.expanded, node.selected]),
     [
-      ["Authentication", 2],
-      ["Workspace", 3],
-      ["Usage", 1],
+      ["Authentication|authentication", 0, false, false, false],
+      ["Workspace|workspace", 0, true, false, true],
+      ["Usage|usage", 0, false, false, false],
     ],
+    "the collapsed child is not drawn, and the selection is the frame's",
   );
-  assert.equal(settingCount(categories), 6);
-  const [choice, secret] = categories[0]!.rows;
+  assert.equal(settingsTitle(view), "Workspace");
+  assert.equal(settingCount(view), 6);
+  const rows = settingsRows(view);
+  assert.deepEqual(
+    rows.map((row) => [row.key, row.current]),
+    [
+      ["workspace_defaults.branch_prefix", false],
+      ["workspace_defaults.scan_max_depth", true],
+      ["ui_preferences.show_git_status", false],
+    ],
+    "only the selected node's rows, with the reducer's cursor",
+  );
+  const [text, number, bool] = rows;
+  assert.equal(text!.value, "agents/");
+  assert.ok(text!.dirty, "an edited row reads dirty");
+  assert.equal(number!.value, "3");
+  assert.equal(bool!.value, "on");
+  assert.ok(!bool!.dirty);
+
+  const filtered = {
+    ...view,
+    config_screen_state: { ...view.config_screen_state, search_len: 3, visible_rows: [["Usage", 0]], selected_setting: 0 },
+  } as ConfigView_Serialize;
+  assert.ok(searching(filtered));
+  assert.equal(settingsTitle(filtered), "Search");
+  assert.deepEqual(settingsRows(filtered).map((row) => row.key), ["usage.plan.id"], "the filter's matches, not a category");
+  const [choice, secret] = allRows(view);
   assert.equal(choice!.kind, "choice");
   assert.deepEqual(choice!.options, ["system_auth", "api_key"]);
   assert.equal(choice!.selected, 1);
   assert.equal(choice!.value, "api_key");
   assert.equal(secret!.kind, "secret");
   assert.equal(secret!.value, "set ($TG_TOKEN)");
-  const [text, number, bool] = categories[1]!.rows;
-  assert.equal(text!.value, "agents/");
-  assert.ok(text!.dirty, "an edited row reads dirty");
-  assert.equal(number!.value, "3");
-  assert.equal(bool!.value, "on");
-  assert.ok(!bool!.dirty);
-  assert.ok(categories[2]!.rows[0]!.readOnly, "[usage] is the burndown plugin's");
+  assert.ok(allRows(view)[5]!.readOnly, "[usage] is the burndown plugin's");
 });
 
-test("no frame means no categories", () => {
-  assert.deepEqual(settingsCategories(undefined), []);
+test("a click names a node, a chevron names it then toggles, and the filter box types into the reducer's search", () => {
+  assert.deepEqual(selectNode("Workspace|workspace"), { Command: ["config.select_node", { id: "Workspace|workspace" }] });
+  assert.deepEqual(
+    toggleNode("Workspace|workspace").map((intent) => intent.Command?.[0]),
+    ["config.select_node", "config.toggle_expand"],
+  );
+  assert.deepEqual(searchIntents("theme"), [{ Command: ["config.search", null] }, { Text: "theme" }]);
+  assert.deepEqual(searchIntents("the\u0007me"), [{ Command: ["config.search", null] }, { Text: "theme" }]);
+  assert.deepEqual(searchIntents(""), [{ Command: ["config.search.cancel", null] }]);
+});
+
+test("no frame means no tree and no rows", () => {
+  assert.deepEqual(settingsTree(undefined), []);
+  assert.deepEqual(settingsRows(undefined), []);
+  assert.equal(settingsTitle(undefined), "");
+  assert.equal(settingCount(undefined), 0);
 });
 
 test("an edit names the row by key and carries only what the widget chose", () => {
-  const rows = settingsCategories(config()).flatMap((category) => category.rows);
+  const rows = allRows(config());
   const by = (key: string) => rows.find((row) => row.key === key)!;
-  assert.deepEqual(rowEdit(by("workspace_defaults.branch_prefix"), "g6a/"), {
-    Command: [SET_ROW, { key: "workspace_defaults.branch_prefix", value: { Text: "g6a/" } }],
+  assert.deepEqual(rowEdit(by("workspace_defaults.branch_prefix"), "g6a/", 7), {
+    Command: [SET_ROW, { key: "workspace_defaults.branch_prefix", value: { Text: "g6a/" }, revision: 7 }],
   });
-  assert.deepEqual(rowEdit(by("authentication.claude_provider"), 0), {
-    Command: [SET_ROW, { key: "authentication.claude_provider", value: { Choice: 0 } }],
+  assert.deepEqual(rowEdit(by("authentication.claude_provider"), 0, 7), {
+    Command: [SET_ROW, { key: "authentication.claude_provider", value: { Choice: 0 }, revision: 7 }],
   });
-  assert.equal(rowEdit(by("fleet.bridge.telegram.token"), "keychain:tg"), null, "a secret is not set from the window");
+  assert.equal(rowEdit(by("fleet.bridge.telegram.token"), "keychain:tg", 7), null, "a secret is not set from the window");
   assert.ok(by("fleet.bridge.telegram.token").readOnly);
   assert.match(by("fleet.bridge.telegram.token").readOnlyReason!, /set from the terminal/);
-  assert.deepEqual(rowEdit(by("ui_preferences.show_git_status"), false), {
-    Command: [SET_ROW, { key: "ui_preferences.show_git_status", value: { Bool: false } }],
+  assert.deepEqual(rowEdit(by("ui_preferences.show_git_status"), false, 7), {
+    Command: [SET_ROW, { key: "ui_preferences.show_git_status", value: { Bool: false }, revision: 7 }],
   });
-  assert.deepEqual(rowEdit(by("workspace_defaults.scan_max_depth"), "4"), {
-    Command: [SET_ROW, { key: "workspace_defaults.scan_max_depth", value: { Number: 4 } }],
+  assert.deepEqual(rowEdit(by("workspace_defaults.scan_max_depth"), "4", 7), {
+    Command: [SET_ROW, { key: "workspace_defaults.scan_max_depth", value: { Number: 4 }, revision: 7 }],
   });
 });
 
 test("an edit that does not fit the row is not sent", () => {
-  const rows = settingsCategories(config()).flatMap((category) => category.rows);
+  const rows = allRows(config());
   const by = (key: string) => rows.find((row) => row.key === key)!;
-  assert.equal(rowEdit(by("authentication.claude_provider"), 2), null, "an index past the options");
-  assert.equal(rowEdit(by("authentication.claude_provider"), "api_key"), null, "a choice is an index");
-  assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), "four"), null, "a number that does not parse");
-  assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), ""), null, "a cleared number input is not 0");
-  assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), "  "), null, "nor a blank one");
-  assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), 1.5), null, "an integer row");
-  assert.equal(rowEdit(by("ui_preferences.show_git_status"), "yes"), null, "a bool is a boolean");
-  assert.equal(rowEdit(by("usage.plan.id"), "pro"), null, "a read-only row");
-  assert.equal(rowEdit(by("workspace_defaults.branch_prefix"), "x".repeat(2001)), null, "over the text bound");
-  assert.deepEqual(rowEdit(by("workspace_defaults.branch_prefix"), "g6a\u202E/\u0007"), {
-    Command: [SET_ROW, { key: "workspace_defaults.branch_prefix", value: { Text: "g6a/" } }],
+  assert.equal(rowEdit(by("authentication.claude_provider"), 2, 7), null, "an index past the options");
+  assert.equal(rowEdit(by("authentication.claude_provider"), "api_key", 7), null, "a choice is an index");
+  assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), "four", 7), null, "a number that does not parse");
+  assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), "", 7), null, "a cleared number input is not 0");
+  assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), "  ", 7), null, "nor a blank one");
+  assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), 1.5, 7), null, "an integer row");
+  assert.equal(rowEdit(by("ui_preferences.show_git_status"), "yes", 7), null, "a bool is a boolean");
+  assert.equal(rowEdit(by("usage.plan.id"), "pro", 7), null, "a read-only row");
+  assert.equal(rowEdit(by("workspace_defaults.branch_prefix"), "x".repeat(2001), 7), null, "over the text bound");
+  assert.deepEqual(rowEdit(by("workspace_defaults.branch_prefix"), "g6a\u202E/\u0007", 7), {
+    Command: [SET_ROW, { key: "workspace_defaults.branch_prefix", value: { Text: "g6a/" }, revision: 7 }],
   }, "control and format characters are stripped");
-  assert.equal(rowEdit(by("workspace_defaults.branch_prefix"), REDACTED), null, "the scrubbed marker is never written back");
-  assert.equal(rowEdit(by("workspace_defaults.branch_prefix"), `x${REDACTED}y`), null, "nor inside a value");
+  assert.equal(rowEdit(by("workspace_defaults.branch_prefix"), REDACTED, 7), null, "the scrubbed marker is never written back");
+  assert.equal(rowEdit(by("workspace_defaults.branch_prefix"), `x${REDACTED}y`, 7), null, "nor inside a value");
 });
 
 test("a row whose value the host runs is drawn inert, with the reason, whatever its category", () => {
@@ -156,11 +215,11 @@ test("a row whose value the host runs is drawn inert, with the reason, whatever 
     description: "",
     value: { Text: "code" },
   });
-  const rows = settingsCategories(view).flatMap((category) => category.rows);
+  const rows = allRows(view);
   const editor = rows.find((row) => row.key === "ui_preferences.preferred_editor")!;
   assert.ok(editor.readOnly);
   assert.match(editor.readOnlyReason!, /host runs, binds or trusts/);
-  assert.equal(rowEdit(editor, "evil"), null);
+  assert.equal(rowEdit(editor, "evil", 7), null);
   const usage = rows.find((row) => row.key === "usage.plan.id")!;
   assert.match(usage.readOnlyReason!, /host runs, binds or trusts/, "[usage] is the burndown plugin's file");
   assert.equal(rows.find((row) => row.key === "workspace_defaults.branch_prefix")!.readOnlyReason, null);
@@ -221,15 +280,4 @@ test("the daemons panel draws the collector's rows and the hook wiring", () => {
   ]);
   assert.deepEqual(daemonRows(undefined), []);
   assert.deepEqual(hookHealthLines(hangar([], null)), []);
-});
-
-test("the page's lines carry every category, row and daemon it draws", () => {
-  const lines = settingsLines(config(), hangar([{ kind: "notifyd", state: "running", connected: true, version: "1", error_count: 0, reason: "", last_error: null }]));
-  assert.equal(lines[0], "Settings (6 settings)");
-  assert.ok(lines.includes("Authentication"));
-  assert.ok(lines.includes("Claude Authentication: api_key"));
-  assert.ok(lines.includes("How Claude authenticates"));
-  assert.ok(lines.includes("Daemons: runtime health"));
-  assert.ok(lines.includes("DAEMON STATE VERSION ERR HEALTH"));
-  assert.ok(lines.includes("notifyd running 1 0 connected"));
 });
