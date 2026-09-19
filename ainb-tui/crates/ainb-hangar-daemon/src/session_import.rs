@@ -51,9 +51,10 @@ use std::time::{Duration, SystemTime};
 
 pub use ainb_hangar_store::repo::sessions::{ImportMarker, NameConflict, ReconcileOutcome};
 
-/// How long a daemon writer waits for the `sessions.json` flock before it
-/// gives up. Every daemon wait on that flock is bounded, so a client holding
-/// it across an RPC to this daemon can never deadlock the two.
+/// How long a daemon writer waits for the `sessions.json` flock.
+///
+/// Every daemon wait on that flock is bounded, so a client holding it across
+/// an RPC to this daemon can never deadlock the two.
 pub const SESSIONS_FLOCK_BOUND: Duration = Duration::from_secs(2);
 
 /// How often [`ReconcileWatch`] checks the file's mtime.
@@ -228,9 +229,16 @@ pub async fn acquire_sessions_flock(dir: &Path, bound: Duration) -> Result<std::
 pub struct ReconcileWatch {
     path: std::path::PathBuf,
     max_bytes: u64,
-    /// The mtime the last successful pass read, `None` for a missing file;
-    /// the outer `None` means no pass has succeeded yet.
-    reconciled: Option<Option<SystemTime>>,
+    last: LastPass,
+}
+
+/// What [`ReconcileWatch`] knows about its previous pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastPass {
+    /// No pass has run yet, or the last one failed: the next tick runs one.
+    Due,
+    /// The last pass succeeded having read this mtime (`None`: no file).
+    Read(Option<SystemTime>),
 }
 
 impl ReconcileWatch {
@@ -246,7 +254,7 @@ impl ReconcileWatch {
         Self {
             path: sessions_path.to_path_buf(),
             max_bytes,
-            reconciled: None,
+            last: LastPass::Due,
         }
     }
 
@@ -255,17 +263,17 @@ impl ReconcileWatch {
     pub async fn tick(&mut self, pool: &SqlitePool) -> Option<Result<ReconcileOutcome>> {
         let path = self.path.clone();
         let now = tokio::task::spawn_blocking(move || file_mtime(&path)).await.ok()?;
-        if self.reconciled == Some(now) {
+        if self.last == LastPass::Read(now) {
             return None;
         }
         Some(
             match reconcile_pass(pool, &self.path, self.max_bytes).await {
                 Ok((outcome, mtime)) => {
-                    self.reconciled = Some(mtime);
+                    self.last = LastPass::Read(mtime);
                     Ok(outcome)
                 }
                 Err(e) => {
-                    self.reconciled = None;
+                    self.last = LastPass::Due;
                     Err(e)
                 }
             },
