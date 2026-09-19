@@ -63,7 +63,7 @@ describe("reviewing from the window", () => {
     await $(".sidebar").waitForExist({ timeout: 90_000 });
     await browser.waitUntil(async () => !(await $(".banner").isExisting()), {
       timeout: 90_000,
-      timeoutMsg: async () => `the sidecar never connected: ${await $(".banner").getText()}`,
+      timeoutMsg: "the sidecar never connected: the window still shows a banner",
     });
     await browser.waitUntil(async () => (await $$(".session-row")).length > 0, {
       timeout: 60_000,
@@ -155,7 +155,7 @@ describe("reviewing from the window", () => {
     await $(".settings-page").waitForExist({ timeout: 30_000 });
     await browser.waitUntil(async () => (await $$(".settings-row")).length > 0, {
       timeout: 60_000,
-      timeoutMsg: async () => `the settings page drew no row: ${await $(".settings-rows .empty").getText()}`,
+      timeoutMsg: "the settings page drew no row of the config section",
     });
     for (const row of await $$(".settings-row")) {
       const key = await row.getAttribute("data-key");
@@ -194,21 +194,28 @@ describe("reviewing from the window", () => {
  */
 async function click(selector, timeout = 60_000) {
   let last = null;
-  await browser.waitUntil(
-    async () => {
-      try {
-        const element = await $(selector);
-        if (!(await element.isExisting())) return false;
-        await element.click();
-        return true;
-      } catch (error) {
-        last = error;
-        if (!/stale element|no longer attached|not interactable/i.test(String(error))) throw error;
-        return false;
-      }
-    },
-    { timeout, timeoutMsg: () => `${selector} never took a click: ${last}` },
-  );
+  try {
+    await browser.waitUntil(
+      async () => {
+        try {
+          const element = await $(selector);
+          if (!(await element.isExisting())) return false;
+          await element.click();
+          return true;
+        } catch (error) {
+          last = error;
+          if (!/stale element|no longer attached|not interactable/i.test(String(error))) throw error;
+          return false;
+        }
+      },
+      { timeout },
+    );
+  } catch (error) {
+    // The message is built here rather than in `timeoutMsg`: wdio takes that
+    // option as a string, so a function there is dropped and the run reports
+    // the bare timeout with nothing about what the clicks were hitting.
+    throw new Error(`${selector} never took a click in ${timeout} ms, last: ${last ?? error}`);
+  }
 }
 
 /** The category the frame says is selected, as the tree draws it. */
