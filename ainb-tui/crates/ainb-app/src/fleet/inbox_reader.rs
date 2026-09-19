@@ -276,16 +276,16 @@ mod tests {
         })]);
         let mut reader = InboxReader::spawn_with(read, fast());
         let mut state = AppState::new();
-        let before = state.section_versions()[SectionId::Inbox.index()];
+        let before = state.versions()[SectionId::Inbox.index()];
         drain_until(&mut reader, &mut state, |s| s.inbox.get().unread == 2).await;
         assert_eq!(state.inbox.get().entries.len(), 2);
-        assert!(state.section_versions()[SectionId::Inbox.index()] > before);
+        assert!(state.versions()[SectionId::Inbox.index()] > before);
         // It keeps reading, and the same rows again bump nothing.
-        let after = state.section_versions()[SectionId::Inbox.index()];
+        let after = state.versions()[SectionId::Inbox.index()];
         tokio::time::sleep(Duration::from_millis(60)).await;
         reader.drain_into(&mut state);
         assert!(calls.load(Ordering::SeqCst) >= 3, "the reader polls on its cadence");
-        assert_eq!(state.section_versions()[SectionId::Inbox.index()], after);
+        assert_eq!(state.versions()[SectionId::Inbox.index()], after);
     }
 
     #[tokio::test]
