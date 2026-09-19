@@ -11,7 +11,7 @@ use ainb_app::wire::frame::HostId;
 use ainb_app::wire::section_json;
 use ainb_app::wire::usage::{
     USAGE_DETAIL_MAX_BYTES, USAGE_FRAME_MAX_BYTES, USAGE_MAX_BREAKDOWN, USAGE_MAX_DAILY,
-    USAGE_MAX_NAME_CHARS,
+    USAGE_MAX_NAME_CHARS, USAGE_REASON_MAX_CHARS,
 };
 use ainb_hangar_proto::fleet::{
     FleetUsageBucket, FleetUsageDailyBucket, FleetUsageModelBucket, FleetUsageProjectBucket,
@@ -242,6 +242,7 @@ fn a_reply_past_every_cap_is_cut_counted_and_bounded_in_bytes() {
         },
         1,
     );
+    state.usage_read_failed("\"".repeat(100_000));
     let body = framed(&state);
     let summary = &body["summary"];
     assert_eq!(
@@ -249,6 +250,15 @@ fn a_reply_past_every_cap_is_cut_counted_and_bounded_in_bytes() {
         USAGE_MAX_DAILY
     );
     assert_eq!(summary["daily_cut"], 500 - USAGE_MAX_DAILY);
+    // `daily` is oldest first, so the cut drops the oldest: the frame keeps
+    // the thirty days a person is looking at, ending today.
+    let first = summary["daily"][0]["date"].as_str().expect("a date");
+    let last = summary["daily"][USAGE_MAX_DAILY - 1]["date"].as_str().expect("a date");
+    assert!(
+        first.starts_with("470"),
+        "the oldest kept day is day 470: {first:.8}"
+    );
+    assert!(last.starts_with("499"), "the newest day is kept: {last:.8}");
     for (list, cut) in [
         ("providers", "providers_cut"),
         ("models", "models_cut"),
@@ -273,9 +283,83 @@ fn a_reply_past_every_cap_is_cut_counted_and_bounded_in_bytes() {
         "{} bytes",
         detail.len()
     );
+    let failure = body["failure"].as_str().expect("a failure");
+    assert!(
+        failure.chars().count() <= USAGE_REASON_MAX_CHARS + 8,
+        "the failure is cut: {} chars",
+        failure.chars().count()
+    );
     let encoded = serde_json::to_vec(&body).expect("encodes").len();
     assert!(
         encoded <= USAGE_FRAME_MAX_BYTES,
         "{encoded} bytes past {USAGE_FRAME_MAX_BYTES}"
+    );
+}
+
+/// An absent reason is the host's text and has no ceiling of its own either.
+#[test]
+fn an_absent_reason_is_cut() {
+    let mut state = AppState::new();
+    state.usage_absent("x".repeat(100_000));
+    let absent = framed(&state)["absent"].as_str().expect("absent").to_string();
+    assert!(
+        absent.chars().count() <= USAGE_REASON_MAX_CHARS + 8,
+        "{} chars",
+        absent.chars().count()
+    );
+}
+
+/// A project's key is the producer's aggregation key, and for a provider that
+/// keys by working directory it is that path with its separators dashed
+/// (`-home-<user>-src-app`). The frame carries a label, never the operator's
+/// home: this host's home is stripped, another user's home prefix is dropped,
+/// and a slash path keeps only its leaf.
+#[test]
+fn a_project_key_shaped_like_a_path_frames_without_the_home() {
+    let home = dirs::home_dir().expect("a home");
+    let dashed_home = home.to_string_lossy().replace('/', "-");
+    let mut reply = ready();
+    let keys = [
+        format!("{dashed_home}-src-agents-in-a-box"),
+        format!("{}-src-app", dashed_home.trim_start_matches('-')),
+        "-Users-sample-user-work-api".to_string(),
+        "-home-other-code-web".to_string(),
+        format!("{}/src/tool", home.display()),
+        "agents-in-a-box".to_string(),
+    ];
+    reply.projects = keys
+        .iter()
+        .map(|key| FleetUsageProjectBucket {
+            project: key.clone(),
+            repo: None,
+            bucket: bucket(1, None),
+        })
+        .collect();
+    let mut state = AppState::new();
+    state.apply_usage_read(reply, 1);
+    let body = framed(&state);
+    let names: Vec<&str> = body["summary"]["projects"]
+        .as_array()
+        .expect("projects")
+        .iter()
+        .map(|row| row["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "src-agents-in-a-box",
+            "src-app",
+            "user-work-api",
+            "code-web",
+            "tool",
+            "agents-in-a-box",
+        ]
+    );
+    let user = home.file_name().expect("a user").to_string_lossy().to_string();
+    let text = serde_json::to_string(&body).expect("encodes");
+    assert!(!text.contains(&dashed_home), "a dashed home framed: {text}");
+    assert!(
+        !text.contains(&format!("-{user}-")),
+        "the user framed: {text}"
     );
 }
