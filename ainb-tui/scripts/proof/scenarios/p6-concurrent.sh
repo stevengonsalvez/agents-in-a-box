@@ -117,6 +117,9 @@ p6_combination() {
     p6_tui_reload "$i"
     check "$name: the session the CLI created reached $i" \
       wait_for 60 p6_tui_has "$i" "$row"
+    pane_text "$i" >"$NODE_DIR/$name-$i-list.txt" 2>/dev/null || true
+    CAPTURES+=("$name-$i-list.txt")
+    observe "$name: $i shows: $(pane_text "$i" | sed -E 's/[^[:print:]]//g' | grep -oE '(agents/[0-9a-f]{8}|repo|No sessions|Sessions)' | sort -u | tr '\n' ' ')"
   done
   if [[ "$web" == "1" ]]; then
     check "$name: the session the CLI created reached ainb web" \
