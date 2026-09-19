@@ -277,12 +277,24 @@ impl Client {
     }
 
     async fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.call_within(method, params, Duration::from_secs(10)).await
+    }
+
+    /// [`Self::call`] with a caller-chosen wait, for a reply that is slow by
+    /// design: a debug build reads, scrubs and serialises a half-MiB page,
+    /// which a loaded runner has stretched past the default 10s.
+    async fn call_within(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        wait: Duration,
+    ) -> serde_json::Value {
         self.send(method, params).await;
         loop {
             let frame = self
-                .read_frame(Duration::from_secs(10))
+                .read_frame(wait)
                 .await
-                .unwrap_or_else(|| panic!("no response to {method} within 10s"));
+                .unwrap_or_else(|| panic!("no response to {method} within {wait:?}"));
             if frame.get("id").is_some() {
                 return frame;
             }
@@ -1924,9 +1936,10 @@ async fn a_cursored_transcript_read_is_bounded_in_bytes_too() {
     let mut pages = Vec::new();
     while pages.len() < 10 {
         let page = client
-            .call(
+            .call_within(
                 methods::FLEET_TRANSCRIPT_LIST,
                 serde_json::json!({ "session_key": "acp:mine", "after_order": after, "limit": 10 }),
+                Duration::from_secs(60),
             )
             .await;
         let result = &page["result"];
