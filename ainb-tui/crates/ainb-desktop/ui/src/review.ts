@@ -69,14 +69,6 @@ export function fileRows(section: GitViewView_Serialize | undefined): FileRow[] 
   }));
 }
 
-/** The file the reducer has open, if the frame carries one. */
-export function openFile(
-  section: GitViewView_Serialize | undefined,
-): ReviewFileFrame_Serialize | undefined {
-  const view = gitView(section);
-  return view?.review.files[view.review_ui.selected_file];
-}
-
 /**
  * The whole review's body: each file's heading, then its hunks and their rows.
  *
@@ -178,6 +170,57 @@ export function wheelRows(pending: number, wheel: Wheel): { rows: number; pendin
   return { rows, pending: total - rows * ROW_PX };
 }
 
+/** A run of a row's text, and whether the reducer marked it as changed. */
+export interface Segment {
+  text: string;
+  emphasis: boolean;
+}
+
+/**
+ * The UTF-16 index `byte` names in `text`.
+ *
+ * A row's emphasis ranges are BYTE offsets, because the reducer measured them
+ * in Rust where a string is UTF-8; a JavaScript string is indexed in UTF-16
+ * code units. For ASCII the two agree, and for everything else they do not:
+ * one accented letter is two bytes and one unit, one emoji four bytes and two.
+ */
+function utf16Index(text: string, byte: number): number {
+  if (byte <= 0) return 0;
+  let bytes = 0;
+  let index = 0;
+  while (index < text.length) {
+    if (bytes >= byte) return index;
+    const code = text.codePointAt(index) ?? 0;
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+    index += code > 0xffff ? 2 : 1;
+  }
+  return text.length;
+}
+
+/**
+ * `row`'s text split into the runs the reducer marked and the runs it did not,
+ * so the window draws the word-level emphasis the terminal draws.
+ *
+ * A row whose text the frame changed carries no ranges at all (the projection
+ * drops them when it scrubs or cuts), so the common case is one run and no
+ * work.
+ */
+export function segments(row: DiffRow_Serialize): Segment[] {
+  if (row.emphasis.length === 0) return [{ text: row.raw, emphasis: false }];
+  const runs: Segment[] = [];
+  let at = 0;
+  for (const [from, to] of row.emphasis) {
+    const start = utf16Index(row.raw, from);
+    const end = utf16Index(row.raw, to);
+    if (end <= start || start < at) continue;
+    if (start > at) runs.push({ text: row.raw.slice(at, start), emphasis: false });
+    runs.push({ text: row.raw.slice(start, end), emphasis: true });
+    at = end;
+  }
+  if (at < row.raw.length) runs.push({ text: row.raw.slice(at), emphasis: false });
+  return runs;
+}
+
 /** `@@ -old +new @@`, as a diff names a hunk. */
 export function hunkHeader(hunk: HunkFrame_Serialize): string {
   return `@@ -${hunk.old_start} +${hunk.new_start} @@`;
@@ -222,11 +265,6 @@ export const WITHHELD =
 /** Select the file at `path`, by path rather than by index. */
 export function selectFileIntent(path: string): RendererIntent {
   return { Command: ["git_view.select_review_row", { target: { file: path } }] };
-}
-
-/** Select the directory at `path` in the sidebar tree. */
-export function selectDirIntent(path: string): RendererIntent {
-  return { Command: ["git_view.select_review_row", { target: { dir: path } }] };
 }
 
 /** Scroll the review by `lines`, down when positive; the reducer owns the offset. */
