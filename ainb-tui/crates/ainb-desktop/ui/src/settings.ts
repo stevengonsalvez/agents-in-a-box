@@ -53,117 +53,192 @@ export interface SettingsCategory {
 
 /**
  * The rows a renderer may edit (#1224), the page's copy of
- * `ainb_app::config::renderer_edit`: rows whose value reaches a program the
- * host runs are denied, then only rows on the allow list are drawn editable.
- * The reducer judges every edit the same way; this copy only spares a round
- * trip and draws the row inert. `parity.test.ts` diffs the two copies through
- * `ainb-app/tests/fixtures/renderer_editable_rows.txt`.
+ * `ainb_app::config::renderer_edit`: two exact lists of registry keys (`*`
+ * for a map segment, no prefixes), deny by default, and a secret row refused
+ * before either. The reducer judges every edit the same way; this copy only
+ * spares a round trip and draws the row inert with the reason. `parity.test.ts`
+ * diffs the two copies through `ainb-app/tests/fixtures/renderer_editable_rows.txt`.
  */
 export const DENIED_ROWS: readonly string[] = [
+  "presets.file",
+  "general.skill_install_real_homes",
   "ui_preferences.preferred_editor",
-  "acp.adapters.*.command",
+  "container_templates.*.config.image_source.type",
+  "container_templates.*.config.image_source.name",
+  "container_templates.*.config.image_source.path",
+  "container_templates.*.config.image_source.base_image",
+  "container_templates.*.config.image_source.build_args.*",
   "container_templates.*.config.command",
   "container_templates.*.config.entrypoint",
   "container_templates.*.config.environment.*",
-  "container_templates.*.config.image_source.path",
-  "container_templates.*.config.image_source.build_args.*",
-  "container_templates.*.config.volumes",
-  "container_templates.*.config.mount_ssh",
-  "container_templates.*.config.mount_git_config",
+  "container_templates.*.config.user",
   "container_templates.*.config.system_packages",
   "container_templates.*.config.npm_packages",
   "container_templates.*.config.python_packages",
+  "container_templates.*.config.ports",
+  "container_templates.*.config.volumes",
+  "container_templates.*.config.mount_ssh",
+  "container_templates.*.config.mount_git_config",
+  "mcp_servers.*.installation.type",
+  "mcp_servers.*.installation.package",
+  "mcp_servers.*.installation.version",
+  "mcp_servers.*.installation.url",
+  "mcp_servers.*.installation.branch",
+  "mcp_servers.*.installation.install_command",
+  "mcp_servers.*.installation.script",
+  "mcp_servers.*.definition.type",
   "mcp_servers.*.definition.command",
   "mcp_servers.*.definition.args",
   "mcp_servers.*.definition.env.*",
   "mcp_servers.*.definition.config",
-  "mcp_servers.*.installation.install_command",
-  "mcp_servers.*.installation.script",
-  "mcp_servers.*.installation.package",
-  "mcp_servers.*.installation.url",
-  "mcp_servers.*.installation.branch",
+  "workspace_defaults.exclude_paths",
+  "workspace_defaults.workspace_scan_paths",
   "docker.host",
-  "fleet.terminal",
-  "hangar_daemon.card_agent.default",
+  "usage.plan.id",
+  "usage.plan.monthly_usd",
+  "usage.plan.provider",
+  "usage.plan.reset_day",
+  "usage.currency.code",
+  "usage.currency.symbol",
+  "usage.currency.usd_rate",
+  "usage.model_aliases.*",
   "plugins.enabled",
   "plugins.disabled",
-  "plugins.*",
-  "presets.file",
+  "fleet.terminal",
+  "fleet.transport",
+  "fleet.bridge.outbound_enabled",
+  "fleet.bridge.outbound_poll_secs",
+  "fleet.bridge.response_timeout",
+  "fleet.bridge.telegram.token",
+  "fleet.bridge.telegram.user_id",
+  "fleet.bridge.telegram.default_target",
+  "fleet.bridge.telegram.require_mention_in_groups",
+  "fleet.bridge.telegram.response_timeout",
+  "fleet.bridge.slack.bot_token",
+  "fleet.bridge.slack.app_token",
+  "fleet.bridge.slack.user_id",
+  "fleet.bridge.slack.default_target",
+  "fleet.bridge.slack.listen_mode",
+  "fleet.bridge.slack.response_timeout",
+  "fleet.bridge.discord.token",
+  "fleet.bridge.discord.user_id",
+  "fleet.bridge.discord.default_target",
+  "fleet.bridge.discord.channel_id",
+  "fleet.bridge.discord.response_timeout",
+  "usage_client.headroom_port",
   "usage_client.cache_db",
+  "notifyd.approval_timeout_secs",
   "web.listen",
+  "web.read_only",
   "web.insecure_bind",
+  "acp.adapters.*.command",
+  "acp.adapters.*.permission_mode",
   "skills.catalog_release",
+  "skills.api_key",
+  "hangar_daemon.card_agent.default",
 ];
 
-/** Rows the page edits; a trailing `.` allows every row under the prefix. */
+/** Rows the page edits. Exact keys, `*` for a map segment. */
 export const ALLOWED_ROWS: readonly string[] = [
-  "general.",
-  "authentication.",
-  "workspace_defaults.",
-  "ui_preferences.",
-  "ui.",
-  "docker.timeout",
   "default_container_template",
+  "general.syntax_highlight",
+  "authentication.cli_provider",
+  "authentication.claude_provider",
+  "authentication.default_model",
+  "authentication.github_method",
   "container_templates.*.name",
   "container_templates.*.description",
   "container_templates.*.config.working_dir",
-  "container_templates.*.config.user",
   "container_templates.*.config.memory_limit",
   "container_templates.*.config.cpu_limit",
-  "container_templates.*.config.ports",
   "container_templates.*.required_env",
   "container_templates.*.default_mcp_servers",
   "mcp_servers.*.name",
   "mcp_servers.*.description",
+  "mcp_servers.*.required_env",
   "mcp_servers.*.enabled_by_default",
   "mcp_servers.*.shared",
-  "mcp_servers.*.required_env",
-  "mcp_servers.*.installation.type",
-  "mcp_servers.*.installation.version",
-  "mcp_servers.*.definition.type",
-  "fleet.",
-  "mcp_pool.",
-  "usage_client.headroom_port",
+  "workspace_defaults.branch_prefix",
+  "workspace_defaults.max_repositories",
+  "workspace_defaults.worktree_collision_behavior",
+  "workspace_defaults.scan_max_depth",
+  "workspace_defaults.scan_cache_ttl_secs",
+  "ui_preferences.theme",
+  "ui_preferences.show_container_status",
+  "ui_preferences.show_git_status",
+  "ui_preferences.show_session_menu_bar",
+  "ui.tick_rate_ms",
+  "ui.app_tick_ms",
+  "ui.session_query_limit",
+  "ui.session_lookback_hours",
+  "ui.attention_err_window_hours",
+  "ui.inbox_list_limit",
+  "ui.double_click_ms",
+  "ui.notice_error_secs",
+  "ui.notice_warning_secs",
+  "ui.notice_info_secs",
+  "docker.timeout",
+  "fleet.cost.session_usd",
+  "fleet.cost.group_usd",
+  "fleet.cost.session_overrides.*",
+  "fleet.cost.group_overrides.*",
+  "fleet.interview.surface",
+  "fleet.idle_min",
+  "fleet.enrich",
+  "fleet.state_stale_ms",
+  "fleet.healthy_state_stale_ms",
+  "fleet.tmux_idle_after_secs",
+  "mcp_pool.enabled",
+  "mcp_pool.idle_grace_secs",
+  "mcp_pool.monitor_refresh_secs",
+  "mcp_pool.daemon_idle_grace_secs",
   "usage_client.fetch_timeout_secs",
   "usage_client.codex_ttl_secs",
-  "daemons.",
-  "notifyd.",
-  "web.read_only",
-  "acp.adapters.*.permission_mode",
-  "skills.api_key",
-  "session_reader.",
-  "hangar_daemon.autostandup.",
-  "hangar_daemon.workspace.",
+  "daemons.stale_after_ms",
+  "daemons.attention_stale_after_ms",
+  "notifyd.os_debounce_secs",
+  "session_reader.incremental_window_days",
+  "hangar_daemon.autostandup.enabled",
+  "hangar_daemon.autostandup.stagnant_min",
+  "hangar_daemon.autostandup.cooldown_min",
+  "hangar_daemon.autostandup.max_concurrent",
+  "hangar_daemon.workspace.creation_disabled",
 ];
 
 /** The marker the frame puts where a value was scrubbed; never written back. */
 export const REDACTED = "<redacted>";
 
+/** The most characters a text edit may carry, as the reducer bounds it. */
+export const MAX_TEXT_CHARS = 2000;
+
+export const DENIED_REASON = "its value reaches something the host runs, binds or trusts, so the window may not set it";
+export const NOT_DRAWN_REASON = "the window's settings page does not edit it";
+export const SECRET_REASON = "a secret is set from the terminal, not the window; the page shows only whether it is set";
+
 /** Whether the concrete key `key` meets `pattern`, `*` standing for one map segment. */
 function matchesPattern(pattern: string, key: string): boolean {
   const parts = pattern.split(".");
-  const prefix = pattern.endsWith(".");
-  if (prefix) parts.pop();
   const segments = key.split(".");
-  if (prefix ? segments.length <= parts.length : segments.length !== parts.length) return false;
+  if (segments.length !== parts.length) return false;
   return parts.every((part, index) => part === "*" || part === segments[index]);
 }
 
 /**
  * Why the page draws `key` inert, or `null` when the renderer may edit it.
- * Map keys stand where the pattern has `*`, so `mcp_servers.github.definition.command`
+ * `secret` says the row is a secret, which is refused before the lists. Map
+ * keys stand where the pattern has `*`, so `mcp_servers.github.definition.command`
  * meets `mcp_servers.*.definition.command`.
  */
-export function editRefusal(key: string): string | null {
-  if (DENIED_ROWS.some((pattern) => matchesPattern(pattern, key))) {
-    return "its value reaches a program the host runs, so the window may not set it";
-  }
+export function editRefusal(key: string, secret = false): string | null {
+  if (secret) return SECRET_REASON;
+  if (DENIED_ROWS.some((pattern) => matchesPattern(pattern, key))) return DENIED_REASON;
   if (ALLOWED_ROWS.some((pattern) => matchesPattern(pattern, key))) return null;
-  return "the window's settings page does not edit it";
+  return NOT_DRAWN_REASON;
 }
 
-function readOnly(key: string): boolean {
-  return editRefusal(key) !== null;
+/** `text` as the reducer would take it: control and format characters removed. */
+export function cleanText(text: string): string {
+  return text.replace(/[\p{Cc}\p{Cf}]/gu, "");
 }
 
 function kindOf(value: ConfigValue_Serialize): RowKind {
@@ -216,8 +291,8 @@ function row(setting: ConfigSetting_Serialize, dirty: readonly string[]): Settin
     value: shown,
     options,
     selected,
-    readOnly: readOnly(setting.key),
-    readOnlyReason: editRefusal(setting.key),
+    readOnly: editRefusal(setting.key, kind === "secret") !== null,
+    readOnlyReason: editRefusal(setting.key, kind === "secret"),
     dirty: dirty.includes(setting.key),
   };
 }
@@ -255,14 +330,16 @@ export function rowEdit(row: SettingsRow, input: string | number | boolean): Ren
   if (typeof input === "string" && input.includes(REDACTED)) return null;
   let value: Record<string, string | number | boolean>;
   switch (row.kind) {
-    case "text":
+    case "text": {
       if (typeof input !== "string") return null;
-      value = { Text: input };
+      const text = cleanText(input);
+      if (Array.from(text).length > MAX_TEXT_CHARS) return null;
+      value = { Text: text };
       break;
+    }
+    // A secret row is never editable here, so `readOnly` returned above.
     case "secret":
-      if (typeof input !== "string") return null;
-      value = { Secret: input };
-      break;
+      return null;
     case "bool":
       if (typeof input !== "boolean") return null;
       value = { Bool: input };
