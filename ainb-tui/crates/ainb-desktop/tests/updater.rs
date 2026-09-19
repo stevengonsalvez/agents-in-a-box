@@ -38,10 +38,7 @@ impl Source for FakeSource {
 
     fn download(&self, url: &str, to: &Path) -> anyhow::Result<()> {
         self.requests.borrow_mut().push(format!("download {url}"));
-        let bytes = self
-            .files
-            .get(url)
-            .ok_or_else(|| anyhow::anyhow!("404 for {url}"))?;
+        let bytes = self.files.get(url).ok_or_else(|| anyhow::anyhow!("404 for {url}"))?;
         std::fs::write(to, bytes)?;
         Ok(())
     }
@@ -60,12 +57,17 @@ fn sha(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-const ROOT: &str = "https://example.org/releases/latest/download";
+/// The stable channel's root, which the fake source answers for.
+const ROOT: &str = ainb_app::cli::update::RELEASE_DOWNLOAD_ROOT;
 
 /// A manifest for `version` whose one desktop bundle is `archive` with `sha256`.
 fn manifest(version: &str, archive: &str, sha256: &str, extra: &str) -> String {
     let target = ainb_app::cli::update::current_target().unwrap();
-    let format = if cfg!(target_os = "macos") { "dmg" } else { "appimage" };
+    let format = if cfg!(target_os = "macos") {
+        "dmg"
+    } else {
+        "appimage"
+    };
     format!(
         r#"{{"version":"{version}","assets":[],"desktop":[{{"target":"{target}","format":"{format}","archive":"{archive}","sha256":"{sha256}","signed":false}}]{extra}}}"#
     )
@@ -88,14 +90,25 @@ fn off_makes_no_request_at_all() {
     let source = Rc::new(FakeSource::default());
     let u = updater(Rc::clone(&source), Channel::Off, home.path());
     assert!(matches!(u.check("1.28.2"), Check::Off));
-    assert!(source.requests.borrow().is_empty(), "{:?}", source.requests.borrow());
+    assert!(
+        source.requests.borrow().is_empty(),
+        "{:?}",
+        source.requests.borrow()
+    );
 }
 
 #[test]
 fn a_prerelease_tag_is_validated_before_it_forms_a_url() {
     assert!(validate_tag("v1.29.0-rc1").is_ok());
     assert!(validate_tag("v1.29.0").is_ok());
-    for bad in ["1.29.0-rc1", "v1.29", "v1.29.0-rc.1", "v1.29.0/../x", "", "v1.29.0 rc1"] {
+    for bad in [
+        "1.29.0-rc1",
+        "v1.29",
+        "v1.29.0-rc.1",
+        "v1.29.0/../x",
+        "",
+        "v1.29.0 rc1",
+    ] {
         assert!(validate_tag(bad).is_err(), "{bad} was accepted");
     }
     let stable = Channel::Stable;
@@ -141,7 +154,10 @@ fn a_manifest_signed_by_another_key_is_declined() {
     let other = SigningKey::from_bytes(&[22; 32]);
     source.manifests.insert(
         ROOT.into(),
-        signed(&other, &manifest("1.29.0", "ainb-desktop-1.29.0-x.dmg", &"0".repeat(64), "")),
+        signed(
+            &other,
+            &manifest("1.29.0", "ainb-desktop-1.29.0-x.dmg", &"0".repeat(64), ""),
+        ),
     );
     let u = updater(Rc::new(source), Channel::Stable, home.path());
     match u.check("1.28.2") {
@@ -154,9 +170,15 @@ fn a_manifest_signed_by_another_key_is_declined() {
 fn a_prerelease_is_declined_on_stable_and_accepted_on_prerelease() {
     let home = tempfile::tempdir().unwrap();
     let mut source = FakeSource::default();
-    let body = manifest("1.29.0-rc2", "ainb-desktop-1.29.0-rc2-x.dmg", &"0".repeat(64), "");
+    let body = manifest(
+        "1.29.0-rc2",
+        "ainb-desktop-1.29.0-rc2-x.dmg",
+        &"0".repeat(64),
+        "",
+    );
     source.manifests.insert(ROOT.into(), signed(&key(), &body));
-    let pre_root = "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v1.29.0-rc2";
+    let pre_root =
+        "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v1.29.0-rc2";
     source.manifests.insert(pre_root.into(), signed(&key(), &body));
     let source = Rc::new(source);
     let u = updater(Rc::clone(&source), Channel::Stable, home.path());
@@ -180,7 +202,10 @@ fn an_equal_or_older_release_reports_current() {
     let mut source = FakeSource::default();
     source.manifests.insert(
         ROOT.into(),
-        signed(&key(), &manifest("1.28.2", "ainb-desktop-1.28.2-x.dmg", &"0".repeat(64), "")),
+        signed(
+            &key(),
+            &manifest("1.28.2", "ainb-desktop-1.28.2-x.dmg", &"0".repeat(64), ""),
+        ),
     );
     let u = updater(Rc::new(source), Channel::Stable, home.path());
     assert!(matches!(u.check("1.28.2"), Check::Current { .. }));
@@ -211,9 +236,10 @@ fn a_checksum_mismatch_is_declined_and_leaves_no_staging_behind() {
         ROOT.into(),
         signed(&key(), &manifest("1.29.0", archive, &"0".repeat(64), "")),
     );
-    source
-        .files
-        .insert(format!("{ROOT}/{archive}"), b"not the bytes the manifest hashed".to_vec());
+    source.files.insert(
+        format!("{ROOT}/{archive}"),
+        b"not the bytes the manifest hashed".to_vec(),
+    );
     let source = Rc::new(source);
     let u = updater(Rc::clone(&source), Channel::Stable, home.path());
     let Check::Available { bundle, root, .. } = u.check("1.28.2") else {
@@ -259,12 +285,20 @@ fn a_verified_next_root_is_persisted_and_used_by_the_next_check() {
         ROOT.into(),
         signed(
             &key(),
-            &manifest("1.28.2", "a.dmg", &"0".repeat(64), &format!(r#","next_root":"{new_root}""#)),
+            &manifest(
+                "1.28.2",
+                "a.dmg",
+                &"0".repeat(64),
+                &format!(r#","next_root":"{new_root}""#),
+            ),
         ),
     );
     source.manifests.insert(
         new_root.into(),
-        signed(&key(), &manifest("1.30.0", "ainb-desktop-1.30.0-x.dmg", &"0".repeat(64), "")),
+        signed(
+            &key(),
+            &manifest("1.30.0", "ainb-desktop-1.30.0-x.dmg", &"0".repeat(64), ""),
+        ),
     );
     let source = Rc::new(source);
     let u = updater(Rc::clone(&source), Channel::Stable, home.path());
@@ -303,8 +337,12 @@ fn install_owner_is_read_from_the_running_executable() {
     let apps = tmp.path().join("Applications");
     let app = bundle_dir(&apps, "Agents in a Box.app", "v1");
     let exe = app.join("Contents/MacOS/ainb-desktop");
+    // The install is the canonical path, so a symlinked Applications (or a
+    // macOS temp dir under /private) resolves to one bundle.
     match Install::detect_from(&exe).unwrap() {
-        Install::Bundle { app: found, .. } => assert_eq!(found, app),
+        Install::Bundle { app: found, .. } => {
+            assert_eq!(found, std::fs::canonicalize(&app).unwrap());
+        }
         other => panic!("{other:?}"),
     }
 
@@ -345,7 +383,10 @@ fn swap_keeps_the_previous_byte_for_byte_and_rollback_restores_it() {
     };
     swap(&install, &staged).unwrap();
     assert_eq!(read_marker(&app), "v2");
-    assert_eq!(read_marker(&apps.join("Agents in a Box.app.previous")), "v1");
+    assert_eq!(
+        read_marker(&apps.join("Agents in a Box.app.previous")),
+        "v1"
+    );
     assert!(!staged.exists(), "the staged bundle moved, not copied");
 
     rollback(&install).unwrap();
@@ -383,7 +424,10 @@ fn an_interrupted_swap_is_finished_on_the_next_start() {
     let repaired = repair_interrupted_swap(&app).unwrap();
     assert!(repaired, "nothing was repaired");
     assert_eq!(read_marker(&app), "v2");
-    assert!(previous.exists(), "the previous stays until the new app connects");
+    assert!(
+        previous.exists(),
+        "the previous stays until the new app connects"
+    );
     assert!(!staged.exists());
     // Nothing to do when the app is in place.
     assert!(!repair_interrupted_swap(&app).unwrap());
@@ -397,7 +441,7 @@ fn a_staged_bundle_loses_its_quarantine_attribute_before_the_swap() {
     let app = bundle_dir(&apps, "Agents in a Box.app", "v1");
     let staged = bundle_dir(&tmp.path().join("staging"), "Agents in a Box.app", "v2");
     let status = std::process::Command::new("xattr")
-        .args(["-w", "com.apple.quarantine", "0083;00000000;test;", ])
+        .args(["-w", "com.apple.quarantine", "0083;00000000;test;"])
         .arg(&staged)
         .status()
         .unwrap();
@@ -407,11 +451,7 @@ fn a_staged_bundle_loses_its_quarantine_attribute_before_the_swap() {
         previous: apps.join("Agents in a Box.app.previous"),
     };
     swap(&install, &staged).unwrap();
-    let out = std::process::Command::new("xattr")
-        .arg("-l")
-        .arg(&app)
-        .output()
-        .unwrap();
+    let out = std::process::Command::new("xattr").arg("-l").arg(&app).output().unwrap();
     assert!(
         !String::from_utf8_lossy(&out.stdout).contains("com.apple.quarantine"),
         "quarantine survived the swap"
