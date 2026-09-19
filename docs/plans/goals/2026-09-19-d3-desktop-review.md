@@ -18,6 +18,7 @@
   - `wire/mod.rs:544` frames `GitViewView` from `GitViewSection` (`sections.rs:59-66`), which holds the whole `GitViewState`, so the review model the TUI paints is already on the wire: the desktop needs a renderer, not a new family.
   - There is no review screen id. Review is a tab inside the git view: `ainb-core/src/components/git_view.rs:70` lists `Review`, `Commits`, `Markdown` and dispatches to `code_review::render::render` at `:91-92`, under `ids::GIT_VIEW` (`ainb-app/src/app/screens/mod.rs:42`). The model is already reduced in `ainb-app/src/components/code_review/{model.rs,parse.rs,render.rs}`, held on `GitViewState` (`ainb-app/src/components/git_view.rs:15`, `:44` `review: ReviewModel`, `:45` `review_ui: CodeReviewUi`, `:99` `enum GitTab`) with the reducer helpers at `:178-277`. What stays in `ainb-core` is paint only: `components/code_review/render.rs` (850 lines of ratatui) and `highlight.rs`. The click path already exists as a pointer row, `git_view.select_review_row` (`ainb-app/src/app/pointer.rs:46`, builder `:185`), pinned by `ainb-app/tests/review_commands.rs`.
   - `wire/mod.rs:163` frames the inbox as `InboxView {}`, an empty struct (`:608-610`). `sections.rs:763-772` says why: the inbox screen's state was removed from `AppState` before the extraction, the section kept its place so nothing renumbers, and it "gains fields when the screen does". `components/layout.rs:947` records the other half, the `b inbox` hint and its unread badge gone with the screen. **The inbox is not a port in this node. It is a screen that has to come back, on a framed source, for both surfaces at once.**
+  - The inbox belongs to **D3-prime**, not to this node: see "WHAT MOVES TO D3-PRIME". The facts stay here because they are what that node starts from.
   - The daemon already serves it: `hangar/inbox_list` (`ainb-hangar-proto/src/methods.rs:1173`) and `hangar/inbox_mark_read` (`:1192`), rows as `InboxEntryRow` (`ainb-hangar-proto/src/events.rs:1061-1086`), written by the aggregator at `ainb-hangar-daemon/src/lib.rs:147`, spawned `:971`. The only surface reading it today is the hangar plugin (`ainb-plugin-hangar/src/plugin.rs:146`, `:337`, `:1529`, `:2248-2267`); `ainb-web` reads `attention/list` instead (`ainb-tui/crates/ainb-web/src/data.rs:283`).
   - Two different things are called the inbox, and this node must not conflate them: the notification inbox above, and the per-parent completion JSONL behind `ainb hangar inbox {peek,drain,commit}` (`ainb-core/src/cli/registry.rs:2926-2956`), which ATC consumes (`cli/fleet/atc.rs:45`, `:247`, `:1201`). The screen is the first.
   - `wire/mod.rs:624-629` frames `ConfigView` from `ConfigSection` (`sections.rs:405-416`: `app_config`, `config_screen_state`, `config_popup_state`, `statusline_status`), and `tests/config_screen_keys.rs` and `tests/config_screen_merge_save.rs` are the behaviour already pinned. The writer is `AppConfig::save` (`ainb-app/src/config/mod.rs:2218`, `save_to_dir` `:2576`) behind the config lock (`config/lock.rs:45`), so a settings form writes through the same path the TUI does.
@@ -101,12 +102,6 @@ Six PRs. Each is mergeable alone, targets `v2`, and carries its own proof. The a
 · Proof: `ui/` tests for the projection (a hunk renders its rows; a file with no hunks says so; a selection maps to the reducer's row id); a parity fixture `code_review` drawn by both renderers against one expected-facts list.
 · Gate: as D3a, plus `tsc --noEmit --strict` and the frontend tests.
 
-**D3c, the inbox screen, on both surfaces.**
-· Touches: `ainb-tui/crates/ainb-app/src/app/` (the screen id, its pointer rows and keymap rows), `ainb-tui/crates/ainb-core/src/components/` (the TUI screen the section lost), `ainb-tui/crates/ainb-desktop/ui/src/inbox.ts` and `inbox.tsx`, `ui/src/main.tsx`.
-· Builds: the screen the section has been holding a place for (`sections.rs:763-772`), drawn from the framed fields D3a added, with the unread badge `layout.rs:947` names restored on the same source, and `hangar/inbox_mark_read` as the one write it sends.
-· Proof: `ainb-app` tests for the screen's rows and its pointer commands; a parity fixture `inbox` drawn by both renderers; the TUI tripwires green with the screen back.
-· Gate: as D3b, plus the tripwires.
-
 **D3d, settings, the daemons panel and the onboarding writes (#1175).**
 · Touches: `ainb-tui/crates/ainb-desktop/src/` (a shell-owned confirmation command), `ui/src/settings.ts` and `settings.tsx`, `ui/src/main.tsx`, `ainb-tui/crates/ainb-app/src/app/` if a row's refusal reason gains a pointer to the new path.
 · Builds: the settings page over the framed `config` section as a form, the daemons panel the screen inventory maps to settings (`:229`), and the native path for the three onboarding writes the webview may not run: install the focused dependency or all of them, write `~/.tmux.conf`, and finish an OpenTelemetry setup. The confirmation is owned by the Tauri shell, never a keymap row sent from the webview, and the refusal toast points at it once it exists.
@@ -117,6 +112,16 @@ Six PRs. Each is mergeable alone, targets `v2`, and carries its own proof. The a
 · Touches: `ainb-tui/crates/ainb-desktop/`, `ainb-tui/scripts/proof/scenarios/d3-review.sh`, `ainb-tui/scripts/proof/run.sh`, `.github/workflows/desktop.yml`, `docs/plans/2026-09-12-desktop-programme.md`.
 · Builds: whatever D3·spec decided for a plugin view (a component over sections, or a fallback cell that paints the plugin's own buffer in a terminal cell, which is the one shape that needs no JSON on a frame); the wdio review journey as its own spec file beside `journey.e2e.js` and `answer.e2e.js`, under the one-runner refusal #1160 landed; the `d3-review` proof scenario in the shape of `d2-board.sh`, registered in `ALL_NODES` with a `skip` when `xvfb-run` is missing; the CI wiring; and the D3 row flipped with the run ids.
 · Gate: the success criteria below, all green.
+
+─ WHAT MOVES TO D3-PRIME ─
+
+The inbox screen is its own node. Bringing a screen back on two surfaces over a framed family that does not exist yet is D2a plus D2b in size: a new field set on `InboxSection`, its scrubbers, its fixture, a TUI screen, a webview screen, and a write. D3's gate does not need it, because "a fixture per screen D3 draws" holds only for the screens D3 draws.
+
+D3-prime, when it is written, carries:
+· The inbox section's fields, read through `hangar/inbox_list` (`ainb-hangar-proto/src/methods.rs:1173`) by the host, bounded, each field scrubbed or allow-listed with its reason.
+· The screen on both surfaces at once, the TUI's and the desktop's, because the section is the boundary and a screen that exists on one surface only is the drift the section set exists to stop.
+· `hangar/inbox_mark_read` (`methods.rs:1192`) as **a mutation under D18**: it carries a mutation envelope with an op id and a fence, and the node states what a replay of it does. This programme already carries one envelope-less write as debt (`AnswerParams.mutation`); a second one is not added quietly.
+· The stats tab and the plugin fallback cell, with the costs recorded under "WHAT D3 DEFERS".
 
 ─ WHICH EXISTING TESTS MUST STAY GREEN ─
 
