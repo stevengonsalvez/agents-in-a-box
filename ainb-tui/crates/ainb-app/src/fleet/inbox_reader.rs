@@ -84,7 +84,16 @@ impl InboxReader {
     /// handed before calling this, since its subscribe command has none.
     #[must_use]
     pub fn spawn(dialer: Dialer) -> Self {
-        Self::spawn_with(read_through(dialer), Timing::default())
+        Self::spawn_timed(dialer, Timing::default())
+    }
+
+    /// [`Self::spawn`] at a cadence of the host's choosing: the terminal
+    /// reads slowly while the inbox screen is not the one open, so its
+    /// unread badge is live without a daemon round trip every few seconds
+    /// for a screen nobody is looking at.
+    #[must_use]
+    pub fn spawn_timed(dialer: Dialer, timing: Timing) -> Self {
+        Self::spawn_with(read_through(dialer), timing)
     }
 
     /// Start the task over any read, with its timing given. For tests, and
