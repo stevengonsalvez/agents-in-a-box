@@ -78,11 +78,15 @@ describe("reviewing from the window", () => {
     // The reducer builds the review for the selected session, through the
     // palette rather than through anything this spec reaches into.
     await browser.keys([...MOD, "k"]);
-    await $(".palette-query").waitForExist({ timeout: 30_000 });
+    const query = await $(".palette-query");
+    await query.waitForExist({ timeout: 30_000 });
     // The palette draws the first PALETTE_ROWS of the list until a query
     // narrows it, and this row is far down, so it is asked for by id: the
-    // detail line a row carries is "<context> · <id>".
-    await browser.keys("session_list.git");
+    // detail line a row carries is "<context> · <id>". setValue rather than
+    // keys, because the query survives the palette being closed and reopened,
+    // and another spec in this world has typed in it before now: typed keys
+    // would land after whatever it still held.
+    await query.setValue("session_list.git");
     const command = await $('.palette-row[data-row="command:session_list.git"]');
     await command.waitForExist({ timeout: 30_000 });
     await command.click();
