@@ -97,6 +97,9 @@ pub struct DesktopHost<S: FrameSink> {
     /// about the reducer turns it off: the poller is a thread on a real
     /// socket, and its first publish is news whenever it lands.
     poll_attention: bool,
+    /// The daemons panel the settings page draws: keeps the collector alive
+    /// while the reducer is on the Config screen.
+    daemons_panel: crate::daemons_panel::DaemonsPanel,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -142,6 +145,7 @@ impl<S: FrameSink> DesktopHost<S> {
             rescan: WorkspaceRescan::default(),
             agent_status: crate::agent_status::AgentStatusPoll::default(),
             read_agent_status: crate::agent_status::read_on_worker,
+            daemons_panel: crate::daemons_panel::DaemonsPanel::default(),
             poll_attention: true,
         }
     }
@@ -257,6 +261,9 @@ impl<S: FrameSink> DesktopHost<S> {
             ainb_app::fleet::daemons::heartbeat::now_ms(),
             self.read_agent_status,
         );
+        // The daemons panel on the settings page (D3d): the collector the
+        // terminal's Daemons screen arms, kept alive while Config is open.
+        self.daemons_panel.tick(&mut self.state);
         let effects = self.state.take_effects();
         self.pump();
         effects
@@ -351,9 +358,11 @@ impl<S: FrameSink> DesktopHost<S> {
         } else {
             self.state.remote_command_refusal(&row.action)
         };
+        // An onboarding write has a path of its own in this shell (#1175):
+        // the refusal points at it rather than at a key the window cannot use.
         why.map(|reason| Refusal {
+            reason: crate::setup::desktop_path(&id).unwrap_or(reason),
             command: id,
-            reason,
         })
     }
 
