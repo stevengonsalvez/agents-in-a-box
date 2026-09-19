@@ -31,17 +31,21 @@ test("a registered plugin with no frame yet is connecting", () => {
 });
 
 test("a recorded render error outranks connecting, as it does on the terminal", () => {
-  const view = host({ plugin_presence: { witr: registered }, plugin_render_errors: { witr: "spawn failed" } });
+  const view = host({
+    plugin_presence: { witr: registered },
+    plugin_render_errors: { witr: { text: "spawn failed", cut: false } },
+  });
   assert.deepEqual(placeholderFor("witr", view), {
     kind: "render_error",
     screen: "witr",
     plugin: "witr",
     error: "spawn failed",
+    cut: false,
   });
 });
 
 test("a render error for a plugin that is not registered is not shown", () => {
-  const view = host({ plugin_render_errors: { witr: "stale" } });
+  const view = host({ plugin_render_errors: { witr: { text: "stale", cut: false } } });
   assert.equal(placeholderFor("witr", view).kind, "not_registered");
 });
 
@@ -50,4 +54,17 @@ test("each plugin screen names the plugin that owns it", () => {
     (screen) => placeholderFor(screen, host()).plugin,
   );
   assert.deepEqual(owners, ["burndown", "witr", "learnings", "abtop", "hangar-tui"]);
+});
+
+test("a cut render error says it was cut", () => {
+  const view = host({
+    plugin_presence: { witr: registered },
+    plugin_render_errors: { witr: { text: "x".repeat(512), cut: true } },
+  });
+  const placeholder = placeholderFor("witr", view);
+  assert.equal(placeholder.kind === "render_error" && placeholder.cut, true);
+});
+
+test("a screen no plugin owns names no plugin, as the terminal's title does", () => {
+  assert.equal(placeholderFor("mystery", host()).plugin, null);
 });
