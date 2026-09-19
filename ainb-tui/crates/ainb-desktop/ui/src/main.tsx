@@ -19,7 +19,7 @@ import { ROOT_SELECTORS } from "./selectors.ts";
 import { AcpCard } from "./acp.tsx";
 import { transcriptIntent, transcriptView } from "./acp.ts";
 import { AnswerBanner } from "./answer.tsx";
-import { phaseOf, questionFor, type Refusal, sendInOrder } from "./answer.ts";
+import { bannerKeys, latchQuestion, phaseOf, type Question, questionFor, type Refusal, sendInOrder } from "./answer.ts";
 import { newNotices, noticeKey } from "./notices.ts";
 import { Board } from "./board.tsx";
 import { Review } from "./review.tsx";
@@ -336,6 +336,10 @@ function Shell() {
   const settings = createMemo(() => shell()?.current_screen === "config");
   const ask = () => fleet()?.ask_state;
   const question = createMemo(() => questionFor(sessions()));
+  // Latched on the request (#1266): a frame that carries the row with no chip
+  // for a moment does not unmount the banner while the reducer still names
+  // that request, so the banner's elements stay where a click is heading.
+  const latched = createMemo<Question | null>((kept) => latchQuestion(kept, question(), ask()), null);
 
   // The reducer speaks through its notices: a refused send says why in the
   // reducer's own words (a daemon that is gone, a native picker, nothing typed),
@@ -537,9 +541,12 @@ function Shell() {
               )}
             </For>
           </nav>
-          <Show when={question()}>
-            {(shown) => <AnswerBanner question={shown()} ask={ask()} run={run} />}
-          </Show>
+          {/* One banner per open request, keyed on its id: the same request
+              keeps one element across frames, a new request mounts a fresh
+              banner with a fresh draft. */}
+          <For each={bannerKeys(latched())}>
+            {() => <AnswerBanner question={latched()!} ask={ask()} run={run} />}
+          </For>
           <Show when={transcriptKey()}>
             {(key) => (
               <AcpCard
