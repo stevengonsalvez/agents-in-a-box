@@ -16,8 +16,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
 /// The daemon crate's committed N-1 frames, one copy for every leg.
-const FIXTURES: &str =
-    include_str!("../../../ainb-hangar-daemon/tests/fixtures/skew_frames.json");
+const FIXTURES: &str = include_str!("../../../ainb-hangar-daemon/tests/fixtures/skew_frames.json");
 
 /// The token the listener's home carries; every hello names it.
 pub const TOKEN: &str = "mdt_desktop_skew_fixture";
