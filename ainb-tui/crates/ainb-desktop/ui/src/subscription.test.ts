@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { createRoot } from "solid-js";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { createFrameStore, type FrameStore, type SectionName } from "./store.ts";
-import { AHEAD_OF_READERS, shellAgentStatus, shellFleet, shellSessions, SUBSCRIBED } from "./subscription.ts";
+import { AHEAD_OF_READERS, shellAgentStatus, shellConfig, shellFleet, shellHangar, shellSessions, SUBSCRIBED } from "./subscription.ts";
 
 /**
  * A store that records which sections a reader asks for, through
@@ -48,6 +48,8 @@ test("the shell chrome reads only subscribed sections, and the list names no unr
     shellSessions(store, "local");
     shellAgentStatus(store, "local");
     shellFleet(store, "local");
+    shellConfig(store, "local");
+    shellHangar(store, "local");
     dispose();
   });
 
@@ -74,6 +76,8 @@ test("reading without a host reads no section", () => {
     assert.equal(shellSessions(store, undefined), undefined);
     assert.equal(shellAgentStatus(store, undefined), undefined);
     assert.equal(shellFleet(store, undefined), undefined);
+    assert.equal(shellConfig(store, undefined), undefined);
+    assert.equal(shellHangar(store, undefined), undefined);
     dispose();
   });
   assert.deepEqual([...read], []);
