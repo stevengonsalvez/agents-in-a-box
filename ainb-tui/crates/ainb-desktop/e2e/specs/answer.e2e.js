@@ -187,7 +187,8 @@ describe("answering from the window", () => {
     );
 
     // What the window sent for that pick, from the host's own log: the
-    // reducer's session list commands, one Enter, and nothing it authored.
+    // reducer's session list commands ending in one pick by label, no cursor
+    // move and no Enter (#1191), and nothing it authored.
     const sent = intentsSent().slice(sentBefore);
     const shown = sent.map(({ command, outcome }) => `${command}:${outcome}`).join(", ");
     assert.deepEqual(
@@ -200,9 +201,14 @@ describe("answering from the window", () => {
       [],
       `the host applied every one of them: ${shown}`,
     );
-    const enters = sent.filter(({ command }) => command === "session_list.ask.enter");
-    assert.deepEqual(enters, [{ command: "session_list.ask.enter", outcome: "dispatched" }], `Enter: ${shown}`);
-    assert.equal(sent.at(-1)?.command, "session_list.ask.enter", `the pick ends in Enter: ${shown}`);
+    const picks = sent.filter(({ command }) => command === "session_list.ask.pick");
+    assert.deepEqual(picks, [{ command: "session_list.ask.pick", outcome: "dispatched" }], `pick: ${shown}`);
+    assert.equal(sent.at(-1)?.command, "session_list.ask.pick", `the pick is the last thing sent: ${shown}`);
+    assert.deepEqual(
+      sent.filter(({ command }) => /^session_list\.ask\.(next|previous|enter)$/.test(command)),
+      [],
+      `no cursor move and no Enter rode with the pick: ${shown}`,
+    );
 
     // The last mile: the agent in the pane read the label.
     await browser.waitUntil(() => paneText(target.tmux).includes(`agent read: ${OPTIONS[PICK]}`), {
