@@ -80,6 +80,19 @@ fn a_daemon_that_stops_answering_does_not_hang_the_tui() {
         "sessions were listed from a store that never answered"
     );
 
+    // The Headroom watchdog runs on the host's tick: its store read must
+    // happen off the tick, so the tick returns at once with the daemon silent.
+    {
+        let _in_runtime = rt.enter();
+        let ticked = Instant::now();
+        state.headroom_watchdog();
+        assert!(
+            ticked.elapsed() < Duration::from_millis(250),
+            "the Headroom watchdog blocked the tick: {:?}",
+            ticked.elapsed()
+        );
+    }
+
     // The next frame paints.
     let mut list = SessionListComponent::new();
     let mut ui = ainb::app::ui_state::UiState::default();
