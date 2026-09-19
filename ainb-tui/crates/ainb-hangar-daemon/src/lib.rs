@@ -971,15 +971,30 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // boot path. Its first tick is immediate, so the first pass starts
         // now, but the RPC socket does not wait for it: a pass can wait up to
         // its flock bound on a CLI holding sessions.json.lock, and boot must
-        // not. The first-pass gate armed here holds every session read until
-        // that pass commits: a read waits up to FIRST_PASS_WAIT, then answers
-        // not-ready, so no row this boot has not reconciled is served. The watcher then
-        // runs a pass whenever the file changes, and ends with the process
-        // like the scheduler below.
+        // not. The first-pass gate armed here holds every session RPC that
+        // touches the table until that pass commits: it waits up to
+        // FIRST_PASS_WAIT, then answers not-ready, so nothing acts on a row
+        // this boot has not reconciled. The watcher then runs a pass whenever
+        // the file changes, and ends with the process.
         crate::session_import::arm_first_pass_gate();
-        tokio::spawn(
-            crate::session_import::ReconcileWatch::new(&sessions_path).run(store.pool().clone()),
-        );
+        {
+            // Supervised: the watcher never returns, so its task ending means
+            // it panicked. It is logged and restarted with a fresh watch, whose
+            // first tick runs a pass, so a dead watcher never leaves the gate
+            // shut or the file unwatched for the rest of the process.
+            let (path, pool) = (sessions_path.clone(), store.pool().clone());
+            tokio::spawn(async move {
+                loop {
+                    let watch = crate::session_import::ReconcileWatch::new(&path);
+                    let ended = tokio::spawn(watch.run(pool.clone())).await;
+                    tracing::error!(
+                        ended = ?ended.err(),
+                        "sessions.json reconcile watcher stopped; restarting it"
+                    );
+                    tokio::time::sleep(crate::session_import::RECONCILE_RETRY_FIRST).await;
+                }
+            });
+        }
 
         // P8.5: the in-memory health stats collector — shared between the RPC server
         // (which snapshots the rolling throughput ring for the `hangar/daemon_health`
