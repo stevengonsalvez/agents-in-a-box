@@ -7,8 +7,14 @@ import {
   daemonsCollectedAt,
   hookHealthLines,
   rowEdit,
+  searchIntents,
+  searching,
+  selectNode,
   settingCount,
-  settingsCategories,
+  settingsRows,
+  settingsTitle,
+  settingsTree,
+  toggleNode,
   type SettingsRow,
 } from "./settings.ts";
 import type { RendererIntent } from "./tabs.ts";
@@ -16,12 +22,14 @@ import type { RendererIntent } from "./tabs.ts";
 interface Props {
   /** The config frame the form draws. */
   config: ConfigView_Serialize | undefined;
+  /** The config section version that frame carried; every edit names it. */
+  revision: number;
   /** The hangar frame the daemons panel draws. */
   hangar: HangarView_Serialize | undefined;
   /** The Setup panel's host read, `null` until it answers. */
   setup: SetupView | null;
-  /** A row was edited: dispatch `config.set_row`. */
-  onEdit(intent: RendererIntent): void;
+  /** Send intents in order, each applied before the next. */
+  run(intents: RendererIntent[]): void;
   /** Ask the shell to confirm and run one of the onboarding writes. */
   onSetupWrite(write: SetupWrite): void;
   /** Read the Setup panel again. */
@@ -30,73 +38,93 @@ interface Props {
 }
 
 /**
- * The settings page: the config section as a form, the daemons panel, and the
- * Setup panel for the writes the window may not run itself. Every string it
- * prints is one `settingsLines` returns, so the DOM half of parity reads the
- * page from that projection.
+ * The settings page: the config section as the reducer has it on screen (the
+ * tree's visible nodes, the selected node's rows or the filter's matches), the
+ * daemons panel, and the Setup panel for the writes the window may not run
+ * itself. The page keeps no selection: a click names a node or a row and the
+ * reducer moves. The DOM half of parity renders this component.
  */
 export function SettingsPage(props: Props) {
-  const categories = createMemo(() => settingsCategories(props.config));
-  const [chosen, setChosen] = createSignal<string | null>(null);
-  const current = createMemo(
-    () => categories().find((category) => category.category === chosen()) ?? categories()[0],
-  );
+  const tree = createMemo(() => settingsTree(props.config));
+  const rows = createMemo(() => settingsRows(props.config));
   const daemons = createMemo(() => daemonRows(props.hangar));
   const hooks = createMemo(() => hookHealthLines(props.hangar));
   const collected = createMemo(() => daemonsCollectedAt(props.hangar));
   const [otel, setOtel] = createSignal({ otlp_endpoint: "", instance_id: "", api_token: "" });
 
   const edit = (row: SettingsRow, input: string | number | boolean) => {
-    const intent = rowEdit(row, input);
-    if (intent) props.onEdit(intent);
+    const intent = rowEdit(row, input, props.revision);
+    if (intent) props.run([intent]);
   };
 
   return (
     <section class="settings-page" aria-label="Settings">
       <header class="settings-head">
-        <h2>Settings ({settingCount(categories())} settings)</h2>
+        <h2>Settings ({settingCount(props.config)} settings)</h2>
+        <input
+          type="search"
+          class="settings-search"
+          placeholder="Search every setting"
+          aria-label="Search settings"
+          classList={{ active: searching(props.config) }}
+          onInput={(event) => props.run(searchIntents(event.currentTarget.value))}
+        />
         <button type="button" class="close" onClick={() => props.onClose()}>
           Back to board
         </button>
       </header>
       <div class="settings-body">
-        <nav class="settings-categories" aria-label="Categories">
-          <For each={categories()}>
-            {(category) => (
-              <button
-                type="button"
-                classList={{ active: category === current() }}
-                aria-current={category === current() ? "true" : undefined}
-                onClick={() => setChosen(category.category)}
-              >
-                {category.label}
-              </button>
+        <nav class="settings-tree" aria-label="Categories">
+          <For each={tree()}>
+            {(node) => (
+              <div class="settings-node" style={{ "padding-left": `${node.depth * 14}px` }} data-node={node.id}>
+                <Show when={node.hasChildren} fallback={<span class="chevron-gap" />}>
+                  <button
+                    type="button"
+                    class="chevron"
+                    aria-label={node.expanded ? `Collapse ${node.label}` : `Expand ${node.label}`}
+                    aria-expanded={node.expanded}
+                    onClick={() => props.run(toggleNode(node.id))}
+                  >
+                    {node.expanded ? "▾" : "▸"}
+                  </button>
+                </Show>
+                <button
+                  type="button"
+                  classList={{ active: node.selected }}
+                  aria-current={node.selected ? "true" : undefined}
+                  onClick={() => props.run([selectNode(node.id)])}
+                >
+                  {node.label}
+                </button>
+              </div>
             )}
           </For>
         </nav>
         <div class="settings-rows">
-          <Show when={current()} fallback={<p class="empty">No config frame yet</p>}>
-            {(category) => (
-              <>
-                <h3>{category().label}</h3>
-                <For each={category().rows}>
-                  {(row) => (
-                    <div class="settings-row" classList={{ dirty: row.dirty, readonly: row.readOnly }} data-key={row.key}>
-                      <label>
-                        <span class="row-label">
-                          {row.label}: {row.value}
-                        </span>
-                        <Widget row={row} onInput={(input) => edit(row, input)} />
-                      </label>
-                      <Show when={row.description !== ""}>
-                        <p class="description">{row.description}</p>
-                      </Show>
-                    </div>
-                  )}
-                </For>
-              </>
-            )}
+          <h3>{settingsTitle(props.config)}</h3>
+          <Show when={rows().length === 0}>
+            <p class="empty">{props.config === undefined ? "No config frame yet" : "No settings here"}</p>
           </Show>
+          <For each={rows()}>
+            {(row) => (
+              <div
+                class="settings-row"
+                classList={{ dirty: row.dirty, readonly: row.readOnly, current: row.current }}
+                data-key={row.key}
+              >
+                <label>
+                  <span class="row-label">
+                    {row.label}: {row.value}
+                  </span>
+                  <Widget row={row} onInput={(input) => edit(row, input)} />
+                </label>
+                <Show when={row.description !== ""}>
+                  <p class="description">{row.description}</p>
+                </Show>
+              </div>
+            )}
+          </For>
         </div>
       </div>
       <section class="daemons-panel" aria-label="Daemons">
