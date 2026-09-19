@@ -7,9 +7,10 @@
     "dev": "vite",
     "build": "tsc --noEmit --strict && vite build",
     "check": "tsc --noEmit --strict",
-    "test": "npm run test:unit && npm run test:parity",
+    "test": "npm run test:unit && npm run test:parity && npm run test:dom",
     "test:unit": "node --conditions=browser --experimental-strip-types --no-warnings=ExperimentalWarning --test src/*.test.ts",
-    "test:parity": "node --import ./test/register-solid-ssr.mjs --experimental-strip-types --no-warnings=ExperimentalWarning --test test/*.test.ts"
+    "test:parity": "node --import ./test/register-solid-ssr.mjs --experimental-strip-types --no-warnings=ExperimentalWarning --test test/*.test.ts",
+    "test:dom": "node --conditions=browser --import ./test/register-solid-dom.mjs --experimental-strip-types --no-warnings=ExperimentalWarning --test test/dom/*.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
