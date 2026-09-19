@@ -4,7 +4,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
 import { createFrameStore } from "./store.ts";
-import { shellAgentStatus, shellConfig, shellFleet, shellHangar, shellSessions, SUBSCRIBED } from "./subscription.ts";
+import { configRevision, shellAgentStatus, shellConfig, shellFleet, shellHangar, shellSessions, SUBSCRIBED } from "./subscription.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { AcpCard } from "./acp.tsx";
@@ -94,10 +94,10 @@ function Shell() {
   // no tmux pane, so the card stands where its terminal would.
   const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
   // The settings page: the config section as a form, the daemons panel and
-  // the Setup panel (D3d). Opening it walks the reducer onto the Config
-  // screen, where the form's row edits are in context; closing walks it back
-  // to the session list the sidebar is.
-  const [settings, setSettings] = createSignal(false);
+  // the Setup panel (D3d). Whether it is open is the reducer's: the page shows
+  // while `shell.current_screen` is the Config screen. Opening walks the
+  // reducer there, where the form's row edits are in context; closing walks
+  // it back to the session list the sidebar is. The window keeps no copy.
   const [setup, setSetup] = createSignal<SetupView | null>(null);
   const focusers = new Map<string, () => void>();
   const tabKeys = createMemo(
@@ -164,13 +164,11 @@ function Shell() {
   const refreshSetup = () => void invoke<SetupView>("setup_status").then(setSetup);
   const openSettings = () => {
     closeTranscript();
-    setSettings(true);
     void run(OPEN_SETTINGS);
     refreshSetup();
   };
   const closeSettings = () => {
     if (!settings()) return;
-    setSettings(false);
     void run(CLOSE_SETTINGS);
   };
   /** The shell confirms in its own dialog, runs the write, and toasts the outcome. */
@@ -311,6 +309,8 @@ function Shell() {
   const shell = () => (host() ? store.section(host()!, "shell") : undefined);
   const config = () => shellConfig(store, host());
   const hangar = () => shellHangar(store, host());
+  /** The reducer is on its Config screen, which is the settings page. */
+  const settings = createMemo(() => shell()?.current_screen === "config");
   const ask = () => fleet()?.ask_state;
   const question = createMemo(() => questionFor(sessions()));
 
@@ -519,9 +519,10 @@ function Shell() {
           <Show when={settings()}>
             <SettingsPage
               config={config()}
+              revision={configRevision(store, host())}
               hangar={hangar()}
               setup={setup()}
-              onEdit={dispatch}
+              run={(intents) => void run(intents)}
               onSetupWrite={setupWrite}
               onRefreshSetup={refreshSetup}
               onClose={() => {
