@@ -1,6 +1,7 @@
-import { For, Show } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
 import type { InboxView_Serialize } from "../../../ainb-app/bindings/AppState";
 import { inboxView, MARK_ALL_READ } from "./inbox.ts";
+import { keyedList, sameKeys } from "./keyed.ts";
 import type { RendererIntent } from "./tabs.ts";
 
 interface Props {
@@ -22,7 +23,11 @@ interface Props {
  * control because the daemon's verb has none.
  */
 export function Inbox(props: Props) {
-  const page = () => inboxView(props.inbox);
+  const page = createMemo(() => inboxView(props.inbox));
+  // Drawn by key, not by object identity (#1267): every frame builds new row
+  // objects, so an unchanged entry keeps its node and only its text patches.
+  const rows = createMemo(() => keyedList(page().rows, (row) => row.id));
+  const rowKeys = createMemo(() => rows().keys, [], { equals: sameKeys });
   return (
     <section class="inbox" aria-label="Inbox" data-state={page().state}>
       <header class="inbox-head">
@@ -53,19 +58,21 @@ export function Inbox(props: Props) {
           </p>
         )}
       </Show>
-      <Show
-        when={page().rows.length > 0}
-        fallback={<p class="empty">{page().state === "empty" ? "Nothing in the inbox" : ""}</p>}
-      >
+      <Show when={page().rows.length > 0} fallback={<Show when={page().state === "empty"}>
+        <p class="empty">Nothing in the inbox</p>
+      </Show>}>
         <ol class="inbox-rows">
-          <For each={page().rows}>
-            {(row) => (
-              <li class="inbox-row" classList={{ unread: row.unread }} data-entry={row.id}>
-                <span class="inbox-label">{row.label}</span>
-                <span class="inbox-summary">{row.summary}</span>
-                <time class="inbox-when">{row.when}</time>
-              </li>
-            )}
+          <For each={rowKeys()}>
+            {(key) => {
+              const row = () => rows().byKey.get(key);
+              return (
+                <li class="inbox-row" classList={{ unread: row()?.unread }} data-entry={row()?.id}>
+                  <span class="inbox-label">{row()?.label}</span>
+                  <span class="inbox-summary">{row()?.summary}</span>
+                  <time class="inbox-when">{row()?.when}</time>
+                </li>
+              );
+            }}
           </For>
         </ol>
       </Show>
