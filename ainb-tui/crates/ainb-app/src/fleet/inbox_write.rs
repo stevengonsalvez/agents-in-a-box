@@ -17,7 +17,7 @@
 use ainb_hangar_client::{DaemonClient, DaemonError};
 use ainb_hangar_proto::methods;
 use ainb_hangar_proto::mutation::{MutationEnvelope, OpId};
-use ainb_hangar_proto::snapshots::{InboxMarkReadResult, InboxScopedParams};
+use ainb_hangar_proto::snapshots::{InboxListResult, InboxMarkReadResult, InboxScopedParams};
 use serde::{Deserialize, Serialize};
 
 use crate::app::sections::{INBOX_RECIPIENT, INBOX_WORKSPACE_ID};
@@ -88,6 +88,7 @@ impl MarkAllRead {
                         marked: result.marked,
                         unread: result.unread,
                         error: None,
+                        after: None,
                     };
                 }
                 Err(error @ DaemonError::Rpc { .. }) => {
@@ -103,12 +104,14 @@ impl MarkAllRead {
             marked: 0,
             unread: 0,
             error: Some(last.map_or_else(|| "not sent".to_string(), |e| e.to_string())),
+            after: None,
         }
     }
 }
 
-/// Mint an operation, dial through `dialer`, and deliver it on the current
-/// thread, blocking. For a host's worker thread.
+/// Mint an operation, dial through `dialer`, deliver it on the current
+/// thread, blocking, and when it lands read the inbox again so the rows'
+/// `read_at` stamps are the daemon's. For a host's worker thread.
 pub fn mark_all_read_blocking(
     dialer: impl Fn() -> Result<DaemonClient, DaemonError>,
 ) -> MarkAllReadOutcome {
@@ -121,15 +124,29 @@ pub fn mark_all_read_blocking(
             marked: 0,
             unread: 0,
             error: Some("the worker runtime did not start".into()),
+            after: None,
         };
     };
-    op.deliver(|params| {
+    let mut outcome = op.deliver(|params| {
         let client = dialer()?;
         runtime.block_on(client.call_typed::<InboxScopedParams, InboxMarkReadResult>(
             methods::HANGAR_INBOX_MARK_READ,
             params,
         ))
-    })
+    });
+    if outcome.ok {
+        // A read that fails leaves `after` empty; the reader's next poll
+        // brings the stamps then.
+        outcome.after = dialer().ok().and_then(|client| {
+            runtime
+                .block_on(client.call_typed::<InboxScopedParams, InboxListResult>(
+                    methods::HANGAR_INBOX_LIST,
+                    &crate::fleet::inbox_reader::list_params(),
+                ))
+                .ok()
+        });
+    }
+    outcome
 }
 
 /// How a "mark all read" ended, reported to the reducer.
@@ -145,6 +162,10 @@ pub struct MarkAllReadOutcome {
     pub unread: i64,
     /// Why it did not land, when it did not.
     pub error: Option<String>,
+    /// The inbox as the daemon lists it after the sweep, when that read
+    /// landed: the rows' `read_at` stamps are the daemon's, never a local clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<InboxListResult>,
 }
 
 #[cfg(test)]
