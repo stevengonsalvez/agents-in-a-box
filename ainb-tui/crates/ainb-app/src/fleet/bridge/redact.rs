@@ -44,8 +44,17 @@ lazy_static! {
     /// 7-char middle is already in the wild) and a fixed `{6}` silently failed to
     /// redact those — leaking the token into `last_error`/logs. The `6,12` ceiling
     /// keeps it conservative so it still won't eat a short dotted version string.
-    static ref DISCORD_TOKEN: Regex =
-        Regex::new(r"[\w-]{24,}\.[\w-]{6,12}\.[\w-]{27,}").expect("valid discord token regex");
+    /// The character class is spelled out rather than `\w` because `\w` is
+    /// Unicode-aware: with it, three bounded repetitions over a class of
+    /// hundreds of thousands of characters cost 3.5 ms on a 4,000-character
+    /// line (99% of the mirror frame's whole scrub) and the same shape over
+    /// ASCII costs 0.7 us. A token's segments are base64url, so nothing that
+    /// is a Discord token stops matching; runs of Unicode letters, which are
+    /// not tokens, stop being false positives.
+    static ref DISCORD_TOKEN: Regex = Regex::new(
+        r"[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,12}\.[A-Za-z0-9_-]{27,}"
+    )
+    .expect("valid discord token regex");
     /// A PEM private key: the whole armoured block when it is closed, the
     /// header and everything after it when the capture cut it off.
     static ref PEM_PRIVATE_KEY: Regex = Regex::new(
@@ -200,20 +209,31 @@ pub fn scrub(input: &str) -> String {
 #[must_use]
 pub fn scrub_lines<S: AsRef<str>>(lines: &[S]) -> Vec<String> {
     let mut in_key = false;
+    scrub_lines_from(lines, &mut in_key)
+}
+
+/// [`scrub_lines`] over one chunk of a longer text, carrying the key-block flag
+/// in `in_key` so the caller can stop part way.
+///
+/// A caller that frames only what fits a budget would otherwise scrub the whole
+/// text to throw most of it away; with this it scrubs a chunk at a time and
+/// stops, and a key block still spans the chunk boundary.
+#[must_use]
+pub fn scrub_lines_from<S: AsRef<str>>(lines: &[S], in_key: &mut bool) -> Vec<String> {
     lines
         .iter()
         .map(|line| {
             let line = line.as_ref();
-            if in_key {
+            if *in_key {
                 if let Some(end) = PEM_END.find(line) {
-                    in_key = false;
+                    *in_key = false;
                     return format!("{REDACTED}{}", scrub(&line[end.end()..]));
                 }
                 return REDACTED.to_string();
             }
             match PEM_BEGIN.find(line) {
                 Some(begin) if !PEM_END.is_match(&line[begin.end()..]) => {
-                    in_key = true;
+                    *in_key = true;
                     format!("{}{REDACTED}", scrub(&line[..begin.start()]))
                 }
                 _ => scrub(line),
@@ -367,6 +387,30 @@ mod tests {
     // file matches a secret scanner.
     fn fake(prefix: &str, body: char, len: usize) -> String {
         format!("{prefix}{}", body.to_string().repeat(len))
+    }
+
+    /// The Discord shape spells its character class out instead of using `\w`,
+    /// which is Unicode-aware and enormously more expensive. A token is
+    /// base64url either way, including one sitting against text that is not.
+    #[test]
+    fn a_discord_token_is_scrubbed_whatever_it_sits_against() {
+        let token = format!(
+            "{}.{}.{}",
+            fake("", 'a', 24),
+            fake("", 'b', 7),
+            fake("", 'c', 27)
+        );
+        for line in [
+            format!("Authorization: Bot {token}"),
+            format!("réponse={token}"),
+            format!("\"token\":\"{token}\""),
+        ] {
+            let scrubbed = scrub(&line);
+            assert!(
+                !scrubbed.contains(&token),
+                "the token survived in {scrubbed}"
+            );
+        }
     }
 
     #[test]
