@@ -693,7 +693,8 @@ plugins_host.plugin_captures_text
 plugins_host.plugin_presence{}.abi
 plugins_host.plugin_presence{}.registered
 plugins_host.plugin_presence{}.wedged
-plugins_host.plugin_render_errors{}
+plugins_host.plugin_render_errors{}.cut
+plugins_host.plugin_render_errors{}.text
 recovery.session_recovery_state.action_result
 recovery.session_recovery_state.last_error
 recovery.session_recovery_state.loading
