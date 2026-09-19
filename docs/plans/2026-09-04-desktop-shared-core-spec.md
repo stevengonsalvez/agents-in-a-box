@@ -243,8 +243,8 @@ plugin/handle_action    NEW { action_id: String, payload: Value }   (clicks, pal
 | hangar board (plugin) | board tab | `agent_status` + Fleet frames, desktop component (the plugin's own `ui.state` component is D3) | yes |
 | code review | review tab | 1:1 hunks, CM6 paint | yes |
 | inbox | inbox | D3-prime, rebuilt on both surfaces: the screen's state was deleted before the extraction | yes |
-| stats / burndown (plugin) | stats tab | D3-prime: a daemon read for the counters, not the plugin's view | yes |
-| abtop, witr, learnings, skills (plugins) | WireBuffer painted in an xterm cell | D3-prime: needs a plugin host in the window | yes, fallback |
+| stats / burndown (plugin) | stats tab | D3-prime: section 21 `usage`, a fold of the daemon's `fleet/usage_summary`, not the plugin's view; DOM-half fixture | yes |
+| abtop, witr, learnings, hangar (plugins) | WireBuffer painted in a plain cell grid | D3-prime: a plugin host the Tauri shell owns, cells on a channel of their own; `analytics` excluded, the stats tab draws it | yes, fallback |
 | daemons overlay | daemons panel in settings | 1:1 | yes |
 | config | settings page | 1:1 + desktop extras | yes |
 | MCP pool overlay | settings panel | 1:1 | yes |
