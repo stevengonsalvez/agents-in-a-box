@@ -76,7 +76,14 @@ pub enum ScreenFixture {
     NewSessionPickRepo,
     Config,
     Daemons,
-    GitView { files: Vec<ReviewFileFixture> },
+    GitView {
+        files: Vec<ReviewFileFixture>,
+        /// Sidebar directories the person has collapsed. A fixture carries one
+        /// so the frame's own copy of them is drawn, and so the frame-twice
+        /// check sees a set with something in it.
+        #[serde(default)]
+        collapsed_dirs: Vec<String>,
+    },
     SessionRecovery,
     SkillManager,
     LogHistory,
@@ -166,12 +173,16 @@ impl ParityFixture {
                     ..Default::default()
                 });
             }
-            ScreenFixture::GitView { files } => {
+            ScreenFixture::GitView {
+                files,
+                collapsed_dirs,
+            } => {
                 let mut git = GitViewState::new(PathBuf::from("/parity/repo"));
                 git.active_tab = GitTab::Review;
                 git.review = ReviewModel {
                     files: files.iter().map(build_review_file).collect(),
                 };
+                git.review_ui.collapsed_dirs = collapsed_dirs.iter().cloned().collect();
                 state.git_view.git_view_state = Some(git);
             }
             ScreenFixture::Onboarding => {
