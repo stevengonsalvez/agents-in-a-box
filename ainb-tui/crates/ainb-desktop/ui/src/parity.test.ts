@@ -89,6 +89,10 @@ async function drawReview(
   }
 }
 
+// The review tab draws a window of its body now, not the whole of it (#1221),
+// so a fixture bigger than one window would only ever show the facts inside
+// that window. `git_review` is three small files and fits in one, which is why
+// the list below can still name every fact the tab draws.
 test("the review tab shows every fact the fixture's list names", async () => {
   const html = await drawReview("git_review");
 

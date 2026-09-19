@@ -105,6 +105,49 @@ export function questionFor(sessions: SessionsView_Serialize | undefined): Quest
   };
 }
 
+/** How long the banner keeps a question after the last frame that carried it. */
+export const LATCH_GRACE_MS = 5_000;
+
+/** A question the banner holds, and when a frame last carried it. */
+export interface Latched {
+  question: Question;
+  seenAt: number;
+}
+
+/**
+ * The question the banner shows, latched for a short grace: the frame's
+ * question when the frame carries one, stamped with `now`; otherwise the one
+ * `kept` from the last frame, for `grace` after that frame; then nothing.
+ *
+ * A frame can carry the selected row with no chip for a moment (a scan apply
+ * before the next attention merge was one source, #1263). A banner that
+ * followed every frame unmounted then, and the next frame mounted a new one
+ * with new elements under a click. The grace covers that gap. It is a grace,
+ * not a hold: the reducer's answer state never says a question is over (its
+ * request is only ever retargeted, never cleared), so time is the only honest
+ * release, and an answered or deselected question leaves within it.
+ */
+export function latchQuestion(
+  kept: Latched | null,
+  current: Question | null,
+  now: number,
+  grace: number = LATCH_GRACE_MS,
+): Latched | null {
+  if (current !== null) return { question: current, seenAt: now };
+  if (kept !== null && now - kept.seenAt <= grace) return kept;
+  return null;
+}
+
+/**
+ * What the banner list is keyed on: the request id, one banner per open
+ * request. Strings key by value in `For`, so every frame that carries the
+ * same request keeps the same banner element, and a new request mounts a new
+ * one, with a fresh draft.
+ */
+export function bannerKeys(question: Question | null): string[] {
+  return question === null ? [] : [question.request];
+}
+
 /**
  * What a banner shows of a question, as one string: a repaint is due when
  * this changes. The request, the title, whether it can be answered, and the

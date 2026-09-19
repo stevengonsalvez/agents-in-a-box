@@ -12874,11 +12874,18 @@ impl AppState {
                         claimed_attention_ids.insert(attention_id.to_string());
                     }
                 }
-                if s.is_attached {
-                    // An attached session never nags: the operator is looking
-                    // straight at it. Its cwd is still claimed, or the daemon
-                    // row for the session under the cursor would be reported as
-                    // waiting somewhere else.
+                // An attached session never nags in the terminal: attaching
+                // shows the pane full screen, where the question is already
+                // in front of the operator. Its cwd is still claimed, or the
+                // daemon row for the session under the cursor would be
+                // reported as waiting somewhere else. Not on the desktop: a
+                // row there is attached whenever its terminal tab is open,
+                // and the banner over that tab is where the question is
+                // answered, so the chip must land. Before #1263 it only ever
+                // did because each scan reset `is_attached`.
+                let fullscreen =
+                    self.host.surface != ainb_hangar_proto::connections::SurfaceKind::Desktop;
+                if s.is_attached && fullscreen {
                     marks.push((
                         s.id,
                         Vec::new(),
