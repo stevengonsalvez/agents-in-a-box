@@ -213,6 +213,7 @@ name = "ainb-desktop"
 version = "1.28.2"
 dependencies = [
  "ainb-app",
+ "ainb-desktop",
  "ainb-hangar-client",
  "ainb-hangar-core",
  "ainb-hangar-proto",
