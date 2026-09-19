@@ -8,9 +8,11 @@ use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
 use ainb_app::app::state::WorkspaceRescan;
 use ainb_app::config::AppConfig;
+use ainb_app::fleet::agent_status_reader::{AgentStatusReader, Dialer};
 use ainb_app::fleet::inbox_reader::{Dialer as InboxDialer, InboxReader};
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
 use ainb_app::{AppState, CommandId, Effect, Intent, Keymap, SectionId};
+use ainb_hangar_proto::connections::SurfaceKind;
 use serde::Serialize;
 
 use crate::intent::Refusal;
@@ -82,12 +84,28 @@ pub struct PaletteEntry {
     pub active: bool,
 }
 
+/// The dialer the desktop's agent status reader uses: the daemon client from
+/// the environment, announced as the desktop, so its reads are recorded as this
+/// surface's and never as a terminal this process never ran.
+#[must_use]
+pub fn agent_status_dialer() -> Dialer {
+    Box::new(|| ainb_app::fleet::bridge::daemon::surface_client(SurfaceKind::Desktop))
+}
+
+/// `[fleet.status] legacy_panel` as the desktop's own config sets it, with the
+/// same `AINB_FLEET_LEGACY_PANEL` override the terminal honours: both surfaces
+/// take the same read path (#1188).
+#[must_use]
+pub fn legacy_panel(config: &AppConfig) -> bool {
+    use ainb_app::config::tunables::{LEGACY_PANEL_ENV, resolved_bool};
+    resolved_bool(LEGACY_PANEL_ENV, config.fleet.status.legacy_panel)
+}
+
 /// The dialer the desktop's inbox reader uses: the daemon client from the
 /// environment, announced as the desktop, so its reads are recorded as this
 /// surface's.
 #[must_use]
 pub fn inbox_dialer() -> InboxDialer {
-    use ainb_hangar_proto::connections::SurfaceKind;
     Box::new(|| ainb_app::fleet::bridge::daemon::surface_client(SurfaceKind::Desktop))
 }
 
@@ -101,8 +119,9 @@ pub struct DesktopHost<S: FrameSink> {
     /// How the tick asks the state to keep the session list fresh: the
     /// cadence, and the floor under daemon news (#1156).
     rescan: WorkspaceRescan,
-    agent_status: crate::agent_status::AgentStatusPoll,
-    read_agent_status: fn(crate::agent_status::Reports),
+    /// The agent status reader both hosts share (#1188), once
+    /// [`Self::start_agent_status`] has started it.
+    agent_status: Option<AgentStatusReader>,
     /// How the inbox reader dials the daemon. The reader itself runs only
     /// while a renderer subscribes to `inbox`, so no read is issued for a
     /// screen nobody has open.
@@ -160,8 +179,7 @@ impl<S: FrameSink> DesktopHost<S> {
             mirror: Mirror::new(host_id, subscription),
             sink,
             rescan: WorkspaceRescan::default(),
-            agent_status: crate::agent_status::AgentStatusPoll::default(),
-            read_agent_status: crate::agent_status::read_on_worker,
+            agent_status: None,
             inbox_dialer: std::sync::Arc::new(inbox_dialer()),
             inbox: None,
             runtime: tokio::runtime::Handle::try_current().ok(),
@@ -232,32 +250,13 @@ impl<S: FrameSink> DesktopHost<S> {
         self
     }
 
-    /// Start agent status reads with `read` instead of a daemon read on a
-    /// worker. For tests, which stand in for the worker through
-    /// [`Self::agent_status_reports`].
-    #[must_use]
-    pub fn reading_agent_status_with(mut self, read: fn(crate::agent_status::Reports)) -> Self {
-        self.read_agent_status = read;
-        self
-    }
-
-    /// The inbox agent status reads report into.
-    #[must_use]
-    pub fn agent_status_reports(&self) -> crate::agent_status::Reports {
-        self.agent_status.reports()
-    }
-
-    /// The sidecar lost its daemon: the board's rows read unreachable, rather
-    /// than standing as if current, until [`Self::daemon_connected`].
-    pub fn daemon_lost(&mut self, reason: &str) {
-        let now_ms = ainb_app::fleet::daemons::heartbeat::now_ms();
-        self.agent_status.daemon_lost(&mut self.state, reason, now_ms);
-        self.pump();
-    }
-
-    /// The sidecar has its daemon again: read the agent status at once.
-    pub fn daemon_connected(&mut self) {
-        self.agent_status.daemon_connected();
+    /// Start the agent status reader that keeps section 20, the board, current:
+    /// the one reader both hosts run, on the daemon's Fleet subscription
+    /// (#1188). A dropped subscription reads unreachable and a reconnect resets
+    /// the section, so the host tracks no daemon liveness of its own. Must be
+    /// called inside a tokio runtime; the tick folds what it reports.
+    pub fn start_agent_status(&mut self, dialer: Dialer, legacy_panel: bool) {
+        self.agent_status = Some(AgentStatusReader::spawn(dialer, legacy_panel));
     }
 
     /// Never start the daemon attention poller on a tick. For tests: the
@@ -321,12 +320,10 @@ impl<S: FrameSink> DesktopHost<S> {
         // is open: the worker reports into the state, and this is the only
         // thing in this process that folds it.
         self.state.tick_surfaces(ainb_app::fleet::daemons::heartbeat::now_ms());
-        // Section 20, which the board draws: no other host feeds it here.
-        self.agent_status.tick(
-            &mut self.state,
-            ainb_app::fleet::daemons::heartbeat::now_ms(),
-            self.read_agent_status,
-        );
+        // Section 20, which the board draws, from the shared reader.
+        if let Some(reader) = &mut self.agent_status {
+            reader.drain_into(&mut self.state);
+        }
         // Section 16, while a renderer reads it.
         if let Some(reader) = &mut self.inbox {
             reader.drain_into(&mut self.state);

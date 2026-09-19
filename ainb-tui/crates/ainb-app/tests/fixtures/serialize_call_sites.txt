@@ -1,6 +1,9 @@
 # Serialisation call sites outside ainb-app/src/wire, locked by tests/serialize_guard.rs.
 # Each writes a disk file, a CLI's own output, a plugin or daemon RPC body, or (ainb-web
 # routes.rs) the web client's daemon attention stream; none is an AppState section.
+# fleet/agent_status_reader.rs is its fake_daemon (test and test-support builds only):
+# the JSON-RPC reply frame a fake daemon writes to the reader under test, a
+# serde_json::Value the test builds from json! literals, never a section or moved type.
 # A new line is triaged first: frames go through wire::serialize_section only.
 # Regenerate: UPDATE_SERIALIZE_CALL_SITES=1 cargo test -p ainb-app --test serialize_guard
 ainb-app/src/agent_parsers/claude_json.rs | serde_json::to_string_pretty(&v)
@@ -24,6 +27,7 @@ ainb-app/src/config/mod.rs | toml::to_string_pretty(self)
 ainb-app/src/config/onboarding.rs | toml::to_string_pretty(self)
 ainb-app/src/config/ssh_display_names.rs | serde_json::to_string_pretty(self)
 ainb-app/src/docker/session_lifecycle.rs | serde_json::to_string_pretty(&config)
+ainb-app/src/fleet/agent_status_reader.rs | serde_json::to_vec(value)
 ainb-app/src/fleet/atc/heartbeat.rs | serde_json::to_string_pretty(self)
 ainb-app/src/fleet/atc/meta.rs | serde_json::to_string_pretty(self)
 ainb-app/src/fleet/plumbing/atomic.rs | serde_json::to_vec_pretty(value)
