@@ -32,8 +32,17 @@ export interface FileRow {
   cut: string | undefined;
 }
 
-/** One line of the diff body: a hunk's header, or one of its rows. */
+/**
+ * One line of the diff body: a file's heading, a hunk's header, or a row.
+ *
+ * Every file is drawn, one after another, because that is the body the
+ * reducer's own offsets describe: `review_ui.scroll` is a row index across
+ * the whole review and `current_hunk` counts hunks across every file. A tab
+ * that drew only the open file would be scrolling something the reducer is
+ * not counting, and the terminal beside it would be showing another thing.
+ */
 export type BodyLine =
+  | { kind: "file"; key: string; file: ReviewFileFrame_Serialize; open: boolean }
   | { kind: "hunk"; key: string; header: string; hidden: number }
   | { kind: "row"; key: string; row: DiffRow_Serialize };
 
@@ -65,23 +74,32 @@ export function openFile(
 }
 
 /**
- * The open file's body: every hunk's header followed by its rows.
+ * The whole review's body: each file's heading, then its hunks and their rows.
  *
- * The header says what the hunk skipped (`gap_before`), because a diff drawn
+ * A hunk's header says what it skipped (`gap_before`), because a diff drawn
  * without its gaps reads as a file with nothing between its changes.
  */
-export function bodyLines(file: ReviewFileFrame_Serialize | undefined): BodyLine[] {
-  if (file === undefined) return [];
+export function bodyLines(section: GitViewView_Serialize | undefined): BodyLine[] {
+  const view = gitView(section);
+  if (view === undefined) return [];
   const lines: BodyLine[] = [];
-  file.hunks.forEach((hunk, index) => {
+  view.review.files.forEach((file, fileIndex) => {
     lines.push({
-      kind: "hunk",
-      key: `${file.path}:hunk:${index}`,
-      header: hunkHeader(hunk),
-      hidden: hunk.gap_before - hunk.expanded_before,
+      kind: "file",
+      key: `${file.path}:file`,
+      file,
+      open: fileIndex === view.review_ui.selected_file,
     });
-    hunk.rows.forEach((row, rowIndex) => {
-      lines.push({ kind: "row", key: `${file.path}:${index}:${rowIndex}`, row });
+    file.hunks.forEach((hunk, index) => {
+      lines.push({
+        kind: "hunk",
+        key: `${file.path}:hunk:${index}`,
+        header: hunkHeader(hunk),
+        hidden: hunk.gap_before - hunk.expanded_before,
+      });
+      hunk.rows.forEach((row, rowIndex) => {
+        lines.push({ kind: "row", key: `${file.path}:${index}:${rowIndex}`, row });
+      });
     });
   });
   return lines;
