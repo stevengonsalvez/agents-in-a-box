@@ -1705,6 +1705,35 @@ fn interactive_launch(
     (agent_type, Some(skip), model.map(str::to_string))
 }
 
+/// Bound on the P6d shadow write of a registration into the `sessions` table,
+/// so a saturated pool cannot hold up an interactive run.
+const SHADOW_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Mirror `record` into the `sessions` table, matching the file.
+///
+/// The pane's tmux name is derived from the task id, so a retried task
+/// registers the same name under a fresh id. The file keys by tmux name and
+/// replaces the old entry; the table does the same here, removing the row
+/// this pane held before so the two stores carry one id for it.
+async fn shadow_write_session(
+    pool: &SqlitePool,
+    record: &ainb_fleet_core::session_registry::AinbSessionRecord,
+) -> Result<(), sqlx::Error> {
+    let row = session_row_for(record);
+    if let Some(old) = SessionsRepo::get_by_tmux_name(pool, &row.tmux_session_name).await? {
+        if old.session_id != row.session_id {
+            SessionsRepo::delete_by_id(pool, &old.session_id).await?;
+        }
+    }
+    match SessionsRepo::upsert(pool, &row).await? {
+        UpsertOutcome::Written => Ok(()),
+        UpsertOutcome::TmuxNameTaken { holder } => Err(sqlx::Error::Protocol(format!(
+            "tmux name {} was rebound to {holder} during the shadow write",
+            row.tmux_session_name
+        ))),
+    }
+}
+
 /// The `sessions` table row for a registry record.
 fn session_row_for(record: &ainb_fleet_core::session_registry::AinbSessionRecord) -> SessionRow {
     SessionRow {
@@ -1852,42 +1881,33 @@ async fn run_interactive(
     // recorded on the row, so a registry write fault is logged and ignored rather
     // than failing the run (the external-dep / degrade rule).
     //
-    // P6d: the same record is also shadow-written to the daemon's `sessions`
-    // table, with what was actually launched (provider, permission bypass,
-    // model) rather than the defaults. While the capability is dark the file
-    // write below stays the registration every reader sees; the table write is
-    // best-effort and a failure is logged, never fails the run. A retry of the task reuses the tmux name, so it
-    // reuses the id already bound to that name instead of colliding with it.
+    // P6d: after the v2 file write, the same record is shadow-written to the
+    // daemon's `sessions` table with what was actually launched (provider,
+    // permission bypass, model). While the capability is dark the file is the
+    // registration every reader sees, so it goes first and the shadow write is
+    // best-effort, bounded by SHADOW_WRITE_TIMEOUT, and only ever logged.
     let (agent_type, skip_permissions, model) = interactive_launch(
         dispatch.backend,
         dispatch.invocation.model.as_deref(),
         &argv,
     );
-    let mut record = ainb_fleet_core::session_registry::AinbSessionRecord::new(
+    let record = ainb_fleet_core::session_registry::AinbSessionRecord::new(
         session_name.clone(),
         cwd.to_path_buf(),
         ws_slug.to_string(),
     )
     .with_launch(agent_type, skip_permissions, model);
-    match SessionsRepo::get_by_tmux_name(pool, &session_name).await {
-        Ok(Some(row)) => match uuid::Uuid::parse_str(&row.session_id) {
-            Ok(id) => record.session_id = id,
-            Err(_) => {
-                tracing::warn!(task_id = %task.id, "sessions row for this pane has a non-UUID id; minting a new one");
-            }
-        },
-        Ok(None) => {}
-        Err(e) => tracing::warn!(task_id = %task.id, error = %e, "sessions table read failed"),
-    }
-    match SessionsRepo::upsert(pool, &session_row_for(&record)).await {
-        Ok(UpsertOutcome::Written) => {}
-        Ok(UpsertOutcome::TmuxNameTaken { holder }) => {
-            tracing::warn!(task_id = %task.id, %holder, "sessions table already binds this pane to another session");
-        }
-        Err(e) => tracing::warn!(task_id = %task.id, error = %e, "sessions table write failed"),
-    }
     if let Err(e) = ainb_fleet_core::session_registry::register_session(&record) {
         tracing::warn!(task_id = %task.id, error = %e, "session registry write failed");
+    }
+    match tokio::time::timeout(SHADOW_WRITE_TIMEOUT, shadow_write_session(pool, &record)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(task_id = %task.id, error = %e, "sessions table shadow write failed");
+        }
+        Err(_) => {
+            tracing::warn!(task_id = %task.id, "sessions table shadow write timed out");
+        }
     }
 
     // a54: the session was registered for the shutdown reap right after spawn
@@ -3193,6 +3213,34 @@ fn warn_danger_access(task: &Task, provider: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A retried task re-registers its pane under a fresh id; the shadow
+    /// write replaces the pane's old row, as the file does, instead of
+    /// leaving the table on the old id.
+    #[tokio::test]
+    async fn shadow_write_replaces_the_panes_previous_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let first = ainb_fleet_core::session_registry::AinbSessionRecord::new(
+            "tmux_hangar-01J",
+            PathBuf::from("/work/x"),
+            "ws",
+        );
+        shadow_write_session(pool, &first).await.unwrap();
+        let retry = ainb_fleet_core::session_registry::AinbSessionRecord::new(
+            "tmux_hangar-01J",
+            PathBuf::from("/work/x"),
+            "ws",
+        )
+        .with_launch("Codex", Some(true), None);
+        shadow_write_session(pool, &retry).await.unwrap();
+
+        let rows = SessionsRepo::list(pool, None, 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, retry.session_id.to_string());
+        assert_eq!(rows[0].agent_type, "Codex");
+    }
 
     /// P6d: the daemon's own registration records the provider it launched,
     /// not the Claude default. A Codex pane must never read back as Claude.
