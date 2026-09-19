@@ -72,7 +72,7 @@
 
 2. The TUI sees what the CLI writes and the reverse. With a real daemon in a private hangar home (capability on, import complete): a session created by `ainb run` appears in the TUI's workspace list read (`state.rs:3110` path) without a restart; a session the TUI creates (`session_manager.rs:1575` path) appears in `ainb list --format json`; `ainb kill` of a TUI-created session removes it from the TUI's next read; `Persist::SessionHeadroom` keeps its compare-and-set semantics through the daemon (a test where the expected value moved leaves the row unchanged). Each is an integration test that fails when the corresponding site is reverted to the file.
 
-3. Reconciliation without resurrection. A daemon boot on a home whose P6d import marker exists reconciles `sessions.json` once more, behind its own marker kind: every file session whose id is absent from the table AND not recorded as deleted is inserted; a session deleted from the table after the P6d import stays deleted; a table row newer than its file row is not overwritten; a second boot reconciles nothing; a failed reconciliation writes no marker and keeps `session_list.import_complete` false. Five tests, one per clause, each red when its guard is removed.
+3. Reconciliation without resurrection. A daemon boot on a home whose P6d import marker exists reconciles `sessions.json` once more, behind its own marker kind: every file session whose id is absent from the table is inserted; a table row is never overwritten by its file row; a failed reconciliation writes no marker and keeps `session_list.import_complete` false. Three tests, one per clause, each red when its guard is removed. No tombstones: see open question 1.
 
 4. The flip is last and alone. The final commit of the implementation PR touches only `protocol.rs` (the catalogue entry), `capabilities.catalogue`, and the test that pinned the capability off (now pinning it on). `hello` advertises `hangar.workspace.sessions` in a test against a real daemon, and `SessionSource::resolve` answers `Daemon` with no test-only switch.
 
@@ -95,7 +95,7 @@
 ─ SCOPE, STAGED AS PRs ─
 
 **P6e-1, reconciliation (daemon only, capability still dark).**
-· Touches: a new migration after `0102` if a marker kind or tombstone table is needed, `repo/sessions.rs`, `session_import.rs`, `lib.rs`'s boot call.
+· Touches: `repo/sessions.rs`, `session_import.rs`, `lib.rs`'s boot call.
 · Proof: the five tests of criterion 3.
 
 **P6e-2, every reader and writer onto `SessionSource`, then the flip.**
@@ -117,7 +117,7 @@
 
 ─ OPEN QUESTIONS, EACH WITH A RECOMMENDATION ─
 
-1. **How does the reconciliation know a row was deleted, not just missing?** Recommended: a `session_tombstone` table (session id, deleted_at) written in the same transaction as every `delete_by_id` / `delete_by_tmux_name` from the migration that adds it onward, and the reconciliation skips any id with a tombstone. While P6d is dark the only table deletes are the daemon's own retried-pane replacements (`shadow_write_session`), whose file entry was replaced the same way, so starting tombstones in P6e-1 loses nothing. Rejected alternative: comparing timestamps, because `SessionMetadata` has only `created_at` and no updated-at, so "newer" cannot be decided.
+1. **Tombstones: decided, no.** While P6d is dark the only table deletes are the daemon's own retried-pane replacements (`shadow_write_session`), whose file entry is replaced under the same key, so there is nothing a reconcile could resurrect. A tombstone table would add an obligation at every delete site, forever, for an empty hazard set. Resurrection is prevented instead by keeping the file current, deletes included (see "Mixed versions").
 
 2. **Does a session created after the flip survive a downgrade?** Recommended: yes for one release. The daemon writes each changed table row into `sessions.json` through `register_session_at`'s flock (row-level upsert or remove, never a whole-file replace), best-effort and bounded like P6d's shadow write, and a later node removes it with a spec note. Rejected alternative: accept the loss, because the parent goal's constraint (`:121`) reads "a user who downgrades still has their sessions" without a date.
 
@@ -144,6 +144,6 @@ Begin by outputting your plan. Then execute end-to-end without checking in until
 ─ PROGRESS LOG ─
 
 Plan, staged as the PRs above:
-1. P6e-1: reconciliation with tombstones and its marker, capability still dark.
+1. P6e-1: reconciliation and its marker, capability still dark.
 2. P6e-2: every `ainb-app` reader and writer onto `SessionSource`, the call-site tripwire, then the flip as the last commit.
 3. P6e-3: `p6-concurrent` and the programme row.
