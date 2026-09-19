@@ -209,6 +209,8 @@ fn an_unparsable_settings_file_fails_closed_with_its_reason() {
         }
         other => panic!("{other:?}"),
     }
+    // And the channel in force reads as off, so nothing applies either.
+    assert_eq!(u.settings().channel, Channel::Off);
 }
 
 /// An update is installed on the channel that found it: `off` set after the
