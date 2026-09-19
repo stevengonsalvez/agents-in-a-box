@@ -2,12 +2,15 @@
 // holds. Projections only: `settings.tsx` draws what these return, and nothing
 // here reads the store or keeps anything.
 //
-//   config.config_screen_state ──categories, rows──▶ the form
+//   config.config_screen_state ──visible_nodes, visible_rows──▶ the tree and the form
 //   hangar.daemons_state       ──rows, hook health──▶ the daemons panel
 //
-// The rows are the reducer's: a row's kind, its options and whether it can be
-// edited come from the frame, and an edit goes back as `config.set_row` naming
-// the row by key. The page never parses config.toml and never saves it whole.
+// The rows, the tree and the selection are the reducer's: what is on screen
+// is `visible_nodes` and `visible_rows` (the selected node's subtree, or the
+// `/` filter's matches), the selected node and row are the frame's, and a
+// click goes back as a pointer command naming the node or the row by id. The
+// page keeps no selection of its own, never parses config.toml and never
+// saves it whole.
 
 import type {
   ConfigCategory,
@@ -22,6 +25,8 @@ import type { RendererIntent } from "./tabs.ts";
 
 /** The command a row edit is sent as, `ainb_app::app::pointer::ids::CONFIG_SET_ROW`. */
 export const SET_ROW = "config.set_row";
+/** The command a tree click is sent as, `ainb_app::app::pointer::ids::CONFIG_SELECT_NODE`. */
+export const SELECT_NODE = "config.select_node";
 
 /** A row's widget, from the reducer's own value kind. */
 export type RowKind = "text" | "secret" | "bool" | "choice" | "number";
@@ -43,12 +48,19 @@ export interface SettingsRow {
   readOnlyReason: string | null;
   /** Edited and not yet written. */
   dirty: boolean;
+  /** The row under the reducer's cursor. */
+  current: boolean;
 }
 
-export interface SettingsCategory {
-  category: ConfigCategory;
+/** One line of the tree pane, as the reducer has it on screen. */
+export interface SettingsNode {
+  /** `ConfigTreeNode::id`, what a click names. */
+  id: string;
   label: string;
-  rows: SettingsRow[];
+  depth: number;
+  hasChildren: boolean;
+  expanded: boolean;
+  selected: boolean;
 }
 
 /**
@@ -255,7 +267,7 @@ function secretShown(reference: string, resolved: boolean): string {
   return `${resolved ? "set" : "unresolved"} (${reference})`;
 }
 
-function row(setting: ConfigSetting_Serialize, dirty: readonly string[]): SettingsRow {
+function row(setting: ConfigSetting_Serialize, dirty: readonly string[], current: boolean): SettingsRow {
   const value = setting.value;
   const kind = kindOf(value);
   let shown = "";
@@ -294,36 +306,83 @@ function row(setting: ConfigSetting_Serialize, dirty: readonly string[]): Settin
     readOnly: editRefusal(setting.key, kind === "secret") !== null,
     readOnlyReason: editRefusal(setting.key, kind === "secret"),
     dirty: dirty.includes(setting.key),
+    current,
   };
 }
 
-/**
- * The categories the form lists, in the reducer's order, each with its rows.
- * The label is the tree's own root node for the category, so both surfaces
- * print the same words.
- */
-export function settingsCategories(config: ConfigView_Serialize | undefined): SettingsCategory[] {
-  if (config === undefined) return [];
-  const screen = config.config_screen_state;
-  return screen.categories.map((category) => ({
-    category,
-    label: label(screen.tree.find((node) => node.depth === 0 && node.category === category)?.label ?? category),
-    rows: (screen.settings[category] ?? []).map((setting) => row(setting, screen.dirty)),
-  }));
+/** A category's label as `ConfigCategory::label` prints it: its root node's. */
+function categoryLabel(config: ConfigView_Serialize, category: ConfigCategory): string {
+  return config.config_screen_state.tree.find((node) => node.depth === 0 && node.category === category)?.label ?? category;
 }
 
-/** How many rows the form holds in all, as the terminal's title counts them. */
-export function settingCount(categories: readonly SettingsCategory[]): number {
-  return categories.reduce((sum, category) => sum + category.rows.length, 0);
+/**
+ * The tree pane, exactly the nodes the reducer has on screen and in its
+ * order: every collapsed subtree is already skipped in `visible_nodes`.
+ */
+export function settingsTree(config: ConfigView_Serialize | undefined): SettingsNode[] {
+  if (config === undefined) return [];
+  const screen = config.config_screen_state;
+  const expanded = new Set(screen.expanded);
+  return screen.visible_nodes.flatMap((index, position) => {
+    const node = screen.tree[index];
+    if (node === undefined) return [];
+    const id = `${categoryLabel(config, node.category)}|${node.path}`;
+    return [
+      {
+        id,
+        label: label(node.label),
+        depth: node.depth,
+        hasChildren: node.has_children,
+        expanded: expanded.has(id),
+        selected: position === screen.selected_node,
+      },
+    ];
+  });
+}
+
+/**
+ * The rows the right pane shows, exactly `visible_rows`: the selected
+ * node's subtree, or the `/` filter's matches, in the reducer's order.
+ */
+export function settingsRows(config: ConfigView_Serialize | undefined): SettingsRow[] {
+  if (config === undefined) return [];
+  const screen = config.config_screen_state;
+  return screen.visible_rows.flatMap(([category, index], position) => {
+    const setting = screen.settings[category]?.[index];
+    return setting === undefined ? [] : [row(setting, screen.dirty, position === screen.selected_setting)];
+  });
+}
+
+/** The right pane's title: the selected node's, or the filter's. */
+export function settingsTitle(config: ConfigView_Serialize | undefined): string {
+  if (config === undefined) return "";
+  const screen = config.config_screen_state;
+  if (screen.search_len !== null) return "Search";
+  const index = screen.visible_nodes[screen.selected_node];
+  const node = index === undefined ? undefined : screen.tree[index];
+  return node === undefined ? "" : label(node.label);
+}
+
+/** How many rows the screen holds in all, as the terminal's title counts them. */
+export function settingCount(config: ConfigView_Serialize | undefined): number {
+  if (config === undefined) return 0;
+  return Object.values(config.config_screen_state.settings).reduce((sum, rows) => sum + (rows?.length ?? 0), 0);
+}
+
+/** Whether the `/` filter is open, so the page draws its box as active. */
+export function searching(config: ConfigView_Serialize | undefined): boolean {
+  return config?.config_screen_state.search_len != null;
 }
 
 /**
  * The edit a widget's input becomes, or `null` when it does not fit the row:
- * a number that does not parse, a choice index outside the options, an edit
- * of a read-only row. The reducer checks the same, so this only spares a
- * round trip.
+ * a number that does not parse or was cleared, a choice index outside the
+ * options, an edit of a read-only row, text over the bound. The reducer
+ * checks the same, so this only spares a round trip. `revision` is the config
+ * section version the page drew, so the reducer can refuse an edit of a frame
+ * it has moved past.
  */
-export function rowEdit(row: SettingsRow, input: string | number | boolean): RendererIntent | null {
+export function rowEdit(row: SettingsRow, input: string | number | boolean, revision: number): RendererIntent | null {
   if (row.readOnly) return null;
   // The frame shows a scrubbed value; sending it back would write the marker
   // over the real one. The reducer refuses it too.
@@ -360,7 +419,28 @@ export function rowEdit(row: SettingsRow, input: string | number | boolean): Ren
       break;
     }
   }
-  return { Command: [SET_ROW, { key: row.key, value }] };
+  return { Command: [SET_ROW, { key: row.key, value, revision }] };
+}
+
+/** A click on the tree node `id`: the reducer selects it. */
+export function selectNode(id: string): RendererIntent {
+  return { Command: [SELECT_NODE, { id }] };
+}
+
+/** A click on a node's chevron: select it, then the reducer's own expand toggle. */
+export function toggleNode(id: string): RendererIntent[] {
+  return [selectNode(id), { Command: ["config.toggle_expand", null] }];
+}
+
+/**
+ * What typing `query` into the filter box sends: the reducer's `/` opens (or
+ * reopens, empty) its search, and the text is typed into it as the terminal
+ * would; an empty query closes the filter with its own Esc.
+ */
+export function searchIntents(query: string): RendererIntent[] {
+  const text = cleanText(query);
+  if (text === "") return [{ Command: ["config.search.cancel", null] }];
+  return [{ Command: ["config.search", null] }, { Text: text }];
 }
 
 /**
@@ -429,27 +509,3 @@ export function daemonsCollectedAt(hangar: HangarView_Serialize | undefined): nu
 
 /** The column titles the panel draws, as the terminal's table does. */
 export const DAEMON_COLUMNS = ["DAEMON", "STATE", "VERSION", "ERR", "HEALTH"] as const;
-
-/**
- * Every line of text the settings page draws, in reading order: the DOM half
- * of parity compares this against the fixture's expected facts. `settings.tsx`
- * prints exactly these strings, so a fact absent here is absent from the page.
- */
-export function settingsLines(config: ConfigView_Serialize | undefined, hangar: HangarView_Serialize | undefined): string[] {
-  const categories = settingsCategories(config);
-  const lines = [`Settings (${settingCount(categories)} settings)`];
-  for (const category of categories) {
-    lines.push(category.label);
-    for (const row of category.rows) {
-      lines.push(`${row.label}: ${row.value}`);
-      if (row.description !== "") lines.push(row.description);
-    }
-  }
-  lines.push("Daemons: runtime health");
-  lines.push(DAEMON_COLUMNS.join(" "));
-  for (const row of daemonRows(hangar)) {
-    lines.push([row.kind, row.state, row.version, String(row.errors), row.connected ? "connected" : row.reason].join(" "));
-  }
-  lines.push(...hookHealthLines(hangar));
-  return lines;
-}
