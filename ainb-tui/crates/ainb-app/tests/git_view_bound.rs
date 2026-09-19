@@ -598,3 +598,113 @@ fn what_the_worst_case_projection_costs() {
 
     println!("worst case: project {projected:?}, encode {encoded:?}, {bytes} bytes");
 }
+
+/// The reducer counts rows over the whole model; the frame carries a cut of
+/// it, so the frame translates the offset into its own rows rather than
+/// sending a number that names different content on each side of the wire.
+///
+/// `flatten` (components/code_review/render.rs:112) counts a row per file
+/// heading and a row per code line, so in a two-file state of ten rows each
+/// the model's row 12 is the second file's first line.
+#[test]
+fn the_frames_scroll_is_its_own_row_and_says_when_the_reducers_row_was_cut() {
+    let mut state = state_with(2, 10, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.scroll = 12;
+    }
+
+    let view = &framed(&state)["git_view_state"]["review_ui"];
+
+    assert_eq!(
+        view["scroll"].as_u64(),
+        Some(12),
+        "nothing was cut, so nothing moved"
+    );
+    assert_eq!(view["scroll_cut"].as_bool(), Some(false));
+}
+
+#[test]
+fn a_row_past_the_per_file_cap_frames_as_the_last_row_that_survived_it() {
+    // 500 rows a file, cut to MAX_ROWS_PER_FILE 400: the model's row 450 is
+    // inside the first file and past what the frame carries of it.
+    let mut state = state_with(2, 500, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.scroll = 450;
+    }
+
+    let view = &framed(&state)["git_view_state"]["review_ui"];
+
+    // The first file frames its heading and 400 rows: rows 0 to 400.
+    assert_eq!(
+        view["scroll"].as_u64(),
+        Some(400),
+        "the last row of that file that was sent"
+    );
+    assert_eq!(
+        view["scroll_cut"].as_bool(),
+        Some(true),
+        "and the frame says the row the terminal is on is not in it"
+    );
+}
+
+#[test]
+fn a_row_in_a_file_the_budget_dropped_frames_at_what_follows_it() {
+    // Twelve files of 400 rows: the total row cap (4,000) stops the frame part
+    // way, so a model row inside a file that was never framed has to land
+    // somewhere honest.
+    let mut state = state_with(12, 400, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        // Inside the last file, which the row budget never reached.
+        git.review_ui.scroll = 11 * 401 + 5;
+    }
+
+    let body = framed(&state);
+    let view = &body["git_view_state"]["review_ui"];
+    let framed_rows: u64 = body["git_view_state"]["review"]["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .map(|file| {
+            1 + file["hunks"]
+                .as_array()
+                .expect("hunks")
+                .iter()
+                .map(|hunk| hunk["rows"].as_array().expect("rows").len() as u64)
+                .sum::<u64>()
+        })
+        .sum();
+
+    assert_eq!(view["scroll_cut"].as_bool(), Some(true));
+    assert!(
+        view["scroll"].as_u64().expect("a scroll") <= framed_rows,
+        "the offset is inside the rows the frame carries"
+    );
+}
+
+#[test]
+fn the_current_hunk_is_the_frames_hunk_too() {
+    let mut state = state_with(3, 10, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.current_hunk = 2;
+    }
+
+    let body = framed(&state);
+    let hunks: usize = body["git_view_state"]["review"]["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .map(|file| file["hunks"].as_array().expect("hunks").len())
+        .sum();
+
+    let current = body["git_view_state"]["review_ui"]["current_hunk"]
+        .as_u64()
+        .expect("a hunk cursor");
+    assert!(
+        (current as usize) < hunks,
+        "the cursor names a hunk the frame carries: {current} of {hunks}"
+    );
+}
