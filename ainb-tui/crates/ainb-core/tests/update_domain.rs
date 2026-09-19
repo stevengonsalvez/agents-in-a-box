@@ -230,7 +230,9 @@ fn signed_manifest_rejects_unsafe_desktop_bundle_metadata() {
 #[test]
 fn next_root_must_be_an_https_root_with_a_host() {
     use ainb::cli::update::validate_next_root;
-    assert!(validate_next_root("https://github.com/acme/new-home/releases/latest/download").is_ok());
+    assert!(
+        validate_next_root("https://github.com/acme/new-home/releases/latest/download").is_ok()
+    );
     assert!(validate_next_root("https://example.org").is_ok());
     for bad in [
         "http://github.com/acme/new-home",
@@ -254,7 +256,10 @@ fn next_root_must_be_an_https_root_with_a_host() {
         &STANDARD.encode(signing_key.verifying_key().as_bytes()),
     )
     .unwrap();
-    assert_eq!(verified.next_root.as_deref(), Some("https://example.org/releases"));
+    assert_eq!(
+        verified.next_root.as_deref(),
+        Some("https://example.org/releases")
+    );
 
     let bad = br#"{"version":"1.29.0","assets":[],"next_root":"http://example.org"}"#;
     let signature = signing_key.sign(bad);
@@ -318,13 +323,16 @@ async fn the_manifest_is_fetched_from_the_given_root_and_nothing_else() {
     let body = br#"{"version":"1.29.0","assets":[]}"#.to_vec();
     let sig = STANDARD.encode(signing_key.sign(&body).to_bytes());
     let (paths_tx, paths_rx) = std::sync::mpsc::channel::<String>();
+    let served_sig = sig.clone();
     std::thread::spawn(move || {
+        let sig = served_sig;
         for stream in listener.incoming().take(2) {
             let mut stream = stream.unwrap();
             let mut buf = [0u8; 4096];
             let n = stream.read(&mut buf).unwrap_or(0);
             let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            let path = request.lines().next().unwrap_or("").split(' ').nth(1).unwrap_or("").to_string();
+            let path =
+                request.lines().next().unwrap_or("").split(' ').nth(1).unwrap_or("").to_string();
             let payload: Vec<u8> = if path.ends_with("/release-manifest.json") {
                 body.clone()
             } else if path.ends_with("/release-manifest.sig") {
@@ -332,7 +340,11 @@ async fn the_manifest_is_fetched_from_the_given_root_and_nothing_else() {
             } else {
                 Vec::new()
             };
-            let status = if payload.is_empty() { "404 Not Found" } else { "200 OK" };
+            let status = if payload.is_empty() {
+                "404 Not Found"
+            } else {
+                "200 OK"
+            };
             let _ = write!(
                 stream,
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
