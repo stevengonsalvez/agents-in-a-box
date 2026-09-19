@@ -12,6 +12,7 @@ pub mod cli;
 pub mod components;
 pub mod effect_host;
 pub mod host;
+pub mod inbox_host;
 pub mod terminal_clients;
 pub mod tmux;
 
