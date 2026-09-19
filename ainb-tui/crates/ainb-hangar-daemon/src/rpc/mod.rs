@@ -1632,7 +1632,7 @@ async fn handle(
         methods::WORKSPACE_SESSION_LIST => handle_session_list(pool, req).await,
         methods::WORKSPACE_SESSION_UPSERT => handle_session_upsert(pool, req).await,
         methods::WORKSPACE_SESSION_DELETE => handle_session_delete(pool, req).await,
-        methods::WORKSPACE_SESSION_RECONCILE => handle_session_reconcile(pool, req).await,
+        methods::WORKSPACE_SESSION_RECONCILE => handle_session_reconcile(pool).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -13510,7 +13510,7 @@ async fn handle_session_list(
         .map_err(|e| store_err(&e))?;
     let truncated = rows.len() > limit as usize;
     rows.truncate(limit as usize);
-    let sessions_path = ainb_fleet_core::session_registry::sessions_json_path();
+    let sessions_path = crate::session_import::daemon_sessions_path();
     let import_complete = SessionsRepo::import_complete_for(pool, &sessions_path.to_string_lossy())
         .await
         .map_err(|e| store_err(&e))?;
@@ -13549,23 +13549,16 @@ async fn handle_session_upsert(
 }
 
 /// Run one reconcile pass of this daemon's `sessions.json` and answer with it
-/// once it has committed.
+/// once it has committed. It takes no params; any sent are ignored, as the
+/// pass is always of this daemon's own file.
 ///
 /// The one-time import runs first if it has not, so a client that finds
 /// `import_complete: false` can bring the table up to date with one call. A
 /// failed pass leaves the marker as it was and answers with the error.
-async fn handle_session_reconcile(
-    pool: &SqlitePool,
-    req: &RpcRequest,
-) -> Result<serde_json::Value, RpcError> {
-    use ainb_hangar_proto::sessions::{
-        WorkspaceSessionReconcileParams, WorkspaceSessionReconcileResult,
-    };
+async fn handle_session_reconcile(pool: &SqlitePool) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::sessions::WorkspaceSessionReconcileResult;
 
-    if !req.params.is_null() {
-        let _: WorkspaceSessionReconcileParams = parse_params(req, "{}")?;
-    }
-    let sessions_path = ainb_fleet_core::session_registry::sessions_json_path();
+    let sessions_path = crate::session_import::daemon_sessions_path();
     let failed = |e: anyhow::Error| internal(&format!("sessions reconcile failed: {e:#}"));
     crate::session_import::import_sessions_if_needed(pool, &sessions_path)
         .await
@@ -16887,9 +16880,7 @@ mod tests {
         // P6e: the import row alone (all P6d wrote) no longer makes the table
         // authoritative; the reconcile row of the same file does. The path is
         // the one the handler resolves; only its rows are written, no file.
-        let source = ainb_fleet_core::session_registry::sessions_json_path()
-            .to_string_lossy()
-            .into_owned();
+        let source = crate::session_import::daemon_sessions_path().to_string_lossy().into_owned();
         ainb_hangar_store::repo::sessions::SessionsRepo::complete_import(pool, &source, &[], 0, 1)
             .await
             .unwrap();
