@@ -82,3 +82,4 @@ proof-out/
 
 # The wdio journey's recorded throughput figure (crates/ainb-desktop/e2e)
 crates/ainb-desktop/e2e/throughput.json
+crates/ainb-desktop/e2e/review-render.json
