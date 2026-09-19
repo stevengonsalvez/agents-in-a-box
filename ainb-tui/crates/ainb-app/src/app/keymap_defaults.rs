@@ -1349,6 +1349,15 @@ pub fn defaults() -> Vec<Binding> {
             AppEvent::GitViewScrollBy(0),
             "Scroll the active git view tab by the lines a wheel names",
         ),
+        unbound(
+            Context::screen("config"),
+            "set_row",
+            AppEvent::ConfigSetRow {
+                key: String::new(),
+                edit: crate::config::settings_model::ConfigRowEdit::Text(String::new()),
+            },
+            "Set the settings row a form names, and write that key",
+        ),
         // Host reports (`crate::app::reports::ids`), unbound for the same reason.
         unbound(
             Context::Global,
