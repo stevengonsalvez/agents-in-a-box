@@ -3336,6 +3336,38 @@ mod tests {
         );
     }
 
+    /// On the desktop a row is attached whenever its terminal tab is open, and
+    /// the banner over that tab is where the question is answered, so the chip
+    /// must still land. The terminal's rule stands there: attaching shows the
+    /// pane full screen, where the question is already in front of the person.
+    #[test]
+    fn on_the_desktop_an_attached_session_keeps_its_chip() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let cwd = "/work/attached";
+        let mut state = state_with_session_at(cwd, Some("tmux_proj"));
+        state.host.surface = ainb_hangar_proto::connections::SurfaceKind::Desktop;
+        state.sessions.workspaces[0].sessions[0].is_attached = true;
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into()),
+        );
+
+        state.merge_attention(2_000);
+
+        let chips = &state.sessions.workspaces[0].sessions[0].live_attention;
+        assert_eq!(
+            chips.len(),
+            1,
+            "the question is on the row the window shows"
+        );
+        assert_eq!(chips[0].kind, AttentionKind::Ask);
+        assert_eq!(
+            state.fleet.attention_elsewhere, 0,
+            "and it is not reported as waiting elsewhere"
+        );
+    }
+
     #[test]
     fn an_attached_session_claims_its_cwd_so_it_is_not_reported_elsewhere() {
         use crate::fleet::attention::{AttentionKind, SessionAttention};

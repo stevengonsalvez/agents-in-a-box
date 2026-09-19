@@ -1978,6 +1978,26 @@ impl InteractiveSessionManager {
     pub async fn list_sessions(
         &mut self,
     ) -> Result<Vec<InteractiveSession>, InteractiveSessionError> {
+        // P6e: one read of the store, through the session source. A failed
+        // read is logged and every session goes on to phase 2.
+        let store = crate::cli::util::load_session_store_async().await.unwrap_or_else(|e| {
+            warn!("session store unavailable for this refresh: {e}");
+            SessionStore::default()
+        });
+        self.list_sessions_with(&store).await
+    }
+
+    /// [`list_sessions`](Self::list_sessions) against a store the caller has
+    /// already read, so one refresh reads the store once however many tmux
+    /// sessions it walks (each read can wait out the RPC deadline).
+    ///
+    /// # Errors
+    ///
+    /// When tmux cannot be listed.
+    pub async fn list_sessions_with(
+        &mut self,
+        store: &SessionStore,
+    ) -> Result<Vec<InteractiveSession>, InteractiveSessionError> {
         info!("Discovering Interactive sessions from tmux");
 
         // Get all tmux sessions
@@ -2004,7 +2024,7 @@ impl InteractiveSessionManager {
             debug!("Found tmux session: {}", tmux_name);
 
             // Try to find corresponding worktree
-            if let Ok(session) = self.discover_session_from_tmux(tmux_name).await {
+            if let Ok(session) = self.discover_session_from_tmux(tmux_name, store).await {
                 discovered_sessions.push(session);
             }
         }
@@ -2024,10 +2044,11 @@ impl InteractiveSessionManager {
     async fn discover_session_from_tmux(
         &self,
         tmux_name: &str,
+        store: &SessionStore,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         // Phase 1: Try to find session in persisted sessions.json
-        // This handles the branch-mismatch case where the user changed branches in the worktree
-        let store = SessionStore::load();
+        // This handles the branch-mismatch case where the user changed branches in the worktree.
+        // P6e: `store` is the caller's one read for the whole refresh.
         if let Some(metadata) = store.find_by_tmux_name(tmux_name) {
             // Verify the worktree still exists
             if metadata.worktree_path.exists() {
@@ -2492,11 +2513,17 @@ impl InteractiveSessionManager {
                          falling back to sessions.json",
                         session_id, e
                     );
-                    let store_name = SessionStore::load()
-                        .sessions()
-                        .values()
-                        .find(|m| m.session_id == session_id)
-                        .map(|m| m.tmux_session_name.clone());
+                    let store_name = crate::cli::util::load_session_store_async()
+                        .await
+                        .map_err(|e| warn!("session store unavailable: {e}"))
+                        .ok()
+                        .and_then(|store| {
+                            store
+                                .sessions()
+                                .values()
+                                .find(|m| m.session_id == session_id)
+                                .map(|m| m.tmux_session_name.clone())
+                        });
                     if let Some(ref n) = store_name {
                         info!("Resolved tmux name from sessions.json: {}", n);
                     } else {
@@ -4855,7 +4882,7 @@ trust_level = "trusted"
 
         let manager = InteractiveSessionManager::new().expect("manager");
         let discovered = manager
-            .discover_session_from_tmux(tmux_name)
+            .discover_session_from_tmux(tmux_name, &SessionStore::load())
             .await
             .expect("discover persisted session");
         let session = discovered.to_session_model();

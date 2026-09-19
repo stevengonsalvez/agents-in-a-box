@@ -1,4 +1,4 @@
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createMemo, createResource, createSelector, createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import type { SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
 import { commandRows, rank, sessionRows, stepRow, type PaletteEntry, type PaletteRow } from "./palette.ts";
@@ -37,6 +37,16 @@ export function Palette(props: Props) {
 
   const rows = createMemo(() => [...sessionRows(props.sessions), ...commandRows(entries() ?? [])]);
   const shown = createMemo(() => rank(rows(), query()));
+  // The list is drawn from the rows' keys, not the row objects. Every frame
+  // the host sends builds new row objects, and `For` keys by identity, so a
+  // list of objects re-created every row on every frame (#1267): a click
+  // could land on a button that had just been replaced. Keys are strings,
+  // equal from one frame to the next, so an unchanged row keeps its node and
+  // only its text is patched from `byKey`.
+  const keys = createMemo(() => shown().map((row) => row.key), [], { equals: sameKeys });
+  const byKey = createMemo(() => new Map(shown().map((row) => [row.key, row])));
+  // Only the row the cursor leaves and the row it reaches re-run.
+  const isAt = createSelector(() => shown()[at()]?.key);
   const choose = (row: PaletteRow | undefined) => {
     // A row the reducer would refuse now is drawn, so the list does not shift
     // under the user, but choosing it would do nothing and say nothing.
@@ -83,33 +93,47 @@ export function Palette(props: Props) {
         />
         <Show when={shown().length > 0} fallback={<p class="empty">Nothing matches</p>}>
           <ul class="palette-rows" role="listbox">
-            <For each={shown()}>
-              {(row, index) => (
-                <li>
-                  <button
-                    type="button"
-                    class="palette-row"
-                    classList={{ at: index() === at(), inactive: !row.active }}
-                    disabled={!row.active}
-                    role="option"
-                    aria-selected={index() === at()}
-                    data-row={row.key}
-                    // The input keeps focus, so the press must not take it away.
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => choose(row)}
-                  >
-                    <span class="palette-title">{row.title}</span>
-                    <span class="palette-detail">{row.detail}</span>
-                    <Show when={row.chord}>
-                      <span class="palette-chord">{row.chord}</span>
-                    </Show>
-                  </button>
-                </li>
-              )}
+            <For each={keys()}>
+              {(key) => {
+                // The row as the latest frame has it. Undefined only for the
+                // moment between a frame dropping this key and `For` removing
+                // the node, when nothing reads it.
+                const row = () => byKey().get(key);
+                const active = () => row()?.active ?? false;
+                return (
+                  <li>
+                    <button
+                      type="button"
+                      class="palette-row"
+                      classList={{ at: isAt(key), inactive: !active() }}
+                      disabled={!active()}
+                      role="option"
+                      aria-selected={isAt(key)}
+                      data-row={key}
+                      // The input keeps focus, so the press must not take it away.
+                      onMouseDown={(event) => event.preventDefault()}
+                      // The row as it is when the click lands, not as it was
+                      // when the node was made.
+                      onClick={() => choose(row())}
+                    >
+                      <span class="palette-title">{row()?.title}</span>
+                      <span class="palette-detail">{row()?.detail}</span>
+                      <Show when={row()?.chord}>
+                        <span class="palette-chord">{row()?.chord}</span>
+                      </Show>
+                    </button>
+                  </li>
+                );
+              }}
             </For>
           </ul>
         </Show>
       </div>
     </div>
   );
+}
+
+/** Whether two key lists name the same rows in the same order. */
+function sameKeys(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((key, index) => key === b[index]);
 }
