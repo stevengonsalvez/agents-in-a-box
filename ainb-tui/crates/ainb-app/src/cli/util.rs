@@ -175,8 +175,13 @@ impl SessionSource {
     ///
     /// # Errors
     ///
-    /// On [`Daemon`](Self::Daemon), when the RPC fails. The file is not read
+    /// On [`Daemon`](Self::Daemon), when the RPC fails, or when the daemon
+    /// answers not-ready (`import_complete: false`). The file is not read
     /// instead: the process already decided where its sessions live.
+    ///
+    /// Not-ready is not monotonic: a daemon that restarts answers it until
+    /// its first reconcile pass commits, with no rows. Read as a store, that
+    /// is zero sessions, and `mutate` would diff against an empty view.
     pub async fn load(&self) -> std::io::Result<SessionStore> {
         let client = match self {
             Self::File => return Ok(SessionStore::load()),
@@ -186,6 +191,12 @@ impl SessionSource {
             .workspace_session_list(WorkspaceSessionListParams::default())
             .await
             .map_err(|e| daemon_io_error("list", e))?;
+        if !res.import_complete {
+            return Err(daemon_io_error(
+                "list",
+                "the daemon's sessions table is not ready (its reconcile pass has not committed)",
+            ));
+        }
         if res.truncated {
             eprintln!(
                 "Warning: the daemon returned only the newest {} sessions.",
