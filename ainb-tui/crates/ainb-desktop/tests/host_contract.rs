@@ -724,7 +724,11 @@ mod transcript {
         )
         // Folding a large page takes a while in a debug build; no rescan may
         // come due inside it, since a scan needs the runtime this test lacks.
-        .rescanning_every(std::time::Duration::from_secs(600));
+        .rescanning_every(std::time::Duration::from_secs(600))
+        // These tests count Fleet frames, and the attention poller's first
+        // publish is news that frames Fleet on whichever tick it lands: on a
+        // loaded runner that was the tick asserted to frame nothing.
+        .without_attention_poll();
         host.open_sessions(&mut Recorder(Log::default()));
         host
     }
