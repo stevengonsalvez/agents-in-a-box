@@ -18,7 +18,7 @@
 use std::sync::{Arc, Mutex};
 
 use ainb_hangar_proto::fleet::{FleetTranscriptListParams, FleetTranscriptListResult};
-use ainb_hangar_proto::transcript::AcpClassifier;
+use ainb_hangar_proto::transcript::{AcpClassifier, acp_card_text};
 
 use crate::fleet::bridge::redact::scrub;
 
@@ -205,13 +205,21 @@ impl TranscriptHost {
                     if self.after.is_some_and(|after| chunk.ingest_order <= after) {
                         continue;
                     }
-                    let text = self
+                    let classified = self
                         .classifier
                         .classify_value(&chunk.event_type, &chunk.payload)
                         .into_iter()
                         .map(|(_, body)| body)
                         .collect::<Vec<_>>()
                         .join("\n");
+                    // The classifier is silent on the prompt echo and the
+                    // usage report, which the card still labels, so it asks
+                    // for their card text rather than drawing an empty row.
+                    let text = if classified.is_empty() {
+                        acp_card_text(&chunk.event_type, &chunk.payload).unwrap_or_default()
+                    } else {
+                        classified
+                    };
                     self.after = Some(chunk.ingest_order);
                     // Scrubbed before the cut, so a credential straddling the
                     // bound is redacted whole rather than cut in half.
