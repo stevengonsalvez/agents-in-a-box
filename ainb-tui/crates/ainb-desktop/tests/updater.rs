@@ -6,10 +6,10 @@
 //! which exists under `cfg(test)`-shaped gates only (see the compile guard in
 //! `updater.rs`); the key seam is never in a release build.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use ainb_desktop::updater::{
     Channel, Check, Install, Settings, Source, Updater, clear_previous, repair_interrupted_swap,
@@ -24,12 +24,12 @@ use sha2::{Digest, Sha256};
 struct FakeSource {
     manifests: HashMap<String, (Vec<u8>, String)>,
     files: HashMap<String, Vec<u8>>,
-    requests: RefCell<Vec<String>>,
+    requests: Mutex<Vec<String>>,
 }
 
 impl Source for FakeSource {
     fn manifest(&self, root: &str) -> anyhow::Result<(Vec<u8>, String)> {
-        self.requests.borrow_mut().push(format!("manifest {root}"));
+        self.requests.lock().unwrap().push(format!("manifest {root}"));
         self.manifests
             .get(root)
             .cloned()
@@ -37,7 +37,7 @@ impl Source for FakeSource {
     }
 
     fn download(&self, url: &str, to: &Path) -> anyhow::Result<()> {
-        self.requests.borrow_mut().push(format!("download {url}"));
+        self.requests.lock().unwrap().push(format!("download {url}"));
         let bytes = self.files.get(url).ok_or_else(|| anyhow::anyhow!("404 for {url}"))?;
         std::fs::write(to, bytes)?;
         Ok(())
@@ -73,7 +73,7 @@ fn manifest(version: &str, archive: &str, sha256: &str, extra: &str) -> String {
     )
 }
 
-fn updater(source: Rc<FakeSource>, channel: Channel, home: &Path) -> Updater {
+fn updater(source: Arc<FakeSource>, channel: Channel, home: &Path) -> Updater {
     Updater::with_key(
         source,
         &STANDARD.encode(key().verifying_key().as_bytes()),
@@ -87,13 +87,13 @@ fn updater(source: Rc<FakeSource>, channel: Channel, home: &Path) -> Updater {
 #[test]
 fn off_makes_no_request_at_all() {
     let home = tempfile::tempdir().unwrap();
-    let source = Rc::new(FakeSource::default());
-    let u = updater(Rc::clone(&source), Channel::Off, home.path());
+    let source = Arc::new(FakeSource::default());
+    let u = updater(Arc::clone(&source), Channel::Off, home.path());
     assert!(matches!(u.check("1.28.2"), Check::Off));
     assert!(
-        source.requests.borrow().is_empty(),
+        source.requests.lock().unwrap().is_empty(),
         "{:?}",
-        source.requests.borrow()
+        source.requests.lock().unwrap()
     );
 }
 
@@ -159,7 +159,7 @@ fn a_manifest_signed_by_another_key_is_declined() {
             &manifest("1.29.0", "ainb-desktop-1.29.0-x.dmg", &"0".repeat(64), ""),
         ),
     );
-    let u = updater(Rc::new(source), Channel::Stable, home.path());
+    let u = updater(Arc::new(source), Channel::Stable, home.path());
     match u.check("1.28.2") {
         Check::Declined { reason } => assert!(reason.contains("signature"), "{reason}"),
         other => panic!("{other:?}"),
@@ -180,11 +180,11 @@ fn a_prerelease_is_declined_on_stable_and_accepted_on_prerelease() {
     let pre_root =
         "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v1.29.0-rc2";
     source.manifests.insert(pre_root.into(), signed(&key(), &body));
-    let source = Rc::new(source);
-    let u = updater(Rc::clone(&source), Channel::Stable, home.path());
+    let source = Arc::new(source);
+    let u = updater(Arc::clone(&source), Channel::Stable, home.path());
     assert!(matches!(u.check("1.29.0-rc1"), Check::Declined { .. }));
     let u = updater(
-        Rc::clone(&source),
+        Arc::clone(&source),
         Channel::Prerelease {
             tag: "v1.29.0-rc2".into(),
         },
@@ -207,7 +207,7 @@ fn an_equal_or_older_release_reports_current() {
             &manifest("1.28.2", "ainb-desktop-1.28.2-x.dmg", &"0".repeat(64), ""),
         ),
     );
-    let u = updater(Rc::new(source), Channel::Stable, home.path());
+    let u = updater(Arc::new(source), Channel::Stable, home.path());
     assert!(matches!(u.check("1.28.2"), Check::Current { .. }));
     assert!(matches!(u.check("1.30.0"), Check::Current { .. }));
 }
@@ -220,7 +220,7 @@ fn a_release_with_no_bundle_for_this_target_is_declined() {
         ROOT.into(),
         signed(&key(), r#"{"version":"1.29.0","assets":[],"desktop":[]}"#),
     );
-    let u = updater(Rc::new(source), Channel::Stable, home.path());
+    let u = updater(Arc::new(source), Channel::Stable, home.path());
     match u.check("1.28.2") {
         Check::Declined { reason } => assert!(reason.contains("no desktop bundle"), "{reason}"),
         other => panic!("{other:?}"),
@@ -240,8 +240,8 @@ fn a_checksum_mismatch_is_declined_and_leaves_no_staging_behind() {
         format!("{ROOT}/{archive}"),
         b"not the bytes the manifest hashed".to_vec(),
     );
-    let source = Rc::new(source);
-    let u = updater(Rc::clone(&source), Channel::Stable, home.path());
+    let source = Arc::new(source);
+    let u = updater(Arc::clone(&source), Channel::Stable, home.path());
     let Check::Available { bundle, root, .. } = u.check("1.28.2") else {
         panic!("expected available");
     };
@@ -262,8 +262,8 @@ fn a_verified_archive_lands_in_staging_and_the_file_is_what_was_hashed() {
         signed(&key(), &manifest("1.29.0", archive, &sha(&bytes), "")),
     );
     source.files.insert(format!("{ROOT}/{archive}"), bytes.clone());
-    let source = Rc::new(source);
-    let u = updater(Rc::clone(&source), Channel::Stable, home.path());
+    let source = Arc::new(source);
+    let u = updater(Arc::clone(&source), Channel::Stable, home.path());
     let Check::Available { bundle, root, .. } = u.check("1.28.2") else {
         panic!("expected available");
     };
@@ -271,7 +271,7 @@ fn a_verified_archive_lands_in_staging_and_the_file_is_what_was_hashed() {
     let file = u.download_and_verify(&bundle, &root, &staging).unwrap();
     assert_eq!(std::fs::read(&file).unwrap(), bytes);
     assert_eq!(
-        source.requests.borrow().last().unwrap(),
+        source.requests.lock().unwrap().last().unwrap(),
         &format!("download {ROOT}/{archive}")
     );
 }
@@ -300,8 +300,8 @@ fn a_verified_next_root_is_persisted_and_used_by_the_next_check() {
             &manifest("1.30.0", "ainb-desktop-1.30.0-x.dmg", &"0".repeat(64), ""),
         ),
     );
-    let source = Rc::new(source);
-    let u = updater(Rc::clone(&source), Channel::Stable, home.path());
+    let source = Arc::new(source);
+    let u = updater(Arc::clone(&source), Channel::Stable, home.path());
     assert!(matches!(u.check("1.28.2"), Check::Current { .. }));
     match u.check("1.28.2") {
         Check::Available { version, root, .. } => {
@@ -310,7 +310,7 @@ fn a_verified_next_root_is_persisted_and_used_by_the_next_check() {
         }
         other => panic!("{other:?}"),
     }
-    let requests = source.requests.borrow();
+    let requests = source.requests.lock().unwrap();
     assert_eq!(requests[0], format!("manifest {ROOT}"));
     assert_eq!(requests[1], format!("manifest {new_root}"));
     assert_eq!(requests.len(), 2, "{requests:?}");
