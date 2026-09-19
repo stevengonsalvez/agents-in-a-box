@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
 import type { SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
-import { label, ringFor, rowStatus, visibleRows } from "./sessions.ts";
+import { isSelected, label, ringFor, rowStatus } from "./sessions.ts";
 
 interface Props {
   sessions: SessionsView_Serialize | undefined;
@@ -33,20 +33,17 @@ export function Sidebar(props: Props) {
         fallback={<p class="empty">{props.loading || !props.sessions ? "Loading sessions" : "No sessions"}</p>}
       >
         <For each={props.sessions?.workspaces}>
-          {(workspace, w) => (
-            <Show when={visibleRows(props.sessions, workspace).length > 0}>
+          {(workspace) => (
+            <Show when={workspace.sessions.length > 0}>
               <section class="workspace" data-workspace={workspace.name}>
                 <div class="workspace-name">{label(workspace.name)}</div>
                 <ul>
-                {/* The session list's own filter decides which rows are
-                    here, so what the sidebar draws and what the reducer's
-                    navigation walks are the same set. */}
-                <For each={visibleRows(props.sessions, workspace)}>
-                  {(row) => {
-                    const session = row.session;
-                    const selected = () =>
-                      props.sessions?.selected_workspace_index === w() &&
-                      props.sessions?.selected_session_index === row.index;
+                {/* The frame carries only the rows the session list's filter
+                    shows, so what the sidebar draws and what the reducer's
+                    navigation walks are the same set (#1180). */}
+                <For each={workspace.sessions}>
+                  {(session) => {
+                    const selected = () => isSelected(props.sessions, session.id);
                     const ring = () => ringFor(session);
                     return (
                       <li>

@@ -13,6 +13,10 @@ keywords = ["ainb", "hangar", "json-rpc", "client", "fleet"]
 name = "ainb_hangar_client"
 path = "src/lib.rs"
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 # The wire shapes. Pure data crate, so the client adds no vocabulary of its own.
 ainb-hangar-proto = { path = "../ainb-hangar-proto" }

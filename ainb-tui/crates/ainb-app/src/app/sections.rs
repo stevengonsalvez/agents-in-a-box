@@ -494,15 +494,6 @@ pub struct SessionsSection {
     /// session-list render reads this set with an O(1) lookup, so it never
     /// re-parses `favorites.yaml` or opens a git repo per frame.
     pub favorite_workspace_paths: HashSet<PathBuf>,
-    /// The session rows the filter hides, by id, as the reducer decides it
-    /// (`AppState::session_passes_filter`), recomputed on every tick.
-    ///
-    /// A set beside the list rather than a shorter list: the selection is
-    /// expressed as an index into the workspace's own `sessions`, so a frame
-    /// that dropped the hidden rows would move every row below one (#1157). A
-    /// renderer draws the rows it is given and skips the ids in here, instead
-    /// of carrying its own copy of the filter rule.
-    pub hidden_sessions: HashSet<Uuid>,
 }
 
 impl Default for SessionsSection {
@@ -516,7 +507,6 @@ impl Default for SessionsSection {
             expand_all_workspaces: true, // Default to expanded view
             // AppState::default overwrites this from the loaded config.
             session_filter: crate::app::state::SessionFilter::default(),
-            hidden_sessions: HashSet::new(),
             attached_session_id: None,
             favorite_workspace_paths: HashSet::new(),
         }

@@ -51,13 +51,22 @@ export type PhaseView =
   | { kind: "already_answered"; by: string }
   | { kind: "failed"; reason: string; draftLen: number | null };
 
-/** The session list row the reducer has selected, when it is a session. */
+/**
+ * The session list row the reducer has selected, when it is a session.
+ *
+ * Resolved by the id the frame names against the rows it carries (#1180): the
+ * frame holds only the rows its filter shows, so an index into the reducer's
+ * full list would name the wrong one. No selection when the frame names none,
+ * or names a row it does not carry.
+ */
 export function selectedSession(view: SessionsView_Serialize | undefined): Session_Serialize | undefined {
-  if (view === undefined) return undefined;
-  const workspace = view.selected_workspace_index;
-  const session = view.selected_session_index;
-  if (workspace === null || session === null || view.shell_selected) return undefined;
-  return view.workspaces[workspace]?.sessions[session];
+  const id = view?.selected_session_id;
+  if (view === undefined || id === null || id === undefined || view.shell_selected) return undefined;
+  for (const workspace of view.workspaces) {
+    const session = workspace.sessions.find((row) => row.id === id);
+    if (session !== undefined) return session;
+  }
+  return undefined;
 }
 
 /**

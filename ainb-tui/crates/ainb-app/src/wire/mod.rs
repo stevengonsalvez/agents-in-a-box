@@ -140,11 +140,7 @@ pub fn serialize_section<S: Serializer>(
     host: &frame::HostId,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    // Frame-only redaction on persisted types (see `fields`) is live for
-    // exactly this call, and so is the sending host the fleet rows name.
-    let _frame = fields::FrameScope::enter();
-    let _host = SendingHost::enter(host);
-    match id {
+    as_frame(host, || match id {
         SectionId::Sessions => SessionsView::from(&*state.sessions).serialize(serializer),
         SectionId::SessionLabels => {
             SessionLabelsView::from(&*state.session_labels).serialize(serializer)
@@ -169,7 +165,18 @@ pub fn serialize_section<S: Serializer>(
         SectionId::Onboarding => OnboardingView::from(&*state.onboarding).serialize(serializer),
         SectionId::Shell => ShellView::from(&*state.shell).serialize(serializer),
         SectionId::AgentStatus => AgentStatusView::from(&*state.agent_status).serialize(serializer),
-    }
+    })
+}
+
+/// Run `serialise` as a frame sent as `host`: the one way a section body is
+/// serialised (#1204). Frame-only redaction on persisted types (see `fields`)
+/// is live for exactly this call, and so is the sending host the fleet rows
+/// name; a body serialised outside it carries a label, a prompt or a log
+/// unscrubbed.
+fn as_frame<R>(host: &frame::HostId, serialise: impl FnOnce() -> R) -> R {
+    let _frame = fields::FrameScope::enter();
+    let _host = SendingHost::enter(host);
+    serialise()
 }
 
 /// The host the section being serialised is sent as, for the view fields that
@@ -503,18 +510,111 @@ macro_rules! view {
     };
 }
 
-view!(SessionsView<'a> for SessionsSection {
-    workspaces: Vec<crate::models::Workspace>,
-    selected_workspace_index: Option<usize>,
-    selected_session_index: Option<usize>,
-    shell_selected: bool,
-    selected_sessions: std::collections::HashSet<uuid::Uuid>,
-    expand_all_workspaces: bool,
-    session_filter: crate::app::state::SessionFilter,
-    attached_session_id: Option<uuid::Uuid>,
-    favorite_workspace_paths: std::collections::HashSet<std::path::PathBuf>,
-    hidden_sessions: std::collections::HashSet<uuid::Uuid>,
-});
+/// The session list as a renderer draws it (#1180): every workspace, with only
+/// the rows the session filter lets through, and the selected row by id.
+///
+/// The frame carries the rows a surface draws, not the filter: a renderer
+/// never holds its own copy of the rule, and never a hidden set beside the
+/// list. The section's `selected_session_index` is an index into its full list,
+/// so it stays off the wire and the selection travels as `selected_session_id`.
+#[derive(Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+// Field names mirror the section's, prefixes and all, so the frame keys match
+// the Rust fields.
+#[allow(clippy::struct_field_names)]
+struct SessionsView<'a> {
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<crate::models::Workspace>))]
+    workspaces: VisibleWorkspaces<'a>,
+    selected_workspace_index: &'a Option<usize>,
+    selected_session_id: Option<uuid::Uuid>,
+    shell_selected: &'a bool,
+    selected_sessions: &'a std::collections::HashSet<uuid::Uuid>,
+    expand_all_workspaces: &'a bool,
+    session_filter: &'a crate::app::state::SessionFilter,
+    attached_session_id: &'a Option<uuid::Uuid>,
+    favorite_workspace_paths: &'a std::collections::HashSet<std::path::PathBuf>,
+}
+
+impl<'a> From<&'a SessionsSection> for SessionsView<'a> {
+    fn from(section: &'a SessionsSection) -> Self {
+        Self::showing(section, section.session_filter)
+    }
+}
+
+impl<'a> SessionsView<'a> {
+    /// The view with the rows `filter` shows. The frame passes the section's
+    /// own filter; a surface that is not the TUI passes its own (#1180).
+    fn showing(section: &'a SessionsSection, filter: crate::app::state::SessionFilter) -> Self {
+        // A selected row the filter hides is not on the frame, so the frame
+        // must not name it: cycling the filter does not move the selection.
+        let selected_session_id = section
+            .selected_workspace_index
+            .and_then(|workspace| section.workspaces.get(workspace))
+            .zip(section.selected_session_index)
+            .and_then(|(workspace, session)| workspace.sessions.get(session))
+            .filter(|session| filter.passes(session))
+            .map(|session| session.id);
+        Self {
+            workspaces: VisibleWorkspaces {
+                workspaces: &section.workspaces,
+                filter,
+            },
+            selected_workspace_index: &section.selected_workspace_index,
+            selected_session_id,
+            shell_selected: &section.shell_selected,
+            selected_sessions: &section.selected_sessions,
+            expand_all_workspaces: &section.expand_all_workspaces,
+            session_filter: &section.session_filter,
+            attached_session_id: &section.attached_session_id,
+            favorite_workspace_paths: &section.favorite_workspace_paths,
+        }
+    }
+}
+
+/// The Sessions section as its frame body would be under the `All` filter:
+/// every session row, whatever filter the TUI's Shift+F left persisted.
+///
+/// The filter is a fact about the TUI's renderer, not about the sessions, so a
+/// surface that lists sessions for another purpose (the web dashboard,
+/// `ainb list --frame`, the web's attach lookup) reads this. It goes through
+/// the same view and the same frame scope ([`as_frame`]) as the frame, so
+/// nothing the frame withholds or scrubs reaches it either.
+#[must_use]
+pub fn every_session_json(state: &AppState) -> serde_json::Value {
+    as_frame(&frame::HostId::local(), || {
+        serde_json::to_value(SessionsView::showing(
+            &state.sessions,
+            crate::app::state::SessionFilter::All,
+        ))
+    })
+    .expect("a section view always serialises to JSON")
+}
+
+/// The workspaces with only the session rows `filter` shows, in list order.
+///
+/// A workspace whose rows all pass is serialised as it stands; only one that
+/// hides a row is copied without it.
+struct VisibleWorkspaces<'a> {
+    workspaces: &'a [crate::models::Workspace],
+    filter: crate::app::state::SessionFilter,
+}
+
+impl Serialize for VisibleWorkspaces<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.workspaces.len()))?;
+        for workspace in self.workspaces {
+            if workspace.sessions.iter().all(|session| self.filter.passes(session)) {
+                seq.serialize_element(workspace)?;
+            } else {
+                let mut visible = workspace.clone();
+                visible.sessions.retain(|session| self.filter.passes(session));
+                seq.serialize_element(&visible)?;
+            }
+        }
+        seq.end()
+    }
+}
 
 view!(SessionLabelsView<'a> for SessionLabelsSection {
     session_label_store: crate::config::SessionLabelStore,
@@ -690,6 +790,42 @@ mod tests {
     /// #1131: a session's merged attention rides its row on the frame as
     /// `attention`, kind and scrubbed detail only, and never reaches the disk
     /// form of the session.
+    /// The every-session body the web reads is a frame body in every respect
+    /// but the filter (#1204): the frame scope redacts it, so a token-shaped
+    /// label or prompt does not survive, and under the `All` filter it is the
+    /// Sessions frame byte for byte.
+    #[test]
+    fn the_every_session_body_is_redacted_as_the_frame_is() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        // Assembled at runtime, so no credential-shaped literal is committed.
+        let key = format!("sk-ant-{}", "api03-abcdefghijklmnopqrstuvwxyz");
+        let mut session = crate::models::Session::new("s".to_string(), "/work/s".to_string());
+        session.display_name = Some(format!("deploy {key}"));
+        session.boss_prompt = Some(format!("use {key} to deploy"));
+        session.live_attention =
+            vec![SessionAttention::local(AttentionKind::Ask, 1_000).with_detail("Continue?")];
+        let (every, frame) = with_scratch_home(|| {
+            let mut state = AppState::new();
+            let mut workspace =
+                crate::models::Workspace::new("w".to_string(), std::path::PathBuf::from("/work/s"));
+            workspace.add_session(session.clone());
+            state.sessions.get_mut().workspaces = vec![workspace];
+            state.sessions.get_mut().session_filter = crate::app::state::SessionFilter::All;
+            (
+                every_session_json(&state),
+                section_json(&state, SectionId::Sessions, &frame::HostId::local()),
+            )
+        });
+
+        let text = every.to_string();
+        assert!(!text.contains(&key), "a credential survived: {text}");
+        assert_eq!(
+            every["workspaces"][0]["sessions"][0]["attention"][0]["kind"], "Ask",
+            "the frame-only attention is on it: {text}"
+        );
+        assert_eq!(every, frame, "one way to serialise a section body");
+    }
+
     #[test]
     fn the_sessions_frame_carries_each_rows_merged_attention_scrubbed() {
         use crate::fleet::attention::{AttentionKind, SessionAttention};

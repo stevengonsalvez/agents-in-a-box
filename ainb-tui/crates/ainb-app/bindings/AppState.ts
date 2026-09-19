@@ -4268,19 +4268,36 @@ export type Session_Serialize = {
 	attention?: AttentionMark_Serialize[],
 };
 
+/**
+ *  The session list as a renderer draws it (#1180): every workspace, with only
+ *  the rows the session filter lets through, and the selected row by id.
+ * 
+ *  The frame carries the rows a surface draws, not the filter: a renderer
+ *  never holds its own copy of the rule, and never a hidden set beside the
+ *  list. The section's `selected_session_index` is an index into its full list,
+ *  so it stays off the wire and the selection travels as `selected_session_id`.
+ */
 export type SessionsView = SessionsView_Serialize;
 
+/**
+ *  The session list as a renderer draws it (#1180): every workspace, with only
+ *  the rows the session filter lets through, and the selected row by id.
+ * 
+ *  The frame carries the rows a surface draws, not the filter: a renderer
+ *  never holds its own copy of the rule, and never a hidden set beside the
+ *  list. The section's `selected_session_index` is an index into its full list,
+ *  so it stays off the wire and the selection travels as `selected_session_id`.
+ */
 export type SessionsView_Serialize = {
 	workspaces: Workspace_Serialize[],
 	selected_workspace_index: number | null,
-	selected_session_index: number | null,
+	selected_session_id: string | null,
 	shell_selected: boolean,
 	selected_sessions: string[],
 	expand_all_workspaces: boolean,
 	session_filter: SessionFilter,
 	attached_session_id: string | null,
 	favorite_workspace_paths: string[],
-	hidden_sessions: string[],
 };
 
 /**  Menu items in the setup menu */

@@ -98,10 +98,15 @@ fn the_composer_is_pointed_at_the_request_before_the_first_key() {
     assert_eq!(state.fleet.ask_state.focus(), AskFocus::FreeText);
 }
 
+/// The frame carries the rows a surface draws, not the filter (#1180): a
+/// stopped row the filter hides is not on it, and the selection travels by id,
+/// because an index into the section's full list would name the wrong row.
 #[test]
-fn the_frame_says_which_rows_the_filter_hides() {
+fn the_frame_carries_only_the_rows_the_filter_shows() {
     use ainb_app::app::state::SessionFilter;
     use ainb_app::models::{SessionMode, SessionStatus};
+    use ainb_app::wire::frame::HostId;
+    use ainb_app::{SectionId, wire::section_json};
 
     let mut state = waiting_on(ask(&["Focused"]));
     let stopped = {
@@ -111,26 +116,87 @@ fn the_frame_says_which_rows_the_filter_hides() {
         session
     };
     let stopped_id = stopped.id;
-    state.sessions.workspaces[0].add_session(stopped);
-    state.sessions.workspaces[0].sessions[0].mode = SessionMode::Interactive;
-    state.sessions.workspaces[0].sessions[0].status = SessionStatus::Running;
+    // The stopped row goes first, so the running row's index in the section
+    // (1) differs from its place on the frame (0).
+    state.sessions.workspaces[0].sessions.insert(0, stopped);
+    let running = &mut state.sessions.workspaces[0].sessions[1];
+    running.mode = SessionMode::Interactive;
+    running.status = SessionStatus::Running;
+    let running_id = running.id;
+    state.sessions.selected_workspace_index = Some(0);
+    state.sessions.selected_session_index = Some(1);
+
+    let row_ids = |state: &AppState| -> (Vec<String>, serde_json::Value) {
+        let frame = section_json(state, SectionId::Sessions, &HostId::local());
+        let ids = frame["workspaces"][0]["sessions"]
+            .as_array()
+            .expect("the workspace's rows")
+            .iter()
+            .map(|row| row["id"].as_str().expect("a row id").to_string())
+            .collect();
+        (ids, frame["selected_session_id"].clone())
+    };
 
     state.sessions.session_filter = SessionFilter::ActiveOnly;
-    state.tick_surfaces(0);
+    let (ids, selected) = row_ids(&state);
     assert_eq!(
-        state.sessions.hidden_sessions,
-        std::collections::HashSet::from([stopped_id]),
-        "the stopped row is hidden, and the list keeps it so the indices hold"
+        ids,
+        vec![running_id.to_string()],
+        "the stopped row is not framed"
     );
-    assert_eq!(
-        state.sessions.workspaces[0].sessions.len(),
-        2,
-        "the frame carries every row: the selection is an index into this list"
+    assert_eq!(selected, serde_json::json!(running_id.to_string()));
+    assert!(
+        state.sessions.workspaces[0].sessions.iter().any(|row| row.id == stopped_id),
+        "the section keeps the row: only the frame leaves it out"
     );
 
     state.sessions.session_filter = SessionFilter::All;
-    state.tick_surfaces(0);
-    assert!(state.sessions.hidden_sessions.is_empty());
+    let (ids, selected) = row_ids(&state);
+    assert_eq!(ids, vec![stopped_id.to_string(), running_id.to_string()]);
+    assert_eq!(selected, serde_json::json!(running_id.to_string()));
+    let frame = section_json(&state, SectionId::Sessions, &HostId::local());
+    assert!(frame.get("hidden_sessions").is_none());
+    assert!(frame.get("selected_session_index").is_none());
+}
+
+/// A selected row can leave the filter without the selection moving: a running
+/// row that stops while the filter shows only active ones. The frame no longer
+/// carries that row, so it must not name it as selected. (Cycling the filter
+/// itself clears the selection.)
+#[test]
+fn the_frame_names_no_selection_the_filter_hides() {
+    use ainb_app::app::state::SessionFilter;
+    use ainb_app::models::{SessionMode, SessionStatus};
+    use ainb_app::wire::frame::HostId;
+    use ainb_app::{SectionId, wire::section_json};
+
+    let mut state = waiting_on(ask(&["Focused"]));
+    let row = &mut state.sessions.workspaces[0].sessions[0];
+    row.mode = SessionMode::Interactive;
+    row.status = SessionStatus::Running;
+    let row_id = row.id;
+    state.sessions.selected_workspace_index = Some(0);
+    state.sessions.selected_session_index = Some(0);
+    state.sessions.session_filter = SessionFilter::ActiveOnly;
+
+    let selected = |state: &AppState| {
+        section_json(state, SectionId::Sessions, &HostId::local())["selected_session_id"].clone()
+    };
+    assert_eq!(selected(&state), serde_json::json!(row_id.to_string()));
+
+    // The session stops; nothing moves the selection off it.
+    state.sessions.workspaces[0].sessions[0].status = SessionStatus::Stopped;
+    assert_eq!(state.sessions.selected_session_index, Some(0));
+    assert_eq!(
+        selected(&state),
+        serde_json::Value::Null,
+        "the frame does not carry the stopped row, so it names no selection"
+    );
+
+    // Cycling the filter clears the selection outright.
+    state.cycle_session_filter();
+    assert_eq!(state.sessions.selected_session_index, None);
+    assert_eq!(selected(&state), serde_json::Value::Null);
 }
 
 #[test]
