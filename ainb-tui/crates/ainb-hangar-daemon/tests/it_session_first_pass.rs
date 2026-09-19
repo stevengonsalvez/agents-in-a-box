@@ -22,12 +22,15 @@ use std::time::{Duration, Instant};
 const KEPT: &str = "00000000-0000-0000-0000-00000000f001";
 const NEW: &str = "00000000-0000-0000-0000-00000000f002";
 
-/// The socket and `auth/hello` must answer well inside the 2 s flock bound
-/// the boot pass is stuck on, so a boot that waited on the pass fails here.
-/// Measured on the dev box: about 0.35 s from spawn for a debug build. The
-/// headroom is for a loaded CI runner; waiting on the pass costs at least
-/// the whole 2 s.
-const OPENS_WITHIN: Duration = Duration::from_millis(1500);
+/// The socket and `auth/hello` must answer inside the flock bound the boot
+/// pass is stuck on: a boot that waited on the pass costs at least the whole
+/// bound, so it fails here. Three quarters of the bound leaves a quarter as
+/// the margin that tells the two apart. A debug build answers in about 0.35 s
+/// from spawn on the dev box, so a false red needs the runner to be about
+/// four times slower than that.
+fn opens_within() -> Duration {
+    ainb_hangar_daemon::session_import::SESSIONS_FLOCK_BOUND * 3 / 4
+}
 
 /// The daemon child, killed by its own pid when the test ends.
 struct Daemon(Child);
@@ -106,6 +109,8 @@ enum Held {
     ListNotReady,
     /// A mutation refused with `STORE_UNAVAILABLE`.
     StoreUnavailable,
+    /// The reconcile ran a pass of its own, which hit the held lock.
+    PassRanIntoTheLock,
     /// Anything else, which means the RPC acted on the stale table.
     Served(String),
 }
@@ -169,7 +174,7 @@ async fn no_session_rpc_touches_the_table_before_the_first_pass() {
             }
         }
         assert!(
-            spawned.elapsed() < OPENS_WITHIN,
+            spawned.elapsed() < opens_within(),
             "connect and hello waited on the held lock: not done after {:?}",
             spawned.elapsed()
         );
@@ -180,7 +185,7 @@ async fn no_session_rpc_touches_the_table_before_the_first_pass() {
     // waits for it, bounded, then refuses rather than act on the stale
     // table. One row per method.
     let asked = Instant::now();
-    let (list, upsert, delete) = tokio::join!(
+    let (list, upsert, delete, reconcile) = tokio::join!(
         client.workspace_session_list(WorkspaceSessionListParams::default()),
         client.workspace_session_upsert(WorkspaceSessionUpsertParams {
             session: entry(NEW, "ainb-new"),
@@ -189,10 +194,21 @@ async fn no_session_rpc_touches_the_table_before_the_first_pass() {
             session_id: Some(KEPT.to_string()),
             tmux_session_name: None,
         }),
+        client.workspace_session_reconcile(),
     );
     let waited = asked.elapsed();
     let list = match list {
         Ok(answer) if !answer.import_complete && answer.sessions.is_empty() => Held::ListNotReady,
+        other => Held::Served(format!("{other:?}")),
+    };
+    // The reconcile RPC is exempt from the gate (a committed pass is what
+    // opens it). It runs its own pass, which fails on the held lock: an
+    // internal error naming the lock, not the gate's not-ready refusal.
+    let reconcile = match reconcile {
+        Err(DaemonError::Rpc {
+            code: -32603,
+            message,
+        }) if message.contains("lock") => Held::PassRanIntoTheLock,
         other => Held::Served(format!("{other:?}")),
     };
     let held = [
@@ -206,6 +222,11 @@ async fn no_session_rpc_touches_the_table_before_the_first_pass() {
             "workspace/session_delete",
             refused(delete),
             Held::StoreUnavailable,
+        ),
+        (
+            "workspace/session_reconcile",
+            reconcile,
+            Held::PassRanIntoTheLock,
         ),
     ];
     for (method, got, want) in held {
