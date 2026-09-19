@@ -17,6 +17,7 @@ pub mod intent;
 pub mod keymap;
 pub mod keymap_defaults;
 pub mod keymap_toml;
+pub mod palette;
 pub mod plugin_action;
 pub mod pointer;
 pub mod reports;

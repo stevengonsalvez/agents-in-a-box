@@ -29,8 +29,8 @@ pub mod reconnect;
 
 pub use ainb_hangar_proto::sessions::{
     WorkspaceSessionDeleteParams, WorkspaceSessionDeleteResult, WorkspaceSessionEntry,
-    WorkspaceSessionListParams, WorkspaceSessionListResult, WorkspaceSessionUpsertParams,
-    WorkspaceSessionUpsertResult,
+    WorkspaceSessionListParams, WorkspaceSessionListResult, WorkspaceSessionReconcileParams,
+    WorkspaceSessionReconcileResult, WorkspaceSessionUpsertParams, WorkspaceSessionUpsertResult,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use presence::reset_process_as_surface_for_test;
@@ -743,6 +743,18 @@ impl DaemonClient {
         params: WorkspaceSessionDeleteParams,
     ) -> Result<WorkspaceSessionDeleteResult, DaemonError> {
         self.call_typed(methods::WORKSPACE_SESSION_DELETE, &params).await
+    }
+
+    /// Ask the daemon for one `sessions.json` reconcile pass and wait for it
+    /// to commit.
+    pub async fn workspace_session_reconcile(
+        &self,
+    ) -> Result<WorkspaceSessionReconcileResult, DaemonError> {
+        self.call_typed(
+            methods::WORKSPACE_SESSION_RECONCILE,
+            &WorkspaceSessionReconcileParams::default(),
+        )
+        .await
     }
 
     /// Open a persistent transcript subscription and retain its live stream.

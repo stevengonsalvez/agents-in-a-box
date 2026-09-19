@@ -100,6 +100,9 @@ pub fn legacy_panel(config: &AppConfig) -> bool {
     resolved_bool(LEGACY_PANEL_ENV, config.fleet.status.legacy_panel)
 }
 
+/// The home sidebar's `select` row, the one Enter runs on a focused item.
+const HOME_SIDEBAR_SELECT: &str = "home.sidebar.select";
+
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
     state: AppState,
@@ -153,6 +156,12 @@ impl<S: FrameSink> DesktopHost<S> {
         // this window is recorded as the desktop's. The sidecar already tells
         // the daemon the same thing about this process (`sidecar::surface`).
         state.host.surface = ainb_hangar_proto::connections::SurfaceKind::Desktop;
+        // The window shows every row. The persisted filter is the terminal's
+        // (Shift+F), and this shell draws no filter indicator and offers no
+        // control, so a filter seeded here would hide rows with nothing on
+        // screen to say why (#1208). Until the desktop has its own filter chip
+        // it starts on All, and the reducer refuses to cycle it from here.
+        state.sessions.session_filter = ainb_app::app::state::SessionFilter::All;
         Self {
             state,
             keymap,
@@ -287,14 +296,21 @@ impl<S: FrameSink> DesktopHost<S> {
     ///
     /// The state starts on the home screen, where the session list's rows (a
     /// row click among them) are refused by the context gate. The move goes
-    /// through the home sidebar's own rows, two clicks on its Sessions item as
-    /// a double click opens it, so the host writes no state of its own.
+    /// through the home sidebar's own rows, so the host writes no state of its
+    /// own: a click on its Sessions item selects and focuses it, and the
+    /// sidebar's `select` row (Enter) opens it.
+    ///
+    /// Not two clicks: the reducer opens on a double click only inside the
+    /// double-click window, timed with the wall clock, so a host slow enough to
+    /// spend the window on the first click stayed on the home screen.
     pub fn open_sessions(&mut self, executor: &mut impl Executor) {
         use ainb_app::app::pointer::click_home_sidebar_item;
         use ainb_app::components::sidebar::SidebarItem;
-        for _ in 0..2 {
-            self.run(click_home_sidebar_item(SidebarItem::Sessions), executor);
-        }
+        self.run(click_home_sidebar_item(SidebarItem::Sessions), executor);
+        self.run(
+            Intent::Command(CommandId::new(HOME_SIDEBAR_SELECT), serde_json::Value::Null),
+            executor,
+        );
     }
 
     /// Every command the palette may offer, in the keymap's own order.
@@ -305,16 +321,17 @@ impl<S: FrameSink> DesktopHost<S> {
     /// row that cannot run. Each entry says whether it is active now.
     #[must_use]
     pub fn palette(&self) -> Vec<PaletteEntry> {
-        let contexts = ainb_app::app::keymap::command_contexts(&self.state);
-        self.keymap
-            .commands()
-            .filter(|(id, row)| crate::intent::palette_offers(&self.keymap, id, row))
-            .map(|(id, row)| PaletteEntry {
-                id,
+        // The reducer owns the row set (#1161); this surface narrows it by what
+        // a webview may send and by nothing else.
+        ainb_app::app::palette::rows(&self.state, &self.keymap)
+            .into_iter()
+            .filter(|row| !crate::intent::is_host_authored(&row.id))
+            .map(|row| PaletteEntry {
+                id: row.id,
                 doc: row.doc,
-                context: row.ctx.name(),
-                chord: row.chord.as_ref().map(|chord| chord.as_str().to_string()),
-                active: contexts.contains(&row.ctx),
+                context: row.context.name(),
+                chord: row.chord,
+                active: row.active,
             })
             .collect()
     }

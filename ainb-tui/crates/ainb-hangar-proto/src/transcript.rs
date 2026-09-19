@@ -445,6 +445,61 @@ pub fn acp_row_text(event_type: &str, raw_payload: &str) -> Option<String> {
     }
 }
 
+/// The ACP card's text for the two row types the transcript lanes skip.
+///
+/// Those are the prompt echo (`acp.user_message`) and the usage report
+/// (`acp.usage`). `None` for every other type, and for either one when it
+/// says nothing.
+///
+/// [`AcpClassifier::classify_value`] stays silent on both so the execution
+/// view reads the same under both executors, and the macOS port with it. The
+/// desktop card is not that view: it labels every chunk kind, and a labelled
+/// row with an empty body reads as if the agent said nothing (#1200).
+///
+/// Scrubbed inside the window before the [`BODY_MAX`] cut, exactly as
+/// [`capped`] does for every classified body: an operator pastes credentials
+/// into prompts too. A cost is money, so it has two decimals rather than
+/// `f64`'s shortest round-trip (`0.4`, `0.30000000000000004`).
+#[must_use]
+pub fn acp_card_text(event_type: &str, payload: &Value) -> Option<String> {
+    let text = match event_type {
+        "acp.user_message" => payload
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())?
+            .to_string(),
+        "acp.usage" => {
+            // Unsigned in the ACP schema, so read unsigned: a count past
+            // `i64::MAX` would otherwise blank the whole line.
+            let used = payload.get("used").and_then(Value::as_u64)?;
+            let tokens = payload.get("size").and_then(Value::as_u64).map_or_else(
+                || format!("{used} tokens in context"),
+                |size| format!("{used} of {size} tokens in context"),
+            );
+            // Only a cost the daemon would record (`provider_usage_from_update`
+            // in ainb-hangar-daemon): USD in any case, finite, not negative.
+            let cost = payload.get("cost");
+            let usd = cost
+                .and_then(|c| c.get("currency"))
+                .and_then(Value::as_str)
+                .is_some_and(|currency| currency.eq_ignore_ascii_case("USD"));
+            match cost
+                .and_then(|c| c.get("amount"))
+                .and_then(Value::as_f64)
+                .filter(|amount| usd && amount.is_finite() && *amount >= 0.0)
+            {
+                Some(amount) => format!("{tokens} · {amount:.2} USD"),
+                None => tokens,
+            }
+        }
+        _ => return None,
+    };
+    Some(truncate_chars(
+        &scrub(clip_chars(&text, BODY_MAX + SCRUB_WINDOW)),
+        BODY_MAX,
+    ))
+}
+
 /// A coalesced text chunk (`{kind, text, coalescedDeltas}`), one entry per
 /// line so a multi-line reply never overflows a render row.
 ///

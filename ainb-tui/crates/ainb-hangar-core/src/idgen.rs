@@ -12,13 +12,26 @@ pub trait IdGen: Send + Sync {
     fn new_ulid(&self) -> String;
 }
 
-/// The production id generator: mints a random, time-prefixed ULID per call.
+/// The production id generator: mints a time-prefixed ULID per call, strictly
+/// greater than every id this process minted before it.
+///
+/// Monotonic, not random within a millisecond: tables break equal-millisecond
+/// ties on the ULID (`dispatch_attempt` orders `created_at DESC, id DESC`), and
+/// a random ULID ordered two rows written in one millisecond by chance (#1246).
+/// One generator serves the whole process, so the order holds across threads;
+/// two processes writing in the same millisecond still order by chance.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemIdGen;
 
+/// The process-wide monotonic generator behind [`SystemIdGen`].
+static MONOTONIC: std::sync::Mutex<ulid::Generator> = std::sync::Mutex::new(ulid::Generator::new());
+
 impl IdGen for SystemIdGen {
     fn new_ulid(&self) -> String {
-        ulid::Ulid::new().to_string()
+        let mut generator = MONOTONIC.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // `generate` fails only when one millisecond has already minted 2^80
+        // ids; a fresh random ULID is the only answer left then.
+        generator.generate().unwrap_or_else(|_| ulid::Ulid::new()).to_string()
     }
 }
 

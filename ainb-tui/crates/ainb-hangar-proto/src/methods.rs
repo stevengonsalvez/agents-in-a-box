@@ -41,6 +41,16 @@ pub const WORKSPACE_SESSION_UPSERT: &str = "workspace/session_upsert";
 /// Result: [`crate::sessions::WorkspaceSessionDeleteResult`].
 pub const WORKSPACE_SESSION_DELETE: &str = "workspace/session_delete";
 
+/// `workspace/session_reconcile`: run one reconcile pass of `sessions.json`
+/// into the sessions table and answer once it has committed.
+///
+/// A client leaving the degraded state calls it so the sessions it wrote to
+/// the file meanwhile are in the table before it switches over.
+///
+/// Params: [`crate::sessions::WorkspaceSessionReconcileParams`].
+/// Result: [`crate::sessions::WorkspaceSessionReconcileResult`].
+pub const WORKSPACE_SESSION_RECONCILE: &str = "workspace/session_reconcile";
+
 /// `hangar/issues_list` — snapshot the issues of a workspace.
 ///
 /// Params: `{ workspace_id: String }`. Result: `{ issues: [IssueRow, ...] }`
@@ -1726,6 +1736,7 @@ pub const ALL_METHODS: &[&str] = &[
     WORKSPACE_SESSION_LIST,
     WORKSPACE_SESSION_UPSERT,
     WORKSPACE_SESSION_DELETE,
+    WORKSPACE_SESSION_RECONCILE,
     HANGAR_ISSUES_LIST,
     HANGAR_ISSUES_SEARCH,
     HANGAR_SEARCH,
@@ -1986,6 +1997,7 @@ mod tests {
         assert!(WORKSPACE_SESSION_LIST.starts_with("workspace/"));
         assert!(WORKSPACE_SESSION_UPSERT.starts_with("workspace/"));
         assert!(WORKSPACE_SESSION_DELETE.starts_with("workspace/"));
+        assert!(WORKSPACE_SESSION_RECONCILE.starts_with("workspace/"));
     }
 
     /// The control-plane attention methods live under the `attention/` namespace.
@@ -2101,6 +2113,7 @@ mod tests {
             WORKSPACE_SESSION_LIST,
             WORKSPACE_SESSION_UPSERT,
             WORKSPACE_SESSION_DELETE,
+            WORKSPACE_SESSION_RECONCILE,
             HANGAR_ISSUES_LIST,
             HANGAR_ISSUES_SEARCH,
             HANGAR_SEARCH,
