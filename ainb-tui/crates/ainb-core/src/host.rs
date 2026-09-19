@@ -157,6 +157,8 @@ impl App {
                 crate::app::sections::PluginPresence {
                     registered: handle.lifecycle_state(&pid).is_some(),
                     wedged: handle.render_wedged(&pid),
+                    // The manifest's ABI, for the keys it can decode (#1171).
+                    abi: handle.plugin_abi(&pid).unwrap_or(0),
                 },
             );
 
