@@ -45,19 +45,14 @@ describe("the commits tab", () => {
     await $(`.session-row[data-session="${session.id}"]`).waitForExist({ timeout: 30_000 });
     await click(`.session-row[data-session="${session.id}"]`);
 
-    // The reducer builds the git view for the selected session, through the
-    // palette, which is also what reads the branch's commits.
-    await browser.keys([...MOD, "k"]);
-    await setPaletteQuery("session_list.git");
-    await $('.palette-row[data-row="command:session_list.git"]').waitForExist({ timeout: 30_000 });
-    await browser.waitUntil(
-      async () =>
-        (await browser.execute(
-          () => document.querySelector('.palette-row[aria-selected="true"]')?.getAttribute("data-row") ?? "",
-        )) === "command:session_list.git",
-      { timeout: 30_000, timeoutMsg: "the palette never put session_list.git under the cursor" },
-    );
-    await browser.keys(["Enter"]);
+    // Another spec in this world may have left the reducer on the git view,
+    // and `session_list.git` is a session-list row: out of context it is
+    // refused, the view is never rebuilt, and the tab would draw the commits
+    // as they were before this journey wrote any. So the view is closed first
+    // when it is open, and only then opened again, which is what reads the
+    // branch's commits (`show_git_view` builds the state from scratch).
+    await tryCommand("git_view.back");
+    assert.ok(await tryCommand("session_list.git"), "the palette never offered session_list.git");
 
     // The tab button, the mount and the subscription, which is the half the
     // parity tests cannot see: they render the component themselves.
@@ -95,6 +90,53 @@ describe("the commits tab", () => {
     });
   });
 });
+
+/**
+ * Run the command `id` from the palette, the way a person does, when the
+ * palette offers it in the state the reducer is in now. `false` when it does
+ * not: the palette is built from the reducer's own rows in context, so this is
+ * also how the spec asks where the reducer is without reaching into it.
+ */
+async function tryCommand(id) {
+  await openPalette();
+  await setPaletteQuery(id);
+  const row = await $(`.palette-row[data-row="command:${id}"]`);
+  const offered = await row.waitForExist({ timeout: 5_000 }).catch(() => false);
+  if (offered === false) {
+    await closePalette();
+    return false;
+  }
+  await browser.waitUntil(
+    async () =>
+      (await browser.execute(
+        () => document.querySelector('.palette-row[aria-selected="true"]')?.getAttribute("data-row") ?? "",
+      )) === `command:${id}`,
+    { timeout: 30_000, timeoutMsg: `the palette never put ${id} under the cursor` },
+  );
+  await browser.keys(["Enter"]);
+  await browser.waitUntil(async () => !(await $(".palette-query").isExisting()), {
+    timeout: 30_000,
+    timeoutMsg: `the palette stayed open after running ${id}`,
+  });
+  return true;
+}
+
+/** Open the palette, or leave it open: the chord toggles it. */
+async function openPalette() {
+  if (await $(".palette-query").isExisting()) return;
+  await browser.keys([...MOD, "k"]);
+  await $(".palette-query").waitForExist({ timeout: 30_000 });
+}
+
+/** Close the palette, or leave it closed. */
+async function closePalette() {
+  if (!(await $(".palette-query").isExisting())) return;
+  await browser.keys(["Escape"]);
+  await browser.waitUntil(async () => !(await $(".palette-query").isExisting()), {
+    timeout: 30_000,
+    timeoutMsg: "the palette stayed open after Escape",
+  });
+}
 
 /** The commit the frame says is selected, as the window draws it. */
 async function selectedCommit() {
