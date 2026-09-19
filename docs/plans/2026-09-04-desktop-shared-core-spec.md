@@ -197,7 +197,7 @@ plugin/handle_action    NEW { action_id: String, payload: Value }   (clicks, pal
 | board | `board` section change | columns, cards with status line, stat strip, LAST REPLY, timeline |
 | answer box | `Command(board.answer)` | reply → daemon answer RPC → card refresh |
 | review tab | `Command(review.open)` | CodeMirror 6 merge view, hunks from `ainb-diff`, Shiki highlight |
-| inbox | `inbox` section change | list from notifyd SQLite via core section |
+| inbox | `inbox` section change | D3-prime: rows from the daemon's `hangar/inbox_list`, framed on the empty `inbox` section |
 | ACP chat card | `transcript` section change | message / thought / tool_call / plan / permission chunks |
 | palette | `cmd+k` | fuzzy over merged keymap + sessions + cards + hosts |
 | settings | `Command(config.open)` | core `config` section as a form + desktop-only: theme, fonts, layout |
@@ -216,6 +216,8 @@ plugin/handle_action    NEW { action_id: String, payload: Value }   (clicks, pal
 
 **Amendment (2026-09-19, D3): the `git_view` section is bounded, and a withheld section says so.** The review tab draws from `git_view`, which carries the diff twice: once as `diff_content` (`ainb-app/src/components/git_view.rs:21`) and again as the review rows under `review.files[].hunks[].rows`. A section whose body passes `MAX_FRAME_BYTES` (`ainb-app/src/wire/frame.rs:149`, 4 MiB) is not trimmed, it is withheld WHOLE into `FrameBatch.oversize` (`frame.rs:169`, pushed at `:398`), so one large diff would take the file tree and the commit box with it and the screen would go quiet without saying why. D3 therefore gives `git_view` the treatment the amendment above gave the conversation: the reducer writes a bounded projection, a row window with a per-file cap, each field scrubbed or allow-listed with its reason, and what was cut is said on the frame rather than read as a short diff. The diff text keeps its scrubber (`ainb-app/src/components/code_review/model.rs:75-80`) through the bound. Separately, no renderer in this repository reads `FrameBatch.oversize` today: D3 draws it on the review tab, naming the section and the reason, and every other screen's behaviour when its section is withheld stays an open gap with an issue of its own.
 
+**Amendment (2026-09-19, D3): the inbox reads the daemon, not notifyd's database.** The surface table said "list from notifyd SQLite via core section", which is stale twice over. The daemon aggregates the inbox itself (`ainb-hangar-daemon/src/lib.rs:147`) and serves it as `hangar/inbox_list` (`ainb-hangar-proto/src/methods.rs:1173`) with `hangar/inbox_mark_read` (`:1192`) as the write, rows already shaped as `InboxEntryRow` (`ainb-hangar-proto/src/events.rs:1061-1086`); and a second process opening notifyd's database would be a third reader of one store, which is the boundary the daemon's own ingest was written to keep. So the inbox section is filled by a host-owned read of that verb, bounded and scrubbed per field, the way `agent_status` is filled from `fleet/roster_status`. `hangar/inbox_mark_read` is a mutation and carries a mutation envelope under D18, with an op id and a fence; it is not added as a second envelope-less write. This lands in D3-prime, not D3.
+
 **Amendment (2026-09-19, D3): the D3 row splits into D3 and D3-prime, with nothing dropped.** The row read "review tab, inbox, settings, burndown component, plugin fallback cell, hangar `ui.state` component" under one gate. Two of those are each the size of the rest put together. The inbox is a screen that no longer exists on any surface: its state was deleted from `AppState` before the extraction and its section is an empty placeholder (`ainb-app/src/app/sections.rs:763-772`, `wire/mod.rs:608-610`), so bringing it back means a new framed family, a scrubber per field, a TUI screen, a desktop screen and a write. The stats tab and the fallback cell need a plugin host the desktop does not have. So D3 is the review tab and settings, gated on the parity suite for the screens it draws, and D3-prime is the inbox, the stats component and the fallback cell, gated on the full parity suite and depending on D3. D4 depends on D3-prime. Every item of the old row is in one of the two, and the gate wording moves with it.
 
 ## Screen inventory
@@ -228,7 +230,7 @@ plugin/handle_action    NEW { action_id: String, payload: Value }   (clicks, pal
 | fleet panel | attention list (header counts) | 1:1 | yes |
 | hangar board (plugin) | board tab | `agent_status` + Fleet frames, desktop component (the plugin's own `ui.state` component is D3) | yes |
 | code review | review tab | 1:1 hunks, CM6 paint | yes |
-| inbox | inbox | 1:1 | yes |
+| inbox | inbox | D3-prime, rebuilt on both surfaces: the screen's state was deleted before the extraction | yes |
 | stats / burndown (plugin) | stats tab | plugin `ui.state` + desktop component | yes |
 | abtop, witr, learnings, skills (plugins) | WireBuffer painted in an xterm cell | fallback | yes, fallback |
 | daemons overlay | daemons panel in settings | 1:1 | yes |
