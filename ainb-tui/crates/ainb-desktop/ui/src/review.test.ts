@@ -75,7 +75,7 @@ function section(
     diff_content: [],
     diff_lines_cut: 0,
     diff_scroll_offset: 0,
-    worktree_path: "/repo",
+    worktree_name: "repo",
     is_dirty: true,
     can_push: false,
     commit_message_len: null,
