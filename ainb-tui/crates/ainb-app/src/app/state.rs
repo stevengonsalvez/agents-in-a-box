@@ -12468,8 +12468,9 @@ impl AppState {
     /// mark. The later of the baseline folded into the Fleet section and the
     /// last refresh that saw the session attached, which is held host-side
     /// until it detaches. On the desktop, where no row is ever marked
-    /// attached, the baseline is written when the session's tab was brought
-    /// forward (`HostOnlyState::attention_focus_pending`).
+    /// attached, the baseline is the instant the session's tab was brought
+    /// forward, folded once the row carries no blocking chip
+    /// (`HostOnlyState::attention_focus_at`).
     fn attention_clear_point(&self, id: Uuid) -> i64 {
         let folded = self.fleet.attention_baseline.get(&id).copied().unwrap_or(0);
         let attached = self.host.attention_attached_at.get(&id).copied().unwrap_or(0);
@@ -13002,16 +13003,26 @@ impl AppState {
             });
         }
         // Desktop only: a tab the reducer brought forward since the last
-        // refresh gets this instant as its clear point, through the same
-        // fold the terminal's detach uses, so the baseline keeps one writer.
-        // The desktop never marks a row `attached` above, so the fold below
-        // runs for it on this very pass.
-        if self.host.surface == ainb_hangar_proto::connections::SurfaceKind::Desktop {
-            for id in std::mem::take(&mut self.host.attention_focus_pending) {
-                self.host.attention_attached_at.insert(id, now_ms);
-            }
-        }
+        // refresh takes this instant as its focus instant, and that instant
+        // becomes the clear point on the first refresh (this one included)
+        // that sees the row with no blocking chip: focus clears what the
+        // person has seen, never a question or an approval still owed. It
+        // goes through the same fold the terminal's detach uses, so the
+        // baseline keeps one writer; the desktop never marks a row `attached`
+        // above, so the fold runs for it on the pass that hands it over.
+        let desktop = self.host.surface == ainb_hangar_proto::connections::SurfaceKind::Desktop;
         for (id, mut chips, attached, failure, projected_status, provider_session_id) in marks {
+            if desktop {
+                if self.host.attention_focus_pending.remove(&id) {
+                    self.host.attention_focus_at.insert(id, now_ms);
+                }
+                if let Some(&focused_at) = self.host.attention_focus_at.get(&id) {
+                    if !chips.iter().any(|chip| chip.kind.blocks()) {
+                        self.host.attention_focus_at.remove(&id);
+                        self.host.attention_attached_at.insert(id, focused_at);
+                    }
+                }
+            }
             if attached {
                 self.host.attention_attached_at.insert(id, now_ms);
             } else if let Some(seen) = self.host.attention_attached_at.remove(&id) {
