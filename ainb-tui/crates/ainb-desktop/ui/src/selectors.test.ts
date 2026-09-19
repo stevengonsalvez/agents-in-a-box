@@ -68,3 +68,14 @@ test("a memo over a root selector stays quiet when a drain keeps its value", () 
   assert.equal(runs.idle, afterFirst + 1);
   dispose();
 });
+
+test("usageStale reads the stale mark on section 21, not on any other", () => {
+  createRoot((dispose) => {
+    const store = createFrameStore(["usage", "git_view"]);
+    assert.equal(ROOT_SELECTORS.usageStale(store, "local"), false);
+    store.applyDrain("local", [{ frames: [], oversize: [{ section: "usage", version: 2, bytes: 5_000_000 }] }]);
+    assert.equal(ROOT_SELECTORS.usageStale(store, "local"), true);
+    assert.equal(ROOT_SELECTORS.gitViewStale(store, "local"), false);
+    dispose();
+  });
+});

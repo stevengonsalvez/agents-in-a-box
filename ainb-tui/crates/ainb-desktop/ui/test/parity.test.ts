@@ -57,6 +57,7 @@ export function pageText(
       config,
       revision: 1,
       hangar,
+      sidecar: { state: "starting" },
       setup: null,
       run: () => undefined,
       onSetupWrite: () => undefined,
