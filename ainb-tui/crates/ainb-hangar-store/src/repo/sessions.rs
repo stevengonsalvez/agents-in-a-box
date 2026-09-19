@@ -336,17 +336,6 @@ impl SessionsRepo {
         }))
     }
 
-    /// Whether ANY import has completed on this home.
-    ///
-    /// Superseded by [`Self::import_complete_for`], which also requires a
-    /// reconcile pass; removed once its last caller has moved.
-    pub async fn any_import_completed(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_import")
-            .fetch_one(pool)
-            .await?;
-        Ok(n > 0)
-    }
-
     /// Whether the table is authoritative for `source_path`: its one-time
     /// import AND at least one reconcile pass have completed.
     ///
