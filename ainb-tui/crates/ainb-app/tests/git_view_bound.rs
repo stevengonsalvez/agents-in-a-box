@@ -486,8 +486,5 @@ fn what_the_worst_case_projection_costs() {
     let bytes = serde_json::to_vec(&frame).expect("encodes").len();
     let encoded = start.elapsed();
 
-    println!(
-        "worst case: project {:?}, encode {:?}, {bytes} bytes",
-        projected, encoded
-    );
+    println!("worst case: project {projected:?}, encode {encoded:?}, {bytes} bytes");
 }
