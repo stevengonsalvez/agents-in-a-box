@@ -33,14 +33,14 @@ impl Screen for InboxScreen {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        render(frame, area, state.inbox.get(), state.host.inbox_scroll);
+        render(frame, area, state.inbox.get());
     }
 }
 
-/// Draw the inbox section into `area`, its rows from `scroll` down, one row
-/// per line and clipped at the width, so the footer can say which rows are
-/// on screen. `scroll` is the reducer's, already inside the rows.
-pub fn render(frame: &mut Frame, area: Rect, section: &InboxSection, scroll: usize) {
+/// Draw the inbox section into `area`, its rows from the section's `scroll`
+/// down, one row per line and clipped at the width, so the footer can say
+/// which rows are on screen.
+pub fn render(frame: &mut Frame, area: Rect, section: &InboxSection) {
     let outer = Block::default()
         .title(Line::from(vec![
             Span::styled(" 📥 ", Style::default().fg(CORNFLOWER_BLUE)),
@@ -67,7 +67,7 @@ pub fn render(frame: &mut Frame, area: Rect, section: &InboxSection, scroll: usi
 
     let notes = note_lines(section);
     let room = usize::from(chunks[0].height).saturating_sub(notes.len());
-    let scroll = scroll.min(section.entries.len().saturating_sub(1));
+    let scroll = section.scroll.min(section.entries.len().saturating_sub(1));
     let shown = section.entries.len().min(scroll.saturating_add(room));
     let mut lines = notes;
     lines.extend(
@@ -209,13 +209,9 @@ mod tests {
     }
 
     fn lines(section: &InboxSection, w: u16, h: u16) -> Vec<String> {
-        lines_from(section, 0, w, h)
-    }
-
-    fn lines_from(section: &InboxSection, scroll: usize, w: u16, h: u16) -> Vec<String> {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, f.area(), section, scroll)).unwrap();
+        terminal.draw(|f| render(f, f.area(), section)).unwrap();
         let buf = terminal.backend().buffer().clone();
         (0..h)
             .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
@@ -332,7 +328,11 @@ mod tests {
             ..InboxSection::default()
         };
         // Height 8: two border rows, one footer, one counters note, four rows.
-        let drawn = lines_from(&section, 3, 60, 8);
+        let at = |scroll: usize| InboxSection {
+            scroll,
+            ..section.clone()
+        };
+        let drawn = lines(&at(3), 60, 8);
         let joined = drawn.join("\n");
         assert!(
             !joined.contains("Row 3 "),
@@ -346,9 +346,9 @@ mod tests {
         );
         assert!(joined.contains("rows 4-7 of 10"), "{joined}");
         assert!(joined.contains("j/k"), "{joined}");
-        let top = lines_from(&section, 0, 60, 8).join("\n");
+        let top = lines(&at(0), 60, 8).join("\n");
         assert!(top.contains("rows 1-4 of 10"), "{top}");
-        let past = lines_from(&section, 99, 60, 8).join("\n");
+        let past = lines(&at(99), 60, 8).join("\n");
         assert!(
             past.contains("Row 10"),
             "a scroll past the end draws the last row:\n{past}"
