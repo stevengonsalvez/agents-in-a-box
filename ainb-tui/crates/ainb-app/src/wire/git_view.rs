@@ -327,13 +327,16 @@ pub fn project_within(
 /// collapsed or binary file. The frame carries a cut of that, so an offset
 /// means one thing on each side until it is translated here, once, where both
 /// shapes are in hand.
-struct Place {
-    /// Per file, its first row in the model and in the frame, and how many
-    /// rows and hunks each side carries.
-    files: Vec<PlacedFile>,
+struct Place<'a> {
+    /// Per file, its first row in the model and in the frame, how many rows
+    /// and hunks each side carries, and both sides themselves, because a row
+    /// inside a file is placed hunk by hunk.
+    files: Vec<PlacedFile<'a>>,
 }
 
-struct PlacedFile {
+struct PlacedFile<'a> {
+    model: &'a ReviewFile,
+    frame: Option<&'a ReviewFileFrame>,
     model_row: usize,
     frame_row: usize,
     model_rows: usize,
@@ -344,10 +347,10 @@ struct PlacedFile {
     frame_hunks: usize,
 }
 
-impl Place {
+impl<'a> Place<'a> {
     /// Walk the model's files beside the frame's, in the order the frame kept
     /// them: `carried` says which model file each framed slot came from.
-    fn of(model: &[ReviewFile], carried: &[usize], framed: &[ReviewFileFrame]) -> Self {
+    fn of(model: &'a [ReviewFile], carried: &[usize], framed: &'a [ReviewFileFrame]) -> Self {
         let mut files = Vec::with_capacity(model.len());
         let mut model_row = 0;
         let mut frame_row = 0;
@@ -382,6 +385,8 @@ impl Place {
                 }
             });
             files.push(PlacedFile {
+                model: file,
+                frame,
                 model_row,
                 frame_row,
                 model_rows,
@@ -413,15 +418,12 @@ impl Place {
             return (last.saturating_sub(1), last > 0);
         };
         let local = row - file.model_row;
-        if file.frame_rows == 0 {
+        let Some(frame) = file.frame else {
             // The file itself was not framed: the top of whatever follows it.
             return (file.frame_row, true);
-        }
-        if local < file.frame_rows {
-            (file.frame_row + local, false)
-        } else {
-            (file.frame_row + file.frame_rows - 1, true)
-        }
+        };
+        let (inside, cut) = row_in_file(file.model, frame, local);
+        (file.frame_row + inside, cut)
     }
 
     /// The framed hunk nearest the model's `hunk`, and whether that hunk is
@@ -482,6 +484,73 @@ fn frame_file_rows(file: &ReviewFileFrame) -> usize {
             )
         })
         .sum::<usize>()
+}
+
+/// Where `local`, a row inside one file's own rows, sits in the framed file,
+/// and whether that exact row is missing from it.
+///
+/// Walked hunk by hunk rather than by totals, because a hunk truncated part
+/// way still frames the gap below it: counting rows alone, the first row past
+/// the cut would land on that gap row and be reported as present, a row off
+/// and reading as though nothing had been left out.
+fn row_in_file(model: &ReviewFile, frame: &ReviewFileFrame, local: usize) -> (usize, bool) {
+    // The heading, which a framed file always has.
+    if local == 0 {
+        return (0, false);
+    }
+    let mut at_model = 1;
+    let mut at_frame = 1;
+    for (index, hunk) in model.hunks.iter().enumerate() {
+        let framed = frame.hunks.get(index);
+        let model_before = hunk.gap_before > hunk.expanded_before;
+        let frame_before = framed.is_some_and(|hunk| hunk.gap_before > hunk.expanded_before);
+        if model_before {
+            if local == at_model {
+                return if frame_before {
+                    (at_frame, false)
+                } else {
+                    (at_frame.saturating_sub(1), true)
+                };
+            }
+            at_model += 1;
+        }
+        if frame_before {
+            at_frame += 1;
+        }
+
+        let model_rows = hunk.rows.len();
+        let frame_rows = framed.map_or(0, |hunk| hunk.rows.len());
+        if local < at_model + model_rows {
+            let row = local - at_model;
+            return if row < frame_rows {
+                (at_frame + row, false)
+            } else {
+                // Past what this hunk kept: the last row of it that was sent.
+                (at_frame + frame_rows.saturating_sub(1), true)
+            };
+        }
+        at_model += model_rows;
+        at_frame += frame_rows;
+
+        let model_after = hunk.gap_after > hunk.expanded_after;
+        let frame_after = framed.is_some_and(|hunk| hunk.gap_after > hunk.expanded_after);
+        if model_after {
+            if local == at_model {
+                // The gap below a hunk the frame truncated is drawn, but it is
+                // not the row the reducer is on: that row was cut.
+                return if frame_after && frame_rows == model_rows {
+                    (at_frame, false)
+                } else {
+                    (at_frame.saturating_sub(1), true)
+                };
+            }
+            at_model += 1;
+        }
+        if frame_after {
+            at_frame += 1;
+        }
+    }
+    (at_frame.saturating_sub(1), true)
 }
 
 /// The virtual rows one hunk contributes, as `flatten` counts them: an expand
