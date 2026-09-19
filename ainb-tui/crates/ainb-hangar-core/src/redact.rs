@@ -34,10 +34,15 @@ use regex::Regex;
 
 /// Telegram bot tokens: `bot<digits>:<base64ish>` (as they appear in the API
 /// URL path) and the bare `<digits>:<base64ish>` token form.
-static TELEGRAM_TOKEN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"bot\d+:[A-Za-z0-9_-]{20,}").expect("valid telegram token regex"));
+static TELEGRAM_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"bot[0-9]+:[A-Za-z0-9_-]{20,}").expect("valid telegram token regex")
+});
+/// `[0-9]` rather than `\d` for the reason the Discord shape spells its class
+/// out: `\d` is Unicode-aware, and a bounded repetition of it with no literal
+/// prefix is the expensive shape over a long line. A token's id is ASCII
+/// digits, so nothing that is a token stops matching.
 static TELEGRAM_BARE_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b\d{6,}:[A-Za-z0-9_-]{20,}").expect("valid bare telegram token regex")
+    Regex::new(r"\b[0-9]{6,}:[A-Za-z0-9_-]{20,}").expect("valid bare telegram token regex")
 });
 /// Slack tokens: bot (`xoxb-…`), the `xox*` families (user `xoxp-`, config
 /// `xoxe-`, refresh `xoxr-`, …) AND app-level tokens (`xapp-…`), which use a
@@ -588,6 +593,31 @@ mod tests {
                 "the token survived in {scrubbed}"
             );
         }
+    }
+
+    /// A long run of letters that are not ASCII is not a token, and the shapes
+    /// that could once scan it character by character are the ones that cost
+    /// milliseconds a line.
+    #[test]
+    fn a_long_non_ascii_run_matches_no_token_shape() {
+        let text = "\u{4f60}\u{597d}".repeat(2_000);
+
+        assert_eq!(
+            scrub(&text),
+            text,
+            "a run of non-ASCII text is not a credential"
+        );
+        assert_eq!(find_secret(&text), None);
+
+        // And the same run with a real token inside it still loses the token.
+        let token = format!(
+            "{}.{}.{}",
+            fake("", 'a', 24),
+            fake("", 'b', 7),
+            fake("", 'c', 27)
+        );
+        let scrubbed = scrub(&format!("{text}{token}{text}"));
+        assert!(!scrubbed.contains(&token), "the token survived");
     }
 
     /// A key block spans lines, so a caller scrubbing a chunk at a time hands
