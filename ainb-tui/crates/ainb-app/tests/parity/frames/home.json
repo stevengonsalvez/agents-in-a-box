@@ -1,0 +1,3268 @@
+{
+  "sessions": {
+    "attached_session_id": null,
+    "expand_all_workspaces": true,
+    "favorite_workspace_paths": [],
+    "hidden_sessions": [],
+    "selected_session_index": null,
+    "selected_sessions": [],
+    "selected_workspace_index": null,
+    "session_filter": "all",
+    "shell_selected": false,
+    "workspaces": []
+  },
+  "session_labels": {
+    "session_context_menu": null,
+    "session_label_rename_buffer": "",
+    "session_label_rename_mode": false,
+    "session_label_rename_target": null,
+    "session_label_store": {}
+  },
+  "tmux": {
+    "embed_session": null,
+    "other_tmux_expanded": true,
+    "other_tmux_rename_buffer": "",
+    "other_tmux_rename_mode": false,
+    "other_tmux_sessions": [],
+    "selected_other_tmux_index": null,
+    "selected_other_tmux_sessions": []
+  },
+  "ssh": {
+    "selected_ssh_session_index": null,
+    "ssh_session_rename_buffer": "",
+    "ssh_session_rename_mode": false,
+    "ssh_sessions": [],
+    "ssh_sessions_expanded": true
+  },
+  "git_view": {
+    "git_view_state": null,
+    "is_current_dir_git_repo": false,
+    "quick_commit_cursor": 0,
+    "quick_commit_message_len": null
+  },
+  "workspace_load": {
+    "is_loading_workspaces": false,
+    "workspace_load_error": null
+  },
+  "new_session": {
+    "branch_refresh_seq": 0,
+    "new_session_state": null,
+    "repo_check_seq": 0,
+    "repo_init_seq": 0
+  },
+  "logs": {
+    "last_logs_session_id": null,
+    "live_logs": {},
+    "log_history_state": {
+      "error_message": null,
+      "filter_level": "All",
+      "focus": "SessionList",
+      "horizontal_scroll": 0,
+      "is_visible": false,
+      "log_entries_area": null,
+      "scroll_offset": 0,
+      "search_query_len": null,
+      "selected_log_file": null,
+      "selected_session": null,
+      "selection": {
+        "end": null,
+        "is_selecting": false,
+        "start": null
+      },
+      "sessions": []
+    }
+  },
+  "claude_chat": {
+    "claude_chat_state": null,
+    "claude_chat_visible": false
+  },
+  "fleet": {
+    "ask_state": {
+      "cursor": 0,
+      "focus": "Options",
+      "free_text_len": 0,
+      "phases": [],
+      "request": null
+    },
+    "attention_baseline": {},
+    "attention_elsewhere": 0,
+    "attention_error_since": {},
+    "broadcast": {
+      "phase": "Composing",
+      "text_len": 0
+    },
+    "conversation": {
+      "cards": [],
+      "cards_held": 0,
+      "composer_len": 0,
+      "rows": [],
+      "rows_held": 0,
+      "scope_key": null,
+      "send_block": "",
+      "status": "Closed",
+      "target_session_key": null,
+      "topic": "None"
+    },
+    "daemon_attention": {
+      "all": {},
+      "by_session_id": {},
+      "error": null,
+      "not_running": false,
+      "reachable": false
+    },
+    "daemon_attention_seen": 0,
+    "fleet_metadata": {},
+    "fleet_snapshot": [],
+    "live_window": {
+      "codex_five_hour_pct": null,
+      "codex_five_hour_resets_at": null,
+      "codex_plan_type": null,
+      "codex_seven_day_pct": null,
+      "codex_seven_day_resets_at": null,
+      "context_pct": null,
+      "five_hour_pct": null,
+      "five_hour_resets_at": null,
+      "model": null,
+      "resets_in": null,
+      "seven_day_pct": null,
+      "seven_day_resets_at": null,
+      "source": "None",
+      "today_cost_usd": null
+    },
+    "transcript": {
+      "chunks": [],
+      "chunks_held": 0,
+      "session_key": null,
+      "starts_part_way": false,
+      "status": "Closed"
+    }
+  },
+  "hangar": {
+    "daemons_state": {
+      "action_requests": [],
+      "attach_request": null,
+      "error_open": null,
+      "generation": 0,
+      "hooks_status": null,
+      "inflight": {},
+      "menu": null,
+      "outcomes": {},
+      "selected": 0,
+      "shared": null
+    },
+    "hangar_daemon_config_loaded": false
+  },
+  "mcp_pool": {
+    "mcp_overlay": null
+  },
+  "inbox": {},
+  "plugins_host": {
+    "plugin_captures_text": {},
+    "plugin_presence": {},
+    "plugin_render_errors": {}
+  },
+  "config": {
+    "app_config": {
+      "acp": {},
+      "authentication": {
+        "claude_provider": "system_auth",
+        "cli_provider": "claude",
+        "default_model": "sonnet",
+        "github_method": null
+      },
+      "container_templates": {
+        "claude-dev": {
+          "config": {
+            "command": null,
+            "cpu_limit": 2.0,
+            "entrypoint": [
+              "/app/scripts/startup.sh"
+            ],
+            "environment": {
+              "AGENTS_BOX_MODE": "<redacted>",
+              "NODE_ENV": "<redacted>"
+            },
+            "image_source": {
+              "base_image": null,
+              "build_args": {},
+              "type": "ClaudeDocker"
+            },
+            "memory_limit": 4096,
+            "mount_git_config": true,
+            "mount_ssh": true,
+            "npm_packages": [
+              "@anthropic-ai/claude-code",
+              "@google/gemini-cli"
+            ],
+            "ports": [
+              3000,
+              5173,
+              8080
+            ],
+            "python_packages": [],
+            "system_packages": [
+              "git",
+              "curl",
+              "build-essential",
+              "python3",
+              "python3-pip"
+            ],
+            "user": "claude-user",
+            "volumes": [],
+            "working_dir": "/workspace"
+          },
+          "default_mcp_servers": [
+            "serena",
+            "context7"
+          ],
+          "description": "Claude development environment with MCP servers and AI tools",
+          "name": "claude-dev",
+          "required_env": [
+            "ANTHROPIC_API_KEY"
+          ]
+        },
+        "node": {
+          "config": {
+            "command": [
+              "bash"
+            ],
+            "cpu_limit": 1.0,
+            "entrypoint": null,
+            "environment": {},
+            "image_source": {
+              "name": "node:20-slim",
+              "type": "Image"
+            },
+            "memory_limit": 2048,
+            "mount_git_config": true,
+            "mount_ssh": true,
+            "npm_packages": [],
+            "ports": [
+              3000,
+              5173
+            ],
+            "python_packages": [],
+            "system_packages": [
+              "git",
+              "build-essential"
+            ],
+            "user": null,
+            "volumes": [],
+            "working_dir": "/workspace"
+          },
+          "default_mcp_servers": [],
+          "description": "Node.js development environment",
+          "name": "node",
+          "required_env": []
+        },
+        "python": {
+          "config": {
+            "command": [
+              "bash"
+            ],
+            "cpu_limit": 1.0,
+            "entrypoint": null,
+            "environment": {},
+            "image_source": {
+              "name": "python:3.11-slim",
+              "type": "Image"
+            },
+            "memory_limit": 2048,
+            "mount_git_config": true,
+            "mount_ssh": true,
+            "npm_packages": [],
+            "ports": [
+              8000,
+              5000
+            ],
+            "python_packages": [
+              "pip",
+              "setuptools",
+              "wheel"
+            ],
+            "system_packages": [
+              "git",
+              "build-essential"
+            ],
+            "user": null,
+            "volumes": [],
+            "working_dir": "/workspace"
+          },
+          "default_mcp_servers": [],
+          "description": "Python development environment",
+          "name": "python",
+          "required_env": []
+        },
+        "rust": {
+          "config": {
+            "command": [
+              "bash"
+            ],
+            "cpu_limit": 1.0,
+            "entrypoint": null,
+            "environment": {},
+            "image_source": {
+              "name": "rust:1.75-slim",
+              "type": "Image"
+            },
+            "memory_limit": 2048,
+            "mount_git_config": true,
+            "mount_ssh": true,
+            "npm_packages": [],
+            "ports": [
+              8080,
+              3000
+            ],
+            "python_packages": [],
+            "system_packages": [
+              "git",
+              "pkg-config",
+              "libssl-dev"
+            ],
+            "user": null,
+            "volumes": [],
+            "working_dir": "/workspace"
+          },
+          "default_mcp_servers": [],
+          "description": "Rust development environment",
+          "name": "rust",
+          "required_env": []
+        }
+      },
+      "daemons": {
+        "attention_stale_after_ms": 45000,
+        "stale_after_ms": 90000
+      },
+      "default_container_template": "claude-dev",
+      "docker": {
+        "host": null,
+        "timeout": 60
+      },
+      "fleet": {
+        "cost": {},
+        "enrich": true,
+        "healthy_state_stale_ms": 300000,
+        "idle_min": 5,
+        "interview": {
+          "surface": null
+        },
+        "state_stale_ms": 0,
+        "status": {
+          "legacy_classify_primary": false,
+          "legacy_panel": false
+        },
+        "terminal": null,
+        "tmux_idle_after_secs": 120,
+        "transport": "tmux"
+      },
+      "general": {
+        "skill_install_real_homes": true,
+        "syntax_highlight": true
+      },
+      "mcp_pool": {
+        "daemon_idle_grace_secs": 900,
+        "enabled": true,
+        "idle_grace_secs": 300,
+        "monitor_refresh_secs": 2
+      },
+      "mcp_servers": {},
+      "notifyd": {
+        "approval_timeout_secs": 600,
+        "os_debounce_secs": 60
+      },
+      "plugins": {
+        "disabled": [],
+        "enabled": []
+      },
+      "presets": {
+        "file": "../presets.toml"
+      },
+      "ui": {
+        "app_tick_ms": 250,
+        "attention_err_window_hours": 2,
+        "double_click_ms": 300,
+        "inbox_list_limit": 200,
+        "notice_error_secs": 60,
+        "notice_info_secs": 10,
+        "notice_warning_secs": 20,
+        "session_lookback_hours": 6,
+        "session_query_limit": 500,
+        "tick_rate_ms": 33
+      },
+      "ui_preferences": {
+        "config_tree_expanded": [],
+        "home_sidebar_fraction": null,
+        "preferred_editor": null,
+        "session_filter": "all",
+        "sessions_sidebar_collapsed": null,
+        "sessions_sidebar_fraction": null,
+        "show_container_status": true,
+        "show_git_status": true,
+        "show_session_menu_bar": true,
+        "skill_manager_sources_fraction": null,
+        "statusline_decision": "unset",
+        "theme": "dark",
+        "tmux_decision": "unset"
+      },
+      "usage": {
+        "currency": {
+          "code": "USD",
+          "symbol": "$",
+          "usd_rate": 1.0
+        },
+        "model_aliases": {},
+        "plan": null
+      },
+      "usage_client": {
+        "codex_ttl_secs": 60,
+        "fetch_timeout_secs": 120,
+        "headroom_port": 8787
+      },
+      "version": "1.28.2",
+      "web": {
+        "insecure_bind": false,
+        "listen": "127.0.0.1:8420",
+        "read_only": false
+      },
+      "workspace_defaults": {
+        "branch_prefix": "agents/",
+        "exclude_paths": [],
+        "max_repositories": 500,
+        "scan_cache_ttl_secs": 3600,
+        "scan_max_depth": 3,
+        "workspace_scan_paths": [],
+        "worktree_collision_behavior": "auto_rename"
+      }
+    },
+    "config_popup_state": {
+      "description": "",
+      "popup_type": {
+        "Choice": {
+          "options": [],
+          "selected_index": 0
+        }
+      },
+      "setting_key": "",
+      "show_popup": false,
+      "title": ""
+    },
+    "config_screen_state": {
+      "api_key_input_mode": false,
+      "categories": [
+        "Authentication",
+        "Workspace",
+        "Docker",
+        "AgentDefaults",
+        "Editor",
+        "Plugins",
+        "McpPool",
+        "Appearance",
+        "General",
+        "ContainerTemplates",
+        "Fleet",
+        "Usage",
+        "Skills",
+        "SessionReader",
+        "Presets",
+        "Daemons",
+        "Web",
+        "Acp",
+        "HangarDaemon"
+      ],
+      "dirty": [],
+      "edit_len": 0,
+      "editing": false,
+      "expanded": [],
+      "expansion_dirty": false,
+      "focused_pane": "Categories",
+      "search_len": null,
+      "selected_node": 0,
+      "selected_setting": 0,
+      "settings": {
+        "Acp": [
+          {
+            "description": "Executable for this adapter; blank resolves its name on PATH (daemon restart)",
+            "key": "acp.adapters.claude-agent-acp.command",
+            "label": "Adapter Command",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Executable for this adapter; blank resolves its name on PATH (daemon restart)",
+            "key": "acp.adapters.codex-acp.command",
+            "label": "Adapter Command",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Mode pinned at session/new, re-asserted after session/load (daemon restart)",
+            "key": "acp.adapters.claude-agent-acp.permission_mode",
+            "label": "Permission Mode",
+            "value": {
+              "Choice": [
+                [
+                  "default",
+                  "acceptEdits",
+                  "bypassPermissions",
+                  "plan"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Mode pinned at session/new, re-asserted after session/load (daemon restart)",
+            "key": "acp.adapters.codex-acp.permission_mode",
+            "label": "Permission Mode",
+            "value": {
+              "Choice": [
+                [
+                  "default",
+                  "acceptEdits",
+                  "bypassPermissions",
+                  "plan"
+                ],
+                0
+              ]
+            }
+          }
+        ],
+        "AgentDefaults": [
+          {
+            "description": "Which agent CLI new sessions launch",
+            "key": "authentication.cli_provider",
+            "label": "Agent CLI",
+            "value": {
+              "Choice": [
+                [
+                  "claude",
+                  "codex",
+                  "gemini",
+                  "copilot",
+                  "antigravity"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Model alias passed to the agent CLI (e.g. sonnet, opus)",
+            "key": "authentication.default_model",
+            "label": "Default Model",
+            "value": {
+              "Text": "sonnet"
+            }
+          }
+        ],
+        "Appearance": [
+          {
+            "description": "Colour theme for the TUI",
+            "key": "ui_preferences.theme",
+            "label": "Theme",
+            "value": {
+              "Choice": [
+                [
+                  "dark",
+                  "light"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Render container mode icons in the session list",
+            "key": "ui_preferences.show_container_status",
+            "label": "Show Container Status",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Render per-session git change counts in the session list",
+            "key": "ui_preferences.show_git_status",
+            "label": "Show Git Status",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Keep the Sessions keymap legend expanded (⇧M toggles it live)",
+            "key": "ui_preferences.show_session_menu_bar",
+            "label": "Show Session Menu Bar",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Milliseconds between input polls; lower feels snappier (restart to apply)",
+            "key": "ui.tick_rate_ms",
+            "label": "Event Poll Interval",
+            "value": {
+              "Number": 33
+            }
+          },
+          {
+            "description": "Milliseconds between heavy periodic passes, e.g. previews (restart to apply)",
+            "key": "ui.app_tick_ms",
+            "label": "App Tick Interval",
+            "value": {
+              "Number": 250
+            }
+          },
+          {
+            "description": "Rows the attention-marker query reads per refresh",
+            "key": "ui.session_query_limit",
+            "label": "Attention Query Limit",
+            "value": {
+              "Number": 500
+            }
+          },
+          {
+            "description": "Hours back an event may still raise a session's attention marker",
+            "key": "ui.session_lookback_hours",
+            "label": "Attention Lookback",
+            "value": {
+              "Number": 6
+            }
+          },
+          {
+            "description": "Hours a failure keeps lighting an ERR chip; the err tab still shows it after",
+            "key": "ui.attention_err_window_hours",
+            "label": "Error Chip Window",
+            "value": {
+              "Number": 2
+            }
+          },
+          {
+            "description": "Rows the Inbox lists; the query runs every render, so keep it modest",
+            "key": "ui.inbox_list_limit",
+            "label": "Inbox Row Limit",
+            "value": {
+              "Number": 200
+            }
+          },
+          {
+            "description": "Milliseconds in which two clicks count as one double-click",
+            "key": "ui.double_click_ms",
+            "label": "Double-Click Window",
+            "value": {
+              "Number": 300
+            }
+          },
+          {
+            "description": "Seconds an error notice stays up; Ctrl+X retires it sooner, the log keeps it after",
+            "key": "ui.notice_error_secs",
+            "label": "Error Notice Lifetime",
+            "value": {
+              "Number": 60
+            }
+          },
+          {
+            "description": "Seconds a warning notice stays up before it retires itself",
+            "key": "ui.notice_warning_secs",
+            "label": "Warning Notice Lifetime",
+            "value": {
+              "Number": 20
+            }
+          },
+          {
+            "description": "Seconds an info notice stays up before it retires itself",
+            "key": "ui.notice_info_secs",
+            "label": "Info Notice Lifetime",
+            "value": {
+              "Number": 10
+            }
+          }
+        ],
+        "Authentication": [
+          {
+            "description": "How Claude authenticates: subscription, API key, or a cloud gateway",
+            "key": "authentication.claude_provider",
+            "label": "Claude Authentication",
+            "value": {
+              "Choice": [
+                [
+                  "system_auth",
+                  "api_key",
+                  "amazon_bedrock",
+                  "google_vertex",
+                  "azure_foundry",
+                  "glm_zai",
+                  "llm_gateway"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "How git operations authenticate to GitHub (unset = inherit the gh CLI)",
+            "key": "authentication.github_method",
+            "label": "GitHub Auth Method",
+            "value": {
+              "Text": ""
+            }
+          }
+        ],
+        "ContainerTemplates": [
+          {
+            "description": "Identifier used to select this template",
+            "key": "container_templates.claude-dev.name",
+            "label": "Template Name",
+            "value": {
+              "Text": "claude-dev"
+            }
+          },
+          {
+            "description": "Identifier used to select this template",
+            "key": "container_templates.node.name",
+            "label": "Template Name",
+            "value": {
+              "Text": "node"
+            }
+          },
+          {
+            "description": "Identifier used to select this template",
+            "key": "container_templates.python.name",
+            "label": "Template Name",
+            "value": {
+              "Text": "python"
+            }
+          },
+          {
+            "description": "Identifier used to select this template",
+            "key": "container_templates.rust.name",
+            "label": "Template Name",
+            "value": {
+              "Text": "rust"
+            }
+          },
+          {
+            "description": "One line shown in the template picker",
+            "key": "container_templates.claude-dev.description",
+            "label": "Template Description",
+            "value": {
+              "Text": "Claude development environment with MCP servers and AI tools"
+            }
+          },
+          {
+            "description": "One line shown in the template picker",
+            "key": "container_templates.node.description",
+            "label": "Template Description",
+            "value": {
+              "Text": "Node.js development environment"
+            }
+          },
+          {
+            "description": "One line shown in the template picker",
+            "key": "container_templates.python.description",
+            "label": "Template Description",
+            "value": {
+              "Text": "Python development environment"
+            }
+          },
+          {
+            "description": "One line shown in the template picker",
+            "key": "container_templates.rust.description",
+            "label": "Template Description",
+            "value": {
+              "Text": "Rust development environment"
+            }
+          },
+          {
+            "description": "Prebuilt Image, a local Dockerfile, or the bundled ClaudeDocker build",
+            "key": "container_templates.claude-dev.config.image_source.type",
+            "label": "Image Source",
+            "value": {
+              "Choice": [
+                [
+                  "Image",
+                  "Dockerfile",
+                  "ClaudeDocker"
+                ],
+                2
+              ]
+            }
+          },
+          {
+            "description": "Prebuilt Image, a local Dockerfile, or the bundled ClaudeDocker build",
+            "key": "container_templates.node.config.image_source.type",
+            "label": "Image Source",
+            "value": {
+              "Choice": [
+                [
+                  "Image",
+                  "Dockerfile",
+                  "ClaudeDocker"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Prebuilt Image, a local Dockerfile, or the bundled ClaudeDocker build",
+            "key": "container_templates.python.config.image_source.type",
+            "label": "Image Source",
+            "value": {
+              "Choice": [
+                [
+                  "Image",
+                  "Dockerfile",
+                  "ClaudeDocker"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Prebuilt Image, a local Dockerfile, or the bundled ClaudeDocker build",
+            "key": "container_templates.rust.config.image_source.type",
+            "label": "Image Source",
+            "value": {
+              "Choice": [
+                [
+                  "Image",
+                  "Dockerfile",
+                  "ClaudeDocker"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Registry image reference, when the source is a prebuilt Image",
+            "key": "container_templates.claude-dev.config.image_source.name",
+            "label": "Image Name",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Registry image reference, when the source is a prebuilt Image",
+            "key": "container_templates.node.config.image_source.name",
+            "label": "Image Name",
+            "value": {
+              "Text": "node:20-slim"
+            }
+          },
+          {
+            "description": "Registry image reference, when the source is a prebuilt Image",
+            "key": "container_templates.python.config.image_source.name",
+            "label": "Image Name",
+            "value": {
+              "Text": "python:3.11-slim"
+            }
+          },
+          {
+            "description": "Registry image reference, when the source is a prebuilt Image",
+            "key": "container_templates.rust.config.image_source.name",
+            "label": "Image Name",
+            "value": {
+              "Text": "rust:1.75-slim"
+            }
+          },
+          {
+            "description": "Dockerfile to build, when the source is a Dockerfile",
+            "key": "container_templates.claude-dev.config.image_source.path",
+            "label": "Dockerfile Path",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Dockerfile to build, when the source is a Dockerfile",
+            "key": "container_templates.node.config.image_source.path",
+            "label": "Dockerfile Path",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Dockerfile to build, when the source is a Dockerfile",
+            "key": "container_templates.python.config.image_source.path",
+            "label": "Dockerfile Path",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Dockerfile to build, when the source is a Dockerfile",
+            "key": "container_templates.rust.config.image_source.path",
+            "label": "Dockerfile Path",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Base image for the ClaudeDocker build (unset = the bundled default)",
+            "key": "container_templates.claude-dev.config.image_source.base_image",
+            "label": "Base Image Override",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Base image for the ClaudeDocker build (unset = the bundled default)",
+            "key": "container_templates.node.config.image_source.base_image",
+            "label": "Base Image Override",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Base image for the ClaudeDocker build (unset = the bundled default)",
+            "key": "container_templates.python.config.image_source.base_image",
+            "label": "Base Image Override",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Base image for the ClaudeDocker build (unset = the bundled default)",
+            "key": "container_templates.rust.config.image_source.base_image",
+            "label": "Base Image Override",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Directory the repository mounts to inside the container",
+            "key": "container_templates.claude-dev.config.working_dir",
+            "label": "Working Directory",
+            "value": {
+              "Text": "/workspace"
+            }
+          },
+          {
+            "description": "Directory the repository mounts to inside the container",
+            "key": "container_templates.node.config.working_dir",
+            "label": "Working Directory",
+            "value": {
+              "Text": "/workspace"
+            }
+          },
+          {
+            "description": "Directory the repository mounts to inside the container",
+            "key": "container_templates.python.config.working_dir",
+            "label": "Working Directory",
+            "value": {
+              "Text": "/workspace"
+            }
+          },
+          {
+            "description": "Directory the repository mounts to inside the container",
+            "key": "container_templates.rust.config.working_dir",
+            "label": "Working Directory",
+            "value": {
+              "Text": "/workspace"
+            }
+          },
+          {
+            "description": "Container command argv (unset = the image default)",
+            "key": "container_templates.claude-dev.config.command",
+            "label": "Command",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Container command argv (unset = the image default)",
+            "key": "container_templates.node.config.command",
+            "label": "Command",
+            "value": {
+              "Text": "bash"
+            }
+          },
+          {
+            "description": "Container command argv (unset = the image default)",
+            "key": "container_templates.python.config.command",
+            "label": "Command",
+            "value": {
+              "Text": "bash"
+            }
+          },
+          {
+            "description": "Container command argv (unset = the image default)",
+            "key": "container_templates.rust.config.command",
+            "label": "Command",
+            "value": {
+              "Text": "bash"
+            }
+          },
+          {
+            "description": "Container entrypoint argv (unset = the image default)",
+            "key": "container_templates.claude-dev.config.entrypoint",
+            "label": "Entrypoint",
+            "value": {
+              "Text": "/app/scripts/startup.sh"
+            }
+          },
+          {
+            "description": "Container entrypoint argv (unset = the image default)",
+            "key": "container_templates.node.config.entrypoint",
+            "label": "Entrypoint",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Container entrypoint argv (unset = the image default)",
+            "key": "container_templates.python.config.entrypoint",
+            "label": "Entrypoint",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Container entrypoint argv (unset = the image default)",
+            "key": "container_templates.rust.config.entrypoint",
+            "label": "Entrypoint",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Environment variable exported inside the container",
+            "key": "container_templates.claude-dev.config.environment.AGENTS_BOX_MODE",
+            "label": "Environment Variable",
+            "value": {
+              "Text": "<redacted>"
+            }
+          },
+          {
+            "description": "Environment variable exported inside the container",
+            "key": "container_templates.claude-dev.config.environment.NODE_ENV",
+            "label": "Environment Variable",
+            "value": {
+              "Text": "<redacted>"
+            }
+          },
+          {
+            "description": "User the container process runs as (unset = the image default)",
+            "key": "container_templates.claude-dev.config.user",
+            "label": "Run As User",
+            "value": {
+              "Text": "claude-user"
+            }
+          },
+          {
+            "description": "User the container process runs as (unset = the image default)",
+            "key": "container_templates.node.config.user",
+            "label": "Run As User",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "User the container process runs as (unset = the image default)",
+            "key": "container_templates.python.config.user",
+            "label": "Run As User",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "User the container process runs as (unset = the image default)",
+            "key": "container_templates.rust.config.user",
+            "label": "Run As User",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Hard memory ceiling in megabytes",
+            "key": "container_templates.claude-dev.config.memory_limit",
+            "label": "Memory Limit (MB)",
+            "value": {
+              "Number": 4096
+            }
+          },
+          {
+            "description": "Hard memory ceiling in megabytes",
+            "key": "container_templates.node.config.memory_limit",
+            "label": "Memory Limit (MB)",
+            "value": {
+              "Number": 2048
+            }
+          },
+          {
+            "description": "Hard memory ceiling in megabytes",
+            "key": "container_templates.python.config.memory_limit",
+            "label": "Memory Limit (MB)",
+            "value": {
+              "Number": 2048
+            }
+          },
+          {
+            "description": "Hard memory ceiling in megabytes",
+            "key": "container_templates.rust.config.memory_limit",
+            "label": "Memory Limit (MB)",
+            "value": {
+              "Number": 2048
+            }
+          },
+          {
+            "description": "CPU shares; 0.5 is half a core",
+            "key": "container_templates.claude-dev.config.cpu_limit",
+            "label": "CPU Limit",
+            "value": {
+              "Text": "2"
+            }
+          },
+          {
+            "description": "CPU shares; 0.5 is half a core",
+            "key": "container_templates.node.config.cpu_limit",
+            "label": "CPU Limit",
+            "value": {
+              "Text": "1"
+            }
+          },
+          {
+            "description": "CPU shares; 0.5 is half a core",
+            "key": "container_templates.python.config.cpu_limit",
+            "label": "CPU Limit",
+            "value": {
+              "Text": "1"
+            }
+          },
+          {
+            "description": "CPU shares; 0.5 is half a core",
+            "key": "container_templates.rust.config.cpu_limit",
+            "label": "CPU Limit",
+            "value": {
+              "Text": "1"
+            }
+          },
+          {
+            "description": "apt packages installed into the image",
+            "key": "container_templates.claude-dev.config.system_packages",
+            "label": "System Packages",
+            "value": {
+              "Text": "git, curl, build-essential, python3, python3-pip"
+            }
+          },
+          {
+            "description": "apt packages installed into the image",
+            "key": "container_templates.node.config.system_packages",
+            "label": "System Packages",
+            "value": {
+              "Text": "git, build-essential"
+            }
+          },
+          {
+            "description": "apt packages installed into the image",
+            "key": "container_templates.python.config.system_packages",
+            "label": "System Packages",
+            "value": {
+              "Text": "git, build-essential"
+            }
+          },
+          {
+            "description": "apt packages installed into the image",
+            "key": "container_templates.rust.config.system_packages",
+            "label": "System Packages",
+            "value": {
+              "Text": "git, pkg-config, libssl-dev"
+            }
+          },
+          {
+            "description": "npm packages installed globally in the image",
+            "key": "container_templates.claude-dev.config.npm_packages",
+            "label": "NPM Packages",
+            "value": {
+              "Text": "@anthropic-ai/claude-code, @google/gemini-cli"
+            }
+          },
+          {
+            "description": "npm packages installed globally in the image",
+            "key": "container_templates.node.config.npm_packages",
+            "label": "NPM Packages",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "npm packages installed globally in the image",
+            "key": "container_templates.python.config.npm_packages",
+            "label": "NPM Packages",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "npm packages installed globally in the image",
+            "key": "container_templates.rust.config.npm_packages",
+            "label": "NPM Packages",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "pip packages installed into the image",
+            "key": "container_templates.claude-dev.config.python_packages",
+            "label": "Python Packages",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "pip packages installed into the image",
+            "key": "container_templates.node.config.python_packages",
+            "label": "Python Packages",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "pip packages installed into the image",
+            "key": "container_templates.python.config.python_packages",
+            "label": "Python Packages",
+            "value": {
+              "Text": "pip, setuptools, wheel"
+            }
+          },
+          {
+            "description": "pip packages installed into the image",
+            "key": "container_templates.rust.config.python_packages",
+            "label": "Python Packages",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Container ports published to the host",
+            "key": "container_templates.claude-dev.config.ports",
+            "label": "Exposed Ports",
+            "value": {
+              "Text": "3000, 5173, 8080"
+            }
+          },
+          {
+            "description": "Container ports published to the host",
+            "key": "container_templates.node.config.ports",
+            "label": "Exposed Ports",
+            "value": {
+              "Text": "3000, 5173"
+            }
+          },
+          {
+            "description": "Container ports published to the host",
+            "key": "container_templates.python.config.ports",
+            "label": "Exposed Ports",
+            "value": {
+              "Text": "8000, 5000"
+            }
+          },
+          {
+            "description": "Container ports published to the host",
+            "key": "container_templates.rust.config.ports",
+            "label": "Exposed Ports",
+            "value": {
+              "Text": "8080, 3000"
+            }
+          },
+          {
+            "description": "Extra host→container mounts; edit with `ainb config edit`",
+            "key": "container_templates.claude-dev.config.volumes",
+            "label": "Volume Mounts",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Extra host→container mounts; edit with `ainb config edit`",
+            "key": "container_templates.node.config.volumes",
+            "label": "Volume Mounts",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Extra host→container mounts; edit with `ainb config edit`",
+            "key": "container_templates.python.config.volumes",
+            "label": "Volume Mounts",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Extra host→container mounts; edit with `ainb config edit`",
+            "key": "container_templates.rust.config.volumes",
+            "label": "Volume Mounts",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Bind ~/.ssh into the container so git over SSH works",
+            "key": "container_templates.claude-dev.config.mount_ssh",
+            "label": "Mount SSH Keys",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Bind ~/.ssh into the container so git over SSH works",
+            "key": "container_templates.node.config.mount_ssh",
+            "label": "Mount SSH Keys",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Bind ~/.ssh into the container so git over SSH works",
+            "key": "container_templates.python.config.mount_ssh",
+            "label": "Mount SSH Keys",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Bind ~/.ssh into the container so git over SSH works",
+            "key": "container_templates.rust.config.mount_ssh",
+            "label": "Mount SSH Keys",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Bind ~/.gitconfig so commits carry your identity",
+            "key": "container_templates.claude-dev.config.mount_git_config",
+            "label": "Mount Git Config",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Bind ~/.gitconfig so commits carry your identity",
+            "key": "container_templates.node.config.mount_git_config",
+            "label": "Mount Git Config",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Bind ~/.gitconfig so commits carry your identity",
+            "key": "container_templates.python.config.mount_git_config",
+            "label": "Mount Git Config",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Bind ~/.gitconfig so commits carry your identity",
+            "key": "container_templates.rust.config.mount_git_config",
+            "label": "Mount Git Config",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Variables that must be present on the host before the template runs",
+            "key": "container_templates.claude-dev.required_env",
+            "label": "Required Env Vars",
+            "value": {
+              "Text": "ANTHROPIC_API_KEY"
+            }
+          },
+          {
+            "description": "Variables that must be present on the host before the template runs",
+            "key": "container_templates.node.required_env",
+            "label": "Required Env Vars",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Variables that must be present on the host before the template runs",
+            "key": "container_templates.python.required_env",
+            "label": "Required Env Vars",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Variables that must be present on the host before the template runs",
+            "key": "container_templates.rust.required_env",
+            "label": "Required Env Vars",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "MCP servers installed into containers built from this template",
+            "key": "container_templates.claude-dev.default_mcp_servers",
+            "label": "Default MCP Servers",
+            "value": {
+              "Text": "serena, context7"
+            }
+          },
+          {
+            "description": "MCP servers installed into containers built from this template",
+            "key": "container_templates.node.default_mcp_servers",
+            "label": "Default MCP Servers",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "MCP servers installed into containers built from this template",
+            "key": "container_templates.python.default_mcp_servers",
+            "label": "Default MCP Servers",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "MCP servers installed into containers built from this template",
+            "key": "container_templates.rust.default_mcp_servers",
+            "label": "Default MCP Servers",
+            "value": {
+              "Text": ""
+            }
+          }
+        ],
+        "Daemons": [
+          {
+            "description": "Milliseconds without a heartbeat before a live-pid daemon reads stale",
+            "key": "daemons.stale_after_ms",
+            "label": "Heartbeat Staleness",
+            "value": {
+              "Number": 90000
+            }
+          },
+          {
+            "description": "Milliseconds without a successful attention poll before the bridge reads broken",
+            "key": "daemons.attention_stale_after_ms",
+            "label": "Bridge Push Staleness",
+            "value": {
+              "Number": 45000
+            }
+          },
+          {
+            "description": "Seconds one session/event pair waits before notifying again (daemon restart)",
+            "key": "notifyd.os_debounce_secs",
+            "label": "OS Notification Debounce",
+            "value": {
+              "Number": 60
+            }
+          },
+          {
+            "description": "Seconds an unanswered permission request waits before auto-DENY (daemon restart)",
+            "key": "notifyd.approval_timeout_secs",
+            "label": "Approval Timeout",
+            "value": {
+              "Number": 600
+            }
+          }
+        ],
+        "Docker": [
+          {
+            "description": "Docker endpoint, e.g. unix:///var/run/docker.sock (unset = autodetect)",
+            "key": "docker.host",
+            "label": "Docker Host",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Seconds to wait on a Docker API call before giving up",
+            "key": "docker.timeout",
+            "label": "Connection Timeout",
+            "value": {
+              "Number": 60
+            }
+          }
+        ],
+        "Editor": [
+          {
+            "description": "Editor command used to open a session's worktree",
+            "key": "ui_preferences.preferred_editor",
+            "label": "Preferred Editor",
+            "value": {
+              "Choice": [
+                [
+                  "",
+                  "vim"
+                ],
+                0
+              ]
+            }
+          }
+        ],
+        "Fleet": [
+          {
+            "description": "Alert when any one session's lifetime spend crosses this",
+            "key": "fleet.cost.session_usd",
+            "label": "Session Budget (USD)",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Alert when any one workspace group's lifetime spend crosses this",
+            "key": "fleet.cost.group_usd",
+            "label": "Group Budget (USD)",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "native: Claude draws its own picker. fleet: hold the call for a remote answer",
+            "key": "fleet.interview.surface",
+            "label": "Interview Surface",
+            "value": {
+              "Choice": [
+                [
+                  "native",
+                  "fleet"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Terminal the macOS Fleet app opens when you jump to a session",
+            "key": "fleet.terminal",
+            "label": "Jump-To Terminal",
+            "value": {
+              "Choice": [
+                [
+                  "warp",
+                  "iterm",
+                  "ghostty",
+                  "terminal"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Minutes of quiet before a session reads IDLE, tmux and hooks alike (restart)",
+            "key": "fleet.idle_min",
+            "label": "Idle Threshold",
+            "value": {
+              "Number": 5
+            }
+          },
+          {
+            "description": "How `ainb fleet send` delivers: tmux first, tmux only, broker (restart)",
+            "key": "fleet.transport",
+            "label": "Send Transport",
+            "value": {
+              "Choice": [
+                [
+                  "tmux",
+                  "tmux-only",
+                  "broker"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Attach cost/hint enrichment to fleet rows; off spends no tokens",
+            "key": "fleet.enrich",
+            "label": "Row Enrichment",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Milliseconds before an ASK/ERR/WAIT/IDLE row falls back to a live scan; 0 = never",
+            "key": "fleet.state_stale_ms",
+            "label": "Sticky State Staleness",
+            "value": {
+              "Number": 0
+            }
+          },
+          {
+            "description": "Milliseconds before a RUNNING/DONE row stops suppressing the live scan",
+            "key": "fleet.healthy_state_stale_ms",
+            "label": "Healthy State Staleness",
+            "value": {
+              "Number": 300000
+            }
+          },
+          {
+            "description": "Seconds of pane silence before tmux discovery calls a session idle (restart)",
+            "key": "fleet.tmux_idle_after_secs",
+            "label": "tmux Idle After",
+            "value": {
+              "Number": 120
+            }
+          },
+          {
+            "description": "Let the bridge message your phone when a session needs attention",
+            "key": "fleet.bridge.outbound_enabled",
+            "label": "Bridge Outbound Push",
+            "value": {
+              "Bool": false
+            }
+          },
+          {
+            "description": "Seconds between attention-inbox polls by the outbound worker",
+            "key": "fleet.bridge.outbound_poll_secs",
+            "label": "Bridge Poll Interval",
+            "value": {
+              "Number": 0
+            }
+          },
+          {
+            "description": "Default seconds a channel waits for a session to answer",
+            "key": "fleet.bridge.response_timeout",
+            "label": "Bridge Response Timeout",
+            "value": {
+              "Number": 0
+            }
+          },
+          {
+            "description": "Literal, $ENV_VAR ref, or keychain:<service> ref",
+            "key": "fleet.bridge.telegram.token",
+            "label": "Telegram Bot Token",
+            "value": {
+              "Secret": {
+                "reference": "",
+                "resolved": false
+              }
+            }
+          },
+          {
+            "description": "The only Telegram account allowed to drive the bridge; a number or a $ENV ref",
+            "key": "fleet.bridge.telegram.user_id",
+            "label": "Telegram User ID",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Session a bare message routes to when none is named",
+            "key": "fleet.bridge.telegram.default_target",
+            "label": "Telegram Default Target",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "In group chats, only act on messages that mention the bot",
+            "key": "fleet.bridge.telegram.require_mention_in_groups",
+            "label": "Telegram Require Mention",
+            "value": {
+              "Bool": false
+            }
+          },
+          {
+            "description": "Seconds this channel waits for an answer, overriding the shared default",
+            "key": "fleet.bridge.telegram.response_timeout",
+            "label": "Telegram Response Timeout",
+            "value": {
+              "Number": 0
+            }
+          },
+          {
+            "description": "xoxb- token. Literal, $ENV_VAR ref, or keychain:<service> ref",
+            "key": "fleet.bridge.slack.bot_token",
+            "label": "Slack Bot Token",
+            "value": {
+              "Secret": {
+                "reference": "",
+                "resolved": false
+              }
+            }
+          },
+          {
+            "description": "xapp- socket-mode token. Literal, $ENV_VAR ref, or keychain:<service> ref",
+            "key": "fleet.bridge.slack.app_token",
+            "label": "Slack App Token",
+            "value": {
+              "Secret": {
+                "reference": "",
+                "resolved": false
+              }
+            }
+          },
+          {
+            "description": "The only Slack account allowed to drive the bridge",
+            "key": "fleet.bridge.slack.user_id",
+            "label": "Slack User ID",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Session a bare message routes to when none is named",
+            "key": "fleet.bridge.slack.default_target",
+            "label": "Slack Default Target",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "mentions: only @-mentions and DMs. all: every message in joined channels",
+            "key": "fleet.bridge.slack.listen_mode",
+            "label": "Slack Listen Mode",
+            "value": {
+              "Choice": [
+                [
+                  "mentions",
+                  "all"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Seconds this channel waits for an answer, overriding the shared default",
+            "key": "fleet.bridge.slack.response_timeout",
+            "label": "Slack Response Timeout",
+            "value": {
+              "Number": 0
+            }
+          },
+          {
+            "description": "Literal, $ENV_VAR ref, or keychain:<service> ref",
+            "key": "fleet.bridge.discord.token",
+            "label": "Discord Bot Token",
+            "value": {
+              "Secret": {
+                "reference": "",
+                "resolved": false
+              }
+            }
+          },
+          {
+            "description": "The only Discord account allowed to drive the bridge",
+            "key": "fleet.bridge.discord.user_id",
+            "label": "Discord User ID",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Session a bare message routes to when none is named",
+            "key": "fleet.bridge.discord.default_target",
+            "label": "Discord Default Target",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Channel the bridge listens on and pushes into",
+            "key": "fleet.bridge.discord.channel_id",
+            "label": "Discord Channel ID",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Seconds this channel waits for an answer, overriding the shared default",
+            "key": "fleet.bridge.discord.response_timeout",
+            "label": "Discord Response Timeout",
+            "value": {
+              "Number": 0
+            }
+          }
+        ],
+        "General": [
+          {
+            "description": "Container template used when a session does not name one",
+            "key": "default_container_template",
+            "label": "Default Container Template",
+            "value": {
+              "Text": "claude-dev"
+            }
+          },
+          {
+            "description": "Colourise fenced code blocks in agent output (NO_COLOR still wins)",
+            "key": "general.syntax_highlight",
+            "label": "Syntax Highlighting",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Write installs to ~/.claude, ~/.codex … not ainb's sandbox (restart to apply)",
+            "key": "general.skill_install_real_homes",
+            "label": "Install Skills To Real Tool Homes",
+            "value": {
+              "Bool": true
+            }
+          }
+        ],
+        "HangarDaemon": [
+          {
+            "description": "Globally enable the auto-standup watcher (opt-in)",
+            "key": "hangar_daemon.autostandup.enabled",
+            "label": "Auto-standup",
+            "value": {
+              "Bool": false
+            }
+          },
+          {
+            "description": "Minutes a session must be idle before a standup fires",
+            "key": "hangar_daemon.autostandup.stagnant_min",
+            "label": "Stagnant Minutes",
+            "value": {
+              "Number": 15
+            }
+          },
+          {
+            "description": "Per-session minutes between successive standups",
+            "key": "hangar_daemon.autostandup.cooldown_min",
+            "label": "Cooldown Minutes",
+            "value": {
+              "Number": 60
+            }
+          },
+          {
+            "description": "Maximum simultaneous in-flight standups",
+            "key": "hangar_daemon.autostandup.max_concurrent",
+            "label": "Max Concurrent",
+            "value": {
+              "Number": 1
+            }
+          },
+          {
+            "description": "Host-wide default provider backend for new cards",
+            "key": "hangar_daemon.card_agent.default",
+            "label": "Default Agent",
+            "value": {
+              "Choice": [
+                [
+                  "claude",
+                  "codex",
+                  "antigravity",
+                  "copilot"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Refuse every new-workspace create on this instance (self-host lockdown)",
+            "key": "hangar_daemon.workspace.creation_disabled",
+            "label": "Lock Workspace Creation",
+            "value": {
+              "Bool": false
+            }
+          }
+        ],
+        "McpPool": [
+          {
+            "description": "Share one MCP server process across host sessions instead of one each",
+            "key": "mcp_pool.enabled",
+            "label": "Shared MCP Pool",
+            "value": {
+              "Bool": true
+            }
+          },
+          {
+            "description": "Seconds a pooled server survives after its last session detaches",
+            "key": "mcp_pool.idle_grace_secs",
+            "label": "Idle Grace",
+            "value": {
+              "Number": 300
+            }
+          },
+          {
+            "description": "Auto-refresh cadence for the pool overlay while open; 0 = manual only",
+            "key": "mcp_pool.monitor_refresh_secs",
+            "label": "Monitor Refresh",
+            "value": {
+              "Number": 2
+            }
+          },
+          {
+            "description": "Seconds the pool daemon lingers with zero clients; 0 = never self-exit",
+            "key": "mcp_pool.daemon_idle_grace_secs",
+            "label": "Daemon Idle Grace",
+            "value": {
+              "Number": 900
+            }
+          }
+        ],
+        "Plugins": [
+          {
+            "description": "Allowlist: when non-empty ONLY these plugins load",
+            "key": "plugins.enabled",
+            "label": "Enabled Plugins",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Denylist: these plugins are skipped (ignored when an allowlist is set)",
+            "key": "plugins.disabled",
+            "label": "Disabled Plugins",
+            "value": {
+              "Text": ""
+            }
+          }
+        ],
+        "Presets": [
+          {
+            "description": "Path to presets.toml, relative to the config dir or absolute",
+            "key": "presets.file",
+            "label": "Presets File",
+            "value": {
+              "Text": "../presets.toml"
+            }
+          }
+        ],
+        "SessionReader": [
+          {
+            "description": "Days of session history re-aggregated on each scan; older files use the cached aggregate",
+            "key": "session_reader.incremental_window_days",
+            "label": "Incremental Window",
+            "value": {
+              "Number": 0
+            }
+          }
+        ],
+        "Skills": [
+          {
+            "description": "Release tag of the curated skills catalog to fetch (default: latest)",
+            "key": "skills.catalog_release",
+            "label": "Catalog Release",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "skills.sh API key. Literal, $ENV_VAR ref, or keychain:<service> ref",
+            "key": "skills.api_key",
+            "label": "Skills API Key",
+            "value": {
+              "Secret": {
+                "reference": "",
+                "resolved": false
+              }
+            }
+          }
+        ],
+        "Usage": [
+          {
+            "description": "Which subscription the burndown gauge measures against",
+            "key": "usage.plan.id",
+            "label": "Subscription Plan",
+            "value": {
+              "Choice": [
+                [
+                  "claude-pro",
+                  "claude-max",
+                  "claude-max5x",
+                  "cursor-pro",
+                  "custom",
+                  "none"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Monthly plan price in USD; the denominator of the burndown gauge",
+            "key": "usage.plan.monthly_usd",
+            "label": "Plan Monthly Cost",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Which provider's spend counts against this plan",
+            "key": "usage.plan.provider",
+            "label": "Plan Provider",
+            "value": {
+              "Choice": [
+                [
+                  "all",
+                  "claude",
+                  "codex",
+                  "cursor",
+                  "antigravity"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Day of month the plan's usage window restarts",
+            "key": "usage.plan.reset_day",
+            "label": "Billing Reset Day",
+            "value": {
+              "Number": 0
+            }
+          },
+          {
+            "description": "ISO code costs are displayed in, e.g. GBP",
+            "key": "usage.currency.code",
+            "label": "Currency Code",
+            "value": {
+              "Text": "USD"
+            }
+          },
+          {
+            "description": "Symbol prefixed to displayed costs",
+            "key": "usage.currency.symbol",
+            "label": "Currency Symbol",
+            "value": {
+              "Text": "$"
+            }
+          },
+          {
+            "description": "Multiplier applied to USD costs before display",
+            "key": "usage.currency.usd_rate",
+            "label": "USD Exchange Rate",
+            "value": {
+              "Text": "1"
+            }
+          },
+          {
+            "description": "Port the ainb-managed Headroom compression proxy listens on (restart)",
+            "key": "usage_client.headroom_port",
+            "label": "Headroom Proxy Port",
+            "value": {
+              "Number": 8787
+            }
+          },
+          {
+            "description": "Seconds `ainb usage` waits for data; raise it against a huge session archive",
+            "key": "usage_client.fetch_timeout_secs",
+            "label": "Usage Fetch Timeout",
+            "value": {
+              "Number": 120
+            }
+          },
+          {
+            "description": "Seconds between Codex statusline usage refreshes",
+            "key": "usage_client.codex_ttl_secs",
+            "label": "Codex Statusline TTL",
+            "value": {
+              "Number": 60
+            }
+          },
+          {
+            "description": "Path to the usage cache database; blank derives it under the state dir (restart)",
+            "key": "usage_client.cache_db",
+            "label": "Usage Cache DB",
+            "value": {
+              "Text": ""
+            }
+          }
+        ],
+        "Web": [
+          {
+            "description": "host:port `ainb web` binds by default; --listen still overrides",
+            "key": "web.listen",
+            "label": "Listen Address",
+            "value": {
+              "Text": "127.0.0.1:8420"
+            }
+          },
+          {
+            "description": "Serve viewer-only: the live terminal and POST /api/answer are refused",
+            "key": "web.read_only",
+            "label": "Read-Only",
+            "value": {
+              "Bool": false
+            }
+          },
+          {
+            "description": "DANGEROUS: serves an unauthenticated control surface to the network. Only with read-only; prefer a token",
+            "key": "web.insecure_bind",
+            "label": "Allow Insecure Bind",
+            "value": {
+              "Bool": false
+            }
+          }
+        ],
+        "Workspace": [
+          {
+            "description": "Prefix applied to branches created for new sessions",
+            "key": "workspace_defaults.branch_prefix",
+            "label": "Branch Prefix",
+            "value": {
+              "Text": "agents/"
+            }
+          },
+          {
+            "description": "Substrings that exclude a directory from repository scanning",
+            "key": "workspace_defaults.exclude_paths",
+            "label": "Exclude Paths",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Extra directories scanned for git repositories, on top of the defaults",
+            "key": "workspace_defaults.workspace_scan_paths",
+            "label": "Scan Paths",
+            "value": {
+              "Text": ""
+            }
+          },
+          {
+            "description": "Cap on repositories listed in workspace search results",
+            "key": "workspace_defaults.max_repositories",
+            "label": "Max Repositories",
+            "value": {
+              "Number": 500
+            }
+          },
+          {
+            "description": "When a worktree path already exists: rename automatically, or fail",
+            "key": "workspace_defaults.worktree_collision_behavior",
+            "label": "Worktree Collision",
+            "value": {
+              "Choice": [
+                [
+                  "auto_rename",
+                  "error"
+                ],
+                0
+              ]
+            }
+          },
+          {
+            "description": "Directory levels below each scan path the repo scanner descends",
+            "key": "workspace_defaults.scan_max_depth",
+            "label": "Scan Depth",
+            "value": {
+              "Number": 3
+            }
+          },
+          {
+            "description": "Seconds a cached repository scan stays fresh before walking disk again",
+            "key": "workspace_defaults.scan_cache_ttl_secs",
+            "label": "Scan Cache TTL",
+            "value": {
+              "Number": 3600
+            }
+          }
+        ]
+      },
+      "tree": [
+        {
+          "category": "Authentication",
+          "depth": 0,
+          "has_children": false,
+          "label": "Authentication",
+          "path": "authentication",
+          "rows": [
+            0,
+            1
+          ]
+        },
+        {
+          "category": "Workspace",
+          "depth": 0,
+          "has_children": false,
+          "label": "Workspace",
+          "path": "workspace_defaults",
+          "rows": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ]
+        },
+        {
+          "category": "Docker",
+          "depth": 0,
+          "has_children": false,
+          "label": "Docker",
+          "path": "docker",
+          "rows": [
+            0,
+            1
+          ]
+        },
+        {
+          "category": "AgentDefaults",
+          "depth": 0,
+          "has_children": false,
+          "label": "Agent Defaults",
+          "path": "authentication",
+          "rows": [
+            0,
+            1
+          ]
+        },
+        {
+          "category": "Editor",
+          "depth": 0,
+          "has_children": false,
+          "label": "Editor",
+          "path": "ui_preferences",
+          "rows": [
+            0
+          ]
+        },
+        {
+          "category": "Plugins",
+          "depth": 0,
+          "has_children": false,
+          "label": "Plugins",
+          "path": "plugins",
+          "rows": [
+            0,
+            1
+          ]
+        },
+        {
+          "category": "McpPool",
+          "depth": 0,
+          "has_children": false,
+          "label": "MCP Pool",
+          "path": "mcp_pool",
+          "rows": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "category": "Appearance",
+          "depth": 0,
+          "has_children": true,
+          "label": "Appearance",
+          "path": "",
+          "rows": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13
+          ]
+        },
+        {
+          "category": "Appearance",
+          "depth": 1,
+          "has_children": false,
+          "label": "Ui Preferences",
+          "path": "ui_preferences",
+          "rows": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "category": "Appearance",
+          "depth": 1,
+          "has_children": false,
+          "label": "Ui",
+          "path": "ui",
+          "rows": [
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13
+          ]
+        },
+        {
+          "category": "General",
+          "depth": 0,
+          "has_children": true,
+          "label": "General",
+          "path": "",
+          "rows": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "category": "General",
+          "depth": 1,
+          "has_children": false,
+          "label": "General",
+          "path": "general",
+          "rows": [
+            1,
+            2
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 0,
+          "has_children": true,
+          "label": "Container Templates",
+          "path": "container_templates",
+          "rows": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32,
+            33,
+            34,
+            35,
+            36,
+            37,
+            38,
+            39,
+            40,
+            41,
+            42,
+            43,
+            44,
+            45,
+            46,
+            47,
+            48,
+            49,
+            50,
+            51,
+            52,
+            53,
+            54,
+            55,
+            56,
+            57,
+            58,
+            59,
+            60,
+            61,
+            62,
+            63,
+            64,
+            65,
+            66,
+            67,
+            68,
+            69,
+            70,
+            71,
+            72,
+            73,
+            74,
+            75,
+            76,
+            77,
+            78,
+            79,
+            80,
+            81,
+            82,
+            83,
+            84,
+            85
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 1,
+          "has_children": true,
+          "label": "Claude-dev",
+          "path": "container_templates.claude-dev",
+          "rows": [
+            0,
+            4,
+            8,
+            12,
+            16,
+            20,
+            24,
+            28,
+            32,
+            36,
+            37,
+            38,
+            42,
+            46,
+            50,
+            54,
+            58,
+            62,
+            66,
+            70,
+            74,
+            78,
+            82
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 2,
+          "has_children": true,
+          "label": "Config",
+          "path": "container_templates.claude-dev.config",
+          "rows": [
+            8,
+            12,
+            16,
+            20,
+            24,
+            28,
+            32,
+            36,
+            37,
+            38,
+            42,
+            46,
+            50,
+            54,
+            58,
+            62,
+            66,
+            70,
+            74
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 3,
+          "has_children": false,
+          "label": "Image Source",
+          "path": "container_templates.claude-dev.config.image_source",
+          "rows": [
+            8,
+            12,
+            16,
+            20
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 3,
+          "has_children": false,
+          "label": "Environment",
+          "path": "container_templates.claude-dev.config.environment",
+          "rows": [
+            36,
+            37
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 1,
+          "has_children": true,
+          "label": "Node",
+          "path": "container_templates.node",
+          "rows": [
+            1,
+            5,
+            9,
+            13,
+            17,
+            21,
+            25,
+            29,
+            33,
+            39,
+            43,
+            47,
+            51,
+            55,
+            59,
+            63,
+            67,
+            71,
+            75,
+            79,
+            83
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 2,
+          "has_children": true,
+          "label": "Config",
+          "path": "container_templates.node.config",
+          "rows": [
+            9,
+            13,
+            17,
+            21,
+            25,
+            29,
+            33,
+            39,
+            43,
+            47,
+            51,
+            55,
+            59,
+            63,
+            67,
+            71,
+            75
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 3,
+          "has_children": false,
+          "label": "Image Source",
+          "path": "container_templates.node.config.image_source",
+          "rows": [
+            9,
+            13,
+            17,
+            21
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 1,
+          "has_children": true,
+          "label": "Python",
+          "path": "container_templates.python",
+          "rows": [
+            2,
+            6,
+            10,
+            14,
+            18,
+            22,
+            26,
+            30,
+            34,
+            40,
+            44,
+            48,
+            52,
+            56,
+            60,
+            64,
+            68,
+            72,
+            76,
+            80,
+            84
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 2,
+          "has_children": true,
+          "label": "Config",
+          "path": "container_templates.python.config",
+          "rows": [
+            10,
+            14,
+            18,
+            22,
+            26,
+            30,
+            34,
+            40,
+            44,
+            48,
+            52,
+            56,
+            60,
+            64,
+            68,
+            72,
+            76
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 3,
+          "has_children": false,
+          "label": "Image Source",
+          "path": "container_templates.python.config.image_source",
+          "rows": [
+            10,
+            14,
+            18,
+            22
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 1,
+          "has_children": true,
+          "label": "Rust",
+          "path": "container_templates.rust",
+          "rows": [
+            3,
+            7,
+            11,
+            15,
+            19,
+            23,
+            27,
+            31,
+            35,
+            41,
+            45,
+            49,
+            53,
+            57,
+            61,
+            65,
+            69,
+            73,
+            77,
+            81,
+            85
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 2,
+          "has_children": true,
+          "label": "Config",
+          "path": "container_templates.rust.config",
+          "rows": [
+            11,
+            15,
+            19,
+            23,
+            27,
+            31,
+            35,
+            41,
+            45,
+            49,
+            53,
+            57,
+            61,
+            65,
+            69,
+            73,
+            77
+          ]
+        },
+        {
+          "category": "ContainerTemplates",
+          "depth": 3,
+          "has_children": false,
+          "label": "Image Source",
+          "path": "container_templates.rust.config.image_source",
+          "rows": [
+            11,
+            15,
+            19,
+            23
+          ]
+        },
+        {
+          "category": "Fleet",
+          "depth": 0,
+          "has_children": true,
+          "label": "Fleet",
+          "path": "fleet",
+          "rows": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28
+          ]
+        },
+        {
+          "category": "Fleet",
+          "depth": 1,
+          "has_children": false,
+          "label": "Cost",
+          "path": "fleet.cost",
+          "rows": [
+            0,
+            1
+          ]
+        },
+        {
+          "category": "Fleet",
+          "depth": 1,
+          "has_children": false,
+          "label": "Interview",
+          "path": "fleet.interview",
+          "rows": [
+            2
+          ]
+        },
+        {
+          "category": "Fleet",
+          "depth": 1,
+          "has_children": true,
+          "label": "Bridge",
+          "path": "fleet.bridge",
+          "rows": [
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28
+          ]
+        },
+        {
+          "category": "Fleet",
+          "depth": 2,
+          "has_children": false,
+          "label": "Telegram",
+          "path": "fleet.bridge.telegram",
+          "rows": [
+            13,
+            14,
+            15,
+            16,
+            17
+          ]
+        },
+        {
+          "category": "Fleet",
+          "depth": 2,
+          "has_children": false,
+          "label": "Slack",
+          "path": "fleet.bridge.slack",
+          "rows": [
+            18,
+            19,
+            20,
+            21,
+            22,
+            23
+          ]
+        },
+        {
+          "category": "Fleet",
+          "depth": 2,
+          "has_children": false,
+          "label": "Discord",
+          "path": "fleet.bridge.discord",
+          "rows": [
+            24,
+            25,
+            26,
+            27,
+            28
+          ]
+        },
+        {
+          "category": "Usage",
+          "depth": 0,
+          "has_children": true,
+          "label": "Usage",
+          "path": "",
+          "rows": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10
+          ]
+        },
+        {
+          "category": "Usage",
+          "depth": 1,
+          "has_children": true,
+          "label": "Usage",
+          "path": "usage",
+          "rows": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ]
+        },
+        {
+          "category": "Usage",
+          "depth": 2,
+          "has_children": false,
+          "label": "Plan",
+          "path": "usage.plan",
+          "rows": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "category": "Usage",
+          "depth": 2,
+          "has_children": false,
+          "label": "Currency",
+          "path": "usage.currency",
+          "rows": [
+            4,
+            5,
+            6
+          ]
+        },
+        {
+          "category": "Usage",
+          "depth": 1,
+          "has_children": false,
+          "label": "Usage Client",
+          "path": "usage_client",
+          "rows": [
+            7,
+            8,
+            9,
+            10
+          ]
+        },
+        {
+          "category": "Skills",
+          "depth": 0,
+          "has_children": false,
+          "label": "Skills",
+          "path": "skills",
+          "rows": [
+            0,
+            1
+          ]
+        },
+        {
+          "category": "SessionReader",
+          "depth": 0,
+          "has_children": false,
+          "label": "Session Reader",
+          "path": "session_reader",
+          "rows": [
+            0
+          ]
+        },
+        {
+          "category": "Presets",
+          "depth": 0,
+          "has_children": false,
+          "label": "Presets",
+          "path": "presets",
+          "rows": [
+            0
+          ]
+        },
+        {
+          "category": "Daemons",
+          "depth": 0,
+          "has_children": true,
+          "label": "Daemons",
+          "path": "",
+          "rows": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "category": "Daemons",
+          "depth": 1,
+          "has_children": false,
+          "label": "Daemons",
+          "path": "daemons",
+          "rows": [
+            0,
+            1
+          ]
+        },
+        {
+          "category": "Daemons",
+          "depth": 1,
+          "has_children": false,
+          "label": "Notifyd",
+          "path": "notifyd",
+          "rows": [
+            2,
+            3
+          ]
+        },
+        {
+          "category": "Web",
+          "depth": 0,
+          "has_children": false,
+          "label": "Web Dashboard",
+          "path": "web",
+          "rows": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "category": "Acp",
+          "depth": 0,
+          "has_children": true,
+          "label": "ACP Adapters",
+          "path": "acp.adapters",
+          "rows": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "category": "Acp",
+          "depth": 1,
+          "has_children": false,
+          "label": "Claude-agent-acp",
+          "path": "acp.adapters.claude-agent-acp",
+          "rows": [
+            0,
+            2
+          ]
+        },
+        {
+          "category": "Acp",
+          "depth": 1,
+          "has_children": false,
+          "label": "Codex-acp",
+          "path": "acp.adapters.codex-acp",
+          "rows": [
+            1,
+            3
+          ]
+        },
+        {
+          "category": "HangarDaemon",
+          "depth": 0,
+          "has_children": true,
+          "label": "Hangar Daemon",
+          "path": "hangar_daemon",
+          "rows": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        },
+        {
+          "category": "HangarDaemon",
+          "depth": 1,
+          "has_children": false,
+          "label": "Autostandup",
+          "path": "hangar_daemon.autostandup",
+          "rows": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "category": "HangarDaemon",
+          "depth": 1,
+          "has_children": false,
+          "label": "Card Agent",
+          "path": "hangar_daemon.card_agent",
+          "rows": [
+            4
+          ]
+        },
+        {
+          "category": "HangarDaemon",
+          "depth": 1,
+          "has_children": false,
+          "label": "Workspace",
+          "path": "hangar_daemon.workspace",
+          "rows": [
+            5
+          ]
+        }
+      ],
+      "visible_nodes": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        10,
+        12,
+        26,
+        33,
+        38,
+        39,
+        40,
+        41,
+        44,
+        45,
+        48
+      ],
+      "visible_rows": [
+        [
+          "Authentication",
+          0
+        ],
+        [
+          "Authentication",
+          1
+        ]
+      ]
+    },
+    "statusline_status": null
+  },
+  "skills": {
+    "skill_manager_state": {
+      "banner": "Hidden",
+      "browse": null,
+      "detail": null,
+      "focused_pane": "Units",
+      "input": null,
+      "library": null,
+      "pending_remove_confirm": null,
+      "preview": null,
+      "preview_loading": null,
+      "search_len": null,
+      "selected": 0,
+      "source_filter_len": null,
+      "source_remove_confirm": null,
+      "source_selected": 0,
+      "sources": [],
+      "sync_confirm": null,
+      "units": []
+    },
+    "skills_state": {
+      "active_tab": "Skills",
+      "data": null,
+      "loading": false,
+      "provider": "Claude",
+      "search_active": false,
+      "search_query_len": 0,
+      "selected_index": 0
+    }
+  },
+  "recovery": {
+    "session_recovery_state": {
+      "action_result": null,
+      "last_error": null,
+      "loading": false,
+      "orphaned_sessions": [],
+      "orphaned_worktrees": [],
+      "recovery_overlay": null,
+      "search_active": false,
+      "search_query_len": 0,
+      "selected_index": 0,
+      "selected_items": [],
+      "view_mode": "Sessions"
+    }
+  },
+  "onboarding": {
+    "auth_provider_popup_state": {
+      "api_key_len": 0,
+      "is_entering_key": false,
+      "providers": [
+        {
+          "available": true,
+          "description": "Uses 'claude auth' - for Anthropic Pro/Max subscribers",
+          "icon": "",
+          "id": "system",
+          "is_current": true,
+          "name": "System Auth (Pro/Max Plan)"
+        },
+        {
+          "available": true,
+          "description": "Set ANTHROPIC_API_KEY environment variable for pay-per-use",
+          "icon": "",
+          "id": "api_key",
+          "is_current": false,
+          "name": "API Key (Pay-as-you-go)"
+        },
+        {
+          "available": false,
+          "description": "Use Claude via AWS Bedrock service",
+          "icon": "",
+          "id": "bedrock",
+          "is_current": false,
+          "name": "Amazon Bedrock"
+        },
+        {
+          "available": false,
+          "description": "Use Claude via Google Cloud Vertex AI",
+          "icon": "",
+          "id": "vertex",
+          "is_current": false,
+          "name": "Google Vertex AI"
+        },
+        {
+          "available": false,
+          "description": "Use Claude via Azure AI services",
+          "icon": "",
+          "id": "azure",
+          "is_current": false,
+          "name": "Microsoft Azure Foundry"
+        },
+        {
+          "available": false,
+          "description": "Use GLM models via ZAI platform",
+          "icon": "",
+          "id": "glm",
+          "is_current": false,
+          "name": "GLM on ZAI"
+        },
+        {
+          "available": false,
+          "description": "Use custom LLM gateway endpoint",
+          "icon": "",
+          "id": "gateway",
+          "is_current": false,
+          "name": "LLM Gateway"
+        }
+      ],
+      "selected_index": 0,
+      "show_popup": false
+    },
+    "auth_setup_state": null,
+    "onboarding_state": null,
+    "setup_menu_state": {
+      "pending_action": null,
+      "selected_index": 0,
+      "showing_confirmation": false
+    }
+  },
+  "shell": {
+    "async_operation_cancelled": false,
+    "confirmation_dialog": null,
+    "current_screen": "home",
+    "focused_pane": "Sessions",
+    "help_visible": false,
+    "home_screen_state": {
+      "selected_tile": 0,
+      "tiles": [
+        "SkillManager",
+        "Config",
+        "Sessions",
+        "Recovery",
+        "Mcp",
+        "Stats",
+        "Help"
+      ]
+    },
+    "home_screen_v2_state": {
+      "focus": "Sidebar",
+      "mascot": {
+        "blink_interval": {
+          "nanos": 0,
+          "secs": 4
+        },
+        "current_frame": "Neutral",
+        "frame_duration": {
+          "nanos": 100000000,
+          "secs": 0
+        },
+        "is_mini": false
+      },
+      "sidebar": {
+        "active_sessions_count": 0,
+        "is_focused": true,
+        "selected_index": 0,
+        "show_labels": true
+      },
+      "welcome": {
+        "content": "# Agents in a Box\n\nYou're on the **Sessions** screen. Start an agent session, or open Setup.\n\n---\n\n## Start here\n\n- `n`         **New session** — pick a repo and launch an agent\n- `s`         **Sessions** — go to your running sessions\n- `Enter`     Open / attach the selected session\n- `1`–`9`     Jump straight to a session by number\n- `?`         Help — every key for this screen\n- `q`         Quit\n\nTo attach: `a` full-screen, `→` in a split pane, or `Enter`.\n\nEach session runs in its own git worktree + tmux + agent, fully isolated.\n\n---\n\n💡 `Esc` in the setup wizard returns here. Press `?` for the full keymap.\n",
+        "content_height": 0,
+        "is_focused": false,
+        "scroll_offset": 0,
+        "visible_height": 0
+      }
+    },
+    "last_panel_close_version": null,
+    "notifications": [],
+    "previous_screen": null,
+    "session_tab": "Preview",
+    "should_quit": false,
+    "ui_needs_refresh": false
+  },
+  "agent_status": {
+    "absent": null,
+    "head_revision": 0,
+    "view": null
+  }
+}
