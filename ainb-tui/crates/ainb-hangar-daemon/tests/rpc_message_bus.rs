@@ -816,6 +816,114 @@ async fn subscribe_after_id_resumes_from_that_row() {
     assert_eq!(ids, vec!["old-1", "old-2", "new-1"]);
 }
 
+/// A credential in a stored chat body never leaves the daemon (#1211).
+///
+/// An agent reply's body is the turn's final message, raw agent prose, so it
+/// carries whatever the agent echoed. `message_wire` is the one projection
+/// the read and the push both take, and the scrub happens there: every
+/// `fleet/message_list` cut (scope tail, whole log, thread) and both
+/// `fleet/message_event` pushes (replayed and live) carry the scrubbed body.
+/// The row keeps what was written, which the re-prime corpus reads back into
+/// the agent.
+#[tokio::test]
+async fn a_token_in_a_stored_body_never_reaches_a_message_reply() {
+    use ainb_hangar_core::redact::{REDACTED, find_secret};
+
+    // Assembled at runtime so no literal here matches a secret scanner.
+    let github = format!("ghp_{}", "C".repeat(36));
+    let anthropic = format!("sk-ant-api03-{}", "A".repeat(40));
+    let pem = format!(
+        "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+        "M".repeat(64)
+    );
+    let body =
+        format!("Set GH_TOKEN={github} and ANTHROPIC_API_KEY={anthropic}.\nThe key:\n{pem}\nDone.");
+    let expected = format!(
+        "Set GH_TOKEN={REDACTED} and ANTHROPIC_API_KEY={REDACTED}.\nThe key:\n{REDACTED}\nDone."
+    );
+    let reply = |id: &str| NewFleetMessage {
+        origin_message_id: Some("prompt".to_string()),
+        sender: "acp:mine".to_string(),
+        kind: "agent".to_string(),
+        body: body.clone(),
+        ..message(id)
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, sink) = start_server(dir.path()).await;
+    FleetMessageRepo::insert_message(store.pool(), &message("prompt"))
+        .await
+        .unwrap();
+    FleetMessageRepo::insert_message(store.pool(), &reply("secret")).await.unwrap();
+
+    // The ledger keeps what was written; the scrub belongs to the wire.
+    let stored = FleetMessageRepo::list_all(store.pool(), 0, 10).await.unwrap();
+    assert_eq!(stored[1].body, body, "the stored row is raw");
+    assert!(stored[1].body.contains(&github));
+
+    let assert_clean = |surface: &str, message: &serde_json::Value| {
+        let wire = message.to_string();
+        assert_eq!(
+            find_secret(&wire),
+            None,
+            "{surface}: a credential left: {wire}"
+        );
+        for secret in [github.as_str(), anthropic.as_str(), "MMMMMMMMMMMMMMMM"] {
+            assert!(!wire.contains(secret), "{surface}: {secret} leaked: {wire}");
+        }
+        assert_eq!(
+            message["body"], expected,
+            "{surface}: the prose around a token survives"
+        );
+        assert_eq!(
+            message["sender"], "acp:mine",
+            "{surface}: identity is untouched"
+        );
+    };
+
+    let mut client = Client::authed(dir.path(), &socket).await;
+    for (surface, params) in [
+        (
+            "scope tail",
+            serde_json::json!({ "scope_key": "session:seeded", "limit": 10 }),
+        ),
+        ("whole log", serde_json::json!({ "limit": 10 })),
+        (
+            "thread",
+            serde_json::json!({ "origin_id": "prompt", "limit": 10 }),
+        ),
+    ] {
+        let listed = client.call(methods::FLEET_MESSAGE_LIST, params).await;
+        let messages = listed["result"]["messages"].as_array().unwrap();
+        let secret = messages
+            .iter()
+            .find(|message| message["id"] == "secret")
+            .unwrap_or_else(|| panic!("{surface}: the reply is listed: {listed}"));
+        assert_clean(surface, secret);
+    }
+
+    client
+        .call(
+            methods::FLEET_MESSAGE_SUBSCRIBE,
+            serde_json::json!({ "after_id": "prompt" }),
+        )
+        .await;
+    let row = FleetMessageRepo::insert_message(store.pool(), &reply("live")).await.unwrap();
+    sink.emit_message_seq(row.seq);
+    let events = client
+        .drain_notifications("fleet/message_event", Duration::from_millis(800))
+        .await;
+    let ids: Vec<&str> =
+        events.iter().map(|params| params["message"]["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        ids,
+        ["secret", "live"],
+        "the replayed row, then the live one"
+    );
+    assert_clean("replayed push", &events[0]["message"]);
+    assert_clean("live push", &events[1]["message"]);
+}
+
 /// An `after_id` that resolves to no row is `invalid_params` on BOTH readers,
 /// never silently treated as start-of-log.
 #[tokio::test]
