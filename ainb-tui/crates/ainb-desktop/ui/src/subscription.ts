@@ -8,6 +8,7 @@ import type {
   ConfigView_Serialize,
   FleetView_Serialize,
   HangarView_Serialize,
+  GitViewView_Serialize,
   HostId,
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
@@ -27,6 +28,7 @@ export const SUBSCRIBED: SectionName[] = [
   "config",
   "agent_status",
   "hangar",
+  "git_view",
 ];
 
 /**
@@ -68,4 +70,15 @@ export function shellHangar(store: FrameStore, host: HostId | undefined): Hangar
  */
 export function configRevision(store: FrameStore, host: HostId | undefined): number {
   return host === undefined ? 0 : (store.state.hosts[host]?.sections.config?.version ?? 0);
+}
+
+/**
+ * The review tab's files, hunks and rows: the host's GitView section.
+ *
+ * Bounded before it is sent (`ainb-app/src/wire/git_view.rs`), so what arrives
+ * is a window on the diff with counters saying what it left out, never the
+ * whole of a large one.
+ */
+export function shellGitView(store: FrameStore, host: HostId | undefined): GitViewView_Serialize | undefined {
+  return host === undefined ? undefined : store.section(host, "git_view");
 }

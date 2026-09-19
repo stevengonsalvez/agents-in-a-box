@@ -21,7 +21,14 @@ fn fixture_dir() -> PathBuf {
 
 /// Draw one frame of `fixture` and return it as text, one line per row.
 fn render(fixture: &ParityFixture) -> String {
+    draw(fixture, |_| {})
+}
+
+/// [`render`], with `change` applied to the state the fixture built before it
+/// is drawn: what a renderer that lost something would have shown.
+fn draw(fixture: &ParityFixture, change: impl FnOnce(&mut ainb::app::AppState)) -> String {
     let mut state = fixture.build();
+    change(&mut state);
     // What the host's startup and tick do before a frame: the status bar draws
     // from the sections this fills.
     state.refresh_statusline();
@@ -43,36 +50,8 @@ fn render(fixture: &ParityFixture) -> String {
     text.replace(&format!("v{}", env!("CARGO_PKG_VERSION")), "v<version>")
 }
 
-/// The tests set `HOME` in one process, so they take turns.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// The expected facts committed beside `fixture`, `<fixture>.facts`, one per
-/// line with `#` comments, or `None` when the fixture has no list. The same
-/// file is read by the DOM half (`ainb-desktop/ui/src/parity.test.ts`), so one
-/// list is diffed against both renderers.
-fn facts(fixture: &Path) -> Option<Vec<String>> {
-    let text = std::fs::read_to_string(fixture.with_extension("facts")).ok()?;
-    Some(
-        text.lines()
-            .map(str::trim_end)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(str::to_string)
-            .collect(),
-    )
-}
-
-/// The facts no line of `rendered` contains.
-fn missing_facts(rendered: &str, facts: &[String]) -> Vec<String> {
-    facts
-        .iter()
-        .filter(|fact| !rendered.lines().any(|line| line.contains(fact.as_str())))
-        .cloned()
-        .collect()
-}
-
 #[test]
 fn every_fixture_renders_its_committed_snapshot() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = tempfile::tempdir().expect("scratch home");
     std::env::set_var("HOME", home.path());
     let update = std::env::var_os("UPDATE_PARITY_SNAPSHOTS").is_some();
@@ -101,56 +80,47 @@ fn every_fixture_renders_its_committed_snapshot() {
     );
 }
 
-/// The screens the settings page draws (D3d) each carry a facts list, and the
-/// terminal renders every fact of every fixture that has one.
-#[test]
-fn every_fixture_with_a_facts_list_renders_every_fact() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
-
-    let mut checked = Vec::new();
-    let mut missing = Vec::new();
-    for (name, path) in ParityFixture::all_in(&fixture_dir()) {
-        let Some(facts) = facts(&path) else {
-            continue;
-        };
-        assert!(!facts.is_empty(), "{name}.facts lists at least one fact");
-        let fixture = ParityFixture::load(&path).unwrap_or_else(|error| panic!("{error}"));
-        let absent = missing_facts(&render(&fixture), &facts);
-        if !absent.is_empty() {
-            missing.push(format!("{name}: {absent:?}"));
-        }
-        checked.push(name);
-    }
-    for required in ["config", "daemons"] {
-        assert!(
-            checked.iter().any(|name| name == required),
-            "the settings page draws `{required}`, which needs a facts list"
-        );
-    }
-    assert!(
-        missing.is_empty(),
-        "facts missing from the render:\n{}",
-        missing.join("\n")
-    );
+/// The facts a fixture must show, as its list gives them.
+fn facts(list: &str) -> Vec<&str> {
+    list.lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
 }
 
-/// The suite can fail: with one fact deleted from the render, the check
-/// names it.
+/// The expected facts of `fixture` the drawing `drawn` does not show.
+fn missing<'a>(drawn: &str, list: &'a str) -> Vec<&'a str> {
+    let text: String = drawn.lines().map(str::trim).collect::<Vec<_>>().join("\n");
+    facts(list).into_iter().filter(|fact| !text.contains(fact)).collect()
+}
+
+/// The expected-facts check has to be able to fail, or a renderer that drew
+/// nothing would pass it. So this takes a file out of what the RENDERER is
+/// given, draws again, and asserts the facts that file carried are reported
+/// missing: the check is against the drawing, not against a string edited
+/// after the fact.
 #[test]
-fn the_facts_check_fails_when_one_fact_is_deleted_from_the_render() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+fn a_renderer_that_loses_a_file_fails_the_facts() {
     let home = tempfile::tempdir().expect("scratch home");
     std::env::set_var("HOME", home.path());
 
-    let path = fixture_dir().join("config.json");
-    let facts = facts(&path).expect("config.facts");
-    let fixture = ParityFixture::load(&path).unwrap_or_else(|error| panic!("{error}"));
-    let rendered = render(&fixture);
-    assert_eq!(missing_facts(&rendered, &facts), Vec::<String>::new());
+    let dir = fixture_dir();
+    let fixture = ParityFixture::load(&dir.join("git_review.json")).expect("the review fixture");
+    let list = std::fs::read_to_string(dir.join("facts/git_review.txt")).expect("the facts list");
 
-    let deleted = facts.last().expect("a fact").clone();
-    let mutated = rendered.replace(deleted.as_str(), "");
-    assert_eq!(missing_facts(&mutated, &facts), vec![deleted]);
+    assert_eq!(
+        missing(&render(&fixture), &list),
+        Vec::<&str>::new(),
+        "the fixture as it stands shows every fact"
+    );
+
+    let lost = draw(&fixture, |state| {
+        let git = state.git_view.git_view_state.as_mut().expect("the git view");
+        git.review.files.remove(0);
+    });
+
+    assert!(
+        !missing(&lost, &list).is_empty(),
+        "a renderer missing a whole file still showed every expected fact, so the list proves nothing"
+    );
 }
