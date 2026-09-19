@@ -41,6 +41,11 @@ wdio = ["bundled", "dep:tauri-plugin-wdio-webdriver"]
 # `bindings`, which renders `Desktop.ts`. Off in every normal build; the CI
 # desktop workflow builds with it and diffs the output.
 typescript-bindings = ["dep:specta", "dep:specta-serde", "dep:specta-typescript"]
+# The updater's test seams (`Updater::with_key`, the `Verify::Key` arm). On
+# only through this crate's own dev-dependency below, so `cargo test` has
+# them and no bundle or `cargo build` does; a release build that carries the
+# feature is refused by the guard at the bottom of `updater.rs`.
+test-seams = []
 
 [dependencies]
 ainb-app = { path = "../ainb-app" }
@@ -73,6 +78,8 @@ specta-typescript = { version = "=0.0.12", optional = true }
 tauri-build = { version = "~2.6.3", optional = true }
 
 [dev-dependencies]
+# This crate, with its own test seams on, for its integration tests only.
+ainb-desktop = { path = ".", features = ["test-seams"] }
 # The shared agent status reader's fake daemon (#1188).
 ainb-app = { path = "../ainb-app", features = ["test-support"] }
 # The updater tests sign a manifest with a throwaway key.
