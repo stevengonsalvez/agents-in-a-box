@@ -338,3 +338,266 @@ fn an_acp_row_of_many_lines_admits_what_the_gate_dropped() {
         "the shared gate's own marker closes the run"
     );
 }
+
+/// A GitHub token, built at run time so no scanner mistakes the fixture for a
+/// leak. Its body is one repeated letter, so any piece of it shows as a run.
+fn token() -> String {
+    format!("ghp_{}", "Q".repeat(40))
+}
+
+/// No piece of [`token`] survives in `body`: not its prefix, not a run of its
+/// body. A cut that ran before the scrub leaves the prefix plus a few body
+/// characters, which is exactly the fragment no credential shape matches.
+fn assert_no_token_piece(body: &str, what: &str) {
+    assert!(
+        !body.contains("ghp_"),
+        "{what}: the token's prefix survived: {body}"
+    );
+    assert!(
+        !body.contains("QQQQ"),
+        "{what}: the token's body survived: {body}"
+    );
+}
+
+/// #1187: every cut the classifier makes runs after the scrub. Each fixture
+/// starts the token a few characters before its cut, where a cut-then-scrub
+/// leaves `ghp_` plus a handful of characters that match no shape.
+#[test]
+fn a_token_straddling_each_cut_never_survives_it() {
+    let token = token();
+    let lead = "x".repeat(70);
+
+    // The tool result's one-line summary (SUMMARY_MAX).
+    let result = classify(&[(
+        "acp.tool_call",
+        &serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": format!("{lead} {token}")}}],
+        })
+        .to_string(),
+    )]);
+    assert_eq!(result.len(), 1, "one result line: {result:?}");
+    assert_no_token_piece(&result[0].1, "tool result");
+
+    // The tool call's compact input (SUMMARY_MAX), telling field and flat form.
+    for raw_input in [
+        serde_json::json!({"command": format!("{lead} {token}")}),
+        serde_json::json!({"note": format!("{lead} {token}")}),
+    ] {
+        let call = classify(&[(
+            "acp.tool_call",
+            &serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "c2",
+                "title": "Bash",
+                "status": "pending",
+                "rawInput": raw_input,
+            })
+            .to_string(),
+        )]);
+        assert_eq!(call.len(), 1, "one call line: {call:?}");
+        assert_no_token_piece(&call[0].1, "tool input");
+    }
+
+    // A plan entry (SUMMARY_MAX, after its `plan · status · ` prefix).
+    let plan = classify(&[(
+        "acp.plan",
+        &serde_json::json!({
+            "entries": [{"status": "pending", "content": format!("{} {token}", "x".repeat(50))}],
+        })
+        .to_string(),
+    )]);
+    assert_eq!(plan.len(), 1, "one plan line: {plan:?}");
+    assert_no_token_piece(&plan[0].1, "plan entry");
+
+    // A body at the hard ceiling (BODY_MAX, 8192 chars).
+    let message = classify(&[(
+        "acp.message",
+        &serde_json::json!({
+            "kind": "acp.message",
+            "text": format!("{} {token}", "x".repeat(8180)),
+            "coalescedDeltas": 1,
+        })
+        .to_string(),
+    )]);
+    assert_eq!(message.len(), 1, "one message line: {message:?}");
+    assert_no_token_piece(&message[0].1, "message body");
+}
+
+/// One `acp.message` row carrying `text`, as the reducer writes it.
+fn message(text: &str) -> Vec<(MessageKind, String)> {
+    classify(&[(
+        "acp.message",
+        &serde_json::json!({"kind": "acp.message", "text": text, "coalescedDeltas": 1}).to_string(),
+    )])
+}
+
+/// One completed tool-call update whose output is `text`.
+fn tool_result(text: &str) -> Vec<(MessageKind, String)> {
+    classify(&[(
+        "acp.tool_call",
+        &serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": text}}],
+        })
+        .to_string(),
+    )])
+}
+
+/// The cuts count characters, not bytes: a lead of 3-byte characters puts the
+/// token across the same cuts and it still goes whole.
+#[test]
+fn a_token_straddling_a_cut_after_multibyte_text_never_survives_it() {
+    let token = token();
+    let result = tool_result(&format!("{} {token}", "日".repeat(70)));
+    assert_eq!(result.len(), 1, "one result line: {result:?}");
+    assert_no_token_piece(&result[0].1, "tool result after multi-byte text");
+
+    let body = message(&format!("{} {token}", "日".repeat(8180)));
+    assert_eq!(body.len(), 1, "one message line: {body:?}");
+    assert_no_token_piece(&body[0].1, "message body after multi-byte text");
+}
+
+/// A private key spans lines, and each base64 line alone matches no shape: the
+/// block goes whole before the text is split into one entry per line.
+#[test]
+fn a_private_key_across_lines_is_removed_whole() {
+    let key_line = format!("MIIEow{}", "Q".repeat(58));
+    let text = format!(
+        "here is the key\n-----BEGIN RSA PRIVATE KEY-----\n{key_line}\n{key_line}\n-----END RSA PRIVATE KEY-----\nthat was it"
+    );
+    let lines: Vec<String> = message(&text).into_iter().map(|(_, body)| body).collect();
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("MIIEow") && !line.contains("PRIVATE KEY")),
+        "a piece of the key survived: {lines:?}"
+    );
+    assert_eq!(lines.first().map(String::as_str), Some("here is the key"));
+    assert_eq!(lines.last().map(String::as_str), Some("that was it"));
+}
+
+/// The scrub runs over a bounded window, and a secret inside that window is
+/// still redacted wherever it sits: in a summary past its cut, on a late line
+/// of a long block, and in a body just under its ceiling.
+#[test]
+fn a_secret_inside_the_scrub_window_is_still_redacted() {
+    let token = token();
+
+    let result = tool_result(&format!(
+        "{} {token} {}",
+        "x".repeat(2000),
+        "y".repeat(2000)
+    ));
+    assert_no_token_piece(&result[0].1, "summary window");
+
+    let block: String = (0..400)
+        .map(|i| {
+            if i == 300 {
+                format!("line {i} {token}")
+            } else {
+                format!("line {i}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (_, line) in message(&block) {
+        assert_no_token_piece(&line, "late line of a long block");
+    }
+
+    let body = message(&format!("{} {token}", "x".repeat(8000)));
+    assert_no_token_piece(&body[0].1, "body just under its ceiling");
+}
+
+/// A multi-megabyte line is classified in time that does not grow with it: the
+/// scrub sees a bounded window, not the whole line. Scrubbed whole, ~40 regex
+/// passes over 32 MiB took 349 s in a debug build; windowed, about 1 s, so the
+/// 10 s ceiling holds on a slow runner. Only the classification is timed: the
+/// payloads are built and parsed first, as the live producer hands the
+/// classifier a parsed `Value`.
+#[test]
+fn a_huge_line_is_classified_in_bounded_time_and_size() {
+    let huge = "x".repeat(32 << 20);
+    let rows = [
+        (
+            "acp.tool_call",
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "c1",
+                "status": "completed",
+                "content": [{"type": "content", "content": {"type": "text", "text": huge}}],
+            }),
+        ),
+        ("acp.message", serde_json::json!({"text": huge})),
+        (
+            "acp.message",
+            serde_json::json!({"text": "line\n".repeat(8 << 20)}),
+        ),
+    ];
+
+    let started = std::time::Instant::now();
+    let out: Vec<Vec<(MessageKind, String)>> = rows
+        .iter()
+        .map(|(event_type, payload)| AcpClassifier::default().classify_value(event_type, payload))
+        .collect();
+    let elapsed = started.elapsed();
+
+    assert!(
+        out[0][0].1.chars().count() <= 84 + "tool  ".len(),
+        "summary bounded"
+    );
+    assert_eq!(out[1].len(), 1);
+    assert!(out[1][0].1.chars().count() <= 8192, "body bounded");
+    assert!(out[2].len() <= 512, "entries bounded: {}", out[2].len());
+    assert_eq!(
+        out[2].last().unwrap().1,
+        format!("… {} more lines", (8 << 20) - 511)
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "a 32 MiB line took {elapsed:?}: the scrub is not windowed"
+    );
+}
+
+/// The summary's scrub window counts the characters the cut counts. Clipped on
+/// raw text, a run of whitespace spends the window and then collapses to one
+/// space, so a token past it is only partly scrubbed yet lands inside the cut.
+#[test]
+fn whitespace_before_a_token_cannot_push_it_out_of_the_scrub_window() {
+    let result = tool_result(&format!(
+        "{} github_pat_{}",
+        " ".repeat(4020),
+        "a".repeat(80)
+    ));
+    assert_eq!(result.len(), 1, "one result line: {result:?}");
+    assert!(
+        !result[0].1.contains("github_pat_"),
+        "a truncated token prefix survived: {}",
+        result[0].1
+    );
+}
+
+/// A summary collapses its text to one line before it scrubs, so a private key
+/// in a tool's output reaches the scrub with its armour on the same line as
+/// its body. The shape still matches there, and no piece of the key is shown.
+#[test]
+fn a_private_key_collapsed_into_a_summary_is_removed_whole() {
+    let key_line = format!("MIIEow{}", "Q".repeat(58));
+    let result = tool_result(&format!(
+        "-----BEGIN RSA PRIVATE KEY-----\n{key_line}\n{key_line}\n-----END RSA PRIVATE KEY-----\ndone"
+    ));
+    assert_eq!(result.len(), 1, "one result line: {result:?}");
+    let body = &result[0].1;
+    assert!(
+        !body.contains("MIIEow") && !body.contains("PRIVATE KEY"),
+        "a piece of the key survived: {body}"
+    );
+    assert!(
+        body.contains("done"),
+        "the text after the key stays: {body}"
+    );
+}
