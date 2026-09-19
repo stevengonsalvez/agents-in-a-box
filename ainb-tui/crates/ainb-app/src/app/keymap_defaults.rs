@@ -1368,6 +1368,12 @@ pub fn defaults() -> Vec<Binding> {
             "Scroll the active git view tab by the lines a wheel names",
         ),
         unbound(
+            Context::screen("git_view"),
+            "select_commit",
+            AppEvent::GitViewSelectCommit { sha: String::new() },
+            "Select the commit a click names in the Commits tab",
+        ),
+        unbound(
             Context::screen("config"),
             "set_row",
             AppEvent::ConfigSetRow {
