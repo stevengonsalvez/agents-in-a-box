@@ -2,13 +2,24 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createRoot, createSignal } from "solid-js";
 import type {
   AnswerPhase_Serialize,
   AskState_Serialize,
   AttentionMark_Serialize,
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
-import { phaseOf, pickIntents, questionFor, type Refusal, selectedSession, sendInOrder, typedIntents } from "./answer.ts";
+import {
+  drawnQuestion,
+  phaseOf,
+  pickIntents,
+  type Question,
+  questionFor,
+  type Refusal,
+  selectedSession,
+  sendInOrder,
+  typedIntents,
+} from "./answer.ts";
 
 function mark(over: Partial<AttentionMark_Serialize> = {}): AttentionMark_Serialize {
   return {
@@ -155,18 +166,23 @@ test("the four phases read from the reducer's own record for the request on scre
   );
 });
 
-test("picking option two moves the reducer's cursor from where it is, then sends", () => {
+test("picking option two sends one pick naming it by label, wherever the cursor is", () => {
+  // No cursor move and no Enter: a frame landing between two intents could
+  // reorder the options under a counted cursor (#1191). The reducer resolves
+  // the label against the options it holds when the pick runs.
   const question = questionFor(sessions(mark()))!;
-  assert.deepEqual(commands(pickIntents(question, ask({ cursor: 0 }), 1)), [
-    "session_list.select_row",
-    "session_list.select_tab",
-    "session_list.ask.next",
-    "session_list.ask.enter",
-  ]);
-  assert.deepEqual(commands(pickIntents(question, ask({ cursor: 2 }), 1)).slice(2), [
-    "session_list.ask.previous",
-    "session_list.ask.enter",
-  ]);
+  const intents = pickIntents(question, ask({ cursor: 2 }), 1);
+  assert.deepEqual(commands(intents), ["session_list.select_row", "session_list.select_tab", "session_list.ask.pick"]);
+  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-7", label: "production" });
+  assert.deepEqual(commands(pickIntents(question, ask({ cursor: 0 }), 1)), commands(intents));
+  assert.deepEqual(pickIntents(question, ask(), 3), [], "an index off the list picks nothing");
+});
+
+test("a pick sends the label as the frame carried it, not as the banner trims it", () => {
+  const long = "x".repeat(120);
+  const question = questionFor(sessions(mark({ options: [{ label: long, description: "" }] })))!;
+  const intents = pickIntents(question, ask(), 0);
+  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-7", label: long });
 });
 
 test("a typed answer moves to the composer row, clears it in one step, types, sends", () => {
@@ -182,9 +198,9 @@ test("a typed answer moves to the composer row, clears it in one step, types, se
   ]);
 });
 
-test("a refused step stops the sequence, so Enter is never sent on the wrong option", async () => {
+test("a refused step stops the sequence, so Enter is never sent on the wrong row", async () => {
   const question = questionFor(sessions(mark()))!;
-  const intents = pickIntents(question, ask({ cursor: 0 }), 1);
+  const intents = typedIntents(question, ask({ cursor: 0 }), "qa");
   const sent: string[] = [];
   const refusal: Refusal = { command: "session_list.ask.next", reason: "not from the window" };
   const stopped = await sendInOrder(intents, async (intent) => {
@@ -207,4 +223,33 @@ test("with nothing refused, every intent goes out in order", async () => {
   });
   assert.equal(stopped, null);
   assert.deepEqual(sent, commands(intents));
+});
+
+test("a click on the banner drawn before the question moved on sends nothing", () => {
+  // The banner reads the question as painted. A frame moves the question on
+  // (att-8, the same labels) before the next paint: the old banner's click
+  // names att-7, which the new answer state refuses. After the paint the
+  // banner is att-8's, and its click answers att-8.
+  const paints: (() => void)[] = [];
+  const { current, setCurrent, drawn, dispose } = createRoot((dispose) => {
+    const [current, setCurrent] = createSignal<Question>(questionFor(sessions(mark()))!);
+    return { current, setCurrent, drawn: drawnQuestion(current, (paint) => paints.push(paint)), dispose };
+  });
+  try {
+    paints.splice(0).forEach((paint) => paint());
+    assert.equal(drawn().request, "att-7");
+    assert.equal(commands(pickIntents(drawn(), ask(), 0)).at(-1), "session_list.ask.pick");
+
+    setCurrent(questionFor(sessions(mark({ request: "att-8" })))!);
+    assert.equal(current().request, "att-8", "the frame has moved on");
+    assert.equal(drawn().request, "att-7", "the banner has not repainted");
+    assert.deepEqual(pickIntents(drawn(), ask({ request: "att-8" }), 0), [], "the old banner's click sends nothing");
+
+    paints.splice(0).forEach((paint) => paint());
+    assert.equal(drawn().request, "att-8", "the paint brought the banner to the new question");
+    const intents = pickIntents(drawn(), ask({ request: "att-8" }), 0);
+    assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-8", label: "staging" });
+  } finally {
+    dispose();
+  }
 });
