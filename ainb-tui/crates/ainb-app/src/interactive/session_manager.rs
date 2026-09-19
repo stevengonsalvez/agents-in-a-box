@@ -2026,8 +2026,12 @@ impl InteractiveSessionManager {
         tmux_name: &str,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         // Phase 1: Try to find session in persisted sessions.json
-        // This handles the branch-mismatch case where the user changed branches in the worktree
-        let store = SessionStore::load();
+        // This handles the branch-mismatch case where the user changed branches in the worktree.
+        // P6e: read through the session source; a failed read goes on to phase 2.
+        let store = crate::cli::util::load_session_store_async().await.unwrap_or_else(|e| {
+            warn!("session store unavailable for tmux {tmux_name}: {e}");
+            SessionStore::default()
+        });
         if let Some(metadata) = store.find_by_tmux_name(tmux_name) {
             // Verify the worktree still exists
             if metadata.worktree_path.exists() {
@@ -2492,11 +2496,17 @@ impl InteractiveSessionManager {
                          falling back to sessions.json",
                         session_id, e
                     );
-                    let store_name = SessionStore::load()
-                        .sessions()
-                        .values()
-                        .find(|m| m.session_id == session_id)
-                        .map(|m| m.tmux_session_name.clone());
+                    let store_name = crate::cli::util::load_session_store_async()
+                        .await
+                        .map_err(|e| warn!("session store unavailable: {e}"))
+                        .ok()
+                        .and_then(|store| {
+                            store
+                                .sessions()
+                                .values()
+                                .find(|m| m.session_id == session_id)
+                                .map(|m| m.tmux_session_name.clone())
+                        });
                     if let Some(ref n) = store_name {
                         info!("Resolved tmux name from sessions.json: {}", n);
                     } else {
