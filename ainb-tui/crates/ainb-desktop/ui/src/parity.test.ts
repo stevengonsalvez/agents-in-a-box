@@ -7,9 +7,10 @@
 // `ainb-app/tests/parity_frames.rs`) rather than building any state of its
 // own. One fixture, two renderers, one list of facts.
 //
-// The list has to be able to fail: `a fact missing from the render is caught`
-// takes one fact out of what this half drew and proves the check reports it,
-// because a suite that cannot fail says nothing about a stubbed renderer.
+// The list has to be able to fail, and it has to fail for the right reason:
+// the second test takes a file out of the FRAME this half is given and proves
+// the facts that file carried are reported missing. Editing the HTML after it
+// was rendered would only prove the comparator works.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -59,8 +60,15 @@ function missing(html: string, fixture: string): string[] {
   return facts(fixture).filter((fact) => !drawn.includes(fact));
 }
 
-/** Server-render the review tab over `fixture`'s committed git view frame. */
-async function drawReview(fixture: string): Promise<string> {
+/**
+ * Server-render the review tab over `fixture`'s committed git view frame,
+ * with `change` applied to that frame first: what a renderer given less would
+ * have drawn.
+ */
+async function drawReview(
+  fixture: string,
+  change: (gitView: GitViewView_Serialize) => void = () => {},
+): Promise<string> {
   const server = await createServer({
     configFile: false,
     root: fileURLToPath(new URL("..", import.meta.url)),
@@ -74,6 +82,7 @@ async function drawReview(fixture: string): Promise<string> {
     const { Review } = await server.ssrLoadModule("/src/review.tsx");
     const { renderToString } = await server.ssrLoadModule("solid-js/web");
     const gitView = framed(fixture, "git_view") as GitViewView_Serialize;
+    change(gitView);
     return renderToString(() => Review({ gitView, stale: false, onChoose() {} }));
   } finally {
     await server.close();
@@ -87,12 +96,17 @@ test("the review tab shows every fact the fixture's list names", async () => {
   assert.deepEqual(missing(html, "git_review"), [], text(html));
 });
 
-test("a fact missing from the render is caught", async () => {
-  const html = await drawReview("git_review");
-  const dropped = facts("git_review")[0];
+test("a renderer given one file fewer fails the facts", async () => {
+  const whole = await drawReview("git_review");
+  assert.deepEqual(missing(whole, "git_review"), [], "the fixture as it stands shows every fact");
 
-  const mutated = html.replaceAll(dropped, "");
+  const lost = await drawReview("git_review", (gitView) => {
+    gitView.git_view_state?.review.files.shift();
+  });
 
-  assert.deepEqual(missing(mutated, "git_review"), [dropped]);
-  assert.deepEqual(missing(html, "git_review"), []);
+  assert.notDeepEqual(
+    missing(lost, "git_review"),
+    [],
+    "a render missing a whole file still showed every expected fact, so the list proves nothing",
+  );
 });
