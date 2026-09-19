@@ -109,6 +109,10 @@ pub struct DesktopHost<S: FrameSink> {
     inbox_dialer: std::sync::Arc<InboxDialer>,
     /// The inbox reader, while `inbox` is subscribed.
     inbox: Option<InboxReader>,
+    /// The runtime the inbox reader runs on. The window's `subscribe` is a
+    /// synchronous command on the main thread, outside any runtime, so the
+    /// host is handed one at construction rather than asking the thread.
+    runtime: Option<tokio::runtime::Handle>,
     /// Whether the tick starts the daemon attention poller. A test that is
     /// about the reducer turns it off: the poller is a thread on a real
     /// socket, and its first publish is news whenever it lands.
@@ -160,6 +164,7 @@ impl<S: FrameSink> DesktopHost<S> {
             read_agent_status: crate::agent_status::read_on_worker,
             inbox_dialer: std::sync::Arc::new(inbox_dialer()),
             inbox: None,
+            runtime: tokio::runtime::Handle::try_current().ok(),
             poll_attention: true,
         }
     }
@@ -169,6 +174,14 @@ impl<S: FrameSink> DesktopHost<S> {
     #[must_use]
     pub fn reading_inbox_with(mut self, dialer: InboxDialer) -> Self {
         self.inbox_dialer = std::sync::Arc::new(dialer);
+        self
+    }
+
+    /// Run the inbox reader on `runtime`. The app's main thread has none of
+    /// its own, so the shell hands the host the app runtime's handle.
+    #[must_use]
+    pub fn on_runtime(mut self, runtime: tokio::runtime::Handle) -> Self {
+        self.runtime = Some(runtime);
         self
     }
 
@@ -186,11 +199,13 @@ impl<S: FrameSink> DesktopHost<S> {
         let wanted = subscription.contains(SectionId::Inbox);
         match (wanted, self.inbox.is_some()) {
             (true, false) => {
-                if tokio::runtime::Handle::try_current().is_err() {
+                let Some(runtime) = &self.runtime else {
                     tracing::warn!("inbox: no runtime to start the reader on");
+                    self.state.inbox_absent("this window has no runtime to read the inbox on");
                     return;
-                }
+                };
                 let dialer = std::sync::Arc::clone(&self.inbox_dialer);
+                let _entered = runtime.enter();
                 self.inbox = Some(InboxReader::spawn(Box::new(move || dialer())));
             }
             (false, true) => {
