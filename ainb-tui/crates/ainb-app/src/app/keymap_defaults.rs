@@ -385,6 +385,13 @@ pub fn defaults() -> Vec<Binding> {
         ),
         app(
             Context::screen("home"),
+            "inbox",
+            "b",
+            AppEvent::GoToInbox,
+            "Open the inbox",
+        ),
+        app(
+            Context::screen("home"),
             "config",
             "o",
             AppEvent::GoToConfig,
@@ -939,6 +946,7 @@ pub fn defaults() -> Vec<Binding> {
     append_app_rows!(rows, Context::screen("session_list"),
         menu_bar: "M" => AppEvent::ToggleSessionMenuBar,
         stats: "i" => AppEvent::GoToStats,
+        inbox: "b" => AppEvent::GoToInbox,
         witr: "w" => AppEvent::GoToWitr,
         skills: "k" => AppEvent::GoToSkills,
         learnings: "m" => AppEvent::GoToLearnings,
@@ -1560,15 +1568,15 @@ pub fn defaults() -> Vec<Binding> {
             },
             "Fold how a mark-all-read sweep of the inbox ended",
         ),
-        // The inbox's one write (D3-prime): a whole-inbox sweep, so it is
-        // named for what it does. Unbound here; the inbox screen binds it.
-        unbound(
-            Context::screen("inbox"),
-            "mark_all_read",
-            AppEvent::InboxMarkAllRead,
-            "Mark every entry in the inbox read",
-        ),
     ]);
+
+    // The inbox screen (D3-prime): a panel over the inbox section. Its one
+    // write is a whole-inbox sweep, so the row is named for what it does.
+    append_app_rows!(rows, Context::screen("inbox"),
+        mark_all_read: "r" => AppEvent::InboxMarkAllRead,
+        back: "esc" => AppEvent::PanelBack,
+        back_q: "q" => AppEvent::PanelBack,
+    );
 
     rows
 }
