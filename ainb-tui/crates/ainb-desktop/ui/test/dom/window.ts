@@ -15,8 +15,9 @@ function install(name: string, value: unknown): void {
 
 install("window", window);
 install("document", window.document);
-install("navigator", window.navigator);
-for (const name of ["Node", "Element", "HTMLElement", "Event", "MouseEvent", "KeyboardEvent", "MutationObserver"]) {
+// Node's own `Event` and `navigator` stay: the test runner uses them, and a
+// test builds its events from `window` instead.
+for (const name of ["Node", "Element", "HTMLElement", "MutationObserver"]) {
   install(name, (window as unknown as Record<string, unknown>)[name]);
 }
 
