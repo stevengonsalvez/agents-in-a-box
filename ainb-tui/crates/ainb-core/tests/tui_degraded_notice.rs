@@ -45,6 +45,10 @@ fn a_tui_started_without_a_daemon_says_so_then_reads_the_table() {
     rt.block_on(state.load_real_workspaces());
     assert!(rt.block_on(util::session_source()).is_degraded());
     assert!(
+        util::notices_go_to_the_log(),
+        "the TUI left the resolver writing raw stderr under its alternate screen"
+    );
+    assert!(
         listed(&state, in_file.session_id),
         "the degraded TUI lost the file's session"
     );
