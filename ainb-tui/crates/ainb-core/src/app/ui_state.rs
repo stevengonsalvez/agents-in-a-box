@@ -44,6 +44,9 @@ pub struct SessionsPaneState {
     last_list_item_heights: Vec<usize>,
     last_attachable_click: Option<(AttachableRef, Instant)>,
     filter_toggle_area: Option<Rect>,
+    /// Each tab label of the right pane's strip, as last painted. Empty while
+    /// no strip is drawn, such as under the interactive embed.
+    tab_strip: Vec<(crate::components::session_tabs::SessionTab, Rect)>,
 }
 
 impl Default for SessionsPaneState {
@@ -60,6 +63,7 @@ impl Default for SessionsPaneState {
             last_list_item_heights: Vec::new(),
             last_attachable_click: None,
             filter_toggle_area: None,
+            tab_strip: Vec::new(),
         }
     }
 }
@@ -102,6 +106,21 @@ impl SessionsPaneState {
 
     pub fn set_filter_toggle_area(&mut self, area: Rect) {
         self.filter_toggle_area = Some(area);
+    }
+
+    /// Publish where the tab strip's labels were painted this frame; an empty
+    /// list when no strip was drawn.
+    pub fn set_tab_strip(
+        &mut self,
+        hits: Vec<(crate::components::session_tabs::SessionTab, Rect)>,
+    ) {
+        self.tab_strip = hits;
+    }
+
+    /// The tab whose strip label covers (`x`, `y`), if any.
+    #[must_use]
+    pub fn tab_at(&self, x: u16, y: u16) -> Option<crate::components::session_tabs::SessionTab> {
+        crate::components::session_tabs::tab_at(&self.tab_strip, x, y)
     }
 
     pub fn is_on_filter_toggle(&self, x: u16, y: u16) -> bool {

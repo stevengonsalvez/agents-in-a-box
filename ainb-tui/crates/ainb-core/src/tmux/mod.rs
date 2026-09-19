@@ -10,5 +10,5 @@ pub mod embed_input;
 pub mod pty_wrapper;
 
 pub use embed_client::EmbedClient;
-pub use embed_input::{encode_key_event, encode_mouse_event};
+pub use embed_input::{encode_key_event, encode_mouse_event, rejoin_paste};
 pub use pty_wrapper::PtyWrapper;

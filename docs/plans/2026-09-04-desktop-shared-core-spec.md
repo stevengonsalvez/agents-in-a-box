@@ -114,8 +114,9 @@
 | S | surface-safety fixes and `ConnectionRegistry` (see "Concurrency between surfaces"); daemon, notifyd, config only; runs in parallel with P0-P5 | | concurrency tests green |
 | D1 | `ainb-desktop` crate: shell, sidecar supervisor, WS terminal, sessions sidebar + tabs, palette | | wdio e2e sessions journey |
 | D2 | board + attention + answer + ACP card | | wdio e2e answer journey |
-| D3 | review tab, inbox, settings, burndown component, plugin fallback cell, hangar `ui.state` component | | full parity suite |
-| D4 | host switcher + ssh forward, updater, release matrix | | release-branch human-driver run |
+| D3 | review tab, settings | | parity suite for the screens D3 draws, with the mutation check |
+| D3' | inbox, burndown stats component, plugin fallback cell, hangar `ui.state` component | D3 | full parity suite |
+| D4 | host switcher + ssh forward, updater, release matrix | D3' | release-branch human-driver run |
 
 - Each step is its own PR. `ainb-core` never breaks because it re-exports. D1 can start after P2; D2 after P3; D3 after P5; D4 after P6 + S.
 - Hard knots and their resolution: 17 component fields on `AppState` move with P2-P5 in screen order; crossterm in ~130 handler signatures becomes `Chord` in P1; `Rect` hit-test leaves core in P0; `attach_handler.rs` becomes the TUI host's `Effect::AttachTerminal` executor in P2.
@@ -196,7 +197,7 @@ plugin/handle_action    NEW { action_id: String, payload: Value }   (clicks, pal
 | board | `board` section change | columns, cards with status line, stat strip, LAST REPLY, timeline |
 | answer box | `Command(board.answer)` | reply → daemon answer RPC → card refresh |
 | review tab | `Command(review.open)` | CodeMirror 6 merge view, hunks from `ainb-diff`, Shiki highlight |
-| inbox | `inbox` section change | list from notifyd SQLite via core section |
+| inbox | `inbox` section change | D3-prime: rows from the daemon's `hangar/inbox_list`, framed on the empty `inbox` section |
 | ACP chat card | `transcript` section change | message / thought / tool_call / plan / permission chunks |
 | palette | `cmd+k` | fuzzy over merged keymap + sessions + cards + hosts |
 | settings | `Command(config.open)` | core `config` section as a form + desktop-only: theme, fonts, layout |
@@ -213,6 +214,16 @@ plugin/handle_action    NEW { action_id: String, payload: Value }   (clicks, pal
 
 **Amendment (2026-09-16, D2): the conversation reaches the wire as a bounded scrubbed projection.** The ACP card's chunks come from the `ChatHost` the reducer already drives, and the handles stay in `HostOnlyState`, which is not a section by design and which no frame carries. The reducer writes a bounded window of the open conversation into a framed field on its own tick, the pattern the merged attention used, with each chunk field picking a scrubber from `wire/fields.rs` and the deny-list test proving the choice; a field nothing can prove safe carries a count or is withheld. The window is bounded so a long conversation cannot cross `MAX_FRAME_BYTES`.
 
+**Amendment (2026-09-19, D3): the `git_view` section is bounded, and a withheld section says so.** The review tab draws from `git_view`, which carries the diff twice: once as `diff_content` (`ainb-app/src/components/git_view.rs:21`) and again as the review rows under `review.files[].hunks[].rows`. A section whose body passes `MAX_FRAME_BYTES` (`ainb-app/src/wire/frame.rs:149`, 4 MiB) is not trimmed, it is withheld WHOLE into `FrameBatch.oversize` (`frame.rs:169`, pushed at `:398`), so one large diff would take the file tree and the commit box with it and the screen would go quiet without saying why. D3 therefore gives `git_view` the treatment the amendment above gave the conversation: the reducer writes a bounded projection, a row window with a per-file cap, each field scrubbed or allow-listed with its reason, and what was cut is said on the frame rather than read as a short diff. The diff text keeps its scrubber (`ainb-app/src/components/code_review/model.rs:75-80`) through the bound. Separately, no renderer in this repository reads `FrameBatch.oversize` today: D3 draws it on the review tab, naming the section and the reason, and every other screen's behaviour when its section is withheld stays an open gap with an issue of its own.
+
+**Amendment (2026-09-19, D3): which throughput number each path can prove (#1162).** The gate read "`cat` 50MB through the WS terminal in under 2s with zero dropped bytes". The desktop journey cannot measure that as written, and not because it is slow: what it drives is a real `tmux attach-session` client, and tmux sends an attached client rendered screen updates rather than a replay of the pane's bytes, so the bytes painted are fewer than the bytes read by design. Two numbers, then. The byte-exact one is D1c's, measured in Rust with no tmux in the path, and it stays a gate. The journey's is the time a 50 MiB read takes with a live window attached, about six seconds on the CI runner with about 6 MB painted; it is recorded as an artifact and is not a pass condition. A later reader should not treat the recorded figure as a failed gate, nor the Rust figure as an end-to-end one.
+
+**Amendment (2026-09-19, D3): the stats tab and the plugin fallback cell are deferred to D3-prime, with their cost.** Neither is a component over data that exists. The burndown plugin publishes no `ui.state` at all, only `ui.close_request` (`ainb-plugin-burndown/src/plugin.rs:339-350`), and lives off the session topics it subscribes to (`:153-165`), so a stats tab is a new daemon read for counters no section carries, the same read the D2 amendment deferred for the board's stat strip; landing it as a second projection of usage beside `agent_status` is what D14 exists to stop, so the cost to record is the verb, the rows, their bound, and whether the numbers become a section or a read the screen makes. The fallback cell needs a plugin runtime in the window: `ainb-desktop/src/executor.rs:29` answers every plugin effect undelivered, and the TUI's cell is a blit of cells a runtime produced (`ainb-core/src/app/screens/builtin.rs:422-462`), so the cost to record is the host, its lifecycle and its quarantine rules, and whether the cell reuses the terminal path D1c landed or opens a second channel. The hangar `ui.state` component stays blocked behind both, as the D2 amendment left it.
+
+**Amendment (2026-09-19, D3): the inbox reads the daemon, not notifyd's database.** The surface table said "list from notifyd SQLite via core section", which is stale twice over. The daemon aggregates the inbox itself (`ainb-hangar-daemon/src/lib.rs:147`) and serves it as `hangar/inbox_list` (`ainb-hangar-proto/src/methods.rs:1173`) with `hangar/inbox_mark_read` (`:1192`) as the write, rows already shaped as `InboxEntryRow` (`ainb-hangar-proto/src/events.rs:1061-1086`); and a second process opening notifyd's database would be a third reader of one store, which is the boundary the daemon's own ingest was written to keep. So the inbox section is filled by a host-owned read of that verb, bounded and scrubbed per field, the way `agent_status` is filled from `fleet/roster_status`. `hangar/inbox_mark_read` is a mutation and carries a mutation envelope under D18, with an op id and a fence; it is not added as a second envelope-less write. This lands in D3-prime, not D3.
+
+**Amendment (2026-09-19, D3): the D3 row splits into D3 and D3-prime, with nothing dropped.** The row read "review tab, inbox, settings, burndown component, plugin fallback cell, hangar `ui.state` component" under one gate. Two of those are each the size of the rest put together. The inbox is a screen that no longer exists on any surface: its state was deleted from `AppState` before the extraction and its section is an empty placeholder (`ainb-app/src/app/sections.rs:763-772`, `wire/mod.rs:608-610`), so bringing it back means a new framed family, a scrubber per field, a TUI screen, a desktop screen and a write. The stats tab and the fallback cell need a plugin host the desktop does not have. So D3 is the review tab and settings, gated on the parity suite for the screens it draws, and D3-prime is the inbox, the stats component and the fallback cell, gated on the full parity suite and depending on D3. D4 depends on D3-prime. Every item of the old row is in one of the two, and the gate wording moves with it.
+
 ## Screen inventory
 
 | TUI screen | Desktop screen | Mapping | v1 |
@@ -223,9 +234,9 @@ plugin/handle_action    NEW { action_id: String, payload: Value }   (clicks, pal
 | fleet panel | attention list (header counts) | 1:1 | yes |
 | hangar board (plugin) | board tab | `agent_status` + Fleet frames, desktop component (the plugin's own `ui.state` component is D3) | yes |
 | code review | review tab | 1:1 hunks, CM6 paint | yes |
-| inbox | inbox | 1:1 | yes |
-| stats / burndown (plugin) | stats tab | plugin `ui.state` + desktop component | yes |
-| abtop, witr, learnings, skills (plugins) | WireBuffer painted in an xterm cell | fallback | yes, fallback |
+| inbox | inbox | D3-prime, rebuilt on both surfaces: the screen's state was deleted before the extraction | yes |
+| stats / burndown (plugin) | stats tab | D3-prime: a daemon read for the counters, not the plugin's view | yes |
+| abtop, witr, learnings, skills (plugins) | WireBuffer painted in an xterm cell | D3-prime: needs a plugin host in the window | yes, fallback |
 | daemons overlay | daemons panel in settings | 1:1 | yes |
 | config | settings page | 1:1 + desktop extras | yes |
 | MCP pool overlay | settings panel | 1:1 | yes |
@@ -357,7 +368,7 @@ Phase S (surface safety), independent of extraction, can start immediately:
 | Core | `ainb-app` behavioural tests: dispatch → state, keymap merge, version bumps, effects emitted; the ~3.5k LOC moved tests plus new per-section tests | must pass, `cargo test -p ainb-app` |
 | Parity | one JSON fixture `AppState` per screen → ratatui `TestBackend` text and Solid DOM text → both diffed against an expected-facts list | must pass, lives in `ainb-app/tests/parity` + `ainb-desktop/e2e` |
 | E2E | `@wdio/tauri-service` against the real window with a real daemon and real tmux sessions; macOS runner + Linux `xvfb-run`; scripts mirror tripwire scenarios (new session, answer ASK, review diff, plugin screen, host switch) | must pass on PR |
-| Throughput | `cat` 50MB through the WS terminal in under 2s with zero dropped bytes, on both runners | must pass on PR |
+| Throughput | two numbers, see the amendment below: the byte-exact one is Rust-level, with no tmux in the path; the journey's is a recorded figure for a 50 MiB read with a live window attached | the Rust-level number must pass on PR; the journey's is recorded |
 | Visual | window PNG per screen, vision-model review posted as PR comment | advisory |
 | Human driver | peekaboo on macOS + computer-use agent operates the app per screen script, screen-recorded, recording reviewed by vision model | gating on release branch, advisory on feature PRs |
 | Concurrency | TUI + desktop + web started in every combination against one daemon; answer race, double spawn, shared file writes | must pass on PR after P6 |

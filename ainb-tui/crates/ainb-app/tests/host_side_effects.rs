@@ -555,6 +555,66 @@ fn the_workspace_load_and_token_refresh_pieces_stay_private() {
     assert!(reopened.is_empty(), "made public again: {reopened:?}");
 }
 
+/// The seam is the only way into the workspace load (#1184): every public
+/// item on the load path in `state.rs` and `sections.rs` is one of the seam's,
+/// so a host can neither drop the result receiver nor fork the pacing. A new
+/// public load item fails here until it is judged.
+#[test]
+fn the_workspace_load_seam_is_the_only_public_way_in() {
+    const SEAM: &[&str] = &[
+        // The seam a host ticks.
+        "start_workspace_load",
+        "pace_workspace_load",
+        "workspace_scan_running",
+        "WORKSPACE_RESCAN",
+        "WORKSPACE_NEWS_FLOOR",
+        // The `WorkspaceRescan` a host hands the seam.
+        "news_floor",
+        // The renderer-facing section and its field, which frames carry.
+        "workspace_load",
+        "workspace_load_error",
+    ];
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
+    let mut public: Vec<String> = Vec::new();
+    for file in ["state.rs", "sections.rs"] {
+        let text = std::fs::read_to_string(src.join(file)).expect(file);
+        for line in text.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("pub ") else {
+                continue;
+            };
+            let rest = ["const fn ", "async fn ", "fn ", "const "]
+                .iter()
+                .find_map(|prefix| rest.strip_prefix(prefix))
+                .unwrap_or(rest);
+            let name: String =
+                rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            let lower = name.to_ascii_lowercase();
+            if lower.contains("workspace_load")
+                || lower.contains("workspace_scan")
+                || lower.contains("rescan")
+                || lower.contains("news_floor")
+                || lower.contains("workspaces_applied")
+            {
+                public.push(format!("{file}: {name}"));
+            }
+        }
+    }
+    let unexpected: Vec<&String> = public
+        .iter()
+        .filter(|item| !SEAM.iter().any(|seam| item.ends_with(&format!(": {seam}"))))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "public load-path items outside the seam: {unexpected:?}"
+    );
+    for seam in SEAM {
+        assert!(
+            public.iter().any(|item| item.ends_with(&format!(": {seam}"))),
+            "the seam lost `{seam}`; update SEAM"
+        );
+    }
+}
+
 /// `HostOnlyState` never serialises: nothing in it may reach a frame.
 #[test]
 fn host_only_state_is_not_serialize() {

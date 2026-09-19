@@ -220,6 +220,13 @@ fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Inte
         return Some(keymap_command("session_list.menu_bar"));
     }
 
+    // A click on a label of the right pane's tab strip shows that tab, the
+    // mouse twin of `tab`. The padding and separators fall through to the
+    // pane-focus click below.
+    if let Some(tab) = ui.sessions_pane.tab_at(x, y) {
+        return Some(pointer::select_session_tab(tab));
+    }
+
     if ui.sessions_pane.is_on_filter_toggle(x, y) {
         return Some(keymap_command("session_list.cycle_filter"));
     }
@@ -392,5 +399,31 @@ mod tests {
 
         let outside = press(&state, &mut ui, Pos { x: 10, y: 5 }, Btn::Left);
         assert_ne!(outside, toggle);
+    }
+
+    /// A left click on a painted strip label names that tab; a click on the
+    /// strip's padding does not.
+    #[test]
+    fn click_on_a_tab_label_selects_that_tab() {
+        use crate::components::session_tabs::SessionTab;
+        use ratatui::layout::Rect;
+        let mut state = AppState::default();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
+        let mut ui = UiState::default();
+        ui.sessions_pane.set_tab_strip(vec![
+            (SessionTab::Pal, Rect::new(72, 3, 3, 1)),
+            (SessionTab::Log, Rect::new(78, 3, 3, 1)),
+        ]);
+
+        let on_log = press(&state, &mut ui, Pos { x: 79, y: 3 }, Btn::Left);
+        assert_eq!(on_log, Some(pointer::select_session_tab(SessionTab::Log)));
+        let on_pal = press(&state, &mut ui, Pos { x: 72, y: 3 }, Btn::Left);
+        assert_eq!(on_pal, Some(pointer::select_session_tab(SessionTab::Pal)));
+
+        // Between the labels: no tab at all, not merely neither neighbour.
+        let on_bar = press(&state, &mut ui, Pos { x: 76, y: 3 }, Btn::Left);
+        for tab in crate::components::session_tabs::ALL_TABS {
+            assert_ne!(on_bar, Some(pointer::select_session_tab(tab)), "{tab:?}");
+        }
     }
 }
