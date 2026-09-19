@@ -41,6 +41,25 @@ export interface InboxPage {
   canMarkAllRead: boolean;
 }
 
+/**
+ * The rows that put the reducer on its inbox screen, where the sweep is
+ * active, the way the terminal opens it from home. Whether the page shows is
+ * the reducer's: it shows while `shell.current_screen` is `inbox`.
+ */
+export const OPEN_INBOX: RendererIntent[] = [
+  { Command: ["global.go_home", null] },
+  { Command: ["home.inbox", null] },
+];
+
+/**
+ * The rows that leave the inbox screen for home, where the page opened it
+ * from, and put the reducer back on the session list, as closing settings does.
+ */
+export const CLOSE_INBOX: RendererIntent[] = [
+  { Command: ["inbox.back", null] },
+  { Command: ["home.sessions", null] },
+];
+
 /** The inbox's one write: every entry read, as the daemon's sweep. */
 export const MARK_ALL_READ: RendererIntent = { Command: ["inbox.mark_all_read", null] };
 
