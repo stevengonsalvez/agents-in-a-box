@@ -1365,6 +1365,7 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::SkillManagerSourceRemoveCancel
         | AppEvent::GoToRecovery
         | AppEvent::GoToDaemons
+        | AppEvent::GoToInbox
         | AppEvent::PanelBack
         | AppEvent::GoToHangar
         | AppEvent::ConfigBack
