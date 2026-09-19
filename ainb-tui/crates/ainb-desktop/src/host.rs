@@ -433,10 +433,21 @@ impl<S: FrameSink> DesktopHost<S> {
             Intent::Key(chord) => {
                 let (ctx, _) =
                     self.keymap.resolve_with_context(&active_contexts(&self.state), chord)?;
-                let (id, row) = self
+                // A chord that resolves but names no row is a synthesised
+                // action: a printable key typed into a field the host owns.
+                // The window types with `Text`, which the host bounds and
+                // cleans; a key it cannot name is refused, closed, rather
+                // than let through unjudged.
+                let Some((id, row)) = self
                     .keymap
                     .commands()
-                    .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))?;
+                    .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))
+                else {
+                    return Some(Refusal {
+                        command: CommandId::new(format!("{}.text", ctx.name())),
+                        reason: "it types into a field the host owns; the window sends text instead",
+                    });
+                };
                 (id, row.action.clone())
             }
             // Judged with its payload: a pointer row's action is what the
