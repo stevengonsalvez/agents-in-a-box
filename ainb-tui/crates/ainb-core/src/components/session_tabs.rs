@@ -50,10 +50,54 @@ const fn chip_color(kind: crate::fleet::attention::AttentionKind) -> Color {
 /// words costs the preview a line on every screen.
 #[must_use]
 pub fn strip(state: &AppState, active: SessionTab) -> Line<'static> {
-    let mut spans = vec![Span::raw(" ")];
+    Line::from(strip_spans(state, active).into_iter().map(|(_, span)| span).collect::<Vec<_>>())
+}
+
+/// Where each label of [`strip`] lands on screen when the strip is drawn as a
+/// title starting at `title_area`'s first cell, clipped to its width.
+///
+/// Walked from the same spans `strip` renders, so a click and the label under
+/// it cannot disagree. Only label cells hit: the padding and the `│`
+/// separators name no tab.
+#[must_use]
+pub fn strip_hits(state: &AppState, title_area: Rect) -> Vec<(SessionTab, Rect)> {
+    let mut hits = Vec::new();
+    let mut offset: u16 = 0;
+    for (tab, span) in strip_spans(state, state.shell.session_tab) {
+        let width = u16::try_from(span.width()).unwrap_or(u16::MAX);
+        if let Some(tab) = tab.filter(|_| offset < title_area.width) {
+            hits.push((
+                tab,
+                Rect::new(
+                    title_area.x.saturating_add(offset),
+                    title_area.y,
+                    width.min(title_area.width - offset),
+                    1,
+                ),
+            ));
+        }
+        offset = offset.saturating_add(width);
+    }
+    hits
+}
+
+/// The tab whose label covers (`x`, `y`) in `hits`, from [`strip_hits`].
+#[must_use]
+pub fn tab_at(hits: &[(SessionTab, Rect)], x: u16, y: u16) -> Option<SessionTab> {
+    hits.iter()
+        .find(|(_, rect)| y == rect.y && x >= rect.x && x < rect.x.saturating_add(rect.width))
+        .map(|(tab, _)| *tab)
+}
+
+/// The strip's spans, each label tagged with the tab it names.
+fn strip_spans(state: &AppState, active: SessionTab) -> Vec<(Option<SessionTab>, Span<'static>)> {
+    let mut spans = vec![(None, Span::raw(" "))];
     for (index, tab) in ALL_TABS.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)));
+            spans.push((
+                None,
+                Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)),
+            ));
         }
         let style = if *tab == active {
             Style::default()
@@ -67,10 +111,13 @@ pub fn strip(state: &AppState, active: SessionTab) -> Line<'static> {
             // cursor is a strip nobody learns.
             Style::default().fg(MUTED_GRAY)
         };
-        spans.push(Span::styled(tab.label_in(state).into_owned(), style));
+        spans.push((
+            Some(*tab),
+            Span::styled(tab.label_in(state).into_owned(), style),
+        ));
     }
-    spans.push(Span::raw(" "));
-    Line::from(spans)
+    spans.push((None, Span::raw(" ")));
+    spans
 }
 
 /// The footer hint for the active tab: what `Enter` does here, and what the
@@ -1677,6 +1724,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_click_inside_a_label_names_that_tab_and_padding_names_none() {
+        // Drawn from column 40 on row 3, the strip reads
+        //   " preview │ ask │ err │ thread │ pal │ log "
+        // so `preview` covers 41..=47, `pal` 72..=74 and `log` 78..=80.
+        let state = state_with(Vec::new(), true);
+        let hits = strip_hits(&state, Rect::new(40, 3, 100, 1));
+        assert_eq!(hits.len(), ALL_TABS.len());
+
+        for (x, tab) in [
+            (41, SessionTab::Preview),
+            (47, SessionTab::Preview),
+            (51, SessionTab::Ask),
+            (72, SessionTab::Pal),
+            (78, SessionTab::Log),
+            (80, SessionTab::Log),
+        ] {
+            assert_eq!(tab_at(&hits, x, 3), Some(tab), "column {x}");
+        }
+        // The leading pad, the pad and bar between two labels, the trailing
+        // pad, past the strip, and the row below it.
+        for (x, y) in [
+            (40, 3),
+            (48, 3),
+            (49, 3),
+            (50, 3),
+            (81, 3),
+            (90, 3),
+            (41, 4),
+        ] {
+            assert_eq!(tab_at(&hits, x, y), None, "column {x}, row {y}");
+        }
+    }
+
+    #[test]
+    fn a_strip_clipped_by_a_narrow_pane_hits_only_what_is_drawn() {
+        let state = state_with(Vec::new(), true);
+        // Twenty cells: " preview │ ask │ err" and nothing after.
+        let hits = strip_hits(&state, Rect::new(40, 3, 20, 1));
+        assert_eq!(
+            hits.iter().map(|(tab, _)| *tab).collect::<Vec<_>>(),
+            vec![SessionTab::Preview, SessionTab::Ask, SessionTab::Err],
+        );
+        assert_eq!(tab_at(&hits, 59, 3), Some(SessionTab::Err));
+        assert_eq!(tab_at(&hits, 60, 3), None);
+        assert_eq!(
+            tab_at(&hits, 63, 3),
+            None,
+            "thread is not drawn, so it cannot hit"
+        );
     }
 
     #[test]
