@@ -711,3 +711,69 @@ fn the_current_hunk_is_the_frames_hunk_too() {
         "the cursor names a hunk the frame carries: {current} of {hunks}"
     );
 }
+
+/// The projection counts the model's rows the way `flatten` does, or the
+/// offset it sends names the wrong line. The probe is an uncut state: put the
+/// reducer on the last row the model has, and the frame must name that same
+/// row and say nothing was cut.
+#[test]
+fn the_projection_counts_the_model_rows_flatten_counts() {
+    use ainb_app::components::code_review::model::Hunk;
+    use ainb_app::components::code_review::render::flatten;
+
+    let mut state = state_with(2, 3, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        // A hunk with hidden context above and below it, and one with no rows
+        // at all, which is the shape the counts disagree over.
+        git.review.files[0].hunks[0].gap_before = 6;
+        git.review.files[0].hunks.push(Hunk {
+            old_start: 40,
+            new_start: 40,
+            gap_before: 5,
+            gap_after: 5,
+            expanded_before: 0,
+            expanded_after: 0,
+            rows: Vec::new(),
+        });
+        git.review.files[1].hunks[0].gap_after = 4;
+
+        let rows = flatten(&git.review).len();
+        git.review_ui.scroll = rows - 1;
+    }
+
+    let view = &framed(&state)["git_view_state"]["review_ui"];
+
+    assert_eq!(
+        view["scroll_cut"].as_bool(),
+        Some(false),
+        "nothing was cut, so the last model row is a row the frame has"
+    );
+}
+
+/// A collapsed file draws its heading and nothing else, so its hunks are not
+/// on the screen to be counted: counting them would shift every later file's
+/// hunk cursor by that many.
+#[test]
+fn a_collapsed_file_ahead_of_an_open_one_does_not_shift_the_hunk_cursor() {
+    let mut state = state_with(2, 4, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review.files[0].collapsed = true;
+        // The model's hunk 0 is the open file's only hunk: the collapsed file
+        // ahead of it contributes none.
+        git.review_ui.current_hunk = 0;
+        git.review_ui.selected_file = 1;
+    }
+
+    let body = framed(&state);
+    let view = &body["git_view_state"]["review_ui"];
+    let files = body["git_view_state"]["review"]["files"].as_array().expect("files");
+
+    assert_eq!(files[0]["collapsed"].as_bool(), Some(true));
+    assert_eq!(
+        view["current_hunk"].as_u64(),
+        Some(0),
+        "the cursor is the open file's hunk, not one counted inside the collapsed file"
+    );
+}
