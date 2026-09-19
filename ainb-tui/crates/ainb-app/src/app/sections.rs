@@ -1688,6 +1688,17 @@ pub struct HostOnlyState {
     /// the Fleet section for nothing, so the instant is held here and folded
     /// into the baseline once, on the refresh that sees the session detached.
     pub attention_attached_at: HashMap<Uuid, i64>,
+    /// Desktop only: sessions whose terminal tab the reducer just asked the
+    /// window to open or bring forward, waiting for the next attention
+    /// refresh to stamp that instant as their clear point.
+    ///
+    /// The desktop's counterpart of the terminal's attach: a tab gaining
+    /// focus puts the pane in front of the person the way a full-screen
+    /// attach does, so what was already there stops nagging. Held here so the
+    /// refresh, which owns the clock, is the one that writes the instant, and
+    /// the baseline keeps its single writer (the fold from
+    /// `attention_attached_at`). Never set on the terminal surface.
+    pub attention_focus_pending: HashSet<Uuid>,
 }
 
 impl Default for HostOnlyState {
@@ -1732,6 +1743,7 @@ impl Default for HostOnlyState {
             daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             inbox_mark_in_flight: false,
             attention_attached_at: HashMap::new(),
+            attention_focus_pending: HashSet::new(),
         }
     }
 }
