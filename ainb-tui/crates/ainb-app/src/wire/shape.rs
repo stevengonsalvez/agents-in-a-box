@@ -1318,6 +1318,7 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
             crate::app::sections::PluginPresence {
                 registered: true,
                 wedged: false,
+                abi: ainb_plugin_protocol::manifest::ABI_VERSION,
             },
         );
     }

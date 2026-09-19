@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use ainb_plugin_protocol::manifest::ABI_VERSION;
 use ainb_plugin_protocol::params::{HandleKeyParams, Viewport};
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
 use bytes::Bytes;
@@ -250,6 +251,15 @@ impl RuntimeHandle {
         self.lookup(plugin_id).is_some_and(|p| p.render_wedged.load(Ordering::Acquire))
     }
 
+    /// The ABI revision this runtime speaks to the plugin in, or `None` for an
+    /// unregistered plugin: its manifest's `abi_version`, capped at this
+    /// build's [`ABI_VERSION`]. A host reads it to know which keys the plugin
+    /// can decode ([`ainb_plugin_protocol::params::KeyCode::min_abi`], #1171).
+    #[must_use]
+    pub fn plugin_abi(&self, plugin_id: &PluginId) -> Option<u32> {
+        self.lookup(plugin_id).map(|p| spoken_abi(&p.plugin))
+    }
+
     /// Atomically check-and-clear the render-dirty flag for a plugin.
     /// Returns `true` iff the host should kick a fresh `plugin/render`
     /// this tick because state may have changed since the last paint.
@@ -313,7 +323,10 @@ impl RuntimeHandle {
     /// render with the last one it wrote, which is how it tells whether a
     /// frame reflects a key; the plugin reads nothing back.
     ///
-    /// Returns `false` if the plugin is unknown or the task is gone, or when
+    /// Returns `false` if the plugin is unknown or the task is gone, when the
+    /// key is newer than the plugin's ABI (its
+    /// [`KeyCode::min_abi`](ainb_plugin_protocol::params::KeyCode::min_abi) is
+    /// above the manifest's `abi_version`, #1171), or when
     /// the key is an Esc that goes to the host instead (#1087): the plugin
     /// has painted no answer to the last
     /// [`crate::plugin_task::ESC_UNANSWERED_LIMIT`] Esc presses in a row, or
@@ -331,6 +344,23 @@ impl RuntimeHandle {
         let Some(handle) = self.lookup(plugin_id) else {
             return false;
         };
+        // The chokepoint for every key a plugin is sent: a key its protocol
+        // revision predates would fail to decode on the plugin side, so it is
+        // dropped here, before a generation is spent or the screen marked
+        // dirty (#1171).
+        let abi = spoken_abi(&handle.plugin);
+        let min_abi = key.code.min_abi();
+        if min_abi > abi {
+            // The ABI numbers only: a key code can carry the typed character,
+            // and this line reaches the on-disk log.
+            tracing::debug!(
+                plugin = %plugin_id,
+                abi,
+                min_abi,
+                "key newer than the plugin's ABI; not sent"
+            );
+            return false;
+        }
         let generation = self.inner.key_generation.fetch_add(1, Ordering::Relaxed);
         // A plugin that keeps painting while ignoring Esc would otherwise hold
         // its screen with Ctrl+C as the only exit (#1087). Refusing the key
@@ -744,4 +774,12 @@ fn warn_on_input_drop(plugin_id: &PluginId, input: &str, before: u64, after: u64
             "plugin input inbox full; dropping the oldest events"
         );
     }
+}
+
+/// The ABI revision the runtime speaks to `plugin` in: its manifest's
+/// `abi_version`, capped at this build's [`ABI_VERSION`]. A manifest claiming a
+/// newer revision, or `u32::MAX`, is never sent a frame this build cannot vouch
+/// for (#1171).
+fn spoken_abi(plugin: &crate::registry::RegisteredPlugin) -> u32 {
+    plugin.manifest.plugin.abi_version.min(ABI_VERSION)
 }

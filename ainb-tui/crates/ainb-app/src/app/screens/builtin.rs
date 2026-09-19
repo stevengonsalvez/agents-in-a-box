@@ -175,14 +175,6 @@ pub fn route_key_to_focused_plugin(
     let Some(plugin_name) = plugin_id_for_screen(&state.shell.current_screen) else {
         return PluginRoute::Host;
     };
-    // Insert joined the wire in protocol 0.3.0, and a plugin built against an
-    // older one cannot decode it. The screen still claims it, as it claimed
-    // every key the wire had no shape for. Lift this when the runtime's
-    // `ABI_VERSION` passes 2 (`ainb-plugin-runtime/src/plugin_task.rs:64`), so
-    // every plugin that loads can decode Insert (#1171).
-    if matches!(key.code, KeyCode::Insert) {
-        return PluginRoute::Consumed;
-    }
     let capturing = focused_plugin_captures_text(state);
     if is_host_reserved_key(key, plugin_owns_help_keys(state), capturing) {
         // Host claims this key: the central dispatch resolves it to Quit or
@@ -205,13 +197,25 @@ pub fn route_key_to_focused_plugin(
     // Esc is a floor on a dead screen: a rowset rebound away from it must not
     // trap the operator on a plugin that will never pop.
     let dead = !presence.registered || presence.wedged;
-    if dead && (back || matches!(key.code, KeyCode::Esc)) {
+    // A key newer than the plugin's ABI (Insert, for an ABI 2 plugin) would
+    // not decode on its side, so it never reaches the plugin.
+    // `RuntimeHandle::send_key` refuses the same keys, so a second sender
+    // cannot slip one past this (#1171). A blocked back key or Esc gets the
+    // same floor as a dead screen: a plugin declaring an ABI older than every
+    // key's cannot trap the operator.
+    let blocked = key.code.min_abi() > presence.abi;
+    if (dead || blocked) && (back || matches!(key.code, KeyCode::Esc)) {
         return PluginRoute::Host;
     }
     // Every other key stays claimed on an absent plugin's screen, so the
     // session list's destructive bindings (`d` delete, `n` new session) cannot
     // fire from it.
     if !presence.registered {
+        return PluginRoute::Consumed;
+    }
+    // Any other blocked key the screen still claims, as it claims every key
+    // the wire has no shape for.
+    if blocked {
         return PluginRoute::Consumed;
     }
     PluginRoute::Forward(crate::app::Effect::ForwardToPlugin {
@@ -331,7 +335,15 @@ mod tests {
         state.shell.current_screen = screen.to_string();
         state.plugins_host.plugin_presence.insert(
             screen.to_string(),
-            crate::app::sections::PluginPresence { registered, wedged },
+            crate::app::sections::PluginPresence {
+                registered,
+                wedged,
+                abi: if registered {
+                    ainb_plugin_protocol::manifest::ABI_VERSION
+                } else {
+                    0
+                },
+            },
         );
         state
     }
@@ -512,18 +524,45 @@ mod tests {
         assert!(!back);
     }
 
-    /// #1123: Insert is claimed by a plugin screen and never sent to the
-    /// plugin, which may predate the wire's Insert; off a plugin screen it is
-    /// the host's.
+    /// #1171: a plugin whose ABI predates every key cannot trap the operator.
+    /// Esc and the back keys go to the host, as on a dead screen; every other
+    /// key is claimed and never sent.
     #[test]
-    fn insert_is_claimed_by_a_plugin_screen_and_never_forwarded() {
+    fn a_plugin_below_every_key_abi_leaves_esc_to_the_host() {
+        let keymap = Keymap::defaults();
+        let mut old = on_plugin_screen(ids::HANGAR, true, false);
+        old.plugins_host.plugin_presence.get_mut(ids::HANGAR).unwrap().abi = 1;
+        assert_eq!(
+            route_key_to_focused_plugin(&old, &keymap, &key(KeyCode::Esc, 0)),
+            PluginRoute::Host,
+            "Esc leaves the screen"
+        );
+        assert_eq!(
+            route_key_to_focused_plugin(&old, &keymap, &ch('j')),
+            PluginRoute::Consumed,
+            "any other key is claimed, not sent"
+        );
+    }
+
+    /// #1171: a plugin screen claims Insert without sending it while its
+    /// plugin's ABI predates Insert, forwards it once the ABI carries it, and
+    /// off a plugin screen Insert is the host's.
+    #[test]
+    fn insert_reaches_a_plugin_only_at_the_abi_that_carries_it() {
         let keymap = Keymap::defaults();
         let insert = key(KeyCode::Insert, 0);
-        let live = on_plugin_screen(ids::HANGAR, true, false);
+        let mut live = on_plugin_screen(ids::HANGAR, true, false);
         assert_eq!(
             route_key_to_focused_plugin(&live, &keymap, &insert),
-            PluginRoute::Consumed
+            PluginRoute::Consumed,
+            "an ABI 2 plugin is not sent Insert"
         );
+        live.plugins_host.plugin_presence.get_mut(ids::HANGAR).unwrap().abi =
+            KeyCode::Insert.min_abi();
+        assert!(matches!(
+            route_key_to_focused_plugin(&live, &keymap, &insert),
+            PluginRoute::Forward(crate::app::Effect::ForwardToPlugin { back: false, .. })
+        ));
         let home = on_plugin_screen(ids::HOME, true, false);
         assert_eq!(
             route_key_to_focused_plugin(&home, &keymap, &insert),
