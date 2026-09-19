@@ -43,8 +43,36 @@ fn render(fixture: &ParityFixture) -> String {
     text.replace(&format!("v{}", env!("CARGO_PKG_VERSION")), "v<version>")
 }
 
+/// The tests set `HOME` in one process, so they take turns.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The expected facts committed beside `fixture`, `<fixture>.facts`, one per
+/// line with `#` comments, or `None` when the fixture has no list. The same
+/// file is read by the DOM half (`ainb-desktop/ui/src/parity.test.ts`), so one
+/// list is diffed against both renderers.
+fn facts(fixture: &Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(fixture.with_extension("facts")).ok()?;
+    Some(
+        text.lines()
+            .map(str::trim_end)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// The facts no line of `rendered` contains.
+fn missing_facts(rendered: &str, facts: &[String]) -> Vec<String> {
+    facts
+        .iter()
+        .filter(|fact| !rendered.lines().any(|line| line.contains(fact.as_str())))
+        .cloned()
+        .collect()
+}
+
 #[test]
 fn every_fixture_renders_its_committed_snapshot() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = tempfile::tempdir().expect("scratch home");
     std::env::set_var("HOME", home.path());
     let update = std::env::var_os("UPDATE_PARITY_SNAPSHOTS").is_some();
@@ -71,4 +99,58 @@ fn every_fixture_renders_its_committed_snapshot() {
         "parity snapshots changed:\n{}",
         mismatched.join("\n")
     );
+}
+
+/// The screens the settings page draws (D3d) each carry a facts list, and the
+/// terminal renders every fact of every fixture that has one.
+#[test]
+fn every_fixture_with_a_facts_list_renders_every_fact() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("scratch home");
+    std::env::set_var("HOME", home.path());
+
+    let mut checked = Vec::new();
+    let mut missing = Vec::new();
+    for (name, path) in ParityFixture::all_in(&fixture_dir()) {
+        let Some(facts) = facts(&path) else {
+            continue;
+        };
+        assert!(!facts.is_empty(), "{name}.facts lists at least one fact");
+        let fixture = ParityFixture::load(&path).unwrap_or_else(|error| panic!("{error}"));
+        let absent = missing_facts(&render(&fixture), &facts);
+        if !absent.is_empty() {
+            missing.push(format!("{name}: {absent:?}"));
+        }
+        checked.push(name);
+    }
+    for required in ["config", "daemons"] {
+        assert!(
+            checked.iter().any(|name| name == required),
+            "the settings page draws `{required}`, which needs a facts list"
+        );
+    }
+    assert!(
+        missing.is_empty(),
+        "facts missing from the render:\n{}",
+        missing.join("\n")
+    );
+}
+
+/// The suite can fail: with one fact deleted from the render, the check
+/// names it.
+#[test]
+fn the_facts_check_fails_when_one_fact_is_deleted_from_the_render() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("scratch home");
+    std::env::set_var("HOME", home.path());
+
+    let path = fixture_dir().join("config.json");
+    let facts = facts(&path).expect("config.facts");
+    let fixture = ParityFixture::load(&path).unwrap_or_else(|error| panic!("{error}"));
+    let rendered = render(&fixture);
+    assert_eq!(missing_facts(&rendered, &facts), Vec::<String>::new());
+
+    let deleted = facts.last().expect("a fact").clone();
+    let mutated = rendered.replace(deleted.as_str(), "");
+    assert_eq!(missing_facts(&mutated, &facts), vec![deleted]);
 }
