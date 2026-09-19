@@ -237,3 +237,109 @@ fn the_slash_palette_opens_learnings_from_any_screen() {
 
     assert_eq!(state.shell.current_screen, screen_ids::LEARNINGS);
 }
+
+/// One selected session blocking on a daemon question with `options`.
+fn waiting_on(options: &[&str]) -> (AppState, ainb_app::fleet::attention::SessionAttention) {
+    use ainb_app::fleet::attention::{AttentionKind, AttentionOption, SessionAttention};
+    let chip = SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-7".into()).with_options(
+        options
+            .iter()
+            .map(|label| AttentionOption {
+                label: (*label).to_string(),
+                description: String::new(),
+            })
+            .collect(),
+    );
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    let mut workspace = Workspace::new("api".to_string(), "/parity/api".into());
+    let mut session = Session::new("feat-login".to_string(), "/parity/api/wt".to_string());
+    session.live_attention = vec![chip.clone()];
+    workspace.add_session(session);
+    state.sessions.workspaces = vec![workspace];
+    state.sessions.selected_workspace_index = Some(0);
+    state.sessions.selected_session_index = Some(0);
+    state.shell.session_tab = ainb_app::components::session_tabs::SessionTab::Ask;
+    (state, chip)
+}
+
+#[test]
+fn a_pick_by_label_sends_that_option_even_after_the_options_reordered() {
+    use ainb_app::fleet::answer::AnswerPhase;
+    let keymap = Keymap::defaults();
+    // The frame the person clicked offered staging, production, local, and
+    // they clicked the first. Before the click lands, a refresh reorders the
+    // options under the cursor.
+    let (mut state, _) = waiting_on(&["local", "production", "staging"]);
+    let chip = state.sessions.workspaces[0].sessions[0].live_attention[0].clone();
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        pointer::pick_answer("staging"),
+    );
+
+    assert_eq!(
+        state.fleet.ask_state.cursor(),
+        2,
+        "the cursor is on staging, where it sits now"
+    );
+    assert_eq!(
+        state.fleet.ask_state.answer_text(&chip).as_deref(),
+        Ok("staging")
+    );
+    assert!(
+        matches!(
+            state.fleet.ask_state.phase_for(&chip),
+            Some(AnswerPhase::InFlight { draft: None, .. })
+        ),
+        "and the send is out, as a pick rather than a draft: {:?}",
+        state.fleet.ask_state.phase_for(&chip)
+    );
+}
+
+#[test]
+fn a_pick_of_a_label_the_question_does_not_offer_sends_nothing_and_says_so() {
+    let keymap = Keymap::defaults();
+    let (mut state, chip) = waiting_on(&["staging", "production"]);
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        pointer::pick_answer("prod"),
+    );
+
+    assert!(
+        state.fleet.ask_state.phase_for(&chip).is_none(),
+        "nothing went out"
+    );
+    assert_eq!(state.fleet.ask_state.cursor(), 0, "the cursor did not move");
+    assert_eq!(
+        state.shell.notifications.last().map(|note| note.message.as_str()),
+        Some("that option is not offered here")
+    );
+}
+
+#[test]
+fn a_pick_runs_only_while_the_ask_pane_is_showing() {
+    // The row sits in the `ask` context, as its keys do: with the pane on
+    // another tab the command is not active, so it changes nothing rather than
+    // answering a question the person is not looking at.
+    let keymap = Keymap::defaults();
+    let (mut state, chip) = waiting_on(&["staging", "production"]);
+    state.shell.session_tab = ainb_app::components::session_tabs::SessionTab::Preview;
+    let before = state.versions();
+
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        pointer::pick_answer("staging"),
+    );
+
+    assert!(effects.is_empty());
+    assert!(state.fleet.ask_state.phase_for(&chip).is_none());
+    assert!(bumped(&before, &state.versions()).is_empty());
+}
