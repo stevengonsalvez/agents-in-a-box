@@ -8,14 +8,18 @@
 //! macOS only. Elsewhere the window has no menu bar and every accelerator
 //! reaches the webview already.
 
+use ainb_desktop::intent::update;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Runtime};
 
-/// The updater's menu ids, handled in `main.rs`. Until the settings page
-/// carries an updates section, the menu is the updater's only surface.
-pub const UPDATE_CHECK: &str = "update.check";
-pub const UPDATE_INSTALL: &str = "update.install";
-pub const UPDATE_ROLLBACK: &str = "update.rollback";
+/// The updater's menu ids, the command ids in `intent::update`, handled in
+/// `main.rs`. Until the settings page carries an updates section, the menu
+/// is the updater's only surface. The channel and the tag have no menu item:
+/// they are set in the terminal or the config file.
+pub const UPDATE_CHECK: &str = update::CHECK;
+pub const UPDATE_INSTALL: &str = update::APPLY;
+pub const UPDATE_ROLLBACK: &str = update::ROLLBACK;
+pub const UPDATE_DISCARD_PREVIOUS: &str = update::DISCARD_PREVIOUS;
 
 /// Install the menu. A failure is logged and left: a window with the default
 /// menu is worth more than no window.
@@ -56,6 +60,13 @@ fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
                 None::<&str>,
             )?,
             &MenuItem::with_id(app, UPDATE_ROLLBACK, "Roll Back Update", true, None::<&str>)?,
+            &MenuItem::with_id(
+                app,
+                UPDATE_DISCARD_PREVIOUS,
+                "Remove Previous Version",
+                true,
+                None::<&str>,
+            )?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
             &PredefinedMenuItem::separator(app)?,
