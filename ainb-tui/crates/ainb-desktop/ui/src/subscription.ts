@@ -60,3 +60,12 @@ export function shellConfig(store: FrameStore, host: HostId | undefined): Config
 export function shellHangar(store: FrameStore, host: HostId | undefined): HangarView_Serialize | undefined {
   return host === undefined ? undefined : store.section(host, "hangar");
 }
+
+/**
+ * The config section version the settings page drew, named on every edit so
+ * the reducer can refuse an edit of a frame it has moved past. 0 before the
+ * first frame, which no live section carries.
+ */
+export function configRevision(store: FrameStore, host: HostId | undefined): number {
+  return host === undefined ? 0 : (store.state.hosts[host]?.sections.config?.version ?? 0);
+}
