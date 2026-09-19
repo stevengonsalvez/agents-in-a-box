@@ -7,6 +7,7 @@
 // composer and is sent with `session_list.ask.enter`. The verified send
 // (`AskState::send`) is the only send there is.
 
+import { type Accessor, createEffect, createSignal, on } from "solid-js";
 import type {
   AnswerPhase_Serialize,
   AskState_Serialize,
@@ -102,6 +103,32 @@ export function questionFor(sessions: SessionsView_Serialize | undefined): Quest
     answerable: mark.route !== "None",
     route,
   };
+}
+
+/**
+ * The question a banner has drawn, one paint behind `current`.
+ *
+ * `current` is the frame's question as of now. A click handler that read it
+ * at click time answered whatever question the frame had moved on to, with
+ * that question's own request id, so the reducer's request check passed for a
+ * question the person never saw (#1191). The drawn question follows the frame
+ * only after the next paint (`schedule`; `requestAnimationFrame` in the
+ * window), keyed on the request: between a frame that moved the question on
+ * and the paint that shows it, a click still names the old request, which
+ * `pointedAt` refuses against the new answer state.
+ */
+export function drawnQuestion(current: Accessor<Question>, schedule: (paint: () => void) => void): Accessor<Question> {
+  const [drawn, setDrawn] = createSignal(current());
+  createEffect(
+    on(
+      () => current().request,
+      () => {
+        const question = current();
+        schedule(() => setDrawn(question));
+      },
+    ),
+  );
+  return drawn;
 }
 
 /** What the reducer recorded for the request it is pointed at. */
