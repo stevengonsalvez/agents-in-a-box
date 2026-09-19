@@ -121,8 +121,8 @@ pub struct DesktopHost<S: FrameSink> {
     /// named one; taken when the reader starts.
     usage_dialer: Option<Dialer>,
     /// The usage reader behind section 21, the stats tab. Started by the tick
-    /// on the first subscription that names `usage`, so a window that never
-    /// opens the tab never asks the daemon (D3p-e).
+    /// on the first subscription that names `usage`, so a renderer that does
+    /// not subscribe to it costs the daemon no read (D3p-e).
     usage: Option<UsageReader>,
     /// Whether the tick starts the daemon attention poller. A test that is
     /// about the reducer turns it off: the poller is a thread on a real
@@ -211,8 +211,9 @@ impl<S: FrameSink> DesktopHost<S> {
 
     /// Let the tick start the usage reader behind section 21, the stats tab,
     /// dialing with `dialer`, once a subscription names `usage` (D3p-e). Until
-    /// then nothing reads: a window that never opens the tab costs the daemon
-    /// nothing.
+    /// then nothing reads: a renderer that does not subscribe to `usage` costs
+    /// the daemon nothing. The webview subscribes to it at launch
+    /// (`ui/src/subscription.ts`), so today the read starts with the window.
     pub fn enable_usage(&mut self, dialer: Dialer) {
         self.usage_dialer = Some(dialer);
     }
