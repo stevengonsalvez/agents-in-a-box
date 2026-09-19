@@ -13,11 +13,41 @@ use sha2::{Digest, Sha256};
 
 use crate::cli::OutputFormat;
 
+/// The release host, the one source [`RELEASE_DOWNLOAD_ROOT`] and every
+/// tagged (prerelease) root are formed from.
+macro_rules! release_host {
+    () => {
+        "https://github.com/stevengonsalvez/agents-in-a-box"
+    };
+}
+
 /// Where the `stable` channel fetches `release-manifest.json` and its
 /// signature from. The one compiled-in root; a verified manifest's
 /// [`ReleaseManifest::next_root`] can move a client off it.
-pub const RELEASE_DOWNLOAD_ROOT: &str =
-    "https://github.com/stevengonsalvez/agents-in-a-box/releases/latest/download";
+pub const RELEASE_DOWNLOAD_ROOT: &str = concat!(release_host!(), "/releases/latest/download");
+
+/// The release host [`RELEASE_DOWNLOAD_ROOT`] lives under, `https://` and
+/// no trailing slash.
+#[must_use]
+pub const fn release_host() -> &'static str {
+    release_host!()
+}
+
+/// `release-manifest.json` is a few kilobytes; anything past this is not it.
+const MANIFEST_CAP: u64 = 256 * 1024;
+/// A base64 Ed25519 signature is 88 bytes.
+const SIGNATURE_CAP: u64 = 4 * 1024;
+/// The largest bundle or archive a release may ship.
+pub const DOWNLOAD_CAP: u64 = 512 * 1024 * 1024;
+/// Redirects followed before a fetch gives up.
+const REDIRECT_HOPS: usize = 3;
+/// Hosts GitHub serves release assets from after a redirect off
+/// [`release_host`].
+const GITHUB_ASSET_HOSTS: [&str; 3] = [
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+];
 const RELEASE_SIGNING_PUBLIC_KEY_B64: &str = "2diG6eoKmUWKOk3XULwefjwKb5IIYTZA4xmNNA8Z6uk=";
 const LAUNCHD_LABEL: &str = "com.agentsinabox.release-check";
 const SYSTEMD_STEM: &str = "com.agentsinabox.release-check";
@@ -300,8 +330,16 @@ impl ReleaseState {
     pub fn load_from(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading update state {}", path.display()))?;
-        serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing update state {}", path.display()))
+        let state: Self = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing update state {}", path.display()))?;
+        // The root is data on disk: validated on the way back in, as it was
+        // when the manifest named it, so a rewritten file cannot redirect the
+        // next check to plain HTTP or an odd URL.
+        if let Some(root) = &state.root {
+            validate_next_root(root)
+                .map_err(|error| anyhow::anyhow!("update state {}: {error}", path.display()))?;
+        }
+        Ok(state)
     }
 }
 
@@ -468,65 +506,218 @@ pub async fn fetch_release_manifest_at(root: &str) -> Result<ReleaseManifest> {
 }
 
 /// Fetch `<root>/release-manifest.json` and `<root>/release-manifest.sig`,
-/// unverified, so a caller with its own key can verify them.
+/// unverified, so a caller with its own key can verify them. `root` must be
+/// `https://`; redirects stay on its host (or GitHub's asset hosts) and the
+/// bodies are capped.
 ///
 /// # Errors
 ///
-/// A request failure or a non-success status.
+/// A non-`https://` root, a request failure, a refused redirect, a body over
+/// its cap, or a non-success status.
 pub async fn fetch_manifest_bytes_at(root: &str) -> Result<(Vec<u8>, String)> {
-    let root = root.trim_end_matches('/');
-    let client = reqwest::Client::builder()
-        .user_agent(format!("ainb/{} update-check", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .context("building GitHub release client")?;
-    let manifest_url = format!("{root}/release-manifest.json");
-    let signature_url = format!("{root}/release-manifest.sig");
-    let manifest_bytes = client
-        .get(manifest_url)
-        .send()
-        .await
-        .context("downloading signed release manifest")?
-        .error_for_status()
-        .context("signed release manifest request failed")?
-        .bytes()
-        .await
-        .context("reading signed release manifest")?;
-    let signature = client
-        .get(signature_url)
-        .send()
-        .await
-        .context("downloading release manifest signature")?
-        .error_for_status()
-        .context("release manifest signature request failed")?
-        .text()
-        .await
-        .context("reading release manifest signature")?;
-    Ok((manifest_bytes.to_vec(), signature))
+    Fetch::STRICT.manifest(root).await
 }
 
-/// Download `url` to `path`, whole, so the caller can hash the FILE it will
-/// use rather than a stream it has already consumed.
+/// Download `url` to `path`, streamed under [`DOWNLOAD_CAP`], hashed as it
+/// streams; returns the lowercase sha256 hex of what was written. `progress`
+/// is called with (bytes so far, declared total) as chunks land. On any
+/// failure nothing is left at `path`.
 ///
 /// # Errors
 ///
-/// A request failure, a non-success status, or a write failure.
-pub async fn download_to(url: &str, path: &Path) -> Result<()> {
-    let bytes = reqwest::Client::builder()
-        .user_agent(format!("ainb/{} updater", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .context("building archive download client")?
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("downloading {url}"))?
-        .error_for_status()
-        .with_context(|| format!("download request failed for {url}"))?
-        .bytes()
-        .await
-        .context("reading download")?;
-    std::fs::write(path, &bytes).with_context(|| format!("writing {}", path.display()))
+/// A non-`https://` URL, a request failure, a refused redirect, a body over
+/// the cap, a non-success status, or a write failure.
+pub async fn download_to(
+    url: &str,
+    path: &Path,
+    progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+) -> Result<String> {
+    Fetch::STRICT.download(url, path, progress).await
+}
+
+/// [`fetch_manifest_bytes_at`] that also accepts `http://` to a loopback
+/// host, for tests that stand up their own responder. Not in release builds.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn fetch_manifest_bytes_at_plain_loopback(root: &str) -> Result<(Vec<u8>, String)> {
+    Fetch::PLAIN_LOOPBACK.manifest(root).await
+}
+
+/// [`download_to`] that also accepts `http://` to a loopback host, for tests
+/// that stand up their own responder. Not in release builds.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn download_to_plain_loopback(
+    url: &str,
+    path: &Path,
+    progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+) -> Result<String> {
+    Fetch::PLAIN_LOOPBACK.download(url, path, progress).await
+}
+
+/// The one HTTP policy for everything the updater fetches: `https://` only,
+/// at most [`REDIRECT_HOPS`] redirects, each staying on the first request's
+/// host or one of [`GITHUB_ASSET_HOSTS`], bodies capped.
+#[derive(Clone, Copy)]
+struct Fetch {
+    /// Test seam: `http://` to `127.0.0.1`, `localhost` or `[::1]` passes
+    /// the scheme rule. Never set outside `cfg(test)`/`test-support`.
+    allow_plain_loopback: bool,
+}
+
+impl Fetch {
+    const STRICT: Self = Self {
+        allow_plain_loopback: false,
+    };
+    #[cfg(any(test, feature = "test-support"))]
+    const PLAIN_LOOPBACK: Self = Self {
+        allow_plain_loopback: true,
+    };
+
+    fn scheme_ok(self, url: &reqwest::Url) -> bool {
+        url.scheme() == "https"
+            || (self.allow_plain_loopback
+                && url.scheme() == "http"
+                && matches!(
+                    url.host_str(),
+                    Some("127.0.0.1" | "localhost" | "[::1]" | "::1")
+                ))
+    }
+
+    fn parse(self, url: &str, what: &str) -> Result<reqwest::Url> {
+        let parsed = reqwest::Url::parse(url).with_context(|| format!("{what} URL `{url}`"))?;
+        if !self.scheme_ok(&parsed) {
+            bail!("{what} must use https:// (got `{url}`)");
+        }
+        Ok(parsed)
+    }
+
+    fn client(self, agent: &str, timeout: std::time::Duration) -> Result<reqwest::Client> {
+        let policy = reqwest::redirect::Policy::custom(move |attempt| {
+            let first = attempt.previous().first().map(|url| url.host_str().map(str::to_owned));
+            let next = attempt.url();
+            if attempt.previous().len() >= REDIRECT_HOPS {
+                return attempt.error("too many redirects");
+            }
+            if !self.scheme_ok(next) {
+                return attempt.error("redirect off https refused");
+            }
+            let same_host = first.flatten().as_deref() == next.host_str();
+            let asset_host = next.host_str().is_some_and(|host| GITHUB_ASSET_HOSTS.contains(&host));
+            if same_host || asset_host {
+                attempt.follow()
+            } else {
+                attempt.error("cross-host redirect refused")
+            }
+        });
+        reqwest::Client::builder()
+            .user_agent(format!("ainb/{} {agent}", env!("CARGO_PKG_VERSION")))
+            .timeout(timeout)
+            .redirect(policy)
+            .build()
+            .context("building release client")
+    }
+
+    async fn manifest(self, root: &str) -> Result<(Vec<u8>, String)> {
+        let root = root.trim_end_matches('/');
+        let manifest_url = self.parse(&format!("{root}/release-manifest.json"), "release root")?;
+        let signature_url = self.parse(&format!("{root}/release-manifest.sig"), "release root")?;
+        let client = self.client("update-check", std::time::Duration::from_secs(15))?;
+        let manifest = read_capped(
+            client
+                .get(manifest_url)
+                .send()
+                .await
+                .map_err(chain("downloading signed release manifest"))?,
+            MANIFEST_CAP,
+            "release manifest",
+        )
+        .await?;
+        let signature = read_capped(
+            client
+                .get(signature_url)
+                .send()
+                .await
+                .map_err(chain("downloading release manifest signature"))?,
+            SIGNATURE_CAP,
+            "release manifest signature",
+        )
+        .await?;
+        let signature =
+            String::from_utf8(signature).context("release manifest signature is not UTF-8")?;
+        Ok((manifest, signature))
+    }
+
+    async fn download(
+        self,
+        url: &str,
+        path: &Path,
+        progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+    ) -> Result<String> {
+        let parsed = self.parse(url, "download")?;
+        let client = self.client("updater", std::time::Duration::from_secs(600))?;
+        let mut response = client
+            .get(parsed)
+            .send()
+            .await
+            .map_err(chain(&format!("downloading {url}")))?
+            .error_for_status()
+            .with_context(|| format!("download request failed for {url}"))?;
+        let total = response.content_length();
+        if total.is_some_and(|length| length > DOWNLOAD_CAP) {
+            bail!(
+                "download is too large ({} bytes over a {DOWNLOAD_CAP} byte cap)",
+                total.unwrap_or(0)
+            );
+        }
+        let mut file =
+            std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+        let written = async {
+            let mut hasher = Sha256::new();
+            let mut received: u64 = 0;
+            while let Some(chunk) = response.chunk().await.context("reading download")? {
+                received += chunk.len() as u64;
+                if received > DOWNLOAD_CAP {
+                    bail!("download is too large (past a {DOWNLOAD_CAP} byte cap)");
+                }
+                hasher.update(&chunk);
+                std::io::Write::write_all(&mut file, &chunk)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                progress(received, total);
+            }
+            std::io::Write::flush(&mut file)
+                .with_context(|| format!("writing {}", path.display()))?;
+            Ok(format!("{:x}", hasher.finalize()))
+        }
+        .await;
+        drop(file);
+        if written.is_err() {
+            let _ = std::fs::remove_file(path);
+        }
+        written
+    }
+}
+
+/// Render a reqwest error with its causes on one line, so a refused
+/// redirect or a TLS failure names itself at the top of the message.
+fn chain(what: &str) -> impl FnOnce(reqwest::Error) -> anyhow::Error + '_ {
+    move |error| anyhow::anyhow!("{what}: {:#}", anyhow::Error::new(error))
+}
+
+/// Read a small body under `cap`, refusing a declared or streamed length
+/// past it before buffering it.
+async fn read_capped(response: reqwest::Response, cap: u64, what: &str) -> Result<Vec<u8>> {
+    let mut response =
+        response.error_for_status().with_context(|| format!("{what} request failed"))?;
+    if response.content_length().is_some_and(|length| length > cap) {
+        bail!("{what} is too large (over a {cap} byte cap)");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.with_context(|| format!("reading {what}"))? {
+        if body.len() as u64 + chunk.len() as u64 > cap {
+            bail!("{what} is too large (over a {cap} byte cap)");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn state_path() -> Result<PathBuf> {
@@ -680,32 +871,17 @@ fn homebrew_upgrade_command() -> Command {
 async fn apply_direct_release(manifest: &ReleaseManifest) -> Result<()> {
     let asset = manifest.asset_for_current_platform()?;
     let url = format!(
-        "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v{}/{}",
+        "{}/releases/download/v{}/{}",
+        release_host(),
         manifest.stable_version()?,
         asset.archive,
     );
-    let bytes = reqwest::Client::builder()
-        .user_agent(format!("ainb/{} updater", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(90))
-        .build()
-        .context("building archive download client")?
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("downloading {}", asset.archive))?
-        .error_for_status()
-        .with_context(|| format!("release archive request failed for {}", asset.archive))?
-        .bytes()
-        .await
-        .context("reading release archive")?;
-    let actual_sha = format!("{:x}", Sha256::digest(&bytes));
+    let temp = tempfile::tempdir().context("creating release staging directory")?;
+    let archive = temp.path().join(&asset.archive);
+    let actual_sha = download_to(&url, &archive, &mut |_, _| {}).await?;
     if !actual_sha.eq_ignore_ascii_case(asset.sha256.trim()) {
         bail!("release archive checksum mismatch for {}", asset.archive);
     }
-
-    let temp = tempfile::tempdir().context("creating release staging directory")?;
-    let archive = temp.path().join(&asset.archive);
-    std::fs::write(&archive, &bytes).context("staging verified release archive")?;
     let unpack = Command::new("tar")
         .args(["-xzf"])
         .arg(&archive)
