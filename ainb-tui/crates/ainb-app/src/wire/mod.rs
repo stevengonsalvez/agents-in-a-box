@@ -19,6 +19,7 @@
 pub mod bindings;
 pub mod fields;
 pub mod frame;
+pub mod git_view;
 pub mod shape;
 pub mod store;
 pub mod trace;
@@ -542,6 +543,8 @@ view!(SshView<'a> for SshSection {
 });
 
 view!(GitViewView<'a> for GitViewSection {
+    #[serde(serialize_with = "crate::wire::git_view::bounded")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<crate::wire::git_view::GitViewFrame>))]
     git_view_state: Option<crate::components::GitViewState>,
     #[serde(rename = "quick_commit_message_len", serialize_with = "opt_len")]
     #[cfg_attr(feature = "typescript-bindings", specta(type = Option<u32>))]
