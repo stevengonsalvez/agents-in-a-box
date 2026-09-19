@@ -68,6 +68,7 @@ pub fn mark_process_as_surface() {
 /// Clears the process-level surface mark so subsequent tests in the same test
 /// binary do not inherit transient connection status.
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn reset_process_as_surface_for_test() {
     PROCESS_IS_SURFACE.store(false, Ordering::SeqCst);
 }
