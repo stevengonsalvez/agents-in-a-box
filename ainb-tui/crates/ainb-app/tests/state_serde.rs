@@ -1085,6 +1085,12 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "DiffRow.raw",
     "FleetView.daemon_attention",
     "FleetView.fleet_snapshot",
+    // The whole section, not its rows: the frame carries `wire::git_view`'s
+    // projection, so `Hunk.rows` and the other row-level serializers are no
+    // longer on the traced shape to name. The scrub they held is the same code
+    // (`wire::git_view::scrub_and_cut`, which the state's own row serializer
+    // also calls), and what it now guards is every text field under here at
+    // once: the diff, the rows, the markdown and the commit draft.
     "GitViewView.git_view_state",
     "GitViewView.quick_commit_message_len",
     "ImageSource.build_args",
