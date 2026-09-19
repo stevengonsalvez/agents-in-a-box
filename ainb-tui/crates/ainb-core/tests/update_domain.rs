@@ -153,10 +153,54 @@ fn a_shipped_cli_reads_the_desktop_key_manifest_and_picks_its_own_archive() {
     assert_eq!(verified.assets.len(), 3);
 }
 
+/// The rule that stops the failure below at the source: the CURRENT verifier
+/// refuses any `assets[]` entry that is not a CLI archive (`ainb-` prefix,
+/// `.tar.gz` suffix), so a manifest with a desktop bundle under `assets[]`
+/// never verifies, whichever key signed it.
+#[test]
+fn a_desktop_bundle_under_assets_is_refused_by_the_current_verifier() {
+    let signing_key = SigningKey::from_bytes(&[16; 32]);
+    let sha = "0".repeat(64);
+    let target = "aarch64-apple-darwin";
+    for archive in [
+        format!("ainb-desktop-1.29.0-{target}.dmg"),
+        format!("ainb-desktop-1.29.0-{target}.AppImage"),
+        format!("ainb-1.29.0-{target}.zip"),
+        format!("notainb-1.29.0-{target}.tar.gz"),
+    ] {
+        let bytes = format!(
+            r#"{{"version":"1.29.0","assets":[{{"target":"{target}","archive":"{archive}","sha256":"{sha}"}}]}}"#
+        );
+        let signature = signing_key.sign(bytes.as_bytes());
+        assert!(
+            verify_manifest_with_key(
+                bytes.as_bytes(),
+                &STANDARD.encode(signature.to_bytes()),
+                &STANDARD.encode(signing_key.verifying_key().as_bytes()),
+            )
+            .is_err(),
+            "{archive} was accepted under assets[]"
+        );
+    }
+    // The CLI archive shape still verifies.
+    let bytes = format!(
+        r#"{{"version":"1.29.0","assets":[{{"target":"{target}","archive":"ainb-1.29.0-{target}.tar.gz","sha256":"{sha}"}}]}}"#
+    );
+    let signature = signing_key.sign(bytes.as_bytes());
+    assert!(
+        verify_manifest_with_key(
+            bytes.as_bytes(),
+            &STANDARD.encode(signature.to_bytes()),
+            &STANDARD.encode(signing_key.verifying_key().as_bytes()),
+        )
+        .is_ok()
+    );
+}
+
 /// The failure the `desktop` key exists to prevent, kept in the suite as the
 /// reason: the same bundles placed in `assets[]` ahead of the CLI archives
-/// would hand a shipped CLI a `.dmg` for its target, because it matches on
-/// target alone and takes the first hit.
+/// would hand a SHIPPED CLI (1.28.2, no such rule) a `.dmg` for its target,
+/// because it matches on target alone and takes the first hit.
 #[test]
 fn desktop_bundles_inside_assets_would_be_installed_by_a_shipped_cli() {
     let sha = "0".repeat(64);

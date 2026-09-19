@@ -93,6 +93,16 @@ fn validate_archive_and_checksum(archive: &str, sha256: &str) -> Result<()> {
 
 impl ReleaseAsset {
     fn validate(&self) -> Result<()> {
+        // Only a CLI archive belongs under `assets[]`: a shipped CLI matches
+        // this list on target alone and takes the first hit, so a desktop
+        // bundle here would be installed as the `ainb` binary. Refused at
+        // verification, whichever key signed the manifest.
+        if !self.archive.starts_with("ainb-") || !self.archive.ends_with(".tar.gz") {
+            bail!(
+                "release asset {} is not a CLI archive (ainb-<version>-<target>.tar.gz)",
+                self.archive
+            );
+        }
         validate_archive_and_checksum(&self.archive, &self.sha256)
     }
 }
