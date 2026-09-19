@@ -658,6 +658,68 @@ pub async fn reresolve_while_degraded() {
     }
 }
 
+/// A change in where this process's sessions live that a long-lived surface
+/// shows the operator (the TUI and, through the mirrored notifications, the
+/// desktop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSourceNotice {
+    /// Sessions are on the local file until the daemon is up.
+    Degraded,
+    /// The daemon is up and has reconciled: sessions are back on it.
+    Recovered,
+}
+
+impl SessionSourceNotice {
+    /// The line a surface shows.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::Degraded => {
+                "Sessions are on the local sessions.json until the hangar daemon is up."
+            }
+            Self::Recovered => "The hangar daemon is up: sessions are back on it.",
+        }
+    }
+}
+
+/// What [`session_source_notice`] last reported: 0 nothing yet, 1 degraded,
+/// 2 recovered.
+static NOTICE_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The notice this process's surface owes, if any, each at most once: the
+/// first time it is seen degraded, and the move back to the daemon after
+/// that. A process that was never degraded owes none.
+pub async fn session_source_notice() -> Option<SessionSourceNotice> {
+    use std::sync::atomic::Ordering;
+    let degraded = session_source().await.is_degraded();
+    match (NOTICE_STATE.load(Ordering::SeqCst), degraded) {
+        (0, true) => {
+            NOTICE_STATE.store(1, Ordering::SeqCst);
+            Some(SessionSourceNotice::Degraded)
+        }
+        (1, false) => {
+            NOTICE_STATE.store(2, Ordering::SeqCst);
+            Some(SessionSourceNotice::Recovered)
+        }
+        _ => None,
+    }
+}
+
+/// Start [`reresolve_while_degraded`] on the current tokio runtime, once per
+/// process, if this process is degraded. For a long-lived surface's load
+/// path; a no-op outside a runtime and on every call after the first.
+pub async fn watch_degraded_session_source() {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !session_source().await.is_degraded()
+        || STARTED.swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(reresolve_while_degraded());
+    }
+}
+
 /// Drive `fut` to completion from sync code, wherever it is called from.
 ///
 /// On a multi-thread runtime the current worker blocks in place. On a
