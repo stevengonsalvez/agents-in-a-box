@@ -1178,10 +1178,12 @@ impl HeldLockMark {
     /// Mark the current thread.
     pub fn enter() -> Self {
         let thread = std::thread::current().id();
-        let mut held = HELD_LOCKS.lock().unwrap_or_else(|p| p.into_inner());
-        match held.iter_mut().find(|(t, _)| *t == thread) {
-            Some((_, n)) => *n += 1,
-            None => held.push((thread, 1)),
+        {
+            let mut held = HELD_LOCKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match held.iter_mut().find(|(t, _)| *t == thread) {
+                Some((_, n)) => *n += 1,
+                None => held.push((thread, 1)),
+            }
         }
         Self { thread }
     }
@@ -1190,7 +1192,7 @@ impl HeldLockMark {
         let thread = std::thread::current().id();
         HELD_LOCKS
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .any(|(t, n)| *t == thread && *n > 0)
     }
@@ -1198,7 +1200,7 @@ impl HeldLockMark {
 
 impl Drop for HeldLockMark {
     fn drop(&mut self) {
-        let mut held = HELD_LOCKS.lock().unwrap_or_else(|p| p.into_inner());
+        let mut held = HELD_LOCKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(i) = held.iter().position(|(t, _)| *t == self.thread) {
             held[i].1 -= 1;
             if held[i].1 == 0 {
