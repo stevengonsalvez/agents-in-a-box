@@ -25,7 +25,7 @@ export interface InboxRow {
   /** The daemon's line, scrubbed and cut by the host, cut marker kept. */
   summary: string;
   unread: boolean;
-  /** When the entry was made, as the viewer's local time. */
+  /** How long ago the entry was made, on the daemon's clock. */
   when: string;
 }
 
@@ -63,6 +63,24 @@ export const CLOSE_INBOX: RendererIntent[] = [
 /** The inbox's one write: every entry read, as the daemon's sweep. */
 export const MARK_ALL_READ: RendererIntent = { Command: ["inbox.mark_all_read", null] };
 
+/**
+ * `created_at` against the clock the read landed on, both epoch milliseconds,
+ * in the largest unit that is at least one.
+ *
+ * The terminal's rule, `age()` in `ainb-core/src/components/inbox.rs`, so one
+ * entry reads the same on both surfaces: a read that has not landed has no
+ * clock and reads `?`, and a stamp past the clock (skew) reads `now`.
+ */
+export function age(createdAtMs: number, nowMs: number): string {
+  if (nowMs <= 0) return "?";
+  const secs = Math.floor((nowMs - createdAtMs) / 1000);
+  if (secs <= 0) return "now";
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  if (secs < 86_400) return `${Math.floor(secs / 3600)}h`;
+  return `${Math.floor(secs / 86_400)}d`;
+}
+
 /** The daemon's unread count, one scalar for the header; 0 with no section. */
 export function unreadCount(inbox: InboxView_Serialize | undefined): number {
   return inbox?.unread ?? 0;
@@ -85,7 +103,7 @@ export function inboxView(inbox: InboxView_Serialize | undefined): InboxPage {
     label: `${entry.kind} · ${entry.event}`,
     summary: entry.summary,
     unread: entry.read_at === null || entry.read_at === undefined,
-    when: new Date(entry.created_at).toLocaleString(),
+    when: age(entry.created_at, inbox.received_at_ms),
   }));
   const cut = lost.length === 0 ? undefined : lost.join(", ");
   if (inbox.absent !== null) {
