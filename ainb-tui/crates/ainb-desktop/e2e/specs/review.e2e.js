@@ -88,7 +88,19 @@ describe("reviewing from the window", () => {
     // would land after whatever it still held.
     await query.setValue("session_list.git");
     await $('.palette-row[data-row="command:session_list.git"]').waitForExist({ timeout: 30_000 });
-    await click('.palette-row[data-row="command:session_list.git"]');
+    // Enter rather than a click on the row: the palette rebuilds every row on
+    // every frame the host sends, and frames arrive faster than a driver can
+    // find an element and click it, so a click on a row of this list loses a
+    // race no person loses. The highlighted row is read back first, so the
+    // journey still proves which row ran.
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          () => document.querySelector('.palette-row[aria-selected="true"]')?.getAttribute("data-row") ?? "",
+        )) === "command:session_list.git",
+      { timeout: 30_000, timeoutMsg: "the palette never put session_list.git under the cursor" },
+    );
+    await browser.keys(["Enter"]);
 
     // The review tab, and the first row drawn: the wall clock across this is a
     // real window's first render of a diff at the bound, which is the figure
