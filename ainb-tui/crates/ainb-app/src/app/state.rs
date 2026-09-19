@@ -6877,15 +6877,7 @@ impl AppState {
     /// Stopped is meaningful). Boss-mode sessions and other variants pass
     /// through regardless.
     pub fn session_passes_filter(&self, session: &crate::models::Session) -> bool {
-        use crate::models::{SessionMode, SessionStatus};
-        if !matches!(session.mode, SessionMode::Interactive) {
-            return true;
-        }
-        match self.sessions.session_filter {
-            SessionFilter::All => true,
-            SessionFilter::ActiveOnly => !matches!(session.status, SessionStatus::Stopped),
-            SessionFilter::StoppedOnly => matches!(session.status, SessionStatus::Stopped),
-        }
+        self.sessions.session_filter.passes(session)
     }
 
     /// Toggle the expand/collapse state of the "Other tmux" section
@@ -12407,7 +12399,6 @@ impl AppState {
 
         let moved = self.tick_conversation(now_ms);
         self.project_conversation(moved);
-        self.refresh_row_visibility();
     }
 
     /// Open and tick the chat host for the tab that is showing, reporting
@@ -12469,28 +12460,6 @@ impl AppState {
             self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
         }
         moved
-    }
-
-    /// Recompute which session rows the filter hides, as a set of ids beside
-    /// the list (#1157).
-    ///
-    /// The rule lives here, where the reducer's own navigation reads it, rather
-    /// than in each renderer: a filter that grows a case in Rust was silently
-    /// wrong in a window carrying its own copy. The list keeps its order and
-    /// its indices, because the selection is expressed in them.
-    ///
-    /// Written only when the set changed, so a tick over a steady list frames
-    /// nothing.
-    fn refresh_row_visibility(&mut self) {
-        let hidden: std::collections::HashSet<Uuid> = self
-            .sessions
-            .workspaces
-            .iter()
-            .flat_map(|workspace| workspace.sessions.iter())
-            .filter(|session| !self.session_passes_filter(session))
-            .map(|session| session.id)
-            .collect();
-        self.sessions.set_if_changed(|sessions| &mut sessions.hidden_sessions, hidden);
     }
 
     /// Write the open conversation's bounded, scrubbed window onto the Fleet
