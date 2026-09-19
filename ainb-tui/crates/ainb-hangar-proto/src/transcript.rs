@@ -787,10 +787,34 @@ fn fmt_dur(ms: i64) -> String {
 ///
 /// Every summary cut goes through here (#1187). Scrubbed after, a token that
 /// starts near the cut keeps its prefix plus a few characters, and that
-/// fragment matches no shape, so no later scrub can catch it. Scrubbed before
-/// the whitespace collapse too, while a private key still has its armour lines.
+/// fragment matches no shape, so no later scrub can catch it.
+///
+/// Collapsed first, then windowed, then scrubbed, then cut: the window has to
+/// count the characters the cut counts. Windowed on raw text, a run of
+/// whitespace spends the window and then collapses to one space, leaving a
+/// token only partly inside it yet inside the cut.
 fn summary(s: &str) -> String {
-    truncate_chars(&one_line(&scrub(clip_chars(s, SCRUB_WINDOW))), SUMMARY_MAX)
+    truncate_chars(&scrub(&one_line_clipped(s, SCRUB_WINDOW)), SUMMARY_MAX)
+}
+
+/// [`one_line`] stopped at `max` chars, so a huge input is never collapsed
+/// past what a window reads.
+fn one_line_clipped(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut len = 0;
+    for word in s.split_whitespace() {
+        if len >= max {
+            break;
+        }
+        if len > 0 {
+            out.push(' ');
+            len += 1;
+        }
+        let word = clip_chars(word, max.saturating_sub(len));
+        out.push_str(word);
+        len += word.chars().count();
+    }
+    out
 }
 
 /// The first `max` chars of `s`, borrowed (char-safe, no ellipsis): the window
