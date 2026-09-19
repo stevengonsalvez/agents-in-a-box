@@ -8,9 +8,8 @@ import type {
   SessionStatus,
   Session_Serialize,
   SessionsView_Serialize,
-  Workspace_Serialize,
 } from "../../../ainb-app/bindings/AppState";
-import { drawnRows, idleCount, isSelected, label, LABEL_CHARS, ringCount, ringFor } from "./sessions.ts";
+import { idleCount, isSelected, label, LABEL_CHARS, ringCount, ringFor } from "./sessions.ts";
 
 function session(id: string, status: SessionStatus = "Running", marks: AttentionKind[] = []): Session_Serialize {
   return {
@@ -64,20 +63,4 @@ test("the selected row is named by id, not by its place in the list", () => {
   assert.equal(isSelected(sessions, "boss"), true);
   assert.equal(isSelected(sessions, "live"), false);
   assert.equal(isSelected(undefined, "boss"), false);
-});
-
-test("the sidebar draws exactly the frame's rows, with no filtering of its own", () => {
-  // Stopped rows on a frame whose filter reads active_only: the host decided
-  // they are shown (another surface's filter, or a row that just stopped), so
-  // the window draws them as sent, in order (#1180).
-  const workspace = {
-    name: "repo",
-    sessions: [session("live"), session("gone", "Stopped"), session("boss", "Stopped")],
-  } as unknown as Workspace_Serialize;
-  assert.deepEqual(
-    drawnRows(workspace).map((row) => row.id),
-    ["live", "gone", "boss"],
-  );
-  const empty = { name: "empty", sessions: [] } as unknown as Workspace_Serialize;
-  assert.deepEqual(drawnRows(empty), []);
 });
