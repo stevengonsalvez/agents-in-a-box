@@ -13491,7 +13491,9 @@ fn session_entry_to_row(
 /// The answer carries `import_complete`: until the boot import of
 /// `sessions.json` and a reconcile pass of that same file have finished, an
 /// empty table does not mean "no sessions", and the client reads the file
-/// instead. The file is the one this daemon resolves for its home.
+/// instead. The file is the one this daemon resolves for its home. Before
+/// this boot's first pass commits, the answer waits for it (bounded) and
+/// then says not-ready rather than serve rows the pass has not checked.
 async fn handle_session_list(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -13504,6 +13506,18 @@ async fn handle_session_list(
     } else {
         parse_params(req, "{ workspace_name?, limit? }")?
     };
+    // P6e: nothing is served from the table until this boot's first
+    // reconcile pass has committed. Past the wait, the answer is an explicit
+    // not-ready: no rows and `import_complete: false`, which sends the client
+    // to the file.
+    if !crate::session_import::first_pass_done_within(crate::session_import::FIRST_PASS_WAIT).await
+    {
+        return to_value(&WorkspaceSessionListResult {
+            sessions: Vec::new(),
+            truncated: false,
+            import_complete: false,
+        });
+    }
     let limit = params.limit.unwrap_or(SESSION_LIST_MAX).min(SESSION_LIST_MAX);
     let mut rows = SessionsRepo::list(pool, params.workspace_name.as_deref(), limit + 1)
         .await
