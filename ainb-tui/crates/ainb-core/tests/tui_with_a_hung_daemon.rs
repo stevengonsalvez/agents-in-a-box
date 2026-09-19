@@ -1,12 +1,16 @@
 //! P6e criterion 10, reader side: a daemon that answers the resolve and then
-//! never answers a session RPC must not hang the TUI. The real workspace
-//! loader returns within one `SESSION_RPC_DEADLINE` (plus the loader's own
-//! work), the session list paints its next frame, and nothing is listed from
-//! a store that did not answer.
+//! never answers a session RPC must not hang the TUI. With two live `tmux_`
+//! sessions for the discovery loop to walk, the real workspace loader returns
+//! within two `SESSION_RPC_DEADLINE`s plus its own work: one bounded read for
+//! the workspace load (shared by discovery and the stopped-session pass) and
+//! one for the orphan scan, however many sessions tmux has. A read per tmux
+//! session, as before, took four deadlines here. The session list paints its
+//! next frame, and nothing is listed from a store that did not answer.
 //!
 //! Own binary: the process's session source is decided once, and
 //! `AINB_HOME` / `AINB_HANGAR_HOME` / `TMUX_TMPDIR` are process-wide.
 
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ainb::app::state::AppState;
@@ -33,10 +37,18 @@ fn a_daemon_that_stops_answering_does_not_hang_the_tui() {
     let _env = [
         EnvGuard::set("AINB_HOME", &home),
         EnvGuard::set("AINB_HANGAR_HOME", &hangar_home),
-        // No tmux server here, so the loader's live pass has nothing of the
-        // box's own to walk.
+        // A tmux server of this test's own, so the loader walks exactly the
+        // sessions seeded below and nothing of the box's.
         EnvGuard::set("TMUX_TMPDIR", root.path().join("tmux")),
     ];
+    let seeded = ["tmux_p6e-hung-a", "tmux_p6e-hung-b"];
+    for name in seeded {
+        let made = Command::new("tmux")
+            .args(["new-session", "-d", "-s", name, "sleep", "600"])
+            .status()
+            .expect("run tmux");
+        assert!(made.success(), "could not seed tmux session {name}");
+    }
     util::advertise_workspace_sessions_for_tests(true);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -60,13 +72,26 @@ fn a_daemon_that_stops_answering_does_not_hang_the_tui() {
         "the loader hung on a daemon that stopped answering"
     );
     assert!(
-        took < SESSION_RPC_DEADLINE + Duration::from_secs(2),
-        "the loader waited past one deadline: {took:?}"
+        took < SESSION_RPC_DEADLINE * 2 + Duration::from_secs(2),
+        "the loader read the store more than once per step: {took:?}"
     );
     assert!(
         state.sessions.workspaces.iter().all(|w| w.sessions.is_empty()),
         "sessions were listed from a store that never answered"
     );
+
+    // The Headroom watchdog runs on the host's tick: its store read must
+    // happen off the tick, so the tick returns at once with the daemon silent.
+    {
+        let _in_runtime = rt.enter();
+        let ticked = Instant::now();
+        state.headroom_watchdog();
+        assert!(
+            ticked.elapsed() < Duration::from_millis(250),
+            "the Headroom watchdog blocked the tick: {:?}",
+            ticked.elapsed()
+        );
+    }
 
     // The next frame paints.
     let mut list = SessionListComponent::new();
@@ -75,4 +100,7 @@ fn a_daemon_that_stops_answering_does_not_hang_the_tui() {
     term.draw(|f| list.render(f, f.area(), &state, &mut ui))
         .expect("the next frame");
     drop(rt);
+    for name in seeded {
+        let _ = Command::new("tmux").args(["kill-session", "-t", name]).status();
+    }
 }

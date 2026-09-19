@@ -289,6 +289,13 @@ export function sectionCut(section: GitViewView_Serialize | undefined): string |
   const view = gitView(section);
   if (view === undefined) return undefined;
   const parts: string[] = [];
+  // The rows the files lost, added up: every file says what it lost on its own
+  // row, but a review cut to the frame's row bound would otherwise say nothing
+  // at the top, which is the whole diff reading as a short one.
+  const rows = view.review.files.reduce((total, file) => total + file.rows_cut, 0);
+  const hunks = view.review.files.reduce((total, file) => total + file.hunks_cut, 0);
+  if (rows > 0) parts.push(`${rows} rows`);
+  if (hunks > 0) parts.push(`${hunks} hunks`);
   if (view.review.files_cut > 0) parts.push(`${view.review.files_cut} files`);
   if (view.files_cut > 0) parts.push(`${view.files_cut} changed paths`);
   if (view.diff_lines_cut > 0) parts.push(`${view.diff_lines_cut} diff lines`);

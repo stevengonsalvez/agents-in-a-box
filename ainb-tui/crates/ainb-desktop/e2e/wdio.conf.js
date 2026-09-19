@@ -18,7 +18,7 @@ import { APP_BIN, down, up } from "./world.js";
 
 export const config = {
   runner: "local",
-  specs: ["./specs/journey.e2e.js", "./specs/answer.e2e.js"],
+  specs: ["./specs/journey.e2e.js", "./specs/answer.e2e.js", "./specs/review.e2e.js"],
   maxInstances: 1,
   framework: "mocha",
   reporters: ["spec"],
