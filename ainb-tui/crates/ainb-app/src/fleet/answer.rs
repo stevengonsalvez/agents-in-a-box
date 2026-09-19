@@ -56,7 +56,10 @@ pub enum AnswerPhase {
     /// The transport reported delivery. The chip clears on the next refresh,
     /// when the producer stops reporting the row.
     Delivered {
-        /// How it was delivered, e.g. `tmux (session-name)`.
+        /// How it was delivered, e.g. `tmux (session-name)`, scrubbed as the
+        /// failure's reason is: it echoes transport text.
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
         via: String,
     },
     /// Nothing was delivered. The chip goes BACK to ASK and this is why.
@@ -348,6 +351,13 @@ impl AskState {
     /// Delete the last character of the free-text answer.
     pub fn backspace(&mut self) {
         self.free_text.pop();
+    }
+
+    /// Empty the free-text answer in one step. A surface that types a whole
+    /// answer clears what is there first, rather than counting backspaces off
+    /// a frame that may already be stale.
+    pub fn clear_free_text(&mut self) {
+        self.free_text.clear();
     }
 
     /// The text this pane would send right now, or why it would not.

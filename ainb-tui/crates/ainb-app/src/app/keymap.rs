@@ -939,6 +939,7 @@ pub enum UiAction {
     SessionAskPrevious,
     SessionAskNext,
     SessionAskBackspace,
+    SessionAskClear,
     SkillManagerShrinkSources,
     SkillManagerGrowSources,
     DaemonsCloseOverlay,
@@ -1164,6 +1165,7 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::SessionStartHangarDaemon
         | AppEvent::SessionListSelectRow { .. }
         | AppEvent::SessionListSelectTab(..)
+        | AppEvent::SessionListOpenTranscript(..)
         | AppEvent::SessionListOpenRowMenu { .. }
         | AppEvent::SessionListFocusPane(..)
         | AppEvent::SaveSessionsPaneLayout { .. }
@@ -1539,6 +1541,7 @@ const fn ui_action_writes_outside_ainb(action: &UiAction) -> bool {
         | UiAction::SessionAskPrevious
         | UiAction::SessionAskNext
         | UiAction::SessionAskBackspace
+        | UiAction::SessionAskClear
         | UiAction::SkillManagerShrinkSources
         | UiAction::SkillManagerGrowSources
         | UiAction::DaemonsCloseOverlay

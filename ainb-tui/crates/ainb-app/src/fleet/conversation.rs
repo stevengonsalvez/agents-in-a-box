@@ -24,6 +24,10 @@ use ainb_plugin_hangar::screen::fleet_chat::{
 
 use crate::fleet::chat_host::ChatHost;
 
+// The window bounds below, and the ACP transcript's in `fleet::transcript`,
+// are this crate's numbers for now: the spec takes ownership of the truncation
+// policy in #1179.
+
 /// How many timeline rows a frame carries: the tail of the conversation, which
 /// is the part a surface draws without scrolling. The host keeps more.
 pub const MAX_ROWS: usize = 50;
@@ -317,7 +321,7 @@ fn count(length: usize) -> u32 {
 /// `text` cut to `limit` CHARACTERS, and whether anything was cut. Characters,
 /// not bytes: a cut inside a multi-byte character is a panic, and a cut inside
 /// an emoji is a mojibake a surface then paints.
-fn cut(text: &str, limit: usize) -> (String, bool) {
+pub(crate) fn cut(text: &str, limit: usize) -> (String, bool) {
     let mut kept: String = text.chars().take(limit).collect();
     if kept.chars().count() == text.chars().count() {
         return (kept, false);
