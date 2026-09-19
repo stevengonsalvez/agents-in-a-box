@@ -885,7 +885,9 @@ impl InboxSection {
     /// may be stale. Without rows the section is absent for `reason`.
     pub fn mark_read_failed(&mut self, reason: impl Into<String>) -> bool {
         let reason = bound_reason(&reason.into());
-        if self.entries.is_empty() && self.absent.is_none() && self.received_at_ms == 0 {
+        // Before any read lands the section is absent, and a repeated failure
+        // replaces that one reason rather than adding a second.
+        if self.entries.is_empty() && self.received_at_ms == 0 {
             return self.mark_absent(reason);
         }
         let changed = self.unreachable.as_deref() != Some(reason.as_str());
@@ -915,20 +917,13 @@ impl InboxSection {
         changed
     }
 
-    /// The daemon answered a "mark all read" sweep: fold its count and stamp
-    /// the rows shown, so the surface does not wait for the next read. The
-    /// next read overwrites both with the daemon's truth.
-    pub fn apply_mark_all_read(&mut self, marked: i64, unread: i64, now_ms: i64) -> bool {
-        let mut changed = self.unread != unread;
+    /// The daemon answered a "mark all read" sweep: fold the unread count it
+    /// reported. The rows' `read_at` stamps are the daemon's, never a local
+    /// clock, so they arrive with the read the host makes after the sweep
+    /// (`apply_read`), not here.
+    pub fn apply_mark_all_read(&mut self, unread: i64) -> bool {
+        let changed = self.unread != unread;
         self.unread = unread;
-        if marked > 0 {
-            for row in &mut self.entries {
-                if row.read_at.is_none() {
-                    row.read_at = Some(now_ms);
-                    changed = true;
-                }
-            }
-        }
         changed
     }
 }
@@ -1011,6 +1006,15 @@ mod inbox_section_tests {
         assert_eq!(section.unreachable.as_deref(), Some("io"));
         assert_eq!(section.entries.len(), 1);
         assert!(!section.mark_read_failed("io"), "the same reason twice is no change");
+    }
+
+    #[test]
+    fn a_repeated_failure_before_any_read_carries_one_reason() {
+        let mut section = InboxSection::default();
+        assert!(section.mark_read_failed("first"));
+        assert!(section.mark_read_failed("second"));
+        assert_eq!(section.absent.as_deref(), Some("second"));
+        assert!(section.unreachable.is_none(), "absent and unreachable never both");
     }
 
     #[test]
@@ -1479,6 +1483,10 @@ pub struct HostOnlyState {
     /// `FleetSection::daemon_attention_seen` is the versioned copy that
     /// `refresh_daemon_attention_generation` folds it into once a frame.
     pub daemon_attention_generation: crate::fleet::attention_poll::Generation,
+    /// A "mark all read" sweep the host is sending now. One held key is one
+    /// sweep: a second press while it is in flight emits nothing, and the
+    /// report clears it.
+    pub inbox_mark_in_flight: bool,
     /// When each attached session was last seen attached by
     /// `AppState::refresh_attention`.
     ///
@@ -1529,6 +1537,7 @@ impl Default for HostOnlyState {
             transcript: None,
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            inbox_mark_in_flight: false,
             attention_attached_at: HashMap::new(),
         }
     }
