@@ -1,21 +1,25 @@
-// The DOM half of parity: the settings page rendered from the frames a window
-// receives for a committed fixture, checked against the same expected-facts
-// list the ratatui half checks its snapshot against
+// The DOM half of parity: the settings page itself, `SettingsPage`, rendered
+// from the frames a window receives for a committed fixture, checked against
+// the same expected-facts list the ratatui half checks its snapshot against
 // (`ainb-core/tests/parity_snapshots.rs`). One fixture, two renderers, one
-// list. The frames are `ainb-app/tests/parity/frames/<fixture>.json`, dumped by
-// `ainb-app/tests/parity_frames.rs`; the facts are `<fixture>.facts` beside the
-// fixture.
+// list. The frames are `ainb-app/tests/parity/frames/<fixture>.json`, dumped
+// by `ainb-app/tests/parity_frames.rs`; the facts are `<fixture>.facts`
+// beside the fixture.
 //
-// The suite has to be able to fail: the last test deletes one fact from the
-// rendered output and asserts the check reports it.
+// The component is mounted for real through Solid's server renderer (see
+// `solid-ssr.mjs`), so a fact the page stops printing fails here. The suite
+// has to be able to fail: the last test deletes one fact from the rendered
+// output and asserts the check reports it.
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { renderToString } from "solid-js/web";
 import type { ConfigView_Serialize, HangarView_Serialize } from "../../../ainb-app/bindings/AppState";
-import { editRefusal, SECRET_REASON, settingsLines } from "./settings.ts";
+import { editRefusal, SECRET_REASON } from "../src/settings.ts";
+import { SettingsPage } from "../src/settings.tsx";
 
 const PARITY_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../ainb-app/tests/parity");
 
@@ -35,17 +39,39 @@ function frames(fixture: string): { config: ConfigView_Serialize; hangar: Hangar
   return JSON.parse(readFileSync(join(PARITY_DIR, "frames", `${fixture}.json`), "utf8"));
 }
 
+/** The page's text, one line per element, as a person reads it. */
+export function pageText(fixture: string): string[] {
+  const { config, hangar } = frames(fixture);
+  const html = renderToString(() =>
+    SettingsPage({
+      config,
+      revision: 1,
+      hangar,
+      setup: null,
+      run: () => undefined,
+      onSetupWrite: () => undefined,
+      onRefreshSetup: () => undefined,
+      onClose: () => undefined,
+    }),
+  );
+  return html
+    .replace(/<[^>]+>/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim())
+    .filter((line) => line !== "");
+}
+
 /** The facts no line of `lines` contains. */
 export function missingFacts(lines: readonly string[], expected: readonly string[]): string[] {
   return expected.filter((fact) => !lines.some((line) => line.includes(fact)));
 }
 
 for (const fixture of SETTINGS_FIXTURES) {
-  test(`the settings page drawn from the ${fixture} fixture's frames carries every expected fact`, () => {
+  test(`the settings page rendered from the ${fixture} fixture's frames carries every expected fact`, () => {
     const expected = facts(fixture);
     assert.ok(expected.length > 0, `${fixture}.facts lists facts`);
-    const { config, hangar } = frames(fixture);
-    const lines = settingsLines(config, hangar);
+    const lines = pageText(fixture);
+    assert.ok(lines.length > 10, "the page rendered");
     assert.deepEqual(missingFacts(lines, expected), [], `facts missing from the settings page for ${fixture}`);
   });
 }
@@ -64,8 +90,7 @@ test("every fixture the settings page draws has a facts list, and no facts list 
 
 test("the check fails when one fact is deleted from the rendered output", () => {
   const expected = facts("config");
-  const { config, hangar } = frames("config");
-  const lines = settingsLines(config, hangar);
+  const lines = pageText("config");
   assert.deepEqual(missingFacts(lines, expected), []);
 
   const deleted = expected[expected.length - 1]!;
