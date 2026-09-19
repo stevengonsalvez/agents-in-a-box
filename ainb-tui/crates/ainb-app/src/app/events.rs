@@ -1573,7 +1573,18 @@ impl EventHandler {
                     tracing::warn!("command `{id}` runs only from its key");
                     return None;
                 }
-                if let Some(why) = state.remote_command_refusal(&binding.action) {
+                let Some(action) = binding.action.with_args(&args) else {
+                    // Field names only: a payload can carry a pairing code, a
+                    // path or typed text, none of which belongs in a log.
+                    let fields: Vec<&String> =
+                        args.as_object().map(|object| object.keys().collect()).unwrap_or_default();
+                    tracing::warn!("command `{id}` rejected arguments with fields {fields:?}");
+                    return None;
+                };
+                // Judged with its payload: a pointer row's action is what the
+                // arguments name (the settings row a `config.set_row` edits,
+                // #1224), not the placeholder the table wrote.
+                if let Some(why) = state.remote_command_refusal(&action) {
                     tracing::warn!("command `{id}` refused: {why}");
                     return None;
                 }
@@ -1585,14 +1596,6 @@ impl EventHandler {
                     tracing::warn!("command `{id}` is not active on this screen");
                     return None;
                 }
-                let Some(action) = binding.action.with_args(&args) else {
-                    // Field names only: a payload can carry a pairing code, a
-                    // path or typed text, none of which belongs in a log.
-                    let fields: Vec<&String> =
-                        args.as_object().map(|object| object.keys().collect()).unwrap_or_default();
-                    tracing::warn!("command `{id}` rejected arguments with fields {fields:?}");
-                    return None;
-                };
                 Self::apply_key_action(action, state, host)
             }
             // A press resolves to what was under it; a host answering a press
@@ -2326,6 +2329,19 @@ impl EventHandler {
         use crate::config::settings_model::ConfigRowEdit;
         if crate::config::screen_model::read_only_reason(key).is_some() {
             return None;
+        }
+        // `config.set_row` is a renderer's row, so the renderer policy applies
+        // here as well as at the host's seam (#1224): a row whose value the
+        // host runs, or one the page does not draw, is not set by name.
+        if crate::config::renderer_edit::refusal(key).is_some() {
+            return None;
+        }
+        // The frame shows a scrubbed value; a form that sends it back would
+        // write the marker over the real value.
+        if let ConfigRowEdit::Text(text) = edit {
+            if text.contains(crate::fleet::bridge::redact::REDACTED) {
+                return None;
+            }
         }
         let row = state
             .config
