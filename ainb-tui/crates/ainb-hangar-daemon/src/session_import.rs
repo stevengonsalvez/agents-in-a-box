@@ -17,25 +17,51 @@
 //! `import_complete: false` and the CLI keeps reading the file, so a failed
 //! import can never make a populated file look empty.
 //!
-//! # Dark in P6d, and what P6e must reconcile
+//! # Repeatable reconcile (P6e)
 //!
-//! P6d ships the table dark: no daemon advertises the capability, so every
-//! reader and writer stays on the file, and the table is written only by this
-//! import and by the daemon's own interactive registration (as a shadow of
-//! its file write). Sessions created after the import therefore exist in the
-//! file but not the table. Before P6e flips the capability it needs a second
-//! reconciliation: file rows missing from the table, keyed by session id,
-//! that never resurrects a row the table deleted after the flip. That is
-//! P6e's first open question; this marker alone does not answer it.
+//! While P6d was dark every surface wrote the file only, so the file holds
+//! sessions the table lacks. [`reconcile_sessions`] closes that gap and keeps
+//! closing it: it runs at boot after the import, on a client's
+//! `workspace/session_reconcile`, and whenever the file's mtime moves
+//! ([`ReconcileWatch`], every [`RECONCILE_INTERVAL`]).
+//!
+//! ```text
+//! pass ──▶ flock sessions.json (bounded) ──▶ read + parse
+//!            │ timeout / read / parse error ──▶ Err, marker unchanged
+//!            ▼
+//!          one tx: insert every file session whose id the table lacks,
+//!          skip + count a tmux name bound to another id (table wins),
+//!          write the <path>#reconcile marker ──▶ release the flock
+//! ```
+//!
+//! The pass holds the flock from before its read until its commit, so no
+//! flock-taking writer can add or remove a file row in between. It never
+//! deletes and never overwrites a table row, so it cannot resurrect a session
+//! the new stack removed: that stack removes the file row too. The table is
+//! authoritative for a client only once the import AND a pass have finished
+//! (`SessionsRepo::import_complete_for`).
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_proto::sessions::WorkspaceSessionEntry;
-use ainb_hangar_store::repo::sessions::{ImportOutcome, SessionRow, SessionsRepo};
+use ainb_hangar_store::repo::sessions::{FileSession, ImportOutcome, SessionRow, SessionsRepo};
 use anyhow::{Context, Result, bail};
 use sqlx::SqlitePool;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
-pub use ainb_hangar_store::repo::sessions::ImportMarker;
+pub use ainb_hangar_store::repo::sessions::{ImportMarker, NameConflict, ReconcileOutcome};
+
+/// How long a daemon writer waits for the `sessions.json` flock before it
+/// gives up. Every daemon wait on that flock is bounded, so a client holding
+/// it across an RPC to this daemon can never deadlock the two.
+pub const SESSIONS_FLOCK_BOUND: Duration = Duration::from_secs(2);
+
+/// How often [`ReconcileWatch`] checks the file's mtime.
+pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Serialises passes within this process. Two passes would otherwise take the
+/// flock on two descriptors and the second would time out.
+static PASS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Largest `sessions.json` the import reads. A real store is a few KB per
 /// session; anything past this is not a session store.
@@ -84,11 +110,12 @@ pub async fn import_sessions_from(
         .await
         .context("sessions.json read task")??;
 
-    let (rows, rejected) = match content {
+    let (sessions, rejected) = match content {
         None => (Vec::new(), 0),
         Some(content) => parse_records(&content)
             .with_context(|| format!("could not parse {}", sessions_path.display()))?,
     };
+    let rows: Vec<SessionRow> = sessions.into_iter().map(|s| s.row).collect();
 
     let outcome =
         SessionsRepo::complete_import(pool, &source, &rows, rejected, SystemClock.now_ms()).await?;
@@ -96,6 +123,190 @@ pub async fn import_sessions_from(
         ImportOutcome::Completed(marker) => ImportReport::Completed(marker),
         ImportOutcome::AlreadyCompleted => ImportReport::AlreadyCompleted,
     })
+}
+
+/// Run one reconcile pass of `sessions_path`, capped at
+/// [`SESSIONS_JSON_MAX_BYTES`]. See the module doc for the rule.
+///
+/// # Errors
+///
+/// Returns an error, and leaves the marker as it was, when the flock is not
+/// free within [`SESSIONS_FLOCK_BOUND`], the file is over the cap, unreadable
+/// or unparseable, or the store write fails.
+pub async fn reconcile_sessions(
+    pool: &SqlitePool,
+    sessions_path: &Path,
+) -> Result<ReconcileOutcome> {
+    reconcile_sessions_from(pool, sessions_path, SESSIONS_JSON_MAX_BYTES).await
+}
+
+/// [`reconcile_sessions`] with an explicit size cap (the test seam).
+///
+/// # Errors
+///
+/// As [`reconcile_sessions`].
+pub async fn reconcile_sessions_from(
+    pool: &SqlitePool,
+    sessions_path: &Path,
+    max_bytes: u64,
+) -> Result<ReconcileOutcome> {
+    reconcile_pass(pool, sessions_path, max_bytes).await.map(|(outcome, _)| outcome)
+}
+
+/// One pass, also returning the file's mtime as read under the flock.
+async fn reconcile_pass(
+    pool: &SqlitePool,
+    sessions_path: &Path,
+    max_bytes: u64,
+) -> Result<(ReconcileOutcome, Option<SystemTime>)> {
+    let _pass = PASS.lock().await;
+    let dir = sessions_path.parent().context("sessions.json has no parent directory")?;
+    let flock = acquire_sessions_flock(dir, SESSIONS_FLOCK_BOUND).await?;
+
+    let path = sessions_path.to_path_buf();
+    let (mtime, content) = tokio::task::spawn_blocking(move || {
+        let mtime = file_mtime(&path);
+        read_capped(&path, max_bytes).map(|content| (mtime, content))
+    })
+    .await
+    .context("sessions.json read task")??;
+    let (sessions, rejected) = match content {
+        None => (Vec::new(), 0),
+        Some(content) => parse_records(&content)
+            .with_context(|| format!("could not parse {}", sessions_path.display()))?,
+    };
+
+    let source = sessions_path.to_string_lossy().into_owned();
+    let outcome =
+        SessionsRepo::complete_reconcile(pool, &source, &sessions, rejected, SystemClock.now_ms())
+            .await?;
+    drop(flock);
+
+    for conflict in &outcome.conflicts {
+        tracing::warn!(
+            session_id = %conflict.session_id,
+            holder = %conflict.holder,
+            tmux_session_name = %conflict.tmux_session_name.escape_debug(),
+            "sessions.json session not reconciled: its tmux name belongs to another session in the table"
+        );
+    }
+    Ok((outcome, mtime))
+}
+
+/// Take the `sessions.json` flock in `dir`, retrying for at most `bound`.
+///
+/// # Errors
+///
+/// Returns an error when the flock is still held after `bound`, or when
+/// taking it fails for another reason.
+pub async fn acquire_sessions_flock(dir: &Path, bound: Duration) -> Result<std::fs::File> {
+    let deadline = tokio::time::Instant::now() + bound;
+    loop {
+        let attempt = dir.to_path_buf();
+        let got = tokio::task::spawn_blocking(move || {
+            ainb_fleet_core::session_registry::try_lock_sessions_store_at(&attempt)
+        })
+        .await
+        .context("sessions.json lock task")??;
+        if let Some(flock) = got {
+            return Ok(flock);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "sessions.json lock in {} still held after {} ms",
+                dir.display(),
+                bound.as_millis()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Runs a reconcile pass when `sessions.json` has changed since the last
+/// successful one, or when the last one failed.
+#[derive(Debug)]
+pub struct ReconcileWatch {
+    path: std::path::PathBuf,
+    max_bytes: u64,
+    /// The mtime the last successful pass read, `None` for a missing file;
+    /// the outer `None` means no pass has succeeded yet.
+    reconciled: Option<Option<SystemTime>>,
+}
+
+impl ReconcileWatch {
+    /// Watch `sessions_path` with the default size cap.
+    #[must_use]
+    pub fn new(sessions_path: &Path) -> Self {
+        Self::with_cap(sessions_path, SESSIONS_JSON_MAX_BYTES)
+    }
+
+    /// Watch `sessions_path` with an explicit size cap (the test seam).
+    #[must_use]
+    pub fn with_cap(sessions_path: &Path, max_bytes: u64) -> Self {
+        Self {
+            path: sessions_path.to_path_buf(),
+            max_bytes,
+            reconciled: None,
+        }
+    }
+
+    /// Run a pass if one is due. `None` means the file is unchanged since the
+    /// last successful pass and nothing ran.
+    pub async fn tick(&mut self, pool: &SqlitePool) -> Option<Result<ReconcileOutcome>> {
+        let path = self.path.clone();
+        let now = tokio::task::spawn_blocking(move || file_mtime(&path)).await.ok()?;
+        if self.reconciled == Some(now) {
+            return None;
+        }
+        Some(
+            match reconcile_pass(pool, &self.path, self.max_bytes).await {
+                Ok((outcome, mtime)) => {
+                    self.reconciled = Some(mtime);
+                    Ok(outcome)
+                }
+                Err(e) => {
+                    self.reconciled = None;
+                    Err(e)
+                }
+            },
+        )
+    }
+
+    /// Tick every [`RECONCILE_INTERVAL`] for the life of the process, logging
+    /// each pass that ran.
+    pub async fn run(mut self, pool: SqlitePool) {
+        let mut every = tokio::time::interval(RECONCILE_INTERVAL);
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            every.tick().await;
+            match self.tick(&pool).await {
+                None => {}
+                Some(Ok(outcome)) => log_reconcile(&outcome),
+                Some(Err(e)) => tracing::warn!(
+                    error = %format!("{e:#}"),
+                    "sessions.json reconcile failed; retrying on the next tick"
+                ),
+            }
+        }
+    }
+}
+
+/// Log a finished pass: quiet when it changed nothing.
+pub fn log_reconcile(outcome: &ReconcileOutcome) {
+    let m = &outcome.marker;
+    if m.imported > 0 || m.skipped > 0 || m.rejected > 0 {
+        tracing::info!(
+            imported = m.imported,
+            skipped = m.skipped,
+            rejected = m.rejected,
+            "sessions.json reconciled into the sessions table"
+        );
+    }
+}
+
+/// The file's mtime, `None` when it cannot be read (a missing file).
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// Read `path` if it exists and is at most `max_bytes`. `Ok(None)` means no
@@ -121,8 +332,8 @@ fn read_capped(path: &Path, max_bytes: u64) -> Result<Option<String>> {
         .with_context(|| format!("could not read {}", path.display()))
 }
 
-/// Parse the store into valid rows plus a count of rejected records.
-fn parse_records(content: &str) -> Result<(Vec<SessionRow>, i64)> {
+/// Parse the store into valid sessions plus a count of rejected records.
+fn parse_records(content: &str) -> Result<(Vec<FileSession>, i64)> {
     let value: serde_json::Value = serde_json::from_str(content).context("parse sessions.json")?;
     let Some(sessions) = value.get("sessions").and_then(serde_json::Value::as_object) else {
         bail!("parse sessions.json: no `sessions` object");
@@ -131,11 +342,14 @@ fn parse_records(content: &str) -> Result<(Vec<SessionRow>, i64)> {
     let mut rows = Vec::with_capacity(sessions.len());
     let mut rejected = 0_i64;
     for (tmux_key, record) in sessions {
-        match record_to_entry(tmux_key, record).and_then(|entry| {
+        match record_to_entry(tmux_key, record).and_then(|(entry, id_minted)| {
             entry.validate()?;
-            Ok(entry)
+            Ok((entry, id_minted))
         }) {
-            Ok(entry) => rows.push(entry_to_row(entry)),
+            Ok((entry, id_minted)) => rows.push(FileSession {
+                row: entry_to_row(entry),
+                id_minted,
+            }),
             Err(why) => {
                 rejected += 1;
                 tracing::warn!(
@@ -151,20 +365,21 @@ fn parse_records(content: &str) -> Result<(Vec<SessionRow>, i64)> {
 
 /// Map one file record onto the wire entry.
 ///
-/// A record with no `session_id` gets a fresh UUID, minted once here and then
-/// stored, so every later read sees the same id. A record whose `session_id`
-/// is present keeps it verbatim; if it is not a UUID, validation rejects the
-/// record rather than inventing a replacement.
+/// A record with no `session_id` gets a fresh UUID, minted here and stored by
+/// whichever write inserts it; the flag in the answer says so, because the
+/// next read mints a different one. A record whose `session_id` is present
+/// keeps it verbatim; if it is not a UUID, validation rejects the record
+/// rather than inventing a replacement.
 fn record_to_entry(
     tmux_key: &str,
     record: &serde_json::Value,
-) -> Result<WorkspaceSessionEntry, String> {
+) -> Result<(WorkspaceSessionEntry, bool), String> {
     let text = |key: &str| record.get(key).and_then(serde_json::Value::as_str);
     let flag = |key: &str| record.get(key).and_then(serde_json::Value::as_bool);
 
-    let session_id = match record.get("session_id") {
-        None | Some(serde_json::Value::Null) => uuid::Uuid::new_v4().to_string(),
-        Some(serde_json::Value::String(id)) => id.clone(),
+    let (session_id, id_minted) = match record.get("session_id") {
+        None | Some(serde_json::Value::Null) => (uuid::Uuid::new_v4().to_string(), true),
+        Some(serde_json::Value::String(id)) => (id.clone(), false),
         Some(_) => return Err("session_id is not a string".to_string()),
     };
     let created_at = match record.get("created_at") {
@@ -177,7 +392,7 @@ fn record_to_entry(
         _ => return Err("created_at is missing".to_string()),
     };
 
-    Ok(WorkspaceSessionEntry {
+    let entry = WorkspaceSessionEntry {
         session_id,
         tmux_session_name: text("tmux_session_name").unwrap_or(tmux_key).to_string(),
         worktree_path: text("worktree_path").unwrap_or_default().to_string(),
@@ -191,7 +406,8 @@ fn record_to_entry(
         model_source: text("model_source").unwrap_or("LegacyTyped").to_string(),
         codex_model: text("codex_model").map(str::to_string),
         codex_thread_id: text("codex_thread_id").map(str::to_string),
-    })
+    };
+    Ok((entry, id_minted))
 }
 
 fn entry_to_row(entry: WorkspaceSessionEntry) -> SessionRow {
