@@ -42,6 +42,7 @@
       "commit_message_cursor": 0,
       "commit_message_len": null,
       "commits": [],
+      "commits_cut": 0,
       "diff_content": [],
       "diff_lines_cut": 0,
       "diff_scroll_offset": 0,
@@ -49,6 +50,7 @@
         ""
       ],
       "file_tree_items": [],
+      "files_cut": 0,
       "is_dirty": false,
       "markdown_content": [],
       "markdown_lines_cut": 0,
@@ -160,6 +162,7 @@
       "selected_commit_index": 0,
       "selected_file_index": 0,
       "selected_tree_index": 0,
+      "tree_items_cut": 0,
       "worktree_path": "/parity/repo"
     },
     "is_current_dir_git_repo": false,
