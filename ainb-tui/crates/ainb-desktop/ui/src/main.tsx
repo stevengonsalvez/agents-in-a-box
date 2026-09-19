@@ -26,8 +26,9 @@ import { phaseOf, questionFor, type Refusal, sendInOrder } from "./answer.ts";
 import { newNotices, noticeKey } from "./notices.ts";
 import { terminal as updateDone, updateLine, type UpdatePhase } from "./update.ts";
 import { Board } from "./board.tsx";
-import { CLOSE_INBOX, OPEN_INBOX } from "./inbox.ts";
+import { CLOSE_INBOX, OPEN_INBOX, inboxCounts } from "./inbox.ts";
 import { Inbox } from "./inbox.tsx";
+import { SURFACES } from "./surfaces.ts";
 import { Review } from "./review.tsx";
 import { boardColumns } from "./board.ts";
 import { Palette } from "./palette.tsx";
@@ -317,6 +318,7 @@ function Shell() {
             store.section(host, "fleet"),
             store.section(host, "sessions"),
           ).map((column) => [column.state, column.cards.length]),
+          inbox: inboxCounts(store.section(host, "inbox")),
         });
       }
     };
@@ -351,9 +353,9 @@ function Shell() {
   const config = () => shellConfig(store, host());
   const hangar = () => shellHangar(store, host());
   /** The reducer is on its Config screen, which is the settings page. */
-  const settings = createMemo(() => shell()?.current_screen === "config");
+  const settings = createMemo(() => shell()?.current_screen === SURFACES.settings);
   /** The reducer is on its Inbox screen, which is the inbox page (D3p-c). */
-  const inboxOpen = createMemo(() => shell()?.current_screen === "inbox");
+  const inboxOpen = createMemo(() => shell()?.current_screen === SURFACES.inbox);
   const inbox = () => shellInbox(store, host());
   const inboxUnread = createMemo(() => ROOT_SELECTORS.inboxUnread(store, host()));
   const ask = () => fleet()?.ask_state;
