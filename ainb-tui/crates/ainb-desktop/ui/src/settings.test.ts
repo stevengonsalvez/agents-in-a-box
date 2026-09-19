@@ -7,8 +7,10 @@ import type { ConfigView_Serialize, HangarView_Serialize } from "../../../ainb-a
 import {
   CLOSE_SETTINGS,
   daemonRows,
+  editRefusal,
   hookHealthLines,
   OPEN_SETTINGS,
+  REDACTED,
   rowEdit,
   SET_ROW,
   settingCount,
@@ -136,6 +138,38 @@ test("an edit that does not fit the row is not sent", () => {
   assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), 1.5), null, "an integer row");
   assert.equal(rowEdit(by("ui_preferences.show_git_status"), "yes"), null, "a bool is a boolean");
   assert.equal(rowEdit(by("usage.plan.id"), "pro"), null, "a read-only row");
+  assert.equal(rowEdit(by("workspace_defaults.branch_prefix"), REDACTED), null, "the scrubbed marker is never written back");
+  assert.equal(rowEdit(by("workspace_defaults.branch_prefix"), `x${REDACTED}y`), null, "nor inside a value");
+});
+
+test("a row whose value the host runs is drawn inert, with the reason, whatever its category", () => {
+  const view = config();
+  view.config_screen_state.settings.Workspace!.push({
+    key: "ui_preferences.preferred_editor",
+    label: "Editor",
+    description: "",
+    value: { Text: "code" },
+  });
+  const rows = settingsCategories(view).flatMap((category) => category.rows);
+  const editor = rows.find((row) => row.key === "ui_preferences.preferred_editor")!;
+  assert.ok(editor.readOnly);
+  assert.match(editor.readOnlyReason!, /program the host runs/);
+  assert.equal(rowEdit(editor, "evil"), null);
+  const usage = rows.find((row) => row.key === "usage.plan.id")!;
+  assert.match(usage.readOnlyReason!, /does not edit it/);
+  assert.equal(rows.find((row) => row.key === "workspace_defaults.branch_prefix")!.readOnlyReason, null);
+});
+
+test("map keys meet their pattern, and the deny list wins over an allowed prefix", () => {
+  assert.match(editRefusal("mcp_servers.github.definition.command")!, /program the host runs/);
+  assert.match(editRefusal("container_templates.claude-dev.config.entrypoint")!, /program the host runs/);
+  assert.equal(editRefusal("acp.adapters.claude-agent-acp.permission_mode"), null);
+  assert.match(editRefusal("acp.adapters.claude-agent-acp.command")!, /program the host runs/);
+  assert.equal(editRefusal("ui_preferences.theme"), null);
+  assert.match(editRefusal("fleet.terminal")!, /program the host runs/);
+  assert.equal(editRefusal("fleet.idle_min"), null);
+  assert.match(editRefusal("no.such.row")!, /does not edit it/);
+  assert.match(editRefusal("ui_preferences")!, /does not edit it/, "a prefix needs a row under it");
 });
 
 test("opening and closing the page walk the reducer through its own rows", () => {
