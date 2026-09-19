@@ -1,8 +1,9 @@
 // The question the banner answers, and the intents that answer it. Projections
 // and sequences only: `answer.tsx` draws and sends what these return.
 //
-// Nothing here decides an answer. A pick names its option by label in one
-// `session_list.ask.pick`, which the reducer resolves against the options it
+// Nothing here decides an answer. A pick names its option by index within the
+// request, with the label the person read as the check, in one
+// `session_list.ask.pick`, which the reducer verifies against the options it
 // holds; a typed answer goes through `Intent::Text` into the reducer's own
 // composer and is sent with `session_list.ask.enter`. The verified send
 // (`AskState::send`) is the only send there is.
@@ -34,8 +35,9 @@ export interface Question {
   detail: string | null;
   /**
    * The labels a pick chooses between, in the reducer's cursor order and as
-   * the frame carries them: a pick sends one back verbatim, so the reducer's
-   * own match finds it. Trimmed for display only where they are drawn.
+   * the frame carries them: a pick names an index and sends the label there
+   * verbatim, which the reducer checks against its own option at that index.
+   * Trimmed for display only where they are drawn.
    */
   options: string[];
   /**
@@ -105,8 +107,14 @@ export function questionFor(sessions: SessionsView_Serialize | undefined): Quest
   };
 }
 
-/** How long the banner keeps a question after the last frame that carried it. */
-export const LATCH_GRACE_MS = 5_000;
+/**
+ * How long the banner keeps a question after the last frame that carried it.
+ * Long enough to bridge one bare frame between a scan apply and the next
+ * attention merge; short enough that a row with no chip does not keep the
+ * previous row's banner up with live buttons, where a click would send
+ * `session_list.select_row` first and move the selection back.
+ */
+export const LATCH_GRACE_MS = 750;
 
 /** A question the banner holds, and when a frame last carried it. */
 export interface Latched {
