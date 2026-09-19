@@ -936,15 +936,34 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
             tracing::warn!(error = %e, "fresh-home boot seed failed (daemon continues)");
         }
 
-        // One-time idempotent boot import of sessions.json (spec P6d, #1166).
+        // One-time boot import of sessions.json (spec P6d, #1166). A failure
+        // writes no marker: the daemon keeps running, `workspace/session_list`
+        // answers `import_complete: false`, and the CLI keeps reading the file,
+        // so a failed import never hides a populated file behind an empty table.
         let sessions_path = ainb_fleet_core::session_registry::sessions_json_path();
         match crate::session_import::import_sessions_if_needed(store.pool(), &sessions_path).await {
-            Ok(count) if count > 0 => {
-                tracing::info!(count, "imported sessions from sessions.json into store");
+            Ok(crate::session_import::ImportReport::Completed(marker)) => {
+                if marker.rejected > 0 {
+                    tracing::warn!(
+                        imported = marker.imported,
+                        skipped = marker.skipped,
+                        rejected = marker.rejected,
+                        "sessions.json imported; rejected records stay in the file only"
+                    );
+                } else {
+                    tracing::info!(
+                        imported = marker.imported,
+                        skipped = marker.skipped,
+                        "sessions.json imported into the sessions table"
+                    );
+                }
             }
-            Ok(_) => {}
+            Ok(crate::session_import::ImportReport::AlreadyCompleted) => {}
             Err(e) => {
-                tracing::warn!(error = %e, "sessions.json boot import failed (daemon continues)");
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "sessions.json import failed; clients keep reading the file until it succeeds"
+                );
             }
         }
 
