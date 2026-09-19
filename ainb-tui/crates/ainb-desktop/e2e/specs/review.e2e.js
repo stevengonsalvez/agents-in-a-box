@@ -71,9 +71,8 @@ describe("reviewing from the window", () => {
 
     // The session whose worktree the diff is in, selected the way a person
     // selects one.
-    const row = await $(`.session-row[data-session="${session.id}"]`);
-    await row.waitForExist({ timeout: 30_000 });
-    await row.click();
+    await $(`.session-row[data-session="${session.id}"]`).waitForExist({ timeout: 30_000 });
+    await click(`.session-row[data-session="${session.id}"]`);
 
     // The reducer builds the review for the selected session, through the
     // palette rather than through anything this spec reaches into.
@@ -87,16 +86,15 @@ describe("reviewing from the window", () => {
     // and another spec in this world has typed in it before now: typed keys
     // would land after whatever it still held.
     await query.setValue("session_list.git");
-    const command = await $('.palette-row[data-row="command:session_list.git"]');
-    await command.waitForExist({ timeout: 30_000 });
-    await command.click();
+    await $('.palette-row[data-row="command:session_list.git"]').waitForExist({ timeout: 30_000 });
+    await click('.palette-row[data-row="command:session_list.git"]');
 
     // The review tab, and the first row drawn: the wall clock across this is a
     // real window's first render of a diff at the bound, which is the figure
     // #1221 asks for and the server render in `review.bound.test.ts` cannot
     // give.
     const started = Date.now();
-    await $(".review-tab .tab-title").click();
+    await click(".review-tab .tab-title");
     await browser.waitUntil(async () => (await $$(".review-row")).length > 0, {
       timeout: 120_000,
       timeoutMsg: "the review tab drew no rows",
@@ -127,22 +125,7 @@ describe("reviewing from the window", () => {
     const already = await openFile();
     const wanted = drawn.find((path) => path !== already);
     assert.ok(wanted, `every drawn file is already the open one: ${drawn}`);
-    // Re-found immediately before the click, and clicked through a retry: the
-    // window redraws this list on every frame the host sends, so an element
-    // read a moment ago can be detached by the time the click lands, and a
-    // stale reference is the runner's report of a redraw, not of a bug.
-    await browser.waitUntil(
-      async () => {
-        try {
-          await $(`.review-file[data-file="${wanted}"]`).click();
-          return true;
-        } catch (error) {
-          if (!/stale element|no longer attached/i.test(String(error))) throw error;
-          return false;
-        }
-      },
-      { timeout: 30_000, timeoutMsg: `the row for ${wanted} kept being redrawn under the click` },
-    );
+    await click(`.review-file[data-file="${wanted}"]`, 30_000);
     await browser.waitUntil(async () => (await openFile()) === wanted, {
       timeout: 30_000,
       timeoutMsg: `the frame never named ${wanted} as the open file`,
@@ -153,10 +136,10 @@ describe("reviewing from the window", () => {
     // second one is the window alone, with the frame already in its store: the
     // tab is left and taken again, so the components mount over a section that
     // has not changed. The gap between the two is what #1221 has to split.
-    await $(".board-tab .tab-title").click();
+    await click(".board-tab .tab-title");
     await $(".board").waitForExist({ timeout: 60_000 });
     const remountStarted = Date.now();
-    await $(".review-tab .tab-title").click();
+    await click(".review-tab .tab-title");
     await browser.waitUntil(async () => (await $$(".review-row")).length > 0, {
       timeout: 120_000,
       timeoutMsg: "the review tab drew no rows the second time",
@@ -172,6 +155,34 @@ describe("reviewing from the window", () => {
     );
   });
 });
+
+/**
+ * Click `selector`, re-finding it each try until it lands.
+ *
+ * Every list in this window is redrawn on every frame the host sends, and a
+ * frame arrives whenever anything moves: an element found a moment ago can be
+ * detached before the click reaches it, which WebDriver reports as a stale
+ * reference. That is the window working, not failing, so the click waits it
+ * out and only the absence of the element is a failure.
+ */
+async function click(selector, timeout = 60_000) {
+  let last = null;
+  await browser.waitUntil(
+    async () => {
+      try {
+        const element = await $(selector);
+        if (!(await element.isExisting())) return false;
+        await element.click();
+        return true;
+      } catch (error) {
+        last = error;
+        if (!/stale element|no longer attached|not interactable/i.test(String(error))) throw error;
+        return false;
+      }
+    },
+    { timeout, timeoutMsg: () => `${selector} never took a click: ${last}` },
+  );
+}
 
 /** The file the frame says is open, as the window draws it. */
 async function openFile() {
