@@ -321,10 +321,16 @@ async fn a_client_from_the_future_is_refused_as_incompatible() {
     else {
         panic!("a PROTOCOL_INCOMPATIBLE refusal decoded as {decoded:?}");
     };
-    assert_eq!(daemon, ainb_hangar_proto::protocol::ProtocolRange::supported());
+    assert_eq!(
+        daemon,
+        ainb_hangar_proto::protocol::ProtocolRange::supported()
+    );
     assert_eq!(ours, client);
     assert_eq!(daemon_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
-    assert!(message.contains("restart from the newer binary"), "{message}");
+    assert!(
+        message.contains("restart from the newer binary"),
+        "{message}"
+    );
     assert!(
         !ainb_hangar_client::DaemonError::Incompatible {
             daemon,
