@@ -226,7 +226,7 @@ export function SettingsPage(props: Props) {
 function Widget(props: { row: SettingsRow; onInput(input: string | number | boolean): void }) {
   const row = () => props.row;
   return (
-    <Show when={!row().readOnly} fallback={<span class="readonly-note">read-only</span>}>
+    <Show when={!row().readOnly} fallback={<span class="readonly-note">read-only: {row().readOnlyReason}</span>}>
       <Show when={row().kind === "bool"}>
         <input
           type="checkbox"
@@ -250,8 +250,11 @@ function Widget(props: { row: SettingsRow; onInput(input: string | number | bool
           onChange={(event) => props.onInput(event.currentTarget.value)}
         />
       </Show>
+      {/* Empty, with the frame's value as the placeholder: that value is scrubbed
+          and cut for the frame, so prefilling it would write the marker or a
+          truncated value over the real one. */}
       <Show when={row().kind === "text"}>
-        <input type="text" value={row().value} onChange={(event) => props.onInput(event.currentTarget.value)} />
+        <input type="text" placeholder={row().value} onChange={(event) => props.onInput(event.currentTarget.value)} />
       </Show>
       <Show when={row().kind === "secret"}>
         <input
