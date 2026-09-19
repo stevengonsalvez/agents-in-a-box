@@ -971,7 +971,6 @@ tmux.selected_other_tmux_index
 tmux.selected_other_tmux_sessions[]
 usage.absent
 usage.failure
-usage.received_at_ms
 usage.summary.daily[].bucket.cache_creation_tokens
 usage.summary.daily[].bucket.cache_read_tokens
 usage.summary.daily[].bucket.call_count
@@ -984,8 +983,6 @@ usage.summary.daily[].bucket.session_count
 usage.summary.daily[].date
 usage.summary.daily_cut
 usage.summary.detail
-usage.summary.end_at
-usage.summary.generated_at
 usage.summary.models[].bucket.cache_creation_tokens
 usage.summary.models[].bucket.cache_read_tokens
 usage.summary.models[].bucket.call_count
@@ -1020,7 +1017,6 @@ usage.summary.providers[].bucket.reasoning_tokens
 usage.summary.providers[].bucket.session_count
 usage.summary.providers[].name
 usage.summary.providers_cut
-usage.summary.start_at
 usage.summary.state
 usage.summary.totals.cache_creation_tokens
 usage.summary.totals.cache_read_tokens
