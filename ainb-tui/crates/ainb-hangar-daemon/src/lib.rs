@@ -967,24 +967,18 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
             }
         }
 
-        // P6e: the repeatable reconcile. One pass now, before the RPC socket
-        // is up, so a client's first `workspace/session_list` already sees the
-        // file sessions written while the table was dark; then a watcher runs
-        // a pass whenever the file's mtime moves. A failed pass leaves
-        // `import_complete` false until one succeeds; the daemon carries on.
-        // Like the scheduler below, the watcher ends with the process.
-        {
-            let mut watch = crate::session_import::ReconcileWatch::new(&sessions_path);
-            match watch.tick(store.pool()).await {
-                Some(Ok(outcome)) => crate::session_import::log_reconcile(&outcome),
-                Some(Err(e)) => tracing::error!(
-                    error = %format!("{e:#}"),
-                    "sessions.json reconcile failed at boot; the watcher retries it"
-                ),
-                None => {}
-            }
-            tokio::spawn(watch.run(store.pool().clone()));
-        }
+        // P6e: the repeatable reconcile runs in the background, never on the
+        // boot path. Its first tick is immediate, so the first pass starts
+        // now, but the RPC socket does not wait for it: a pass can wait up to
+        // its flock bound on a CLI holding sessions.json.lock, and boot must
+        // not. Until that pass commits, `workspace/session_list` answers
+        // `import_complete: false` and clients stay on the file, which is
+        // what they do anyway while the capability is dark. The watcher then
+        // runs a pass whenever the file changes, and ends with the process
+        // like the scheduler below.
+        tokio::spawn(
+            crate::session_import::ReconcileWatch::new(&sessions_path).run(store.pool().clone()),
+        );
 
         // P8.5: the in-memory health stats collector — shared between the RPC server
         // (which snapshots the rolling throughput ring for the `hangar/daemon_health`
