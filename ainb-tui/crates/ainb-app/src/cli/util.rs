@@ -5,6 +5,7 @@
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -18,9 +19,19 @@ use ainb_hangar_proto::sessions::{
 };
 
 /// Convert a proto [`WorkspaceSessionEntry`] into local [`SessionMetadata`].
-#[must_use]
-pub fn entry_to_metadata(entry: &WorkspaceSessionEntry) -> SessionMetadata {
-    let session_id = Uuid::parse_str(&entry.session_id).unwrap_or_else(|_| Uuid::new_v4());
+///
+/// # Errors
+///
+/// Returns why the entry cannot be used when its `session_id` is not a UUID.
+/// The caller skips such a row; it never invents an id for it, because an
+/// id minted on read would differ on every read and match no worktree.
+pub fn entry_to_metadata(entry: &WorkspaceSessionEntry) -> Result<SessionMetadata, String> {
+    let session_id = Uuid::parse_str(&entry.session_id).map_err(|e| {
+        format!(
+            "session {:?} has a non-UUID id: {e}",
+            entry.tmux_session_name
+        )
+    })?;
     let created_at = DateTime::from_timestamp_millis(entry.created_at).unwrap_or_else(Utc::now);
     let agent_type = serde_json::from_value(serde_json::Value::String(entry.agent_type.clone()))
         .unwrap_or(SessionAgentType::Claude);
@@ -32,7 +43,7 @@ pub fn entry_to_metadata(entry: &WorkspaceSessionEntry) -> SessionMetadata {
         .as_ref()
         .and_then(|cm| serde_json::from_value(serde_json::Value::String(cm.clone())).ok());
 
-    SessionMetadata {
+    Ok(SessionMetadata {
         session_id,
         tmux_session_name: entry.tmux_session_name.clone(),
         worktree_path: PathBuf::from(&entry.worktree_path),
@@ -46,17 +57,17 @@ pub fn entry_to_metadata(entry: &WorkspaceSessionEntry) -> SessionMetadata {
         model_source,
         codex_model,
         codex_thread_id: entry.codex_thread_id.clone(),
-    }
+    })
 }
 
 /// Convert local [`SessionMetadata`] into proto [`WorkspaceSessionEntry`].
 #[must_use]
 pub fn metadata_to_entry(meta: &SessionMetadata) -> WorkspaceSessionEntry {
-    let agent_type = serde_json::to_value(&meta.agent_type)
+    let agent_type = serde_json::to_value(meta.agent_type)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_else(|| "Claude".to_string());
-    let model_source = serde_json::to_value(&meta.model_source)
+    let model_source = serde_json::to_value(meta.model_source)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_else(|| "LegacyTyped".to_string());
@@ -82,14 +93,165 @@ pub fn metadata_to_entry(meta: &SessionMetadata) -> WorkspaceSessionEntry {
     }
 }
 
-async fn try_daemon_client() -> Option<DaemonClient> {
-    let client = DaemonClient::from_env().ok()?;
-    let hello = client.hello().await.ok()?;
-    if hello.advertises(CAP_WORKSPACE_SESSIONS) {
-        Some(client)
-    } else {
-        None
+/// Where this process reads and writes sessions.
+///
+/// ```text
+/// resolve ──▶ hello advertises hangar.workspace.sessions?
+///               └─▶ session_list says import_complete? ──▶ Daemon
+///             anything else ─────────────────────────────▶ File
+/// ```
+///
+/// Decided once per process by [`session_source`], so one command cannot
+/// read from the table and write to the file. On [`Daemon`](Self::Daemon)
+/// the table is authoritative and `sessions.json` is never written; a daemon
+/// that fails later in the command is an error, not a fallback. On
+/// [`File`](Self::File) the flocked `SessionStore` path is used unchanged.
+#[derive(Debug, Clone)]
+pub enum SessionSource {
+    /// The daemon's `sessions` table, behind RPC.
+    Daemon(DaemonClient),
+    /// `~/.agents-in-a-box/sessions.json`.
+    File,
+}
+
+fn daemon_io_error(what: &str, error: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(format!("daemon session {what} failed: {error}"))
+}
+
+impl SessionSource {
+    /// Decide against the daemon named by the environment.
+    pub async fn resolve() -> Self {
+        match DaemonClient::from_env() {
+            Ok(client) => Self::resolve_with(client).await,
+            Err(_) => Self::File,
+        }
     }
+
+    /// Decide against the daemon at `socket` with `token` (the test seam).
+    pub async fn resolve_at(socket: PathBuf, token: String) -> Self {
+        Self::resolve_with(DaemonClient::with_parts(socket, token)).await
+    }
+
+    async fn resolve_with(client: DaemonClient) -> Self {
+        let Ok(hello) = client.hello().await else {
+            return Self::File;
+        };
+        if !hello.advertises(CAP_WORKSPACE_SESSIONS) {
+            return Self::File;
+        }
+        let probe = WorkspaceSessionListParams {
+            workspace_name: None,
+            limit: Some(1),
+        };
+        match client.workspace_session_list(probe).await {
+            Ok(res) if res.import_complete => Self::Daemon(client),
+            Ok(_) => {
+                eprintln!(
+                    "Warning: the daemon has not finished importing sessions.json; \
+                     reading the file this run."
+                );
+                Self::File
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: daemon session list failed ({e}); reading sessions.json this run."
+                );
+                Self::File
+            }
+        }
+    }
+
+    /// Read the whole store from this source.
+    ///
+    /// # Errors
+    ///
+    /// On [`Daemon`](Self::Daemon), when the RPC fails. The file is not read
+    /// instead: the process already decided where its sessions live.
+    pub async fn load(&self) -> std::io::Result<SessionStore> {
+        let client = match self {
+            Self::File => return Ok(SessionStore::load()),
+            Self::Daemon(client) => client,
+        };
+        let res = client
+            .workspace_session_list(WorkspaceSessionListParams::default())
+            .await
+            .map_err(|e| daemon_io_error("list", e))?;
+        if res.truncated {
+            eprintln!(
+                "Warning: the daemon returned only the newest {} sessions.",
+                res.sessions.len()
+            );
+        }
+        let mut store = SessionStore::default();
+        for entry in &res.sessions {
+            match entry_to_metadata(entry) {
+                Ok(meta) => {
+                    store.sessions.insert(meta.tmux_session_name.clone(), meta);
+                }
+                Err(why) => eprintln!("Warning: skipping {why}"),
+            }
+        }
+        Ok(store)
+    }
+
+    /// Apply `f` to the store and persist the difference.
+    ///
+    /// On [`Daemon`](Self::Daemon) the store is read fresh, `f` runs, and only
+    /// what changed is written: one delete per session id that disappeared,
+    /// one upsert per session that is new or different. The `sessions.json`
+    /// lock is held across the whole read-modify-write so two CLI processes
+    /// cannot interleave, as on the file path.
+    ///
+    /// # Errors
+    ///
+    /// The first failed RPC, so a caller such as `ainb run` can roll back.
+    pub async fn mutate<F>(&self, f: F) -> std::io::Result<()>
+    where
+        F: FnOnce(&mut SessionStore),
+    {
+        let client = match self {
+            Self::File => return SessionStore::mutate(f),
+            Self::Daemon(client) => client,
+        };
+        let _guard = SessionStore::lock()?;
+        let mut store = self.load().await?;
+        let before = entries_by_id(&store);
+        f(&mut store);
+        let after = entries_by_id(&store);
+
+        for (id, _) in before.iter().filter(|(id, _)| !after.contains_key(*id)) {
+            client
+                .workspace_session_delete(WorkspaceSessionDeleteParams {
+                    session_id: Some(id.to_string()),
+                    tmux_session_name: None,
+                })
+                .await
+                .map_err(|e| daemon_io_error("delete", e))?;
+        }
+        for (id, entry) in &after {
+            if before.get(id) == Some(entry) {
+                continue;
+            }
+            client
+                .workspace_session_upsert(WorkspaceSessionUpsertParams {
+                    session: entry.clone(),
+                })
+                .await
+                .map_err(|e| daemon_io_error("write", e))?;
+        }
+        Ok(())
+    }
+}
+
+fn entries_by_id(store: &SessionStore) -> HashMap<Uuid, WorkspaceSessionEntry> {
+    store.sessions.values().map(|m| (m.session_id, metadata_to_entry(m))).collect()
+}
+
+static SESSION_SOURCE: tokio::sync::OnceCell<SessionSource> = tokio::sync::OnceCell::const_new();
+
+/// This process's [`SessionSource`], resolved on first use and then fixed.
+pub async fn session_source() -> &'static SessionSource {
+    SESSION_SOURCE.get_or_init(SessionSource::resolve).await
 }
 
 fn run_async<F: std::future::Future<Output = T> + Send, T: Send>(fut: F) -> T {
@@ -111,82 +273,42 @@ fn run_async<F: std::future::Future<Output = T> + Send, T: Send>(fut: F) -> T {
     }
 }
 
-/// Load session store through the daemon RPC when available, falling back to disk.
-pub async fn load_session_store_async() -> SessionStore {
-    if let Some(client) = try_daemon_client().await {
-        if let Ok(res) = client.workspace_session_list(WorkspaceSessionListParams::default()).await
-        {
-            let mut store = SessionStore::default();
-            for entry in res.sessions {
-                let meta = entry_to_metadata(&entry);
-                store.sessions.insert(meta.tmux_session_name.clone(), meta);
-            }
-            return store;
-        }
-    }
-    SessionStore::load()
+/// Load the session store from this process's [`session_source`].
+///
+/// # Errors
+///
+/// When the daemon was chosen and its RPC fails.
+pub async fn load_session_store_async() -> std::io::Result<SessionStore> {
+    session_source().await.load().await
 }
 
-/// Load session store through the daemon RPC when available, falling back to disk (sync).
-#[must_use]
-pub fn load_session_store() -> SessionStore {
+/// [`load_session_store_async`] from sync code.
+///
+/// # Errors
+///
+/// As [`load_session_store_async`].
+pub fn load_session_store() -> std::io::Result<SessionStore> {
     run_async(load_session_store_async())
 }
 
-/// Mutate session store through the daemon RPC when available, falling back to disk.
-pub async fn mutate_session_store_async<F>(f: F) -> Result<(), std::io::Error>
+/// Mutate the session store through this process's [`session_source`].
+///
+/// # Errors
+///
+/// The lock, file or RPC failure; never swallowed.
+pub async fn mutate_session_store_async<F>(f: F) -> std::io::Result<()>
 where
     F: FnOnce(&mut SessionStore),
 {
-    if let Some(client) = try_daemon_client().await {
-        let mut store =
-            match client.workspace_session_list(WorkspaceSessionListParams::default()).await {
-                Ok(res) => {
-                    let mut s = SessionStore::default();
-                    for entry in res.sessions {
-                        let meta = entry_to_metadata(&entry);
-                        s.sessions.insert(meta.tmux_session_name.clone(), meta);
-                    }
-                    s
-                }
-                Err(_) => SessionStore::load(),
-            };
-
-        let before_keys: std::collections::HashSet<String> =
-            store.sessions.keys().cloned().collect();
-        f(&mut store);
-        let after_keys: std::collections::HashSet<String> =
-            store.sessions.keys().cloned().collect();
-
-        // Deleted sessions
-        for removed in before_keys.difference(&after_keys) {
-            let _ = client
-                .workspace_session_delete(WorkspaceSessionDeleteParams {
-                    session_id: None,
-                    tmux_session_name: Some(removed.clone()),
-                })
-                .await;
-        }
-
-        // Added or updated sessions
-        for meta in store.sessions.values() {
-            let _ = client
-                .workspace_session_upsert(WorkspaceSessionUpsertParams {
-                    session: metadata_to_entry(meta),
-                })
-                .await;
-        }
-
-        // Downgrade backup to sessions.json
-        let _ = SessionStore::mutate(|s| *s = store);
-        return Ok(());
-    }
-
-    SessionStore::mutate(f)
+    session_source().await.mutate(f).await
 }
 
-/// Mutate session store through the daemon RPC when available, falling back to disk (sync).
-pub fn mutate_session_store<F>(f: F) -> Result<(), std::io::Error>
+/// [`mutate_session_store_async`] from sync code.
+///
+/// # Errors
+///
+/// As [`mutate_session_store_async`].
+pub fn mutate_session_store<F>(f: F) -> std::io::Result<()>
 where
     F: FnOnce(&mut SessionStore) + Send,
 {
@@ -202,7 +324,7 @@ where
 ///
 /// Returns an error if no match is found or if multiple sessions match.
 pub fn find_session(id_or_name: &str) -> Result<SessionMetadata> {
-    let store = load_session_store();
+    let store = load_session_store()?;
     find_session_in_store(id_or_name, &store)
 }
 
@@ -411,6 +533,20 @@ mod tests {
         let result = find_session_in_store("nonexistent", &store);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No session found"));
+    }
+
+    #[test]
+    fn a_non_uuid_entry_is_refused_not_given_a_fresh_id() {
+        let mut entry = metadata_to_entry(&create_test_store().sessions["tmux_project-a"]);
+        entry.session_id = "01J8Z3K6Q2N4T5V7W9X0Y1Z2A3".to_string();
+        assert!(entry_to_metadata(&entry).is_err());
+    }
+
+    #[test]
+    fn entry_round_trip_keeps_the_id() {
+        let meta = create_test_store().sessions["tmux_project-a"].clone();
+        let back = entry_to_metadata(&metadata_to_entry(&meta)).unwrap();
+        assert_eq!(back.session_id, meta.session_id);
     }
 
     #[test]
