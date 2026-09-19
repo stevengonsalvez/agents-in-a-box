@@ -163,6 +163,9 @@ ainb-hangar-daemon = { path = "../ainb-hangar-daemon", features = ["test-support
 # ACP transcript kind exhaustively against the desktop frame's ChunkKind.
 ainb-acp = { path = "../ainb-acp" }
 tempfile = "3"
+# Already in the tree through ainb-app. Named here so the update tests can
+# hash a served body the way the downloader does.
+sha2 = "0.10"
 
 [lints]
 workspace = true
