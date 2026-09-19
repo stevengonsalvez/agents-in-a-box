@@ -15,10 +15,10 @@ EXPECT="a click on the log label of the session tab strip makes log the active t
 # strip_row <session>: the 1-based screen row the tab strip is drawn on.
 strip_row() { row_of "$1" 'preview │ ask │ err │'; }
 
-# active_tab <session>: the strip label drawn underlined, read from the ANSI
-# capture. Only the active tab carries the underline attribute.
+# active_tab <session> <row>: the strip label drawn underlined on <row>, read
+# from the ANSI capture. Only the active tab carries the underline attribute.
 active_tab() {
-  pane_text "$1" -e | sed -n "$(strip_row "$1")p" | python3 -c '
+  pane_text "$1" -e | sed -n "${2}p" | python3 -c '
 import re, sys
 line = sys.stdin.read()
 underline = False
@@ -45,16 +45,16 @@ for code, text in re.findall(r"\x1b\[([0-9;]*)m|([^\x1b]+)", line):
 '
 }
 
-# active_is <session> <label>
-active_is() { [[ "$(active_tab "$1")" == "$2" ]]; }
+# active_is <session> <row> <label>
+active_is() { [[ "$(active_tab "$1" "$2")" == "$3" ]]; }
 
-# active_is_not <session> <label>: a tab is active, and it is not <label>.
-active_is_not() { local now; now="$(active_tab "$1")"; [[ -n "$now" && "$now" != "$2" ]]; }
+# active_is_not <session> <row> <label>: a tab is active, and it is not <label>.
+active_is_not() { local now; now="$(active_tab "$1" "$2")"; [[ -n "$now" && "$now" != "$3" ]]; }
 
-# label_col <session> <label>: the 1-based column of <label> on the strip row.
+# label_col <session> <row> <label>: the 1-based column of <label> on <row>.
 label_col() {
-  pane_text "$1" | sed -n "$(strip_row "$1")p" \
-    | python3 -c 'import sys; line = sys.stdin.read(); i = line.find(" " + sys.argv[1] + " "); print(i + 2 if i >= 0 else "")' "$2"
+  pane_text "$1" | sed -n "${2}p" \
+    | python3 -c 'import sys; line = sys.stdin.read(); i = line.find(" " + sys.argv[1] + " "); print(i + 2 if i >= 0 else "")' "$3"
 }
 
 scenario() {
@@ -72,28 +72,28 @@ scenario() {
     return
   fi
   capture tui strip-before
-  observe "tab strip on row $row; active tab before any input: '$(active_tab tui)'"
-  check "preview is the active tab when the session list opens" active_is tui preview
+  observe "tab strip on row $row; active tab before any input: '$(active_tab tui "$row")'"
+  check "preview is the active tab when the session list opens" active_is tui "$row" preview
 
   # The click, from a clean preview.
-  col="$(label_col tui log)"
+  col="$(label_col tui "$row" log)"
   if [[ -z "$col" ]]; then
     check "the strip names a log tab" false
     return
   fi
   observe "clicking 'log' at column $col, row $row"
   click tui "$col" "$row"
-  check "a click on the log label makes log the active tab" wait_for 5 active_is tui log
-  observe "active tab after the click: '$(active_tab tui)'"
+  check "a click on the log label makes log the active tab" wait_for 5 active_is tui "$row" log
+  observe "active tab after the click: '$(active_tab tui "$row")'"
   capture tui strip-after-click
 
   # Control: the keyboard moves the same strip, and the same read sees it, so
   # a failed click above is the click, not the read.
   local before_tab
-  before_tab="$(active_tab tui)"
+  before_tab="$(active_tab tui "$row")"
   keys tui Tab
   check "tab moves the active tab off '$before_tab' (the read sees a change)" \
-    wait_for 5 active_is_not tui "$before_tab"
-  observe "active tab after tab: '$(active_tab tui)'"
+    wait_for 5 active_is_not tui "$row" "$before_tab"
+  observe "active tab after tab: '$(active_tab tui "$row")'"
   capture tui strip-after-tab
 }
