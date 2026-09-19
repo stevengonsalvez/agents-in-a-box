@@ -1343,7 +1343,12 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
                 bucket: bucket.clone(),
             }],
             projects: vec![FleetUsageProjectBucket {
-                project: seed.text("usage.projects.name", Captured),
+                // Path-shaped, as a working-directory key arrives: the frame
+                // must carry the label, never the dashed home before it.
+                project: format!(
+                    "-home-sample-src-{}",
+                    seed.text("usage.projects.name", Captured)
+                ),
                 repo: Some(seed.text("usage.projects.repo", Captured)),
                 bucket,
             }],
