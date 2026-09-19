@@ -139,9 +139,11 @@ pub enum SessionSource {
     Degraded(Option<DaemonClient>),
 }
 
-/// The bound on every session RPC [`SessionSource`] makes, and on its wait
-/// for the `sessions.json` lock. On expiry the call returns an error the
-/// caller surfaces; it never hangs a reducer or a CLI command.
+/// The bound on every session RPC [`SessionSource`] makes.
+///
+/// It also bounds the wait for the `sessions.json` lock. On expiry the call
+/// returns an error the caller surfaces; it never hangs a reducer or a CLI
+/// command.
 ///
 /// 3 s, not the 2 s the goal recommends: a daemon that has just restarted
 /// holds a session read for up to its `FIRST_PASS_WAIT` (2 s) before it
@@ -177,16 +179,18 @@ async fn within_deadline<T, E: std::fmt::Display>(
     what: &str,
     call: impl std::future::Future<Output = Result<T, E>>,
 ) -> std::io::Result<T> {
-    match tokio::time::timeout(SESSION_RPC_DEADLINE, call).await {
-        Ok(result) => result.map_err(|e| daemon_io_error(what, e)),
-        Err(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!(
-                "daemon session {what} did not answer within {} ms",
-                SESSION_RPC_DEADLINE.as_millis()
-            ),
-        )),
-    }
+    tokio::time::timeout(SESSION_RPC_DEADLINE, call).await.map_or_else(
+        |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "daemon session {what} did not answer within {} ms",
+                    SESSION_RPC_DEADLINE.as_millis()
+                ),
+            ))
+        },
+        |result| result.map_err(|e| daemon_io_error(what, e)),
+    )
 }
 
 /// Take the `sessions.json` lock, waiting at most [`SESSION_RPC_DEADLINE`].
@@ -246,9 +250,10 @@ fn build_advertises() -> bool {
 #[cfg(any(test, feature = "test-support"))]
 static TEST_ADVERTISES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Make this process's [`SessionSource::resolve`] treat the sessions
-/// capability as compiled in, before the flip does it for real. Test builds
-/// only; the daemon side is `advertise_workspace_sessions_for_tests`.
+/// Make [`SessionSource::resolve`] treat the sessions capability as built in.
+///
+/// For tests before the flip does it for real; test builds only. The daemon
+/// side is `advertise_workspace_sessions_for_tests`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn advertise_workspace_sessions_for_tests(on: bool) {
     TEST_ADVERTISES.store(on, std::sync::atomic::Ordering::SeqCst);
@@ -269,12 +274,11 @@ impl SessionSource {
         if kill_switch_says_file() || !build_advertises() {
             return Self::File;
         }
-        match DaemonClient::from_env() {
-            Ok(client) => Self::resolve_with(client).await,
-            Err(_) => {
-                degraded_notice();
-                Self::Degraded(None)
-            }
+        if let Ok(client) = DaemonClient::from_env() {
+            Self::resolve_with(client).await
+        } else {
+            degraded_notice();
+            Self::Degraded(None)
         }
     }
 
@@ -291,12 +295,9 @@ impl SessionSource {
     }
 
     async fn resolve_with(client: DaemonClient) -> Self {
-        let hello = match within_deadline("hello", client.hello()).await {
-            Ok(hello) => hello,
-            Err(_) => {
-                degraded_notice();
-                return Self::Degraded(Some(client));
-            }
+        let Ok(hello) = within_deadline("hello", client.hello()).await else {
+            degraded_notice();
+            return Self::Degraded(Some(client));
         };
         if !hello.advertises(CAP_WORKSPACE_SESSIONS) {
             // A daemon from before the sessions table: it will never serve
@@ -319,7 +320,7 @@ impl SessionSource {
     /// Whether sessions are on the file only because the daemon is not up:
     /// the state a surface shows a notice for.
     #[must_use]
-    pub fn is_degraded(&self) -> bool {
+    pub const fn is_degraded(&self) -> bool {
         matches!(self, Self::Degraded(_))
     }
 
@@ -517,13 +518,13 @@ fn write_file_rows(
 /// caller's lock.
 fn restore_file(before: Option<&[u8]>) -> std::io::Result<()> {
     let path = SessionStore::storage_path();
-    match before {
-        Some(bytes) => crate::config::write_atomic(&path, &String::from_utf8_lossy(bytes)),
-        None => match std::fs::remove_file(&path) {
+    before.map_or_else(
+        || match std::fs::remove_file(&path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         },
-    }
+        |bytes| crate::config::write_atomic(&path, &String::from_utf8_lossy(bytes)),
+    )
 }
 
 /// Apply the row changes to the daemon's table, each RPC under
@@ -574,21 +575,22 @@ pub async fn session_source() -> SessionSource {
     let cell = SESSION_SOURCE
         .get_or_init(|| async { std::sync::RwLock::new(SessionSource::resolve().await) })
         .await;
-    cell.read().unwrap_or_else(|p| p.into_inner()).clone()
+    cell.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
-/// Try once to move this process from [`Degraded`](SessionSource::Degraded)
-/// to [`Daemon`](SessionSource::Daemon): reach the daemon, check it speaks
-/// the capability, ask it to reconcile (so the sessions written to the file
-/// while degraded are in the table) and wait for that pass, then check the
-/// table is ready. Returns whether the process is on the daemon now.
+/// Try once to move this process from `Degraded` to `Daemon`.
+///
+/// Reach the daemon, check it speaks the capability, ask it to reconcile (so
+/// the sessions written to the file while degraded are in the table) and
+/// wait for that pass, then check the table is ready. Returns whether the
+/// process is on the daemon now.
 ///
 /// The move is made once; nothing moves the process back.
 pub async fn leave_degraded() -> bool {
     let cell = SESSION_SOURCE
         .get_or_init(|| async { std::sync::RwLock::new(SessionSource::resolve().await) })
         .await;
-    let current = cell.read().unwrap_or_else(|p| p.into_inner()).clone();
+    let current = cell.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     let SessionSource::Degraded(client) = current else {
         return matches!(current, SessionSource::Daemon(_));
     };
@@ -598,7 +600,7 @@ pub async fn leave_degraded() -> bool {
     let Some(next) = SessionSource::leave_degraded_with(client).await else {
         return false;
     };
-    let mut slot = cell.write().unwrap_or_else(|p| p.into_inner());
+    let mut slot = cell.write().unwrap_or_else(std::sync::PoisonError::into_inner);
     if slot.is_degraded() {
         *slot = next;
     }
@@ -638,10 +640,12 @@ pub fn reresolve_delays() -> impl Iterator<Item = Duration> {
         .chain(std::iter::repeat(Duration::from_secs(16)))
 }
 
-/// For a long-lived process (TUI, desktop, `ainb web`): while this process
-/// is degraded, retry [`leave_degraded`] on [`reresolve_delays`], and return
-/// once it is on the daemon or was never degraded. A CLI command does not
-/// call this; it ends.
+/// Retry [`leave_degraded`] on [`reresolve_delays`] while this process is
+/// degraded.
+///
+/// For a long-lived process (TUI, desktop, `ainb web`); returns once it is
+/// on the daemon or was never degraded. A CLI command does not call this;
+/// it ends.
 pub async fn reresolve_while_degraded() {
     if !session_source().await.is_degraded() {
         return;
