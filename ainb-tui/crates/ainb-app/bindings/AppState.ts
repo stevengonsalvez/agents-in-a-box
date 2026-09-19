@@ -5369,12 +5369,6 @@ export type UsageState =
 /**  One `fleet/usage_summary` reply, bounded. */
 export type UsageSummaryFrame = {
 	state: UsageState,
-	/**  When the daemon generated the summary, epoch ms. */
-	generated_at: number | null,
-	/**  Inclusive window start, epoch ms. */
-	start_at: number | null,
-	/**  Exclusive window end, epoch ms. */
-	end_at: number | null,
 	/**  `None` while scanning: never a synthesised zero. */
 	totals: UsageBucketFrame | null,
 	/**  Oldest first, at most [`USAGE_MAX_DAILY`]. */
@@ -5406,8 +5400,6 @@ export type UsageView = {
 	 *  Scrubbed.
 	 */
 	failure: string | null,
-	/**  The local epoch-ms clock the summary was received at. */
-	received_at_ms: number | null,
 	summary: UsageSummaryFrame | null,
 };
 
