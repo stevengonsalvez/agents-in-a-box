@@ -529,16 +529,27 @@ struct SessionsView<'a> {
 
 impl<'a> From<&'a SessionsSection> for SessionsView<'a> {
     fn from(section: &'a SessionsSection) -> Self {
+        Self::showing(section, section.session_filter)
+    }
+}
+
+impl<'a> SessionsView<'a> {
+    /// The view with the rows `filter` shows. The frame passes the section's
+    /// own filter; a surface that is not the TUI passes its own (#1180).
+    fn showing(section: &'a SessionsSection, filter: crate::app::state::SessionFilter) -> Self {
+        // A selected row the filter hides is not on the frame, so the frame
+        // must not name it: cycling the filter does not move the selection.
         let selected_session_id = section
             .selected_workspace_index
             .and_then(|workspace| section.workspaces.get(workspace))
             .zip(section.selected_session_index)
             .and_then(|(workspace, session)| workspace.sessions.get(session))
+            .filter(|session| filter.passes(session))
             .map(|session| session.id);
         Self {
             workspaces: VisibleWorkspaces {
                 workspaces: &section.workspaces,
-                filter: section.session_filter,
+                filter,
             },
             selected_workspace_index: &section.selected_workspace_index,
             selected_session_id,
@@ -550,6 +561,23 @@ impl<'a> From<&'a SessionsSection> for SessionsView<'a> {
             favorite_workspace_paths: &section.favorite_workspace_paths,
         }
     }
+}
+
+/// The Sessions section as its frame body would be under the `All` filter:
+/// every session row, whatever filter the TUI's Shift+F left persisted.
+///
+/// The filter is a fact about the TUI's renderer, not about the sessions, so a
+/// surface that lists sessions for another purpose (the web dashboard,
+/// `ainb list --frame`, the web's attach lookup) reads this. It goes through
+/// the same view as the frame, so nothing the frame withholds or scrubs
+/// reaches it either.
+#[must_use]
+pub fn every_session_json(state: &AppState) -> serde_json::Value {
+    serde_json::to_value(SessionsView::showing(
+        &state.sessions,
+        crate::app::state::SessionFilter::All,
+    ))
+    .expect("a section view always serialises to JSON")
 }
 
 /// The workspaces with only the session rows `filter` shows, in list order.
