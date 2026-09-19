@@ -801,7 +801,7 @@ pub const INBOX_WORKSPACE_ID: &str = "default";
 /// Populated by a host-owned reader (the host owns the socket); this crate
 /// only reduces. The section kept its place, empty, from the extraction
 /// until the screen came back, so nothing renumbered.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct InboxSection {
     /// The rows a surface draws, newest first, already bounded and scrubbed.
     pub entries: Vec<ainb_hangar_proto::events::InboxEntryRow>,
@@ -822,9 +822,28 @@ pub struct InboxSection {
     pub summaries_cut: usize,
     /// The local clock when the last read landed, epoch milliseconds.
     pub received_at_ms: i64,
+    /// The first row a screen draws, an index into `entries`, moved by the
+    /// reducer one row at a time and bounded by it: a read that shrinks the
+    /// list pulls it back, so no screen draws from past the end. Framed like
+    /// the review tab's scroll, so a mirrored surface draws the same window.
+    pub scroll: usize,
 }
 
 impl InboxSection {
+    /// Move `scroll` by `delta` rows, bounded at the top and the last row.
+    /// True when it moved.
+    pub fn scroll_by(&mut self, delta: i32) -> bool {
+        let before = self.scroll;
+        self.scroll = self.scroll.saturating_add_signed(delta as isize);
+        self.clamp_scroll();
+        self.scroll != before
+    }
+
+    /// Keep `scroll` inside `entries`.
+    fn clamp_scroll(&mut self) {
+        self.scroll = self.scroll.min(self.entries.len().saturating_sub(1));
+    }
+
     /// Fold one read: bound it, scrub it, count what went. True when anything
     /// a surface renders changed; the same rows again is not a change.
     pub fn apply_read(
@@ -869,13 +888,15 @@ impl InboxSection {
                 row
             })
             .collect();
+        let scroll = self.scroll.min(entries.len().saturating_sub(1));
         let changed = self.entries != entries
             || self.unread != read.unread
             || self.recipient != recipient
             || self.absent.is_some()
             || self.unreachable.is_some()
             || self.rows_cut != rows_cut
-            || self.summaries_cut != summaries_cut;
+            || self.summaries_cut != summaries_cut
+            || self.scroll != scroll;
         self.entries = entries;
         self.unread = read.unread;
         self.recipient = recipient.to_string();
@@ -884,6 +905,7 @@ impl InboxSection {
         self.rows_cut = rows_cut;
         self.summaries_cut = summaries_cut;
         self.received_at_ms = received_at_ms;
+        self.scroll = scroll;
         changed
     }
 
@@ -909,6 +931,7 @@ impl InboxSection {
             || self.unread != 0
             || self.absent.as_deref() != Some(reason.as_str());
         self.entries.clear();
+        self.scroll = 0;
         self.unread = 0;
         self.rows_cut = 0;
         self.summaries_cut = 0;
@@ -1705,11 +1728,6 @@ pub struct HostOnlyState {
     /// sweep: a second press while it is in flight emits nothing, and the
     /// report clears it.
     pub inbox_mark_in_flight: bool,
-    /// The inbox screen's first drawn row, an index into
-    /// `InboxSection::entries`. Owned by the reducer, bounded by it: a new
-    /// read that shrinks the list pulls it back, so the screen never draws
-    /// from past the end. Host-only, the desktop's list scrolls in the DOM.
-    pub inbox_scroll: usize,
     /// When each attached session was last seen attached by
     /// `AppState::refresh_attention`.
     ///
@@ -1761,7 +1779,6 @@ impl Default for HostOnlyState {
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             inbox_mark_in_flight: false,
-            inbox_scroll: 0,
             attention_attached_at: HashMap::new(),
         }
     }
