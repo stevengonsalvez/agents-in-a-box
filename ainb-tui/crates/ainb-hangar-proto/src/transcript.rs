@@ -469,18 +469,27 @@ pub fn acp_card_text(event_type: &str, payload: &Value) -> Option<String> {
             .filter(|text| !text.trim().is_empty())?
             .to_string(),
         "acp.usage" => {
-            let used = payload.get("used").and_then(Value::as_i64)?;
-            let tokens = payload.get("size").and_then(Value::as_i64).map_or_else(
+            // Unsigned in the ACP schema, so read unsigned: a count past
+            // `i64::MAX` would otherwise blank the whole line.
+            let used = payload.get("used").and_then(Value::as_u64)?;
+            let tokens = payload.get("size").and_then(Value::as_u64).map_or_else(
                 || format!("{used} tokens in context"),
                 |size| format!("{used} of {size} tokens in context"),
             );
+            // Only a cost the daemon would record (`provider_usage_from_update`
+            // in ainb-hangar-daemon): USD in any case, finite, not negative.
             let cost = payload.get("cost");
-            match (
-                cost.and_then(|c| c.get("amount")).and_then(Value::as_f64),
-                cost.and_then(|c| c.get("currency")).and_then(Value::as_str),
-            ) {
-                (Some(amount), Some(currency)) => format!("{tokens} · {amount:.2} {currency}"),
-                _ => tokens,
+            let usd = cost
+                .and_then(|c| c.get("currency"))
+                .and_then(Value::as_str)
+                .is_some_and(|currency| currency.eq_ignore_ascii_case("USD"));
+            match cost
+                .and_then(|c| c.get("amount"))
+                .and_then(Value::as_f64)
+                .filter(|amount| usd && amount.is_finite() && *amount >= 0.0)
+            {
+                Some(amount) => format!("{tokens} · {amount:.2} USD"),
+                None => tokens,
             }
         }
         _ => return None,
