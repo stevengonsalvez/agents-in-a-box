@@ -137,7 +137,13 @@ pub struct ReviewUiFrame {
     pub collapsed_dirs: Vec<String>,
     /// Collapsed directories the frame did not carry.
     pub collapsed_dirs_cut: usize,
+    /// The first row to draw, in the FRAME's rows rather than the reducer's:
+    /// the frame carries a cut of the model, so the same number would
+    /// otherwise name different content on each side.
     pub scroll: usize,
+    /// The row the reducer is on was not sent, so `scroll` is the nearest one
+    /// that was.
+    pub scroll_cut: bool,
     pub current_hunk: usize,
 }
 
@@ -251,9 +257,15 @@ pub fn project_within(
     let selected_place = carried.iter().position(|index| *index == selected).unwrap_or(0);
     let selected_framed = framed[..selected_place.min(framed.len())].iter().flatten().count();
     let files: Vec<ReviewFileFrame> = framed.into_iter().flatten().collect();
-    let hunk_count: usize = files.iter().map(|file| file.hunks.len()).sum();
-    let row_count: usize =
-        files.iter().flat_map(|file| &file.hunks).map(|hunk| hunk.rows.len()).sum();
+    // The reducer's offsets index ITS virtual rows, over the whole model; the
+    // frame carries a cut of that model, so the same number names different
+    // content on each side of the wire. The frame therefore carries the
+    // offsets in ITS OWN row space, and says when the row the terminal is on
+    // was not sent.
+    let place = Place::of(&state.review.files, &carried, &files);
+    let (scroll, scroll_cut) = place.row(state.review_ui.scroll);
+    let (current_hunk, _) = place.hunk(state.review_ui.current_hunk);
+
     let review = ReviewFrame {
         files_cut: held_files - files.len(),
         files,
@@ -299,11 +311,158 @@ pub fn project_within(
             sidebar_selected: state.review_ui.sidebar_selected,
             collapsed_dirs,
             collapsed_dirs_cut,
-            scroll: within(state.review_ui.scroll, row_count + hunk_count),
-            current_hunk: within(state.review_ui.current_hunk, hunk_count),
+            scroll,
+            scroll_cut,
+            current_hunk,
         },
         review,
     }
+}
+
+/// Where the model's virtual rows and hunks ended up in the frame's.
+///
+/// The reducer counts rows the way `flatten`
+/// (`components/code_review/render.rs:112`) does: a row per file heading, a
+/// row per hidden gap, a row per code line, and nothing past the heading for a
+/// collapsed or binary file. The frame carries a cut of that, so an offset
+/// means one thing on each side until it is translated here, once, where both
+/// shapes are in hand.
+struct Place {
+    /// Per file, its first row in the model and in the frame, and how many
+    /// rows and hunks each side carries.
+    files: Vec<PlacedFile>,
+}
+
+struct PlacedFile {
+    model_row: usize,
+    frame_row: usize,
+    model_rows: usize,
+    frame_rows: usize,
+    model_hunk: usize,
+    frame_hunk: usize,
+    model_hunks: usize,
+    frame_hunks: usize,
+}
+
+impl Place {
+    /// Walk the model's files beside the frame's, in the order the frame kept
+    /// them: `carried` says which model file each framed slot came from.
+    fn of(model: &[ReviewFile], carried: &[usize], framed: &[ReviewFileFrame]) -> Self {
+        let mut files = Vec::with_capacity(model.len());
+        let mut model_row = 0;
+        let mut frame_row = 0;
+        let mut model_hunk = 0;
+        let mut frame_hunk = 0;
+        // A framed file keeps its place in `framed` in model order, so the two
+        // walks advance together and a file the budget dropped simply has no
+        // frame rows of its own.
+        let mut next_framed = 0;
+        for (index, file) in model.iter().enumerate() {
+            let frame = carried
+                .iter()
+                .position(|carried| *carried == index)
+                .and_then(|_| framed.get(next_framed))
+                .filter(|frame| frame.path == file.path);
+            let model_rows = model_file_rows(file);
+            let frame_rows = frame.map_or(0, frame_file_rows);
+            let model_hunks = if file.collapsed || file.binary {
+                0
+            } else {
+                file.hunks.len()
+            };
+            let frame_hunks = frame.map_or(0, |frame| frame.hunks.len());
+            files.push(PlacedFile {
+                model_row,
+                frame_row,
+                model_rows,
+                frame_rows,
+                model_hunk,
+                frame_hunk,
+                model_hunks,
+                frame_hunks,
+            });
+            model_row += model_rows;
+            model_hunk += model_hunks;
+            if frame.is_some() {
+                frame_row += frame_rows;
+                frame_hunk += frame_hunks;
+                next_framed += 1;
+            }
+        }
+        Self { files }
+    }
+
+    /// The framed row nearest the model's `row`, and whether that exact row is
+    /// missing from the frame.
+    fn row(&self, row: usize) -> (usize, bool) {
+        let Some(file) = self.files.iter().find(|file| row < file.model_row + file.model_rows)
+        else {
+            // Past the last row the model has: the end of what was framed.
+            let last = self.files.last().map_or(0, |file| file.frame_row + file.frame_rows);
+            return (last.saturating_sub(1), true);
+        };
+        let local = row - file.model_row;
+        if file.frame_rows == 0 {
+            // The file itself was not framed: the top of whatever follows it.
+            return (file.frame_row, true);
+        }
+        if local < file.frame_rows {
+            (file.frame_row + local, false)
+        } else {
+            (file.frame_row + file.frame_rows - 1, true)
+        }
+    }
+
+    /// The framed hunk nearest the model's `hunk`, and whether that hunk is
+    /// missing from the frame.
+    fn hunk(&self, hunk: usize) -> (usize, bool) {
+        let Some(file) = self.files.iter().find(|file| hunk < file.model_hunk + file.model_hunks)
+        else {
+            let last = self.files.last().map_or(0, |file| file.frame_hunk + file.frame_hunks);
+            return (last.saturating_sub(1), true);
+        };
+        let local = hunk - file.model_hunk;
+        if file.frame_hunks == 0 {
+            return (file.frame_hunk, true);
+        }
+        if local < file.frame_hunks {
+            (file.frame_hunk + local, false)
+        } else {
+            (file.frame_hunk + file.frame_hunks - 1, true)
+        }
+    }
+}
+
+/// How many virtual rows `file` has in the model, as `flatten` counts them.
+fn model_file_rows(file: &ReviewFile) -> usize {
+    if file.collapsed || file.binary {
+        return 1;
+    }
+    1 + file
+        .hunks
+        .iter()
+        .map(|hunk| {
+            usize::from(hunk.gap_before > hunk.expanded_before)
+                + hunk.rows.len()
+                + usize::from(hunk.gap_after > hunk.expanded_after)
+        })
+        .sum::<usize>()
+}
+
+/// The same count over a framed file, which is what a surface draws.
+fn frame_file_rows(file: &ReviewFileFrame) -> usize {
+    if file.collapsed || file.binary {
+        return 1;
+    }
+    1 + file
+        .hunks
+        .iter()
+        .map(|hunk| {
+            usize::from(hunk.gap_before > hunk.expanded_before)
+                + hunk.rows.len()
+                + usize::from(hunk.gap_after > hunk.expanded_after)
+        })
+        .sum::<usize>()
 }
 
 /// `set`, in an order a frame can repeat: a set has none of its own, so which
