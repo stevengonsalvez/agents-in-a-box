@@ -48,6 +48,8 @@ pub mod ids {
     pub const GIT_VIEW_SELECT_REVIEW_ROW: &str = "git_view.select_review_row";
     /// `{"lines": i32}`, down when positive.
     pub const GIT_VIEW_SCROLL: &str = "git_view.scroll";
+    /// No arguments: the inbox's one write is a whole-inbox sweep (D3-prime).
+    pub const INBOX_MARK_ALL_READ: &str = "inbox.mark_all_read";
 
     /// Every pointer command id.
     pub const ALL: &[&str] = &[
@@ -66,6 +68,7 @@ pub mod ids {
         HOME_CLICK_SIDEBAR_ITEM,
         GIT_VIEW_SELECT_REVIEW_ROW,
         GIT_VIEW_SCROLL,
+        INBOX_MARK_ALL_READ,
     ];
 }
 
@@ -206,6 +209,12 @@ pub fn select_review_row(target: &ReviewRowId) -> Intent {
 #[must_use]
 pub fn scroll_git_view(lines: i32) -> Intent {
     command(ids::GIT_VIEW_SCROLL, json!({ "lines": lines }))
+}
+
+/// Mark every entry in the inbox read: the daemon's sweep, sent with one op id.
+#[must_use]
+pub fn mark_inbox_all_read() -> Intent {
+    command(ids::INBOX_MARK_ALL_READ, Args::Null)
 }
 
 #[derive(Deserialize)]
