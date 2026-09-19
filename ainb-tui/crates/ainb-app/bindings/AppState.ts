@@ -2620,19 +2620,21 @@ export type GitTab = "Review" | "Files" | "Diff" | "Commits" | "Markdown";
 
 /**
  *  The git view as a frame carries it: every field the state holds, with the
- *  three long ones windowed and each window's loss counted.
+ *  long ones windowed and each window's loss counted.
  */
 export type GitViewFrame = GitViewFrame_Serialize;
 
 /**
  *  The git view as a frame carries it: every field the state holds, with the
- *  three long ones windowed and each window's loss counted.
+ *  long ones windowed and each window's loss counted.
  */
 export type GitViewFrame_Serialize = {
 	active_tab: GitTab,
 	changed_files: ChangedFile[],
+	/**  Changed paths the frame did not carry, so a shortened tree says so. */
+	files_cut: number,
 	selected_file_index: number,
-	/**  Scrubbed, then cut to [`MAX_DIFF_LINES`]. */
+	/**  Scrubbed, then cut to [`MAX_DIFF_LINES`] and to what the budget allows. */
 	diff_content: string[],
 	/**
 	 *  Diff lines the frame did not carry, so a short diff and a cut one are
@@ -2646,17 +2648,25 @@ export type GitViewFrame_Serialize = {
 	/**  The draft crosses as its length, as it did before the bound. */
 	commit_message_len: number | null,
 	commit_message_cursor: number,
+	/**
+	 *  Sorted, because a set has no order and a frame has to be the same bytes
+	 *  twice for the same state.
+	 */
 	expanded_folders: string[],
 	file_tree_items: FileTreeItem[],
+	/**  Tree rows the frame did not carry. */
+	tree_items_cut: number,
 	selected_tree_index: number,
 	/**
-	 *  Already scrubbed line by line at its own field, cut to
-	 *  [`MAX_MARKDOWN_LINES`].
+	 *  Scrubbed as one document, then cut to [`MAX_MARKDOWN_LINES`] and to
+	 *  [`MAX_LINE_CHARS`] a line.
 	 */
 	markdown_content: MarkdownLine_Serialize[],
 	markdown_lines_cut: number,
 	markdown_scroll_offset: number,
 	commits: CommitInfo_Serialize[],
+	/**  Commits the frame did not carry. */
+	commits_cut: number,
 	selected_commit_index: number,
 	review: ReviewFrame_Serialize,
 	review_ui: CodeReviewUi,
@@ -3892,7 +3902,10 @@ export type ReviewFileFrame_Serialize = {
 	collapsed: boolean,
 	binary: boolean,
 	hunks: HunkFrame_Serialize[],
-	/**  Rows this file lost to [`MAX_ROWS_PER_FILE`]. */
+	/**
+	 *  Rows this file lost, to [`MAX_ROWS_PER_FILE`], to [`MAX_ROWS_TOTAL`], or
+	 *  to the byte budget.
+	 */
 	rows_cut: number,
 };
 
