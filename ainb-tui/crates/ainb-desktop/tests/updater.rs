@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use ainb_desktop::updater::{
-    Channel, Check, Install, Settings, Source, Updater, clear_previous, repair_interrupted_swap,
-    rollback, swap, validate_tag,
+    Channel, Check, Install, Phase, Settings, Source, Updater, clear_previous,
+    repair_at_startup_from, repair_interrupted_swap, rollback, swap, validate_tag,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signer, SigningKey};
@@ -36,10 +36,16 @@ impl Source for FakeSource {
             .ok_or_else(|| anyhow::anyhow!("404 for {root}"))
     }
 
-    fn download(&self, url: &str, to: &Path) -> anyhow::Result<()> {
+    fn download(
+        &self,
+        url: &str,
+        to: &Path,
+        progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+    ) -> anyhow::Result<()> {
         self.requests.lock().unwrap().push(format!("download {url}"));
         let bytes = self.files.get(url).ok_or_else(|| anyhow::anyhow!("404 for {url}"))?;
         std::fs::write(to, bytes)?;
+        progress(bytes.len() as u64, Some(bytes.len() as u64));
         Ok(())
     }
 }
@@ -113,36 +119,129 @@ fn a_prerelease_tag_is_validated_before_it_forms_a_url() {
     }
     let stable = Channel::Stable;
     assert_eq!(
-        stable.root(None).as_deref(),
+        stable.root(None).unwrap().as_deref(),
         Some(ainb_app::cli::update::RELEASE_DOWNLOAD_ROOT)
     );
     let pre = Channel::Prerelease {
         tag: "v1.29.0-rc1".into(),
     };
+    // The prerelease root is formed on the CLI's release host, the one
+    // source, and nowhere else.
     assert_eq!(
-        pre.root(None).as_deref(),
-        Some("https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v1.29.0-rc1")
+        pre.root(None).unwrap().as_deref(),
+        Some(
+            format!(
+                "{}/releases/download/v1.29.0-rc1",
+                ainb_app::cli::update::release_host()
+            )
+            .as_str()
+        )
     );
     // A persisted next_root wins for stable; the prerelease tag stays pinned
     // to its release page.
     assert_eq!(
-        stable.root(Some("https://example.org/new")).as_deref(),
+        stable.root(Some("https://example.org/new")).unwrap().as_deref(),
         Some("https://example.org/new")
     );
-    assert!(Channel::Off.root(None).is_none());
+    assert!(Channel::Off.root(None).unwrap().is_none());
+    // A bad tag is an error, not a silent `off`.
+    assert!(
+        Channel::Prerelease {
+            tag: "v1.29".into()
+        }
+        .root(None)
+        .is_err()
+    );
+}
+
+/// A prerelease tag that does not parse declines the check with the reason,
+/// rather than reading as `off`; nothing is requested.
+#[test]
+fn an_invalid_tag_declines_the_check_with_its_reason() {
+    let home = tempfile::tempdir().unwrap();
+    let source = Arc::new(FakeSource::default());
+    let u = updater(
+        Arc::clone(&source),
+        Channel::Prerelease {
+            tag: "v1.29.0/../x".into(),
+        },
+        home.path(),
+    );
+    match u.check("1.28.2") {
+        Check::Declined { reason } => assert!(reason.contains("tag"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(source.requests.lock().unwrap().is_empty());
 }
 
 #[test]
 fn settings_round_trip_through_the_home_and_default_to_stable() {
     let home = tempfile::tempdir().unwrap();
-    assert_eq!(Settings::load(home.path()).channel, Channel::Stable);
+    assert_eq!(
+        Settings::load(home.path()).unwrap().channel,
+        Channel::Stable
+    );
     let s = Settings {
         channel: Channel::Prerelease {
             tag: "v1.29.0-rc2".into(),
         },
     };
     s.save(home.path()).unwrap();
-    assert_eq!(Settings::load(home.path()), s);
+    assert_eq!(Settings::load(home.path()).unwrap(), s);
+}
+
+/// A settings file that does not parse is not the default: a file that was
+/// set to `off` and then damaged must not start fetching from `stable`.
+/// Every check declines with the file named until it is fixed.
+#[test]
+fn an_unparsable_settings_file_fails_closed_with_its_reason() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("desktop-updater.json"),
+        br#"{"channel": "nonsense""#,
+    )
+    .unwrap();
+    assert!(Settings::load(home.path()).is_err());
+    let u = Updater::new(home.path().to_path_buf());
+    match u.check("1.28.2") {
+        Check::Declined { reason } => {
+            assert!(reason.contains("desktop-updater.json"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// An update is installed on the channel that found it: `off` set after the
+/// check refuses the apply.
+#[test]
+fn apply_refuses_when_the_channel_is_off() {
+    let home = tempfile::tempdir().unwrap();
+    let mut source = FakeSource::default();
+    let archive = "ainb-desktop-1.29.0-x.AppImage";
+    let bytes = b"the bundle bytes".to_vec();
+    source.manifests.insert(
+        ROOT.into(),
+        signed(&key(), &manifest("1.29.0", archive, &sha(&bytes), "")),
+    );
+    source.files.insert(format!("{ROOT}/{archive}"), bytes);
+    let source = Arc::new(source);
+    let mut u = updater(Arc::clone(&source), Channel::Stable, home.path());
+    let check = u.check("1.28.2");
+    assert!(matches!(check, Check::Available { .. }), "{check:?}");
+    u.set_settings(Settings {
+        channel: Channel::Off,
+    })
+    .unwrap();
+    let install = Install::AppImage {
+        file: home.path().join("ainb.AppImage"),
+    };
+    let error = u.apply(&check, &install).unwrap_err();
+    assert!(error.to_string().contains("off"), "{error:#}");
+    assert_eq!(
+        source.requests.lock().unwrap().len(),
+        1,
+        "the apply made a request"
+    );
 }
 
 // ── the checks, in order ───────────────────────────────────────────────────
@@ -270,6 +369,12 @@ fn a_verified_archive_lands_in_staging_and_the_file_is_what_was_hashed() {
     let staging = home.path().join("staging");
     let file = u.download_and_verify(&bundle, &root, &staging).unwrap();
     assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&staging).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "the staging directory is this user's alone");
+    }
     assert_eq!(
         source.requests.lock().unwrap().last().unwrap(),
         &format!("download {ROOT}/{archive}")
@@ -310,10 +415,17 @@ fn a_verified_next_root_is_persisted_and_used_by_the_next_check() {
         }
         other => panic!("{other:?}"),
     }
+    // The move sticks: a manifest at the new root that names no next_root
+    // does not send the check after it back to the compiled-in root.
+    match u.check("1.28.2") {
+        Check::Available { root, .. } => assert_eq!(root, new_root),
+        other => panic!("{other:?}"),
+    }
     let requests = source.requests.lock().unwrap();
     assert_eq!(requests[0], format!("manifest {ROOT}"));
     assert_eq!(requests[1], format!("manifest {new_root}"));
-    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(requests[2], format!("manifest {new_root}"));
+    assert_eq!(requests.len(), 3, "{requests:?}");
 }
 
 // ── the install, the swap, the previous, the rollback ─────────────────────
@@ -433,6 +545,39 @@ fn an_interrupted_swap_is_finished_on_the_next_start() {
     assert!(!repair_interrupted_swap(&app).unwrap());
 }
 
+/// The startup repair from what the process knows about itself: the path of
+/// the executable, and on Linux the `$APPIMAGE` the runtime mounted.
+#[test]
+fn the_startup_repair_reads_the_bundle_from_the_executable_and_the_appimage_from_its_env() {
+    // A relaunch from the parked bundle after a crash between the renames.
+    let tmp = tempfile::tempdir().unwrap();
+    let apps = tmp.path().join("Applications");
+    let previous = bundle_dir(&apps, "Agents in a Box.app.previous", "v1");
+    bundle_dir(&apps, "Agents in a Box.app.next", "v2");
+    let exe = previous.join("Contents/MacOS/ainb-desktop");
+    assert!(repair_at_startup_from(&exe, None).unwrap());
+    assert_eq!(read_marker(&apps.join("Agents in a Box.app")), "v2");
+
+    // The same crash on Linux: the runtime mounted `<name>.AppImage.previous`
+    // and set $APPIMAGE to it; the executable path is inside the mount.
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let parked = bin.join("ainb.AppImage.previous");
+    std::fs::write(&parked, b"v1").unwrap();
+    std::fs::write(bin.join("ainb.AppImage.next"), b"v2").unwrap();
+    let mounted = tmp.path().join("mount/AppRun");
+    assert!(repair_at_startup_from(&mounted, Some(&parked)).unwrap());
+    assert_eq!(std::fs::read(bin.join("ainb.AppImage")).unwrap(), b"v2");
+    assert!(!bin.join("ainb.AppImage.next").exists());
+    assert!(parked.exists(), "the previous stays as the rollback slot");
+
+    // A normal launch repairs nothing.
+    assert!(!repair_at_startup_from(&mounted, Some(&bin.join("ainb.AppImage"))).unwrap());
+    assert!(
+        !repair_at_startup_from(&apps.join("Agents in a Box.app/Contents/MacOS/x"), None).unwrap()
+    );
+}
+
 /// The whole apply path on a real disk image: a `.dmg` made with `hdiutil`
 /// around a fixture app whose `Info.plist` names its version, served by the
 /// fake source and hashed by the manifest; the app is mounted, copied out,
@@ -491,8 +636,40 @@ fn a_disk_image_is_mounted_copied_checked_and_swapped_in() {
         app: installed.clone(),
         previous: apps.join("Agents in a Box.app.previous"),
     };
-    let swapped = u.apply(&check, &install).unwrap();
+    let mut phases: Vec<Phase> = Vec::new();
+    let swapped = u.apply_with(&check, &install, &mut |phase| phases.push(phase)).unwrap();
     assert_eq!(swapped, installed);
+    assert_eq!(read_marker(&installed), "v2");
+    assert_eq!(
+        read_marker(&apps.join("Agents in a Box.app.previous")),
+        "v1"
+    );
+    // The apply is framed: downloading (with progress), verifying, applying.
+    assert!(
+        matches!(phases.first(), Some(Phase::Downloading { received, total }) if *received > 0 && total.is_some()),
+        "{phases:?}"
+    );
+    let kinds: Vec<&str> = phases
+        .iter()
+        .map(|p| match p {
+            Phase::Downloading { .. } => "downloading",
+            Phase::Verifying => "verifying",
+            Phase::Applying => "applying",
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let mut dedup = kinds.clone();
+    dedup.dedup();
+    assert_eq!(
+        dedup,
+        ["downloading", "verifying", "applying"],
+        "{phases:?}"
+    );
+    // One install in flight: a second apply before the restart is refused,
+    // and the rollback slot still holds v1 (a second swap would have parked
+    // v2 there).
+    let again = u.apply(&check, &install).unwrap_err();
+    assert!(again.to_string().contains("restart"), "{again:#}");
     assert_eq!(read_marker(&installed), "v2");
     assert_eq!(
         read_marker(&apps.join("Agents in a Box.app.previous")),
@@ -575,18 +752,22 @@ fn a_staged_bundle_loses_its_quarantine_attribute_before_the_swap() {
     let apps = tmp.path().join("Applications");
     let app = bundle_dir(&apps, "Agents in a Box.app", "v1");
     let staged = bundle_dir(&tmp.path().join("staging"), "Agents in a Box.app", "v2");
-    let status = std::process::Command::new("xattr")
-        .args(["-w", "com.apple.quarantine", "0083;00000000;test;"])
-        .arg(&staged)
-        .status()
-        .unwrap();
-    assert!(status.success());
+    // On the bundle and on a file inside it: Gatekeeper reads the inner
+    // files too, so a top-level strip alone is not a strip.
+    for tagged in [staged.clone(), staged.join("Contents/MacOS/ainb-desktop")] {
+        let status = std::process::Command::new("xattr")
+            .args(["-w", "com.apple.quarantine", "0083;00000000;test;"])
+            .arg(&tagged)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
     let install = Install::Bundle {
         app: app.clone(),
         previous: apps.join("Agents in a Box.app.previous"),
     };
     swap(&install, &staged).unwrap();
-    let out = std::process::Command::new("xattr").arg("-l").arg(&app).output().unwrap();
+    let out = std::process::Command::new("xattr").arg("-lr").arg(&app).output().unwrap();
     assert!(
         !String::from_utf8_lossy(&out.stdout).contains("com.apple.quarantine"),
         "quarantine survived the swap"
