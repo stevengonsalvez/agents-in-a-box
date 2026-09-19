@@ -3916,11 +3916,10 @@ impl EventHandler {
             AppEvent::GitViewSelectCommit { sha } => {
                 // Read first, against the model's own list as it stands now: a
                 // click on a commit the list no longer carries writes nothing.
-                let at = state
-                    .git_view
-                    .git_view_state
-                    .as_ref()
-                    .and_then(|git| git.commits.iter().position(|commit| commit.hash_short == sha));
+                let at =
+                    state.git_view.git_view_state.as_ref().and_then(|git| {
+                        git.commits.iter().position(|commit| commit.hash_short == sha)
+                    });
                 if let Some(at) = at {
                     if let Some(ref mut git_state) = state.git_view.git_view_state {
                         git_state.selected_commit_index = at;
