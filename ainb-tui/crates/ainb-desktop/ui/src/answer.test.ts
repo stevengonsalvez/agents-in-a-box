@@ -330,28 +330,35 @@ test("the banner reads props.question only to feed drawnQuestion", () => {
   // Every other read must go through the drawn question: a `props.question`
   // anywhere else is a getter over the frame, which reintroduces the
   // paint-to-click gap while every behavioural test stays green.
-  const source = readFileSync(new URL("./answer.tsx", import.meta.url), "utf8")
+  const file = readFileSync(new URL("./answer.tsx", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/^\s*\/\/.*$/gm, "");
+  // The banner's own body: `AnswerSlot` above it reads the prop to latch, by design.
+  const start = file.indexOf("export function AnswerBanner(");
+  assert.ok(start >= 0, "AnswerBanner is exported from answer.tsx");
+  const end = file.indexOf("\nexport function ", start + 1);
+  const source = file.slice(start, end === -1 ? undefined : end);
   const reads = source.match(/props\.question/g) ?? [];
   assert.equal(reads.length, 1, `props.question is read ${reads.length} times outside comments`);
   assert.match(source, /drawnQuestion\(\s*\(\) => props\.question,/, "and that one read is the drawnQuestion feed");
 });
 
-test("the banner latches on the request while a frame carries no chip and the reducer still points at it", () => {
-  // A frame between a scan apply and the next attention merge carries the
+test("the banner latches a question for a grace after the last frame that carried it", () => {
+  // A frame between a scan apply and the next attention merge can carry the
   // row with no chip (#1263 closed one source; #1266 makes the banner not
-  // depend on it): the banner keeps the question it drew while the reducer's
-  // answer state still names that request, so its elements stay in place.
+  // depend on it). The grace covers that gap and then releases: the reducer's
+  // answer state never says a question is over, so time is the release.
   const shown = questionFor(sessions(mark()))!;
-  assert.equal(latchQuestion(null, shown, ask()), shown, "a frame with the question shows it");
-  assert.equal(latchQuestion(shown, null, ask()), shown, "a bare frame keeps it while the reducer is on att-7");
-  assert.equal(latchQuestion(shown, null, ask({ request: "att-8" })), null, "the reducer moved on: dropped");
-  assert.equal(latchQuestion(shown, null, ask({ request: null })), null, "the reducer cleared it: dropped");
-  assert.equal(latchQuestion(shown, null, undefined), null, "no answer state at all: dropped");
+  const held = latchQuestion(null, shown, 1_000, 500);
+  assert.deepEqual(held, { question: shown, seenAt: 1_000 }, "a frame with the question stamps it");
+  assert.equal(latchQuestion(held, null, 1_400, 500), held, "a bare frame inside the grace keeps it");
+  assert.equal(latchQuestion(held, null, 1_500, 500), held, "up to the grace");
+  assert.equal(latchQuestion(held, null, 1_501, 500), null, "past the grace: released");
+  assert.equal(latchQuestion(null, null, 1_600, 500), null);
+  const again = questionFor(sessions(mark()))!;
+  assert.deepEqual(latchQuestion(held, again, 1_400, 500), { question: again, seenAt: 1_400 }, "a frame with it restamps");
   const next = questionFor(sessions(mark({ request: "att-8" })))!;
-  assert.equal(latchQuestion(shown, next, ask({ request: "att-8" })), next, "a new question replaces it");
-  assert.equal(latchQuestion(null, null, ask()), null);
+  assert.equal(latchQuestion(held, next, 1_400, 500)?.question, next, "a new question replaces it at once");
 });
 
 test("the banner is keyed on the request id, so the same request keeps one banner across frames", () => {
@@ -362,4 +369,14 @@ test("the banner is keyed on the request id, so the same request keeps one banne
   assert.deepEqual(bannerKeys(again), bannerKeys(shown), "the same key, so For keeps the element");
   assert.deepEqual(bannerKeys(questionFor(sessions(mark({ request: "att-8" })))!), ["att-8"], "a new request is a new key");
   assert.deepEqual(bannerKeys(null), [], "no question, no banner");
+});
+
+test("the window mounts the banner through AnswerSlot, never AnswerBanner directly", () => {
+  // The slot owns the latch and the request key; a direct mount of the banner
+  // in main.tsx (the old non-keyed Show) would unmount it on a bare frame.
+  const source = readFileSync(new URL("./main.tsx", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  assert.match(source, /<AnswerSlot\b/, "AnswerSlot is mounted");
+  assert.doesNotMatch(source, /<AnswerBanner\b/, "AnswerBanner is not mounted directly");
 });
