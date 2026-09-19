@@ -5652,7 +5652,6 @@ impl AppState {
     /// Discover tmux sessions that are NOT managed by agents-in-a-box
     /// Also includes orphaned `tmux_` sessions whose worktrees no longer exist
     pub async fn load_other_tmux_sessions(&mut self) {
-        use crate::interactive::SessionStore;
         use crate::models::OtherTmuxSession;
         use tokio::process::Command;
 
@@ -9846,7 +9845,6 @@ impl AppState {
         session_id: Uuid,
         trigger_key: &str,
     ) -> anyhow::Result<()> {
-        use crate::interactive::SessionStore;
         use crate::models::SessionStatus;
 
         info!("Soft-stopping interactive session: {}", session_id);
