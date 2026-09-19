@@ -1829,6 +1829,17 @@ async fn a_token_in_a_stored_payload_never_reaches_a_transcript_reply() {
     seed_transcript_payload(&store, "acp:mine", "json-secret", &json_payload).await;
     seed_transcript_payload(&store, "acp:mine", "text-secret", &text_payload).await;
 
+    // The ledger keeps what the provider sent: `raw_blake3` is a digest of
+    // those bytes and the prune export re-digests them, so a scrub moved to
+    // ingest would break both. The scrub belongs to the wire, not the row.
+    let stored =
+        FleetProviderEventRepo::list_by_session_after(store.pool(), "acp:mine", before, 10)
+            .await
+            .unwrap();
+    assert_eq!(stored[0].raw_payload, json_payload, "the stored row is raw");
+    assert!(stored[0].raw_payload.contains(&github));
+    assert_eq!(stored[1].raw_payload, text_payload, "the stored row is raw");
+
     let secrets = [github.as_str(), anthropic.as_str(), "MMMMMMMMMMMMMMMM"];
 
     let mut client = Client::authed(dir.path(), &socket).await;
