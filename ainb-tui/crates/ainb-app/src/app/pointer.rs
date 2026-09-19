@@ -208,7 +208,6 @@ pub fn scroll_git_view(lines: i32) -> Intent {
     command(ids::GIT_VIEW_SCROLL, json!({ "lines": lines }))
 }
 
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewRowArgs {
