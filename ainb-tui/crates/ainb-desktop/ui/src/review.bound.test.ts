@@ -25,6 +25,9 @@ import type {
 
 /** The bound the host frames to: rows across the section, characters a row. */
 const MAX_ROWS_TOTAL = 4_000;
+
+/** `review.ts`'s overscan, read here so the two cannot drift apart. */
+const { OVERSCAN } = await import("./review.ts");
 const MAX_ROWS_PER_FILE = 400;
 const MAX_LINE_CHARS = 2_000;
 
@@ -137,10 +140,23 @@ test("the review tab at the frame's bound, measured", async () => {
       `review at the bound: ${rows} rows, ${elements} elements, ${html.length} bytes, first render ${took.toFixed(0)} ms`,
     );
 
-    assert.equal(rows, MAX_ROWS_TOTAL, "every row the frame allows is drawn");
+    // The frame carries MAX_ROWS_TOTAL rows; the window draws the viewport's
+    // own and an overscan on each side, so what the DOM costs is bounded by
+    // the viewport rather than by the diff. A render with no layout has no
+    // height to measure, so the window is the component's default page plus
+    // two overscans.
+    const bound = 40 + 2 * OVERSCAN;
     assert.ok(
-      took < 5_000,
-      `the bound rendered in ${took.toFixed(0)} ms, which is a cost per row that is no longer linear`,
+      rows > 0 && rows <= bound,
+      `the window drew ${rows} of the frame's ${MAX_ROWS_TOTAL} rows, outside the ${bound} it is bounded to`,
+    );
+    assert.ok(
+      elements < 1_000,
+      `the window built ${elements} elements, which is a DOM that grows with the diff rather than the viewport`,
+    );
+    assert.ok(
+      took < 200,
+      `the bound rendered in ${took.toFixed(0)} ms, over the 200 ms line #1221 set`,
     );
   } finally {
     await server.close();
