@@ -3399,7 +3399,6 @@
   "usage": {
     "absent": null,
     "failure": null,
-    "received_at_ms": null,
     "summary": null
   }
 }
