@@ -662,7 +662,7 @@ impl SessionRecoveryState {
         // Enrich orphaned worktrees with agent_type and label from sessions.json
         Self::enrich_worktrees(
             &mut orphaned,
-            &SessionStore::load(),
+            &crate::cli::util::load_session_store().map_err(|e| e.to_string())?,
             &crate::config::SessionLabelStore::load(),
         );
 

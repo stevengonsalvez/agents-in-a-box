@@ -271,6 +271,7 @@ impl AppState {
             SectionId::Onboarding => self.onboarding.version(),
             SectionId::Shell => self.shell.version(),
             SectionId::AgentStatus => self.agent_status.version(),
+            SectionId::Usage => self.usage.version(),
         }
     }
 
@@ -302,6 +303,28 @@ impl AppState {
     /// the head it was told, so the next read cannot render live below it.
     pub fn agent_status_reset(&mut self) -> bool {
         self.agent_status.update(AgentStatusSection::reset)
+    }
+
+    /// Fold one `fleet/usage_summary` reply into section 21 (D3p-e). The same
+    /// counters read again move no version.
+    pub fn apply_usage_read(
+        &mut self,
+        reply: ainb_hangar_proto::fleet::FleetUsageSummaryResult,
+        received_at_ms: i64,
+    ) -> bool {
+        self.usage.update(|section| section.apply_read(reply, received_at_ms))
+    }
+
+    /// The usage read failed: section 21 keeps its numbers and says why.
+    pub fn usage_read_failed(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        self.usage.update(|section| section.mark_read_failed(reason))
+    }
+
+    /// The daemon cannot serve a usage summary: section 21 is absent, and why.
+    pub fn usage_absent(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        self.usage.update(|section| section.mark_absent(reason))
     }
 
     /// A newer Fleet revision was observed: section 20 goes stale until a read
@@ -3127,6 +3150,9 @@ pub struct AppState {
     /// Section 20: agent status from one joined daemon read (T0-section).
     pub agent_status: Versioned<AgentStatusSection>,
 
+    /// Section 21: usage, a fold of the daemon's `fleet/usage_summary` (D3p-e).
+    pub usage: Versioned<crate::app::sections::UsageSection>,
+
     /// Effects queued by the step being applied, for the host to drain. Not a
     /// section: see [`crate::app::effect::EffectOutbox`].
     effects: crate::app::effect::EffectOutbox,
@@ -3191,10 +3217,10 @@ fn add_stopped_sessions(
     workspaces: &mut Vec<Workspace>,
     live_tmux_names: &HashSet<String>,
     labels: &SessionLabelStore,
+    store: &crate::interactive::SessionStore,
 ) {
     let canonical_key =
         |p: &std::path::Path| -> PathBuf { p.canonicalize().unwrap_or_else(|_| p.to_path_buf()) };
-    let store = crate::interactive::SessionStore::load();
     for metadata in store.sessions().values() {
         if live_tmux_names.contains(&metadata.tmux_session_name) {
             continue;
@@ -3256,8 +3282,20 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
     // The merge step (combining Boss and Interactive sessions into the
     // same Workspace by canonical path) runs after both fetches return,
     // since the workspace_map mutation is non-commutative.
-    let (boss_workspaces, interactive_sessions) =
-        tokio::join!(fetch_boss_mode_workspaces(), fetch_interactive_sessions());
+    // P6e: the store is read once for the whole load, through the process's
+    // session source, and shared by live discovery and the stopped-session
+    // pass: each read can wait out the RPC deadline. A failed read lists no
+    // stopped sessions this refresh and says why; live discovery goes on
+    // without it (phase 2). It never reads another store.
+    let store = crate::cli::util::load_session_store_async()
+        .await
+        .map_err(|e| warn!("session store unavailable for this refresh: {e}"))
+        .ok();
+    let empty = crate::interactive::SessionStore::default();
+    let (boss_workspaces, interactive_sessions) = tokio::join!(
+        fetch_boss_mode_workspaces(),
+        fetch_interactive_sessions(store.as_ref().unwrap_or(&empty))
+    );
 
     // Index from canonicalized (or raw-fallback) workspace path to its
     // position in `workspaces`. Computed once per workspace and once per
@@ -3300,7 +3338,14 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
     // A session the operator stopped is still theirs: its worktree is on disk
     // and the row is how they resume it. The scan is the only thing that runs
     // on every host, so the pass belongs here (#1159).
-    add_stopped_sessions(&mut workspaces, &live_tmux_names, &session_label_store);
+    if let Some(store) = &store {
+        add_stopped_sessions(
+            &mut workspaces,
+            &live_tmux_names,
+            &session_label_store,
+            store,
+        );
+    }
 
     info!(
         "load_workspaces_async: Complete with {} workspaces",
@@ -3360,7 +3405,9 @@ async fn fetch_boss_mode_workspaces() -> Vec<Workspace> {
 
 /// Fetch Interactive-mode (tmux) sessions. No Docker dependency — must
 /// not be gated on Boss-mode completing.
-async fn fetch_interactive_sessions() -> Vec<crate::interactive::InteractiveSession> {
+async fn fetch_interactive_sessions(
+    store: &crate::interactive::SessionStore,
+) -> Vec<crate::interactive::InteractiveSession> {
     use crate::interactive::InteractiveSessionManager;
 
     info!("load_workspaces_async: Loading Interactive mode sessions");
@@ -3375,7 +3422,7 @@ async fn fetch_interactive_sessions() -> Vec<crate::interactive::InteractiveSess
         }
     };
 
-    match manager.list_sessions().await {
+    match manager.list_sessions_with(store).await {
         Ok(sessions) => {
             info!(
                 "load_workspaces_async: Found {} Interactive sessions",
@@ -3661,6 +3708,7 @@ impl AppState {
             recovery: Versioned::default(),
             mcp_pool: Versioned::default(),
             agent_status: Versioned::default(),
+            usage: Versioned::default(),
             effects: crate::app::effect::EffectOutbox::default(),
             statusline: StatuslineProbe::default(),
             host: HostOnlyState::default(),
@@ -4426,6 +4474,23 @@ impl AppState {
 
     pub async fn load_real_workspaces(&mut self) {
         info!("Loading active sessions (both Docker and Interactive)");
+
+        // P6e: a process that could not reach a ready daemon keeps its
+        // sessions on the file and says so, once; it retries in the
+        // background and says so again, once, when it is back on the daemon.
+        // A long-lived surface: the resolver's notices go to the log and to
+        // the notification below, never to raw stderr under the TUI.
+        crate::cli::util::mark_long_lived_surface();
+        crate::cli::util::watch_degraded_session_source().await;
+        match crate::cli::util::session_source_notice().await {
+            Some(notice @ crate::cli::util::SessionSourceNotice::Degraded) => {
+                self.add_warning_notification(notice.message().to_string());
+            }
+            Some(notice @ crate::cli::util::SessionSourceNotice::Recovered) => {
+                self.add_info_notification(notice.message().to_string());
+            }
+            None => {}
+        }
 
         // Before the list goes: the selection is restored by identity below, so
         // a refresh does not move the operator off the row they chose (#1155).
@@ -5371,15 +5436,20 @@ impl AppState {
         }
         self.host.last_headroom_watchdog = Some(now);
 
-        let has_headroom_session = crate::interactive::SessionStore::load()
-            .sessions
-            .values()
-            .any(|m| m.headroom_enabled);
-        if !has_headroom_session {
-            return;
-        }
-
+        // P6e: the store read happens inside the spawned task, never on the
+        // host's tick: through the session source a read can wait out the
+        // RPC deadline, and the tick must not.
         tokio::spawn(async {
+            let store = match crate::cli::util::load_session_store_async().await {
+                Ok(store) => store,
+                Err(e) => {
+                    debug!("headroom watchdog skipped: {e}");
+                    return;
+                }
+            };
+            if !store.sessions.values().any(|m| m.headroom_enabled) {
+                return;
+            }
             if !crate::headroom::is_healthy().await {
                 warn!("Headroom proxy down with a live session — watchdog respawning");
                 let _ = crate::headroom::ensure_proxy_running_for_live_users().await;
@@ -5574,7 +5644,7 @@ impl AppState {
 
     /// Load Interactive mode sessions from tmux
     async fn load_interactive_mode_sessions(&mut self) {
-        use crate::interactive::{InteractiveSessionManager, SessionStore};
+        use crate::interactive::InteractiveSessionManager;
 
         // Create Interactive session manager (no Docker needed)
         let mut manager = match InteractiveSessionManager::new() {
@@ -5598,8 +5668,16 @@ impl AppState {
             p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
         };
 
+        // P6e: one read of the store for this load, shared by discovery and
+        // the stopped-session pass below; a failed read skips that pass.
+        let store = crate::cli::util::load_session_store_async()
+            .await
+            .map_err(|e| warn!("session store unavailable for this refresh: {e}"))
+            .ok();
+        let empty = crate::interactive::SessionStore::default();
+
         // Discover Interactive sessions from tmux
-        match manager.list_sessions().await {
+        match manager.list_sessions_with(store.as_ref().unwrap_or(&empty)).await {
             Ok(sessions) => {
                 info!(
                     "Discovered {} Interactive sessions from tmux",
@@ -5692,11 +5770,14 @@ impl AppState {
         // Plain checkouts and subdirectories of a checkout resolve fine (see
         // `get_source_repository`), so a stopped session created with
         // `ainb run --repo <clone>` stays visible here instead of vanishing.
-        add_stopped_sessions(
-            &mut self.sessions.workspaces,
-            &live_tmux_names,
-            &self.session_labels.session_label_store,
-        );
+        if let Some(store) = &store {
+            add_stopped_sessions(
+                &mut self.sessions.workspaces,
+                &live_tmux_names,
+                &self.session_labels.session_label_store,
+                store,
+            );
+        }
     }
 
     /// Build a `Session` model in `Stopped` state from persisted metadata.
@@ -5741,7 +5822,6 @@ impl AppState {
     /// Discover tmux sessions that are NOT managed by agents-in-a-box
     /// Also includes orphaned `tmux_` sessions whose worktrees no longer exist
     pub async fn load_other_tmux_sessions(&mut self) {
-        use crate::interactive::SessionStore;
         use crate::models::OtherTmuxSession;
         use tokio::process::Command;
 
@@ -5776,8 +5856,16 @@ impl AppState {
             return;
         }
 
-        // Load session store to identify orphaned tmux_ sessions
-        let session_store = SessionStore::load();
+        // Load session store to identify orphaned tmux_ sessions. A failed
+        // read leaves the lists as they were rather than calling every
+        // tmux_ session an orphan of an empty store.
+        let session_store = match crate::cli::util::load_session_store() {
+            Ok(store) => store,
+            Err(e) => {
+                warn!("orphaned tmux sessions not refreshed: {e}");
+                return;
+            }
+        };
 
         // Collect tmux names that appear in loaded workspaces (successfully matched)
         let matched_tmux_names: std::collections::HashSet<&str> = self
@@ -9927,7 +10015,6 @@ impl AppState {
         session_id: Uuid,
         trigger_key: &str,
     ) -> anyhow::Result<()> {
-        use crate::interactive::SessionStore;
         use crate::models::SessionStatus;
 
         info!("Soft-stopping interactive session: {}", session_id);
@@ -9941,7 +10028,9 @@ impl AppState {
             .map(|t| t.name().to_string())
             .or_else(|| self.find_session(session_id).and_then(|s| s.tmux_session_name.clone()))
             .or_else(|| {
-                let store = SessionStore::load();
+                let store = crate::cli::util::load_session_store()
+                    .map_err(|e| warn!("session store fallback unavailable: {e}"))
+                    .ok()?;
                 store
                     .sessions()
                     .values()
@@ -10136,7 +10225,7 @@ impl AppState {
         session_id: Uuid,
         trigger_key: String,
     ) -> anyhow::Result<()> {
-        use crate::interactive::{InteractiveSessionManager, SessionStore};
+        use crate::interactive::InteractiveSessionManager;
         use crate::models::SessionStatus;
 
         info!(
@@ -10149,7 +10238,7 @@ impl AppState {
         self.begin_codex_launch(session_id);
 
         // Resolve metadata up-front so we can audit even if subsequent steps fail.
-        let store = SessionStore::load();
+        let store = crate::cli::util::load_session_store_async().await?;
         let metadata = store.sessions().values().find(|m| m.session_id == session_id).cloned();
 
         // Recover the exact launch settings the session was CREATED with from
@@ -12785,11 +12874,18 @@ impl AppState {
                         claimed_attention_ids.insert(attention_id.to_string());
                     }
                 }
-                if s.is_attached {
-                    // An attached session never nags: the operator is looking
-                    // straight at it. Its cwd is still claimed, or the daemon
-                    // row for the session under the cursor would be reported as
-                    // waiting somewhere else.
+                // An attached session never nags in the terminal: attaching
+                // shows the pane full screen, where the question is already
+                // in front of the operator. Its cwd is still claimed, or the
+                // daemon row for the session under the cursor would be
+                // reported as waiting somewhere else. Not on the desktop: a
+                // row there is attached whenever its terminal tab is open,
+                // and the banner over that tab is where the question is
+                // answered, so the chip must land. Before #1263 it only ever
+                // did because each scan reset `is_attached`.
+                let fullscreen =
+                    self.host.surface != ainb_hangar_proto::connections::SurfaceKind::Desktop;
+                if s.is_attached && fullscreen {
                     marks.push((
                         s.id,
                         Vec::new(),
@@ -13319,7 +13415,7 @@ impl AppState {
 
         // Load persisted metadata once — used for both the resume-history probe
         // (Claude, keyed off the worktree cwd) and the Headroom routing flag.
-        let store = crate::interactive::SessionStore::load();
+        let store = crate::cli::util::load_session_store_async().await?;
         let metadata = store.sessions.get(&tmux_session_name);
         let skip_permissions =
             metadata.and_then(|m| m.skip_permissions).unwrap_or(session.skip_permissions);

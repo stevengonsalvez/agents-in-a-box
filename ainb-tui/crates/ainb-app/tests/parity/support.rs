@@ -41,6 +41,12 @@ pub struct ParityFixture {
     pub selected: Option<[usize; 2]>,
     #[serde(default)]
     pub help_visible: bool,
+    /// Why this fixture has no ratatui half, when it has none. The terminal
+    /// renderer and its snapshot checks skip it; the frames dump and the
+    /// webview half still take it. `stats` is the one: the terminal's stats is
+    /// burndown's plugin paint, not a built-in screen (D3-prime).
+    #[serde(default)]
+    pub dom_only: Option<String>,
     pub screen: ScreenFixture,
 }
 
@@ -98,6 +104,11 @@ pub enum ScreenFixture {
     LogHistory,
     Onboarding,
     SetupMenu,
+    /// Section 21 holding one `fleet/usage_summary` reply, as the daemon
+    /// sends it, on the terminal's `analytics` screen (burndown's).
+    Stats {
+        usage: Box<ainb_hangar_proto::fleet::FleetUsageSummaryResult>,
+    },
     /// A plugin screen with nothing painted yet, which draws one of the three
     /// fallback placeholders (D3p-f): not registered, registered with a render
     /// error, or registered with no frame yet.
@@ -197,6 +208,7 @@ impl ParityFixture {
             ScreenFixture::LogHistory => ids::LOG_HISTORY,
             ScreenFixture::Onboarding => ids::ONBOARDING,
             ScreenFixture::SetupMenu => ids::SETUP_MENU,
+            ScreenFixture::Stats { .. } => ids::ANALYTICS,
             ScreenFixture::Plugin { screen, .. } => match screen {
                 PluginScreenFixture::Analytics => ids::ANALYTICS,
                 PluginScreenFixture::Witr => ids::WITR,
@@ -245,6 +257,9 @@ impl ParityFixture {
             ScreenFixture::Onboarding => {
                 state.onboarding.onboarding_state =
                     Some(ainb_app::components::onboarding::OnboardingState::new());
+            }
+            ScreenFixture::Stats { usage } => {
+                state.apply_usage_read((**usage).clone(), 0);
             }
             ScreenFixture::Plugin {
                 registered,
