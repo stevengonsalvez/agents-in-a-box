@@ -491,7 +491,10 @@ fn incompatible(error: &DaemonError) -> Result<(), Refusal> {
             ..
         } => Err(Refusal::Incompatible {
             message: message.clone(),
-            daemon_is_newer: daemon.min > client.max,
+            // A refusal that did not say its range reads as an older daemon:
+            // the stop verb is the fix that always holds; an update of this
+            // app is offered only when the daemon proved it is the newer one.
+            daemon_is_newer: daemon.is_some_and(|daemon| daemon.min > client.max),
         }),
         _ => Ok(()),
     }
