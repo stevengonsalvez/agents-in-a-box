@@ -3356,7 +3356,7 @@
             "reasoning_tokens": 5000,
             "session_count": 10
           },
-          "name": "agents-in-a-box",
+          "name": "box",
           "repo": "stevengonsalvez/agents-in-a-box"
         }
       ],
