@@ -5,6 +5,8 @@ import { type BreakdownRow, statsView } from "./stats.ts";
 interface Props {
   /** Section 21, or undefined until the host frames it. */
   usage: UsageView | undefined;
+  /** The section was withheld for being over the frame ceiling. */
+  stale: boolean;
 }
 
 /**
@@ -19,7 +21,7 @@ interface Props {
  * counters when a list was longer than the frame carries.
  */
 export function Stats(props: Props) {
-  const view = () => statsView(props.usage);
+  const view = () => statsView(props.usage, props.stale);
   return (
     <section class="stats" aria-label="Stats" data-state={view().state}>
       <Show when={view().status}>
