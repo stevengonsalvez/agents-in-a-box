@@ -43,6 +43,33 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::thread::ThreadId;
 
+/// One home directory for every test in this binary, taken once and never
+/// given back.
+///
+/// For the tests that only need home to be somewhere other than the developer's
+/// own: they never read what another test wrote, so they do not need to be
+/// ordered against each other, only kept off the real home. The first caller
+/// takes the lock, points `HOME` and `AINB_HOME` at a temporary directory and
+/// keeps both for the rest of the binary, so no test can move home under
+/// another one. A [`ScopedHome`] taken later in the same binary still works: it
+/// puts this directory back when it drops.
+///
+/// Prefer [`ScopedHome`] when a test reads back what it wrote, because then a
+/// home of its own is the point.
+pub fn shared() -> &'static Path {
+    static SHARED: std::sync::OnceLock<ScopedHome> = std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            let mut home = ScopedHome::new();
+            // The lock is dropped and the guard kept: the environment stays
+            // pointed at this directory for the rest of the binary, and the
+            // tests that take a `ScopedHome` can still take the lock.
+            drop(home.lock.take());
+            home
+        })
+        .path()
+}
+
 /// Held by whichever test currently owns the home directory.
 static HOME: Mutex<()> = Mutex::new(());
 
