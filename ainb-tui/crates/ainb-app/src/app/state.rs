@@ -3542,7 +3542,13 @@ impl AppState {
             fleet: Versioned::default(),
             tmux: Versioned::default(),
             log_streams: Versioned::default(),
-            sessions: Versioned::default(),
+            // The filter Shift+F persisted, so the next process starts on it
+            // rather than on `All` (#1208). Only the TUI's rows read it: the
+            // web rows and `ainb list --frame` list every session (#1180).
+            sessions: Versioned::new(SessionsSection {
+                session_filter,
+                ..SessionsSection::default()
+            }),
             new_session: Versioned::default(),
             workspace_load: Versioned::default(),
             session_labels: Versioned::default(),
