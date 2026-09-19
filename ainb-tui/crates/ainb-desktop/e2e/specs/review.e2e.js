@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { run, seeded } from "../world.js";
+import { env, run, seeded } from "../world.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -152,7 +152,11 @@ describe("reviewing from the window", () => {
     // category goes to the reducer and comes back in the frame, the same round
     // trip the file selection above makes.
     await click("button.settings");
-    await $(".settings-page").waitForExist({ timeout: 30_000 });
+    try {
+      await $(".settings-page").waitForExist({ timeout: 30_000 });
+    } catch (error) {
+      throw new Error(`${error}; the host's last intents: ${intentsSent().slice(-6).join(", ") || "none"}`);
+    }
     await browser.waitUntil(async () => (await $$(".settings-row")).length > 0, {
       timeout: 60_000,
       timeoutMsg: "the settings page drew no row of the config section",
@@ -215,6 +219,28 @@ async function click(selector, timeout = 60_000) {
     // option as a string, so a function there is dropped and the run reports
     // the bare timeout with nothing about what the clicks were hitting.
     throw new Error(`${selector} never took a click in ${timeout} ms, last: ${last ?? error}`);
+  }
+}
+
+/**
+ * What the webview asked the host for and what became of it, from the
+ * desktop's own log, so a failure here names the command that was refused
+ * rather than only the element that never appeared.
+ */
+function intentsSent() {
+  try {
+    const lines = run("sh", [
+      "-c",
+      'cat "$1"/desktop.log* 2>/dev/null | grep "renderer intent"',
+      "log",
+      env().AINB_HANGAR_HOME,
+    ]);
+    return lines
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => `${line.match(/command="?([^"\s]+)/)?.[1] ?? "unknown"}:${line.match(/outcome="?(\w+)/)?.[1] ?? "unknown"}`);
+  } catch {
+    return [];
   }
 }
 
