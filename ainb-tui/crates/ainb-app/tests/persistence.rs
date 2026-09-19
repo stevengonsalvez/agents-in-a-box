@@ -8,7 +8,7 @@
 
 use ainb_app::app::NoRenderer;
 use ainb_app::app::reports;
-use ainb_app::app::state::NotificationType;
+use ainb_app::app::state::{NotificationType, SessionFilter};
 use ainb_app::app::{Persist, Snapshot};
 use ainb_app::config::AppConfig;
 use ainb_app::config::ClaudeAuthProvider;
@@ -273,4 +273,33 @@ fn a_git_directories_write_leaves_an_unreadable_onboarding_record_alone() {
 
     assert!(!error.is_empty());
     assert_eq!(std::fs::read_to_string(&path).expect("record"), broken);
+}
+
+#[test]
+fn the_persisted_session_filter_is_applied_at_startup() {
+    // Shift+F writes `ui_preferences.session_filter`; the next process must
+    // start on it rather than on `All` (#1208). The TUI's rows alone read it:
+    // `ainb list --frame` and the web list every session whatever it says
+    // (`crates/ainb-core/tests/list_frame_every_session.rs`).
+    let home = scratch_home();
+    let config_file = config_file(&home);
+    std::fs::create_dir_all(config_file.parent().expect("config dir")).expect("config dir");
+    std::fs::write(
+        &config_file,
+        "[ui_preferences]\nsession_filter = \"active_only\"\n",
+    )
+    .expect("persist the filter");
+
+    let state = AppState::new();
+
+    assert_eq!(
+        state.sessions.session_filter,
+        SessionFilter::ActiveOnly,
+        "the state starts on the filter the file holds"
+    );
+    assert_eq!(
+        state.config.app_config.ui_preferences.session_filter,
+        SessionFilter::ActiveOnly,
+        "and the config section agrees, so the next cycle persists from it"
+    );
 }
