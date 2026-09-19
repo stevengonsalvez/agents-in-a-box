@@ -86,5 +86,9 @@ test("the page opens and closes the reducer's inbox screen, the rows the termina
     { Command: ["global.go_home", null] },
     { Command: ["home.inbox", null] },
   ]);
-  assert.deepEqual(CLOSE_INBOX, [{ Command: ["inbox.back", null] }]);
+  // Back to the session list the window sits on, as closing settings does.
+  assert.deepEqual(CLOSE_INBOX, [
+    { Command: ["inbox.back", null] },
+    { Command: ["home.sessions", null] },
+  ]);
 });
