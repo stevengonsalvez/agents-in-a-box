@@ -87,15 +87,17 @@ function Shell() {
   // The board is the window's landing surface: what every agent is doing, and
   // what is waiting on a human. A terminal takes the work area while it is
   // chosen, and the board is one click back.
-  const [board, setBoard] = createSignal(true);
-  // The review tab holds the work area over the git view section, which the
-  // host sends bounded. It is a view of the same shell, not a screen of its
-  // own: the reducer owns the selection and the scroll, as it does for the
-  // board.
-  const [review, setReview] = createSignal(false);
+  // What holds the work area. One choice rather than a flag each: two booleans
+  // for one pane is three ways to be wrong and a fourth that draws nothing.
+  // The transcript card is not in here; it stands in a session's place and
+  // closes back to whatever was chosen.
+  const [pane, setPane] = createSignal<"board" | "review" | "terminal">("board");
   // The ACP session whose transcript card holds the work area, if any. It has
   // no tmux pane, so the card stands where its terminal would.
   const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
+  /** Whether `which` holds the work area: the transcript card takes it first. */
+  const showing = (which: "board" | "review" | "terminal") =>
+    transcriptKey() === null && pane() === which;
   const focusers = new Map<string, () => void>();
   const tabKeys = createMemo(
     () => tabs().map((tab) => tab.key),
@@ -107,8 +109,7 @@ function Shell() {
   const activate = (key: string | null) => {
     setActive(key);
     if (key !== null) {
-      setBoard(false);
-      setReview(false);
+      setPane("terminal");
       closeTranscript();
     }
     if (key !== null) requestAnimationFrame(() => focusers.get(key)?.());
@@ -125,7 +126,7 @@ function Shell() {
       // a terminal; this is the strip tidying up after itself.
       const next = view.tabs[0]?.key ?? null;
       setActive(next);
-      if (next !== null && !board()) requestAnimationFrame(() => focusers.get(next)?.());
+      if (next !== null && pane() === "terminal") requestAnimationFrame(() => focusers.get(next)?.());
     }
   };
   // A refused intent comes back with the row and the reason: say so, or a
@@ -137,8 +138,7 @@ function Shell() {
   const openTranscript = (sessionKey: string) => {
     dispatch(transcriptIntent(sessionKey));
     setTranscriptKey(sessionKey);
-    setBoard(false);
-    setReview(false);
+    setPane("terminal");
   };
   /** Close the card; the host drops the transcript and frames the default. */
   function closeTranscript() {
@@ -415,29 +415,27 @@ function Shell() {
         />
         <section class="workarea">
           <nav class="tabs" aria-label="Board and terminals">
-            <span class="tab board-tab" classList={{ active: board() && !review() && transcriptKey() === null }}>
+            <span class="tab board-tab" classList={{ active: showing("board") }}>
               <button
                 type="button"
                 class="tab-title"
-                aria-current={board() && !review() && transcriptKey() === null ? "page" : undefined}
+                aria-current={showing("board") ? "page" : undefined}
                 onClick={() => {
                   closeTranscript();
-                  setReview(false);
-                  setBoard(true);
+                  setPane("board");
                 }}
               >
                 Board
               </button>
             </span>
-            <span class="tab review-tab" classList={{ active: review() && transcriptKey() === null }}>
+            <span class="tab review-tab" classList={{ active: showing("review") }}>
               <button
                 type="button"
                 class="tab-title"
-                aria-current={review() && transcriptKey() === null ? "page" : undefined}
+                aria-current={showing("review") ? "page" : undefined}
                 onClick={() => {
                   closeTranscript();
-                  setBoard(false);
-                  setReview(true);
+                  setPane("review");
                 }}
               >
                 Review
@@ -457,7 +455,7 @@ function Shell() {
                     aria-label={`Close ${key()}`}
                     onClick={() => {
                       closeTranscript();
-                      setBoard(true);
+                      setPane("board");
                     }}
                   >
                     ×
@@ -469,15 +467,13 @@ function Shell() {
               {(tab) => (
                 <span
                   class="tab"
-                  classList={{ active: !board() && !review() && transcriptKey() === null && tab.key === active() }}
+                  classList={{ active: showing("terminal") && tab.key === active() }}
                   data-state={tab.state}
                 >
                   <button
                     type="button"
                     class="tab-title"
-                    aria-current={
-                      !board() && !review() && transcriptKey() === null && tab.key === active() ? "page" : undefined
-                    }
+                    aria-current={showing("terminal") && tab.key === active() ? "page" : undefined}
                     onClick={() => choose(tab)}
                   >
                     {title(tab)}
@@ -504,15 +500,15 @@ function Shell() {
                 view={transcriptView(fleet(), key())}
                 onClose={() => {
                   closeTranscript();
-                  setBoard(true);
+                  setPane("board");
                 }}
               />
             )}
           </Show>
-          <Show when={review() && transcriptKey() === null}>
+          <Show when={showing("review")}>
             <Review gitView={gitView()} stale={gitViewStale()} onChoose={dispatch} />
           </Show>
-          <Show when={board() && !review() && transcriptKey() === null}>
+          <Show when={showing("board")}>
             <Board
               agentStatus={agentStatus()}
               fleet={fleet()}
@@ -522,7 +518,7 @@ function Shell() {
               onOpenTranscript={openTranscript}
             />
           </Show>
-          <Show when={!board() && !review() && transcriptKey() === null && tabs().length === 0}>
+          <Show when={showing("terminal") && tabs().length === 0}>
             <p class="empty">Choose a session to open its terminal</p>
           </Show>
           {/* Keyed by tab key, not by the tab object each event replaces: a
@@ -534,7 +530,7 @@ function Shell() {
                   <TerminalView
                     tab={tab()}
                     title={title(tab())}
-                    active={!board() && !review() && transcriptKey() === null && key === active()}
+                    active={showing("terminal") && key === active()}
                     mac={MAC}
                     onAccelerator={onAccelerator}
                     onLeave={() => sidebar?.focus()}
