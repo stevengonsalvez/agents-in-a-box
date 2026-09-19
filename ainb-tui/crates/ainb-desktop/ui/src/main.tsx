@@ -323,6 +323,7 @@ function Shell() {
   const agentStatus = () => shellAgentStatus(store, host());
   const gitView = () => shellGitView(store, host());
   const usage = () => shellUsage(store, host());
+  const usageStale = createMemo(() => ROOT_SELECTORS.usageStale(store, host()));
   const counts = HEADER_COUNTS.map(([select, label]) => ({
     label,
     count: createMemo(() => select(store, host())),
@@ -587,7 +588,7 @@ function Shell() {
             <Review gitView={gitView()} stale={gitViewStale()} onChoose={dispatch} />
           </Show>
           <Show when={showing("stats")}>
-            <Stats usage={usage()} />
+            <Stats usage={usage()} stale={usageStale()} />
           </Show>
           <Show when={showing("board")}>
             <Board
