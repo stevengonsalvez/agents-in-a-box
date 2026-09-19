@@ -2672,7 +2672,13 @@ export type GitViewFrame_Serialize = {
 	commits: CommitInfo_Serialize[],
 	/**  Commits the frame did not carry. */
 	commits_cut: number,
+	/**  Brought inside the commits the frame carries. */
 	selected_commit_index: number,
+	/**
+	 *  The commit the reducer is on was not sent (past the list, or past the
+	 *  cut), so `selected_commit_index` is the last one that was.
+	 */
+	selected_commit_cut: boolean,
 	review: ReviewFrame_Serialize,
 	review_ui: ReviewUiFrame,
 };
