@@ -2,6 +2,9 @@
 // asks for host work returns exactly that effect, performs none of it, and
 // moves exactly the section versions the reducer should.
 
+#[path = "support/home.rs"]
+mod home;
+
 use ainb_app::app::NoRenderer;
 use ainb_app::app::screens::ids;
 use ainb_app::app::{TerminalTarget, TmuxSessionName, ToolTerminal};
@@ -39,16 +42,10 @@ fn session_list_with_selection(path: &str) -> AppState {
     state
 }
 
-/// One scratch `HOME` for the whole binary, set once before any test reads
-/// the environment, so parallel tests never swap it under each other.
+/// The home directory every test in this binary reads, taken once so no test
+/// can move it under another.
 fn isolated_home() -> &'static std::path::Path {
-    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| {
-        let home = tempfile::tempdir().expect("scratch home");
-        std::env::set_var("HOME", home.path());
-        home
-    })
-    .path()
+    home::shared()
 }
 
 #[test]
