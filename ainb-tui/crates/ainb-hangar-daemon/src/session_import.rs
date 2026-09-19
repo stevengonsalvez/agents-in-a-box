@@ -1,111 +1,202 @@
-//! One-time idempotent boot import of `~/.agents-in-a-box/sessions.json` into
-//! the daemon-owned `sessions` table (spec P6d, #1166).
+//! One-time boot import of `~/.agents-in-a-box/sessions.json` into the
+//! daemon-owned `sessions` table (spec P6d, #1166).
+//!
+//! ```text
+//! boot ──▶ marker for this path? ──yes──▶ AlreadyCompleted (nothing read)
+//!                │ no
+//!                ▼
+//!          file missing ──▶ marker, 0 rows (fresh home)
+//!          over cap / unreadable / unparseable ──▶ Err, NO marker
+//!          parsed ──▶ validate each record ──▶ rows + marker, one tx
+//! ```
+//!
+//! The file is only ever read, never written, so a user who downgrades keeps
+//! every session it held. The marker (migration 0102) is what makes the import
+//! one-time: a row deleted after the import is not brought back by the next
+//! boot. Until a marker exists, `workspace/session_list` answers
+//! `import_complete: false` and the CLI keeps reading the file, so a failed
+//! import can never make a populated file look empty.
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
-use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
-use ainb_hangar_store::repo::sessions::{SessionRow, SessionsRepo};
-use anyhow::Result;
+use ainb_hangar_proto::sessions::WorkspaceSessionEntry;
+use ainb_hangar_store::repo::sessions::{ImportOutcome, SessionRow, SessionsRepo};
+use anyhow::{Context, Result, bail};
 use sqlx::SqlitePool;
 use std::path::Path;
 
-/// One-time idempotent import from `sessions.json` into the `sessions` table.
+pub use ainb_hangar_store::repo::sessions::ImportMarker;
+
+/// Largest `sessions.json` the import reads. A real store is a few KB per
+/// session; anything past this is not a session store.
+pub const SESSIONS_JSON_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// What one boot's import did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportReport {
+    /// This boot imported and wrote the marker.
+    Completed(ImportMarker),
+    /// An earlier boot finished the import of this file; nothing was read.
+    AlreadyCompleted,
+}
+
+/// Import `sessions_path` once, capped at [`SESSIONS_JSON_MAX_BYTES`].
 ///
-/// Leaves `sessions.json` in place. Skips records that are already present
-/// in the database (by session_id or tmux_session_name), so repeated boots
-/// import nothing further. Returns the count of newly imported sessions.
-pub async fn import_sessions_if_needed(pool: &SqlitePool, sessions_path: &Path) -> Result<usize> {
-    if !sessions_path.exists() {
-        return Ok(0);
+/// # Errors
+///
+/// Returns an error, and writes no marker, when the file is over the cap,
+/// unreadable or unparseable, or the store write fails. The caller logs it;
+/// clients see `import_complete: false` and keep reading the file.
+pub async fn import_sessions_if_needed(
+    pool: &SqlitePool,
+    sessions_path: &Path,
+) -> Result<ImportReport> {
+    import_sessions_from(pool, sessions_path, SESSIONS_JSON_MAX_BYTES).await
+}
+
+/// [`import_sessions_if_needed`] with an explicit size cap (the test seam).
+///
+/// # Errors
+///
+/// As [`import_sessions_if_needed`].
+pub async fn import_sessions_from(
+    pool: &SqlitePool,
+    sessions_path: &Path,
+    max_bytes: u64,
+) -> Result<ImportReport> {
+    let source = sessions_path.to_string_lossy().into_owned();
+    if SessionsRepo::import_marker(pool, &source).await?.is_some() {
+        return Ok(ImportReport::AlreadyCompleted);
     }
-    let content = match std::fs::read_to_string(sessions_path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(path = %sessions_path.display(), error = %e, "could not read sessions.json");
-            return Ok(0);
-        }
-    };
-    let value: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(path = %sessions_path.display(), error = %e, "could not parse sessions.json");
-            return Ok(0);
-        }
-    };
-    let sessions_map = match value.get("sessions").and_then(|s| s.as_object()) {
-        Some(m) => m,
-        None => return Ok(0),
+
+    let path = sessions_path.to_path_buf();
+    let content = tokio::task::spawn_blocking(move || read_capped(&path, max_bytes))
+        .await
+        .context("sessions.json read task")??;
+
+    let (rows, rejected) = match content {
+        None => (Vec::new(), 0),
+        Some(content) => parse_records(&content)
+            .with_context(|| format!("could not parse {}", sessions_path.display()))?,
     };
 
-    let mut imported = 0;
-    for (tmux_key, entry) in sessions_map {
-        let tmux_session_name = entry
-            .get("tmux_session_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or(tmux_key)
-            .to_string();
-        let session_id = entry
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| SystemIdGen.new_ulid());
+    let outcome =
+        SessionsRepo::complete_import(pool, &source, &rows, rejected, SystemClock.now_ms()).await?;
+    Ok(match outcome {
+        ImportOutcome::Completed(marker) => ImportReport::Completed(marker),
+        ImportOutcome::AlreadyCompleted => ImportReport::AlreadyCompleted,
+    })
+}
 
-        let existing_tmux = SessionsRepo::get_by_tmux_name(pool, &tmux_session_name).await?;
-        let existing_id = SessionsRepo::get_by_id(pool, &session_id).await?;
-        if existing_tmux.is_some() || existing_id.is_some() {
-            continue;
-        }
+/// Read `path` if it exists and is at most `max_bytes`. `Ok(None)` means no
+/// file (a fresh home).
+fn read_capped(path: &Path, max_bytes: u64) -> Result<Option<String>> {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("could not stat {}", path.display())),
+    };
+    if !meta.is_file() {
+        bail!("{} is not a regular file", path.display());
+    }
+    if meta.len() > max_bytes {
+        bail!(
+            "{} is {} bytes, over the {max_bytes} byte import limit",
+            path.display(),
+            meta.len()
+        );
+    }
+    std::fs::read_to_string(path)
+        .map(Some)
+        .with_context(|| format!("could not read {}", path.display()))
+}
 
-        let worktree_path =
-            entry.get("worktree_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let workspace_name = entry
-            .get("workspace_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("default")
-            .to_string();
-        let created_at = match entry.get("created_at") {
-            Some(serde_json::Value::Number(n)) => {
-                n.as_i64().unwrap_or_else(|| SystemClock.now_ms())
+/// Parse the store into valid rows plus a count of rejected records.
+fn parse_records(content: &str) -> Result<(Vec<SessionRow>, i64)> {
+    let value: serde_json::Value = serde_json::from_str(content).context("parse sessions.json")?;
+    let Some(sessions) = value.get("sessions").and_then(serde_json::Value::as_object) else {
+        bail!("parse sessions.json: no `sessions` object");
+    };
+
+    let mut rows = Vec::with_capacity(sessions.len());
+    let mut rejected = 0_i64;
+    for (tmux_key, record) in sessions {
+        match record_to_entry(tmux_key, record).and_then(|entry| {
+            entry.validate()?;
+            Ok(entry)
+        }) {
+            Ok(entry) => rows.push(entry_to_row(entry)),
+            Err(why) => {
+                rejected += 1;
+                tracing::warn!(
+                    tmux_key = %tmux_key.escape_debug(),
+                    %why,
+                    "sessions.json record not imported; it stays in the file"
+                );
             }
-            Some(serde_json::Value::String(s)) => chrono::DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.timestamp_millis())
-                .unwrap_or_else(|_| SystemClock.now_ms()),
-            _ => SystemClock.now_ms(),
-        };
-        let agent_type =
-            entry.get("agent_type").and_then(|v| v.as_str()).unwrap_or("Claude").to_string();
-        let headroom_enabled =
-            entry.get("headroom_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-        let rtk_enabled = entry.get("rtk_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-        let skip_permissions = entry.get("skip_permissions").and_then(|v| v.as_bool());
-        let model = entry.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let model_source = entry
-            .get("model_source")
-            .and_then(|v| v.as_str())
-            .unwrap_or("LegacyTyped")
-            .to_string();
-        let codex_model = entry.get("codex_model").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let codex_thread_id =
-            entry.get("codex_thread_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-
-        let row = SessionRow {
-            session_id,
-            tmux_session_name,
-            worktree_path,
-            workspace_name,
-            created_at,
-            agent_type,
-            headroom_enabled,
-            rtk_enabled,
-            skip_permissions,
-            model,
-            model_source,
-            codex_model,
-            codex_thread_id,
-        };
-
-        SessionsRepo::upsert(pool, &row).await?;
-        imported += 1;
+        }
     }
+    Ok((rows, rejected))
+}
 
-    Ok(imported)
+/// Map one file record onto the wire entry.
+///
+/// A record with no `session_id` gets a fresh UUID, minted once here and then
+/// stored, so every later read sees the same id. A record whose `session_id`
+/// is present keeps it verbatim; if it is not a UUID, validation rejects the
+/// record rather than inventing a replacement.
+fn record_to_entry(
+    tmux_key: &str,
+    record: &serde_json::Value,
+) -> Result<WorkspaceSessionEntry, String> {
+    let text = |key: &str| record.get(key).and_then(serde_json::Value::as_str);
+    let flag = |key: &str| record.get(key).and_then(serde_json::Value::as_bool);
+
+    let session_id = match record.get("session_id") {
+        None | Some(serde_json::Value::Null) => uuid::Uuid::new_v4().to_string(),
+        Some(serde_json::Value::String(id)) => id.clone(),
+        Some(_) => return Err("session_id is not a string".to_string()),
+    };
+    let created_at = match record.get("created_at") {
+        Some(serde_json::Value::Number(n)) => {
+            n.as_i64().ok_or_else(|| "created_at is not an integer".to_string())?
+        }
+        Some(serde_json::Value::String(s)) => chrono::DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.timestamp_millis())
+            .map_err(|e| format!("created_at: {e}"))?,
+        _ => return Err("created_at is missing".to_string()),
+    };
+
+    Ok(WorkspaceSessionEntry {
+        session_id,
+        tmux_session_name: text("tmux_session_name").unwrap_or(tmux_key).to_string(),
+        worktree_path: text("worktree_path").unwrap_or_default().to_string(),
+        workspace_name: text("workspace_name").unwrap_or("default").to_string(),
+        created_at,
+        agent_type: text("agent_type").unwrap_or("Claude").to_string(),
+        headroom_enabled: flag("headroom_enabled").unwrap_or(false),
+        rtk_enabled: flag("rtk_enabled").unwrap_or(false),
+        skip_permissions: flag("skip_permissions"),
+        model: text("model").map(str::to_string),
+        model_source: text("model_source").unwrap_or("LegacyTyped").to_string(),
+        codex_model: text("codex_model").map(str::to_string),
+        codex_thread_id: text("codex_thread_id").map(str::to_string),
+    })
+}
+
+fn entry_to_row(entry: WorkspaceSessionEntry) -> SessionRow {
+    SessionRow {
+        session_id: entry.session_id,
+        tmux_session_name: entry.tmux_session_name,
+        worktree_path: entry.worktree_path,
+        workspace_name: entry.workspace_name,
+        created_at: entry.created_at,
+        agent_type: entry.agent_type,
+        headroom_enabled: entry.headroom_enabled,
+        rtk_enabled: entry.rtk_enabled,
+        skip_permissions: entry.skip_permissions,
+        model: entry.model,
+        model_source: entry.model_source,
+        codex_model: entry.codex_model,
+        codex_thread_id: entry.codex_thread_id,
+    }
 }
