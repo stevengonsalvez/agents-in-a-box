@@ -4443,8 +4443,10 @@ impl AppState {
             .filter_map(|w| w.shell_session.clone().map(|s| (w.path.clone(), s)))
             .collect();
 
-        // Clear existing workspaces before loading to prevent duplicates
-        self.sessions.workspaces.clear();
+        // Taken, not cleared: the rows are rebuilt from disk below, and what
+        // the host set on them rides over by id at the end, as the background
+        // scan's apply does.
+        let held = std::mem::take(&mut self.sessions.workspaces);
 
         // Check and refresh OAuth tokens if needed (only if Docker is available)
         let home_dir = dirs::home_dir();
@@ -4535,6 +4537,8 @@ impl AppState {
 
         // Also try to auto-detect workspace shells from tmux
         self.auto_detect_workspace_shells().await;
+
+        crate::models::workspace::carry_host_rows(&held, &mut self.sessions.workspaces);
 
         // Reset selection state before setting new selection
         // This is critical to avoid stale indices after refresh that break navigation
@@ -4824,6 +4828,22 @@ impl AppState {
                             // (#1155).
                             let keep = self.selected_row_identity();
                             self.host.workspaces_applied = true;
+                            // The scan discovered the rows; what the host set
+                            // on them (the chips, the errors, the provider id,
+                            // the attach mark, the logs and preview) rides
+                            // over by id, so no frame between this and the
+                            // next attention merge shows a waiting row with no
+                            // question on it.
+                            let mut workspaces = workspaces;
+                            let mut ssh_sessions = ssh_sessions;
+                            crate::models::workspace::carry_host_rows(
+                                &self.sessions.workspaces,
+                                &mut workspaces,
+                            );
+                            crate::models::session::carry_host_rows(
+                                &self.ssh.ssh_sessions,
+                                &mut ssh_sessions,
+                            );
                             self.sessions.workspaces = workspaces;
                             self.ssh.ssh_sessions = ssh_sessions;
 

@@ -3590,6 +3590,79 @@ mod tests {
         );
     }
 
+    /// A scan discovers rows; the host sets the rest on them (the chips, the
+    /// errors, the provider id, the attach mark, the logs and preview). A scan
+    /// that found a change used to replace the rows wholesale, so a frame
+    /// between it and the next attention merge showed a waiting row with no
+    /// question on it, and the desktop banner unmounted under a click.
+    #[test]
+    fn a_scan_that_changed_the_list_keeps_what_the_host_set_on_a_row() {
+        use crate::app::state::WorkspaceLoadResult;
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        use crate::models::{Session, Workspace};
+
+        let mut state = AppState::new();
+        let mut held = Workspace::new("api".to_string(), "/repo/api".into());
+        let mut row = Session::new("feat".to_string(), "/repo/api/wt".to_string());
+        let id = row.id;
+        row.live_attention = vec![SessionAttention::daemon(
+            AttentionKind::Ask,
+            1_000,
+            "att-7".into(),
+        )];
+        row.errors = vec![SessionAttention::daemon(
+            AttentionKind::Err,
+            900,
+            "att-6".into(),
+        )];
+        row.is_attached = true;
+        row.provider_session_id = Some("prov-1".to_string());
+        row.recent_logs = Some("agent tick 1".to_string());
+        row.preview_content = Some("agent tick 1".to_string());
+        held.add_session(row);
+        state.sessions.workspaces = vec![held];
+        state.host.workspaces_applied = true;
+
+        // The scan found a change: the same row, at a scan's defaults, and a
+        // new one beside it.
+        let mut found = Workspace::new("api".to_string(), "/repo/api".into());
+        let mut same = Session::new("feat".to_string(), "/repo/api/wt".to_string());
+        same.id = id;
+        found.add_session(same);
+        found.add_session(Session::new(
+            "spike".to_string(),
+            "/repo/api/wt2".to_string(),
+        ));
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(vec![found])).expect("send load result");
+
+        assert!(
+            state.check_workspace_loading_complete(),
+            "the scan was applied"
+        );
+        assert_eq!(
+            state.sessions.workspaces[0].sessions.len(),
+            2,
+            "with the new row"
+        );
+        let row = state.find_session(id).expect("the held row is still listed");
+        assert_eq!(
+            row.live_attention.len(),
+            1,
+            "the question is still on the row"
+        );
+        assert_eq!(row.errors.len(), 1);
+        assert!(row.is_attached);
+        assert_eq!(row.provider_session_id.as_deref(), Some("prov-1"));
+        assert_eq!(row.recent_logs.as_deref(), Some("agent tick 1"));
+        assert_eq!(row.preview_content.as_deref(), Some("agent tick 1"));
+        let new_row = &state.sessions.workspaces[0].sessions[1];
+        assert!(
+            new_row.live_attention.is_empty(),
+            "a row the host never saw stays bare"
+        );
+    }
+
     /// A host that rescans on a timer must not reframe the world every time.
     /// A scan whose result matches what the state holds writes nothing: the
     /// Sessions section keeps its version, the operator's selection stays put,
