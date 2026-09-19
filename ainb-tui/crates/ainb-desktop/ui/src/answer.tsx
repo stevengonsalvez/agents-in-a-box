@@ -30,7 +30,8 @@ export function AnswerBanner(props: Props) {
   const question = drawnQuestion(
     () => props.question,
     (paint) => {
-      requestAnimationFrame(paint);
+      const frame = requestAnimationFrame(paint);
+      return () => cancelAnimationFrame(frame);
     },
   );
   const [draft, setDraft] = createSignal("");

@@ -12,6 +12,14 @@ on:
         required: false
         type: boolean
         default: false
+      # The desktop bundles are ad-hoc signed unless this is true, in which
+      # case the six Apple secrets below must all be present (#530) and the
+      # bundler signs with the Developer ID, notarises and staples.
+      desktop_signed:
+        description: 'Sign and notarise the desktop bundles with the Apple secrets'
+        required: false
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,10 +27,18 @@ env:
   WORKING_DIR: ainb-tui
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
+# Two dispatches of one version would race the tag push; the second waits
+# for the first rather than cancelling it, because a release half published
+# is worse than one published twice over.
+concurrency:
+  group: release-v${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
 jobs:
   prepare:
     name: Prepare Release
-    timeout-minutes: 20
+    # The desktop lockfile update below may fetch the registry index.
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -145,6 +161,24 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
         run: cargo update --workspace
 
+      # The desktop shell is its own cargo workspace, excluded from the
+      # parent's members, so the two steps above never reach it. One version
+      # per release: the bundler reads this crate's version (tauri.conf.json
+      # carries none), so the tag, the CLI, the daemon and the desktop agree.
+      - name: Update the desktop crate version
+        working-directory: ${{ env.WORKING_DIR }}/crates/ainb-desktop
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          sed -i "/^\[package\]$/,/^\[/{s/^version = \".*\"/version = \"${VERSION}\"/;}" Cargo.toml
+          grep -q "^version = \"${VERSION}\"" Cargo.toml
+          echo "Updated crates/ainb-desktop/Cargo.toml to version ${VERSION}"
+
+      - name: Update the desktop lockfile version
+        working-directory: ${{ env.WORKING_DIR }}/crates/ainb-desktop
+        # Offline first: the lockfile only changes its own version line, so
+        # the registry index is needed only when the cache is cold.
+        run: cargo update -p ainb-desktop --offline || cargo update -p ainb-desktop
+
       - name: Update CHANGELOG.md
         working-directory: ${{ env.WORKING_DIR }}
         run: |
@@ -211,7 +245,8 @@ jobs:
           BRANCH="chore/release-v${VERSION}"
 
           git checkout -b "${BRANCH}"
-          git add "${WORKING_DIR}/Cargo.toml" "${WORKING_DIR}/Cargo.lock" "${WORKING_DIR}/CHANGELOG.md"
+          git add "${WORKING_DIR}/Cargo.toml" "${WORKING_DIR}/Cargo.lock" "${WORKING_DIR}/CHANGELOG.md" \
+            "${WORKING_DIR}/crates/ainb-desktop/Cargo.toml" "${WORKING_DIR}/crates/ainb-desktop/Cargo.lock"
           git commit -m "chore(release): prepare v${VERSION}"
 
           # Tag FIRST: it is the artifact the rest of the pipeline consumes, so
@@ -413,9 +448,244 @@ jobs:
             ${{ runner.temp }}/fleet-updates/AINBFleet-*.dmg
             ${{ runner.temp }}/fleet-updates/appcast.xml
 
+  # The desktop shell, bundled with its daemon sidecar, one bundle per target
+  # under the release's version. Per-arch on macOS rather than universal: the
+  # sidecar is a target-triple-named external binary the xtask stages one at a
+  # time, and the x64 leg is cross-compiled on the arm64 runner exactly as the
+  # CLI's is above. Linux builds on the oldest supported image so the AppImage
+  # links the oldest glibc. Signing and notarisation run only from the Apple
+  # secrets (#530), and only when `desktop_signed` asks for them; otherwise the
+  # bundles are ad-hoc signed and the summary and the release body say so.
+  desktop:
+    name: Build desktop ${{ matrix.target }}
+    needs: prepare
+    timeout-minutes: 90
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `app` declared beside `dmg`: the bundle check reads the .app, so
+          # it is asked for rather than relied on as the dmg's byproduct.
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            bundles: app,dmg
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            bundles: app,dmg
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            bundles: appimage,deb
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAURI_CLI_VERSION: "2.11.4"
+      DESKTOP_DIR: ainb-tui/crates/ainb-desktop
+      # linuxdeploy is itself an AppImage; without FUSE on the runner it has
+      # to extract and run.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.prepare.outputs.version }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Add target std to the pinned toolchain
+        working-directory: ${{ env.WORKING_DIR }}
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install the Tauri system packages (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf libfuse2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ${{ env.DESKTOP_DIR }}/ui/package-lock.json
+
+      # `tsc --noEmit --strict` runs first; the bundler's beforeBuildCommand
+      # builds it again, which is cheap once node_modules is in place.
+      - name: Build the shell frontend
+        run: npm ci --no-audit --no-fund && npm run build
+        working-directory: ${{ env.DESKTOP_DIR }}/ui
+
+      - name: Stage the hangar daemon sidecar for the target
+        working-directory: ${{ env.WORKING_DIR }}
+        run: cargo xtask stage-desktop-sidecar --release --target ${{ matrix.target }}
+
+      # The bundle's daemon must report the release version, asserted before
+      # anything is bundled. The cross-compiled x64 sidecar can run on the
+      # arm64 runner only under Rosetta; without it the run is skipped, the
+      # job summary says so, and the binary's architecture is checked
+      # instead. The version inside the bundle is still asserted by the
+      # desktop workflow's smoke on a host that matches.
+      - name: Assert the staged sidecar reports the release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="${DESKTOP_DIR}/binaries/ainb-hangar-daemon-${{ matrix.target }}"
+          test -x "$BIN"
+          via=()
+          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+            if arch -x86_64 /usr/bin/true 2>/dev/null; then
+              via=(arch -x86_64)
+            else
+              lipo -archs "$BIN" | grep -qw x86_64
+              echo "sidecar version assert on ${{ matrix.target }}: skipped, no Rosetta on this runner; the staged binary is x86_64" | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
+          reported="$("${via[@]}" "$BIN" --version)"
+          echo "sidecar reports: $reported"
+          case "$reported" in
+            *" ${VERSION}") ;;
+            *) echo "sidecar version does not match the release version ${VERSION}" >&2; exit 1 ;;
+          esac
+
+      - name: Install the Tauri CLI (pinned)
+        run: |
+          if cargo tauri --version 2>/dev/null | grep -q "tauri-cli ${TAURI_CLI_VERSION}"; then
+            echo "tauri-cli ${TAURI_CLI_VERSION} already installed"
+          else
+            cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
+          fi
+          cargo tauri --version
+
+      - name: Require the Apple signing secrets
+        if: ${{ runner.os == 'macOS' && github.event.inputs.desktop_signed == 'true' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then
+              missing+=("${name}")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'desktop_signed was requested but these Apple secrets are missing (#530): %s\n' "${missing[*]}"
+            exit 1
+          fi
+          echo "desktop bundles on ${{ matrix.target }}: signed with the Developer ID and notarised" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Record ad-hoc signing
+        if: ${{ runner.os == 'macOS' && github.event.inputs.desktop_signed != 'true' }}
+        run: |
+          echo "desktop bundles on ${{ matrix.target }}: ad-hoc signed, not notarised (desktop_signed is false; #530)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Two bundle steps rather than one with conditional variables: the
+      # bundler treats a DEFINED but empty APPLE_CERTIFICATE as a certificate
+      # to import and a defined APPLE_SIGNING_IDENTITY as the identity, so an
+      # unsigned run must not have the names in its environment at all. The
+      # ad-hoc identity `-` is the config's default (tauri.conf.json,
+      # bundle.macOS.signingIdentity); the signed step overrides it through
+      # the environment, and the bundler then codesigns, notarises and
+      # staples by itself. `--locked` reaches cargo through the CLI.
+      - name: Bundle the desktop shell (ad-hoc signed)
+        if: ${{ !(runner.os == 'macOS' && github.event.inputs.desktop_signed == 'true') }}
+        working-directory: ${{ env.DESKTOP_DIR }}
+        run: cargo tauri build --target ${{ matrix.target }} --features bundled --bundles ${{ matrix.bundles }} -- --locked
+
+      - name: Bundle the desktop shell (Developer ID, notarised)
+        if: ${{ runner.os == 'macOS' && github.event.inputs.desktop_signed == 'true' }}
+        working-directory: ${{ env.DESKTOP_DIR }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: cargo tauri build --target ${{ matrix.target }} --features bundled --bundles ${{ matrix.bundles }} -- --locked
+
+      # What was bundled is read, never launched: a hosted runner is not a
+      # GUI host. The sidecar sits beside the app binary inside the bundle,
+      # which is where the supervisor looks for it.
+      - name: Check the macOS bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find "${DESKTOP_DIR}/target/${{ matrix.target }}/release/bundle/macos" -maxdepth 1 -name '*.app' -print -quit)"
+          test -d "$APP"
+          echo "bundle: $APP"
+          test -x "$APP/Contents/MacOS/ainb-desktop"
+          test -x "$APP/Contents/MacOS/ainb-hangar-daemon"
+          short="$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")"
+          test "$short" = "${VERSION}"
+          test "$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")" = "dev.agentsinabox.desktop"
+          codesign -v --strict --deep "$APP"
+          if [ "${{ github.event.inputs.desktop_signed }}" = "true" ]; then
+            spctl --assess --type execute "$APP"
+          fi
+          DMG="$(find "${DESKTOP_DIR}/target/${{ matrix.target }}/release/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -f "$DMG"
+
+      - name: Check the Linux bundles
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APPIMAGE="$(find "${DESKTOP_DIR}/target/${{ matrix.target }}/release/bundle/appimage" -maxdepth 1 -name '*.AppImage' -print -quit)"
+          DEB="$(find "${DESKTOP_DIR}/target/${{ matrix.target }}/release/bundle/deb" -maxdepth 1 -name '*.deb' -print -quit)"
+          test -x "$APPIMAGE"
+          test -f "$DEB"
+          dpkg-deb --contents "$DEB" | grep -q 'usr/bin/ainb-hangar-daemon$'
+          dpkg-deb --contents "$DEB" | grep -q 'usr/bin/ainb-desktop$'
+          echo "bundles: $APPIMAGE $DEB"
+
+      # Stable, target-named file names: the manifest and the release page
+      # name these, not the bundler's spaced product name.
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="${DESKTOP_DIR}/out"
+          mkdir -p "$OUT"
+          BUNDLE_DIR="${DESKTOP_DIR}/target/${{ matrix.target }}/release/bundle"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cp "$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' -print -quit)" \
+              "$OUT/ainb-desktop-${VERSION}-${{ matrix.target }}.dmg"
+          else
+            cp "$(find "$BUNDLE_DIR/appimage" -maxdepth 1 -name '*.AppImage' -print -quit)" \
+              "$OUT/ainb-desktop-${VERSION}-${{ matrix.target }}.AppImage"
+            cp "$(find "$BUNDLE_DIR/deb" -maxdepth 1 -name '*.deb' -print -quit)" \
+              "$OUT/ainb-desktop-${VERSION}-${{ matrix.target }}.deb"
+          fi
+          cd "$OUT"
+          for f in ainb-desktop-*; do
+            shasum -a 256 "$f" > "$f.sha256"
+          done
+          ls -la
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.target }}
+          path: |
+            ${{ env.DESKTOP_DIR }}/out/ainb-desktop-*
+
   release:
     name: Create Release
-    needs: [prepare, build, fleet_macos]
+    # The CLI release never waits on the desktop legs' luck: a failed bundle
+    # leg leaves its entry out of the manifest and is named in the release
+    # body, and the tag is never left pushed with no release behind it.
+    needs: [prepare, build, desktop, fleet_macos]
     if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && (needs.fleet_macos.result == 'success' || needs.fleet_macos.result == 'skipped') }}
     timeout-minutes: 20
     runs-on: ubuntu-latest
@@ -433,6 +703,7 @@ jobs:
           path: artifacts
 
       - name: Sign release manifest
+        id: manifest
         env:
           AINB_RELEASE_SIGNING_KEY: ${{ secrets.AINB_RELEASE_SIGNING_KEY }}
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -451,13 +722,80 @@ jobs:
             exit 1
           fi
 
-          cat > artifacts/release-manifest.json <<EOF
-          {"version":"${VERSION}","assets":[
-            {"target":"aarch64-apple-darwin","archive":"ainb-${VERSION}-aarch64-apple-darwin.tar.gz","sha256":"${mac_sha}"},
-            {"target":"x86_64-apple-darwin","archive":"ainb-${VERSION}-x86_64-apple-darwin.tar.gz","sha256":"${intel_sha}"},
-            {"target":"x86_64-unknown-linux-gnu","archive":"ainb-${VERSION}-x86_64-unknown-linux-gnu.tar.gz","sha256":"${linux_sha}"}
-          ]}
-          EOF
+          # The desktop bundles go under their own top-level key, NEVER into
+          # assets[]: a shipped CLI matches assets[] on target alone and takes
+          # the first hit, so a .dmg there would be installed as the ainb
+          # binary. One entry per bundle, with a `format` that tells the two
+          # Linux entries apart and a `signed` flag that says whether the
+          # bundle was signed with the Developer ID and notarised. A leg that
+          # failed has no artifact: its entries are left out, and the release
+          # body names them; the CLI release publishes regardless.
+          signed_flag="false"
+          if [ "${{ github.event.inputs.desktop_signed }}" = "true" ]; then
+            signed_flag="true"
+          fi
+          desktop_entries="[]"
+          desktop_missing=""
+          add_desktop_entry() {
+            # add_desktop_entry <target> <format> <extension> <signed>
+            local target="$1" format="$2" ext="$3" signed="$4" file="" sha
+            for candidate in "artifacts/desktop-${target}"/*."${ext}"; do
+              if [ -e "$candidate" ]; then file="$candidate"; break; fi
+            done
+            if [ -z "$file" ]; then
+              desktop_missing="${desktop_missing} ${target}/${format}"
+              return 0
+            fi
+            sha=$(sha256sum "$file" | awk '{print $1}')
+            desktop_entries=$(jq -c \
+              --arg t "$target" --arg f "$format" --arg a "$(basename "$file")" \
+              --arg s "$sha" --argjson g "$signed" \
+              '. + [{target: $t, format: $f, archive: $a, sha256: $s, signed: $g}]' \
+              <<<"$desktop_entries")
+          }
+          add_desktop_entry aarch64-apple-darwin dmg dmg "$signed_flag"
+          add_desktop_entry x86_64-apple-darwin dmg dmg "$signed_flag"
+          add_desktop_entry x86_64-unknown-linux-gnu appimage AppImage false
+          add_desktop_entry x86_64-unknown-linux-gnu deb deb false
+
+          jq -n \
+            --arg v "${VERSION}" --arg m "${mac_sha}" --arg i "${intel_sha}" --arg l "${linux_sha}" \
+            --argjson d "${desktop_entries}" '{
+              version: $v,
+              assets: [
+                {target: "aarch64-apple-darwin", archive: ("ainb-" + $v + "-aarch64-apple-darwin.tar.gz"), sha256: $m},
+                {target: "x86_64-apple-darwin", archive: ("ainb-" + $v + "-x86_64-apple-darwin.tar.gz"), sha256: $i},
+                {target: "x86_64-unknown-linux-gnu", archive: ("ainb-" + $v + "-x86_64-unknown-linux-gnu.tar.gz"), sha256: $l}
+              ],
+              desktop: $d
+            }' > artifacts/release-manifest.json
+
+          # Read the manifest back before signing it: every assets[] entry is a
+          # CLI archive and every desktop entry a desktop bundle with a known
+          # format, so a shipped CLI can never be handed a bundle for its
+          # target.
+          jq -e '
+            (.assets | length == 3) and all(.assets[]; .archive | startswith("ainb-" + $v + "-"))
+            and (.desktop | length <= 4)
+            and all(.desktop[]; (.archive | startswith("ainb-desktop-" + $v + "-"))
+                                and (.format | IN("dmg", "appimage", "deb"))
+                                and (.signed | type == "boolean"))
+          ' --arg v "${VERSION}" artifacts/release-manifest.json >/dev/null \
+            || { echo "release manifest has an entry under the wrong key"; cat artifacts/release-manifest.json; exit 1; }
+          cat artifacts/release-manifest.json
+
+          # The release body is built from what was actually attached.
+          if [ -n "${desktop_missing}" ]; then
+            note="Missing from this release because their build leg failed:${desktop_missing}. The manifest's desktop key lists only the bundles attached."
+          else
+            note="All desktop bundles are attached and listed under the manifest's desktop key."
+          fi
+          if [ "$signed_flag" = "true" ]; then
+            sign_note="The macOS bundles are signed with the Developer ID and notarised, and each entry in the manifest carries signed: true."
+          else
+            sign_note="The macOS bundles are ad-hoc signed and not notarised (signed: false in the manifest), so first launch can require right-click Open, or Open Anyway in System Settings > Privacy & Security."
+          fi
+          echo "desktop_note=${note} ${sign_note}" >> "$GITHUB_OUTPUT"
 
           key_path="${RUNNER_TEMP}/ainb-release-signing-key.pem"
           printf '%s' "${AINB_RELEASE_SIGNING_KEY}" > "${key_path}"
@@ -535,6 +873,14 @@ jobs:
             Use Settings, Check for Updates to check immediately. Fleet is unsigned,
             so first launch can require right-click Open or Open Anyway in System
             Settings > Privacy & Security.
+
+            ### Desktop app
+            One bundle per platform, each carrying its own `ainb-hangar-daemon` sidecar
+            at this release's version: `ainb-desktop-<version>-aarch64-apple-darwin.dmg`
+            (Apple Silicon), `ainb-desktop-<version>-x86_64-apple-darwin.dmg` (Intel),
+            and for Linux x86_64 an `.AppImage` and a `.deb`. Every bundle attached is
+            listed under the signed manifest's `desktop` key with its `format` and a
+            `signed` flag. ${{ steps.manifest.outputs.desktop_note }}
 
             ### Manual Install
             1. Download the appropriate archive for your platform from the assets below
