@@ -96,14 +96,14 @@ pub fn refresh_snapshot() {
 /// Install `config` as the snapshot. Test seam, and the escape hatch for a
 /// caller that has already loaded and does not want a second read.
 /// The one lock every test that mutates the environment or the snapshot must
-/// hold.
+/// hold, under the name this crate's tests already use.
 ///
 /// Both are process-global. A module that declares its own private mutex is
-/// guarding nothing — two different locks around the same `setenv` is still a
+/// guarding nothing: two different locks around the same `setenv` is still a
 /// `setenv`/`getenv` data race, and a snapshot installed by one test is read by
-/// every other test in the binary. There is exactly one of these on purpose.
-#[cfg(any(test, feature = "test-support"))]
-pub static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// every other test in the binary. There is exactly one of these on purpose, and
+/// it lives in [`crate::env_lock`] so the integration tests reach the same one.
+pub use crate::env_lock::ENV_LOCK as TEST_ENV_LOCK;
 
 /// Install `config` as the snapshot.
 ///
