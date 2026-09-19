@@ -419,3 +419,102 @@ fn a_token_straddling_each_cut_never_survives_it() {
     assert_eq!(message.len(), 1, "one message line: {message:?}");
     assert_no_token_piece(&message[0].1, "message body");
 }
+
+/// One `acp.message` row carrying `text`, as the reducer writes it.
+fn message(text: &str) -> Vec<(MessageKind, String)> {
+    classify(&[(
+        "acp.message",
+        &serde_json::json!({"kind": "acp.message", "text": text, "coalescedDeltas": 1})
+            .to_string(),
+    )])
+}
+
+/// One completed tool-call update whose output is `text`.
+fn tool_result(text: &str) -> Vec<(MessageKind, String)> {
+    classify(&[(
+        "acp.tool_call",
+        &serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": text}}],
+        })
+        .to_string(),
+    )])
+}
+
+/// The cuts count characters, not bytes: a lead of 3-byte characters puts the
+/// token across the same cuts and it still goes whole.
+#[test]
+fn a_token_straddling_a_cut_after_multibyte_text_never_survives_it() {
+    let token = token();
+    let result = tool_result(&format!("{} {token}", "日".repeat(70)));
+    assert_eq!(result.len(), 1, "one result line: {result:?}");
+    assert_no_token_piece(&result[0].1, "tool result after multi-byte text");
+
+    let body = message(&format!("{} {token}", "日".repeat(8180)));
+    assert_eq!(body.len(), 1, "one message line: {body:?}");
+    assert_no_token_piece(&body[0].1, "message body after multi-byte text");
+}
+
+/// A private key spans lines, and each base64 line alone matches no shape: the
+/// block goes whole before the text is split into one entry per line.
+#[test]
+fn a_private_key_across_lines_is_removed_whole() {
+    let key_line = format!("MIIEow{}", "Q".repeat(58));
+    let text = format!(
+        "here is the key\n-----BEGIN RSA PRIVATE KEY-----\n{key_line}\n{key_line}\n-----END RSA PRIVATE KEY-----\nthat was it"
+    );
+    let lines: Vec<String> = message(&text).into_iter().map(|(_, body)| body).collect();
+    assert!(
+        lines.iter().all(|line| !line.contains("MIIEow") && !line.contains("PRIVATE KEY")),
+        "a piece of the key survived: {lines:?}"
+    );
+    assert_eq!(lines.first().map(String::as_str), Some("here is the key"));
+    assert_eq!(lines.last().map(String::as_str), Some("that was it"));
+}
+
+/// The scrub runs over a bounded window, and a secret inside that window is
+/// still redacted wherever it sits: in a summary past its cut, on a late line
+/// of a long block, and in a body just under its ceiling.
+#[test]
+fn a_secret_inside_the_scrub_window_is_still_redacted() {
+    let token = token();
+
+    let result = tool_result(&format!("{} {token} {}", "x".repeat(2000), "y".repeat(2000)));
+    assert_no_token_piece(&result[0].1, "summary window");
+
+    let block: String = (0..400)
+        .map(|i| if i == 300 { format!("line {i} {token}") } else { format!("line {i}") })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (_, line) in message(&block) {
+        assert_no_token_piece(&line, "late line of a long block");
+    }
+
+    let body = message(&format!("{} {token}", "x".repeat(8000)));
+    assert_no_token_piece(&body[0].1, "body just under its ceiling");
+}
+
+/// A multi-megabyte line is classified in time that does not grow with it: the
+/// scrub sees a bounded window, not the whole line. Scrubbed whole, ~40 regex
+/// passes over 32 MiB take tens of seconds in a debug build; windowed, well
+/// under the ceiling here.
+#[test]
+fn a_huge_line_is_classified_in_bounded_time_and_size() {
+    let huge = "x".repeat(32 << 20);
+    let started = std::time::Instant::now();
+    let result = tool_result(&huge);
+    let body = message(&huge);
+    let many = message(&"line\n".repeat(8 << 20));
+    let elapsed = started.elapsed();
+
+    assert!(result[0].1.chars().count() <= 84 + "tool  ".len(), "summary bounded");
+    assert_eq!(body.len(), 1);
+    assert!(body[0].1.chars().count() <= 8192, "body bounded");
+    assert!(many.len() <= 512, "entries bounded: {}", many.len());
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "a 32 MiB line took {elapsed:?}: the scrub is not windowed"
+    );
+}
