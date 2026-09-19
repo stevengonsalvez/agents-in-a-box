@@ -41,6 +41,10 @@ pub enum Hello {
         protocol: ProtocolRange,
         daemon_version: Option<String>,
     },
+    /// `PROTOCOL_INCOMPATIBLE` with `"data": null`: a refusal that says
+    /// nothing about the daemon, which the code alone must still make a
+    /// refusal and never a spawn.
+    RefuseBare,
 }
 
 /// A listener on `home`'s plain socket with the home's token written, so a
@@ -108,6 +112,9 @@ pub fn listen(home: &Path, hello: Hello) -> Listener {
                                 protocol.min, protocol.max, client.min, client.max
                             )
                         }
+                        (Some(m), Hello::RefuseBare) if m == methods::AUTH_HELLO => format!(
+                            r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":{PROTOCOL_INCOMPATIBLE},"message":"refused","data":null}}}}"#
+                        ),
                         _ => format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{}}}}"#),
                     };
                     if writer.write_all(&framed(&body)).await.is_err() {
