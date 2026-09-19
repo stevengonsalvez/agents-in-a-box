@@ -1,4 +1,4 @@
-# /goal P6e makes the daemon's sessions table the one source for every surface at once: the TUI's readers and writers move onto `SessionSource` together with the CLI, the file rows created while P6d was dark are reconciled into the table without bringing back a row the table deleted, the `hangar.workspace.sessions` capability is advertised as the last commit, and a scripted `p6-concurrent` scenario proves a session created on one surface is seen by the other two, so slice 2 closes with one session store and no split brain
+# /goal P6e makes the daemon's sessions table the one source for every surface at once: the TUI's readers and writers move onto `SessionSource` together with the CLI, the file rows created while P6d was dark are reconciled into the table without bringing back a row the table deleted, a scripted `p6-concurrent` scenario proves, before any flip, a session created on one surface is seen by the other two, and then the `hangar.workspace.sessions` capability is advertised in a last PR of its own, so slice 2 closes with one session store and no split brain
 
 ─ CONTEXT ─
 
@@ -54,7 +54,7 @@
 ```
 
 · The whole seam is `SessionSource`. P6e does not add a second resolver: every `SessionStore::load`, `lock` and `mutate` call in the list above becomes `load_session_store` / `mutate_session_store` (or their async forms), so the TUI, the desktop, the CLI and, through `ainb list --frame`, the web read one decision per process.
-· The flip is a one-line change: append `CAP_WORKSPACE_SESSIONS` to `CAPABILITY_CATALOGUE` and to `capabilities.catalogue`. It is the LAST commit of the node, after every reader and writer has moved and the reconciliation has landed, so no intermediate commit on `v2` has a surface on the table while another is on the file.
+· The flip is a one-line change: append `CAP_WORKSPACE_SESSIONS` to `CAPABILITY_CATALOGUE` and to `capabilities.catalogue`. It is the LAST PR of the node (P6e-6), after the reconciliation, the resolver, every reader and writer, and the proof scenario have landed, so no intermediate commit on `v2` has a surface on the table while another is on the file.
 · Kill switch: `AINB_SESSION_SOURCE=file` in a process's environment makes `resolve` answer `File` before it dials anything: no `Degraded` notice, no re-resolve, no RPC. The flip is a compile-time constant, so this is the rollback that does not need a re-release. Any other value is ignored with one warning. Because the file stays written ("Mixed versions"), a process forced onto the file still sees current sessions.
 · Reconciliation happens in the daemon, in the same shape as the P6d import (a marker row, one transaction, clients on the file until the first pass completes), but it is repeatable, not one-time: see "Mixed versions" below.
 
@@ -94,9 +94,9 @@
 
 3. Reconciliation without resurrection, repeatable. Daemon state: capability on (test switch before the flip), P6d import row present. Each pass (boot, degraded exit, mtime change) inserts every file session whose id is absent from the table; a table row is never overwritten by its file row; a session deleted through the new stack is gone from the file too, so a later pass does not bring it back; a session an older binary appended to the file after the previous pass is inserted by the next one; a file session whose tmux name the table binds to another id is skipped and counted, and the table row is unchanged (table wins); a failed pass writes no marker and keeps `session_list.import_complete` false even though the P6d import row exists (the kind-aware check of open question 3). Six tests, one per clause, each red when its guard is removed, plus one that a writer blocked on the flock during a pass lands its row in the file after the pass and is inserted by the next pass, never lost. No tombstones: see open question 1.
 
-4. The flip is last and alone. Daemon state: a real daemon on the flip commit with no test switch. The final commit of the implementation PR touches only `protocol.rs` (the catalogue entry), `capabilities.catalogue`, and the test that pinned the capability off (now pinning it on). `hello` advertises `hangar.workspace.sessions` in a test against a real daemon, and `SessionSource::resolve` answers `Daemon` with no test-only switch.
+4. The flip is last and alone. Daemon state: a real daemon on the flip commit with no test switch. The flip PR (P6e-6) is the last PR of the node, and its flip commit touches only `protocol.rs` (the catalogue entry), `capabilities.catalogue`, and the test that pinned the capability off (now pinning it on). `hello` advertises `hangar.workspace.sessions` in a test against a real daemon, and `SessionSource::resolve` answers `Daemon` with no test-only switch.
 
-5. The desktop journey stays green with the capability on. Daemon state: the journey's own world daemon, started before the app, capability advertised by the flip commit: `ainb-tui/crates/ainb-desktop/e2e/specs/journey.e2e.js`, including "the session created by the CLI reached the sidebar", in the `Desktop journey (ubuntu-latest)` job on the implementation PR's head, with the run id on the PR body.
+5. The desktop journey stays green with the capability on. Daemon state: the journey's own world daemon, started before the app, capability advertised by the flip commit: `ainb-tui/crates/ainb-desktop/e2e/specs/journey.e2e.js`, including "the session created by the CLI reached the sidebar", in the `Desktop journey (ubuntu-latest)` job on the flip PR's head, with the run id on the PR body.
 
 6. The concurrent proof passes. Daemon state: one daemon for all surfaces, capability on through `advertise_workspace_sessions_for_tests` until the flip and through the catalogue after it, plus one combination where the TUI starts before the daemon (degraded, then switched). `ainb-tui/scripts/proof/scenarios/p6-concurrent.sh`, registered in `run.sh`'s `ALL_NODES`, starts a TUI, an `ainb web` and a CLI against one daemon in every combination the scenario defines, creates a session from each surface and asserts the other two see it, kills one from each surface and asserts the other two drop it, answers an ASK from one surface and asserts the other two fold it, and writes `result.json` with `pass: true`. `bash ainb-tui/scripts/proof/run.sh --only p6-concurrent` passes on the PR's head, and a full harness run reports every other node passing.
 
@@ -108,7 +108,7 @@
 
 10. Bounded blocking, no nested lock. Daemon state: a daemon that answers hello with the capability and import complete, then never answers a session RPC (a fake socket). Every converted reducer and effect site returns an error within `SESSION_RPC_DEADLINE` plus 250 ms, and the TUI reducer under test produces its next frame; a site that hangs fails the test on a timeout rather than hanging CI. A nested lock (holding `SessionStore::lock` and calling `mutate_session_store`) returns an error within 1 s. Both are red with the deadline or the guard removed.
 
-11. The programme row `docs/plans/2026-09-12-desktop-programme.md:126` is flipped to done (no daemon state; a docs change) with the PR numbers and the proof run id, in the implementation PR.
+11. The programme row `docs/plans/2026-09-12-desktop-programme.md:126` is flipped to done (no daemon state; a docs change) with the PR numbers and the proof run id, as the docs commit of the flip PR.
 
 ─ WHICH EXISTING TESTS MUST STAY GREEN ─
 
@@ -120,17 +120,31 @@
 
 ─ SCOPE, STAGED AS PRs ─
 
-**P6e-1, reconciliation (daemon only, capability still dark).**
-· Touches: `repo/sessions.rs`, `session_import.rs`, `lib.rs`'s boot call.
-· Proof: the five tests of criterion 3.
+Six PRs, in this order. Each targets `v2`, is mergeable alone, and keeps the capability dark until the last one. The proof scenario lands before the flip, so the flip is gated by it.
 
-**P6e-2, every reader and writer onto `SessionSource`, then the flip.**
-· Touches: the `ainb-app` sites listed under "still on the file", the call-site tripwire and its fixture, the pu4 tests, and as its final commit `protocol.rs` plus `capabilities.catalogue`.
-· Proof: criteria 1, 2, 4, 5 and 7.
+**P6e-1, repeatable reconcile (daemon only).**
+· Touches: `repo/sessions.rs` (the `<path>#reconcile` row, the kind-aware `import_complete`), `session_import.rs` (passes on boot, on mtime change, on request; the flock across a pass; the name-conflict rule), the `workspace/session_reconcile` RPC in `methods.rs` and the daemon dispatch, and `run_loop.rs:1900-1903` (the registration under one flock).
+· Proof: criterion 3, and the registration half of criterion 2.
 
-**P6e-3, the concurrent proof and the programme row.**
-· Touches: `ainb-tui/scripts/proof/scenarios/p6-concurrent.sh`, `run.sh`'s `ALL_NODES`, `docs/plans/2026-09-12-desktop-programme.md:126`.
-· Proof: criteria 6 and 8. May be folded into P6e-2 if the orchestrator prefers one PR for the flip and its proof.
+**P6e-2, the resolver.**
+· Touches: `ainb-app/src/cli/util.rs` (`Degraded` and its re-resolve, the kill switch, `SESSION_RPC_DEADLINE`, the bounded flock, the held-lock guard, the file-then-table write order with revert), and a harness switch that turns the capability on for a real `ainb` and `ainb hangar daemon` built with `test-support`, since `advertise_workspace_sessions_for_tests` only reaches in-process tests.
+· Proof: criteria 9 and 10, and criterion 7a against the in-process daemon.
+
+**P6e-3, the readers.**
+· Touches: every read site in the blast-radius list (`state.rs`, `session_recovery.rs:665`, `session_manager.rs:1927`, `:2392`, `snapshot.rs:36`), the call-site tripwire and its fixture, the degraded notice in the TUI and desktop.
+· Proof: the read halves of criteria 1 and 2 under the switch, and criterion 8's read side.
+
+**P6e-4, the writers.**
+· Touches: every write site (`session_manager.rs:1035`, `:1046`, `:1575`, `:1846`, `:2468-2473`, `session_recovery.rs:988`, `:1425`, `state.rs:13392-13395` and `:13484`, `config/persist.rs:38` with the `Persist::SessionHeadroom` compare-and-set), and the pu4 tests.
+· Proof: the write halves of criteria 1, 2 and 8 under the switch.
+
+**P6e-5, the concurrent proof.**
+· Touches: `ainb-tui/scripts/proof/scenarios/p6-concurrent.sh`, `run.sh`'s `ALL_NODES`, and the harness build of the `test-support` binaries.
+· Proof: criterion 6 under the harness switch, green on this PR, before any flip.
+
+**P6e-6, the flip, alone and last.**
+· Touches: `protocol.rs` (append `CAP_WORKSPACE_SESSIONS` to the catalogue), `capabilities.catalogue`, the dark-pinning test turned into an on-pinning test, and, as a separate docs commit, `docs/plans/2026-09-12-desktop-programme.md:126`. Nothing else.
+· Proof: criteria 4, 5 and 11, criterion 6 re-run with the capability from the catalogue, and criterion 7 in both directions against a release-shaped daemon.
 
 ─ CONSTRAINTS ─
 
@@ -171,6 +185,9 @@ Begin by outputting your plan. Then execute end-to-end without checking in until
 ─ PROGRESS LOG ─
 
 Plan, staged as the PRs above:
-1. P6e-1: reconciliation and its marker, capability still dark.
-2. P6e-2: every `ainb-app` reader and writer onto `SessionSource`, the call-site tripwire, then the flip as the last commit.
-3. P6e-3: `p6-concurrent` and the programme row.
+1. P6e-1: repeatable reconcile with its marker row, kind-aware `import_complete`, flock across a pass, table-wins conflicts, registration under the flock.
+2. P6e-2: the resolver: `Degraded`, kill switch, RPC deadline, bounded flock, nesting guard, file-then-table writes, the harness switch.
+3. P6e-3: every reader onto `SessionSource`, the call-site tripwire, the degraded notice.
+4. P6e-4: every writer onto `SessionSource`, the headroom compare-and-set, the pu4 tests.
+5. P6e-5: `p6-concurrent` in `ALL_NODES`, green under the harness switch.
+6. P6e-6: the flip alone, then the programme row.
