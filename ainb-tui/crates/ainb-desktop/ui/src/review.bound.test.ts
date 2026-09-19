@@ -18,6 +18,7 @@ import { createServer } from "vite";
 import solid from "vite-plugin-solid";
 import type {
   DiffRow_Serialize,
+  GitViewFrame_Serialize,
   GitViewView_Serialize,
   ReviewFileFrame_Serialize,
 } from "../../../ainb-app/bindings/AppState";
@@ -40,7 +41,7 @@ function atTheBound(): GitViewView_Serialize {
         new_lineno: row,
         raw: text,
         emphasis: [],
-      } as DiffRow_Serialize);
+      });
     }
     files.push({
       path: `src/module${file}/file${file}.rs`,
@@ -63,47 +64,48 @@ function atTheBound(): GitViewView_Serialize {
       ],
       rows_cut: 0,
       hunks_cut: 0,
-    } as ReviewFileFrame_Serialize);
+    });
   }
-  return {
-    git_view_state: {
-      active_tab: "Review",
-      changed_files: [],
-      files_cut: 0,
-      selected_file_index: 0,
-      diff_content: [],
-      diff_lines_cut: 0,
-      diff_scroll_offset: 0,
-      worktree_path: "/repo",
-      is_dirty: true,
-      can_push: false,
-      commit_message_len: null,
-      commit_message_cursor: 0,
-      expanded_folders: [],
-      expanded_folders_cut: 0,
-      file_tree_items: [],
-      tree_items_cut: 0,
-      selected_tree_index: 0,
-      markdown_content: [],
-      markdown_lines_cut: 0,
-      markdown_scroll_offset: 0,
-      commits: [],
-      commits_cut: 0,
-      selected_commit_index: 0,
-      review: { files, files_cut: 0 },
-      review_ui: {
-        selected_file: 0,
-        sidebar_selected: 0,
-        collapsed_dirs: [],
-        collapsed_dirs_cut: 0,
-        scroll: 0,
-        current_hunk: 0,
-      },
+  const state: GitViewFrame_Serialize = {
+    active_tab: "Review",
+    changed_files: [],
+    files_cut: 0,
+    selected_file_index: 0,
+    diff_content: [],
+    diff_lines_cut: 0,
+    diff_scroll_offset: 0,
+    worktree_path: "/repo",
+    is_dirty: true,
+    can_push: false,
+    commit_message_len: null,
+    commit_message_cursor: 0,
+    expanded_folders: [],
+    expanded_folders_cut: 0,
+    file_tree_items: [],
+    tree_items_cut: 0,
+    selected_tree_index: 0,
+    markdown_content: [],
+    markdown_lines_cut: 0,
+    markdown_scroll_offset: 0,
+    commits: [],
+    commits_cut: 0,
+    selected_commit_index: 0,
+    review: { files, files_cut: 0 },
+    review_ui: {
+      selected_file: 0,
+      sidebar_selected: 0,
+      collapsed_dirs: [],
+      collapsed_dirs_cut: 0,
+      scroll: 0,
+      current_hunk: 0,
     },
+  };
+  return {
+    git_view_state: state,
     quick_commit_message_len: null,
     quick_commit_cursor: 0,
     is_current_dir_git_repo: true,
-  } as unknown as GitViewView_Serialize;
+  };
 }
 
 test("the review tab at the frame's bound, measured", async () => {
