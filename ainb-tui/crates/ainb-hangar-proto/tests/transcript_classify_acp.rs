@@ -580,3 +580,24 @@ fn whitespace_before_a_token_cannot_push_it_out_of_the_scrub_window() {
         result[0].1
     );
 }
+
+/// A summary collapses its text to one line before it scrubs, so a private key
+/// in a tool's output reaches the scrub with its armour on the same line as
+/// its body. The shape still matches there, and no piece of the key is shown.
+#[test]
+fn a_private_key_collapsed_into_a_summary_is_removed_whole() {
+    let key_line = format!("MIIEow{}", "Q".repeat(58));
+    let result = tool_result(&format!(
+        "-----BEGIN RSA PRIVATE KEY-----\n{key_line}\n{key_line}\n-----END RSA PRIVATE KEY-----\ndone"
+    ));
+    assert_eq!(result.len(), 1, "one result line: {result:?}");
+    let body = &result[0].1;
+    assert!(
+        !body.contains("MIIEow") && !body.contains("PRIVATE KEY"),
+        "a piece of the key survived: {body}"
+    );
+    assert!(
+        body.contains("done"),
+        "the text after the key stays: {body}"
+    );
+}
