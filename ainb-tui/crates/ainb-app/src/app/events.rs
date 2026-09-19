@@ -300,6 +300,15 @@ pub enum AppEvent {
     },
     /// Scroll the git view's active tab by this many lines, down when positive.
     GitViewScrollBy(i32),
+    /// Click the commit `sha` names in the Commits tab; nothing when the list
+    /// no longer carries it.
+    ///
+    /// The commit is named, never its index: the list is cut to a budget on
+    /// the wire and can move under a click, and an index would then select a
+    /// different commit than the one a person pressed.
+    GitViewSelectCommit {
+        sha: String,
+    },
     /// Click home sidebar `item`; a second click on it opens it.
     HomeSidebarClickItem {
         item: crate::components::sidebar::SidebarItem,
@@ -3901,6 +3910,20 @@ impl EventHandler {
                 if let Some(row) = row {
                     if let Some(ref mut git_state) = state.git_view.git_view_state {
                         git_state.review_click_row(row);
+                    }
+                }
+            }
+            AppEvent::GitViewSelectCommit { sha } => {
+                // Read first, against the model's own list as it stands now: a
+                // click on a commit the list no longer carries writes nothing.
+                let at = state
+                    .git_view
+                    .git_view_state
+                    .as_ref()
+                    .and_then(|git| git.commits.iter().position(|commit| commit.hash_short == sha));
+                if let Some(at) = at {
+                    if let Some(ref mut git_state) = state.git_view.git_view_state {
+                        git_state.selected_commit_index = at;
                     }
                 }
             }
