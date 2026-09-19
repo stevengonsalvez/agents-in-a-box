@@ -1,4 +1,4 @@
-import { Match, Switch } from "solid-js";
+import { Match, Show, Switch } from "solid-js";
 import type { PluginsHostView_Serialize } from "../../../ainb-app/bindings/AppState";
 import { type Placeholder, placeholderFor, shown, titleCase } from "./plugin_placeholder.ts";
 
@@ -16,13 +16,20 @@ interface Props {
  */
 export function PluginPlaceholder(props: Props) {
   const state = () => placeholderFor(props.screen, props.pluginsHost);
+  // Frame text, drawn as text: control and format characters dropped.
+  const title = () => shown(titleCase(props.screen));
+  // The terminal names the screen when no plugin owns it.
+  const owner = () => shown(state().plugin ?? props.screen);
   return (
     <section class="plugin-placeholder" data-state={state().kind} data-screen={props.screen}>
       <Switch>
         <Match when={state().kind === "render_error"}>
-          <h2>{`${titleCase(props.screen)} unavailable`}</h2>
-          <p class="lead">{`The \`${state().plugin}\` plugin could not render this screen.`}</p>
+          <h2>{`${title()} unavailable`}</h2>
+          <p class="lead">{`The \`${owner()}\` plugin could not render this screen.`}</p>
           <p class="error">{shown(errorOf(state()))}</p>
+          <Show when={state().kind === "render_error" && (state() as { cut: boolean }).cut}>
+            <p class="hint">The error was cut; the whole of it is in the log.</p>
+          </Show>
           <p class="hint">
             If ainb was upgraded while this session was open, the plugin binary it was discovered from no longer
             exists. Quit and relaunch ainb.
@@ -30,19 +37,22 @@ export function PluginPlaceholder(props: Props) {
           <p class="hint">Logs: ~/.agents-in-a-box/logs/agents-in-a-box-*.jsonl - search `plugin spawn failed`.</p>
         </Match>
         <Match when={state().kind === "no_frame"}>
-          <h2>{`${titleCase(props.screen)} — connecting…`}</h2>
+          <h2>{`${title()} — connecting…`}</h2>
           <p class="hint">waiting for the plugin's first frame</p>
         </Match>
         <Match when={state().kind === "not_registered"}>
-          <h2>{`${state().plugin} unavailable`}</h2>
-          <p class="lead">{`This screen is owned by the \`${state().plugin}\` plugin, which isn't loaded.`}</p>
+          <h2>{state().plugin === null ? "plugin unavailable" : `${owner()} unavailable`}</h2>
+          <p class="lead">{`This screen is owned by the \`${owner()}\` plugin, which isn't loaded.`}</p>
           <p class="hint">Check whether plugins are disabled in this session:</p>
           <ul class="hint">
             <li>AINB_DISABLE_PLUGINS=1 — all plugins off (kill switch)</li>
-            <li>{`AINB_DISABLE_PLUGIN=${state().plugin} — this plugin denylisted by env`}</li>
+            <li>{`AINB_DISABLE_PLUGIN=${state().plugin === null ? "<id>" : owner()} — this plugin denylisted by env`}</li>
             <li>AINB_ONLY_PLUGINS=… — env allowlist excludes it</li>
             <li>config.toml [plugins] — persistent allow/disable list</li>
           </ul>
+          <p class="hint">To restore it: unset the env var(s) and/or edit ~/.agents-in-a-box/config/config.toml</p>
+          <p class="hint">Logs: ~/.agents-in-a-box/logs/agents-in-a-box-*.jsonl — search `applying plugin filter`.</p>
+          <p class="hint">See docs/plugins.md → Configuration → Enable/disable plugins.</p>
         </Match>
       </Switch>
     </section>
