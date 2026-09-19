@@ -86,7 +86,11 @@ pub struct GitViewFrame {
     /// not read as the same thing.
     pub diff_lines_cut: usize,
     pub diff_scroll_offset: usize,
-    pub worktree_path: std::path::PathBuf,
+    /// The worktree's directory name, scrubbed. Never the absolute path: the
+    /// seam denies paths on the wire for remote surfaces, and nothing that
+    /// draws this view reads more than the name (the #1097 rule for the web
+    /// rows, #1212 here).
+    pub worktree_name: String,
     pub is_dirty: bool,
     pub can_push: bool,
     /// The draft crosses as its length, as it did before the bound.
@@ -267,7 +271,13 @@ pub fn project_within(
         diff_scroll_offset: within(state.diff_scroll_offset, diff_content.len()),
         diff_content,
         diff_lines_cut,
-        worktree_path: state.worktree_path.clone(),
+        worktree_name: crate::fleet::bridge::redact::scrub(
+            &state
+                .worktree_path
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default(),
+        ),
         is_dirty: state.is_dirty,
         can_push: state.can_push,
         commit_message_len: state
