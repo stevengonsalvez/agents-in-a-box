@@ -388,9 +388,7 @@ impl AcpClassifier {
             }
         }
 
-        let snippet = tool_output_text(payload)
-            .map(|s| summary(&s))
-            .unwrap_or_default();
+        let snippet = tool_output_text(payload).map(|s| summary(&s)).unwrap_or_default();
         let terminal = matches!(status, "completed" | "failed");
         if snippet.is_empty() && !terminal {
             return;
