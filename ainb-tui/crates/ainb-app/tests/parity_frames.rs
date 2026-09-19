@@ -15,17 +15,17 @@
 #[path = "parity/support.rs"]
 mod support;
 
+#[path = "support/home.rs"]
+mod home;
+
+use home::ScopedHome;
+
 use std::path::{Path, PathBuf};
 
 use ainb_app::SectionId;
 use ainb_app::wire::frame::HostId;
 use ainb_app::wire::{section_json, section_name};
 use support::ParityFixture;
-
-/// Both tests set `HOME` in one process, so they take turns: without this the
-/// fixture one test builds can be built under the other's scratch home, and the
-/// dumps differ by whose home won the race.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity")
@@ -147,11 +147,10 @@ fn frames(fixture: &ParityFixture, homes: &[String]) -> String {
 
 #[test]
 fn every_fixture_frames_its_committed_sections() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let home = tempfile::tempdir().expect("scratch home");
-    // The parity tests own this process's environment; the fixtures read no
-    // real home.
-    std::env::set_var("HOME", home.path());
+    // The guard is the taking of turns: both tests here build fixtures under a
+    // home of their own, and a fixture built under the other test's home would
+    // dump different bytes.
+    let home = ScopedHome::new();
     let homes = homes_of(home.path());
 
     let dir = fixture_dir();
@@ -235,10 +234,8 @@ fn homes_of(home: &Path) -> Vec<String> {
 /// exactly the instability that would land as a mystery diff in CI later.
 #[test]
 fn framing_every_fixture_twice_gives_the_same_bytes() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let home = tempfile::tempdir().expect("scratch home");
-    // As above: a scratch home, never this box's.
-    std::env::set_var("HOME", home.path());
+    // As above: a home of this test's own, never this box's.
+    let home = ScopedHome::new();
     let homes = homes_of(home.path());
 
     for (name, path) in ParityFixture::all_in(&fixture_dir()) {
