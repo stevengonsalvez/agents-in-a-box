@@ -115,7 +115,7 @@
 | D1 | `ainb-desktop` crate: shell, sidecar supervisor, WS terminal, sessions sidebar + tabs, palette | | wdio e2e sessions journey |
 | D2 | board + attention + answer + ACP card | | wdio e2e answer journey |
 | D3 | review tab, settings | | parity suite for the screens D3 draws, with the mutation check |
-| D3' | inbox, burndown stats component, plugin fallback cell, hangar `ui.state` component | D3 | full parity suite |
+| D3' | inbox, burndown stats tab, plugin fallback cell | D3 | full parity suite, as the D3-prime goal enumerates it |
 | D4 | host switcher + ssh forward, updater, release matrix | D3' | release-branch human-driver run |
 
 - Each step is its own PR. `ainb-core` never breaks because it re-exports. D1 can start after P2; D2 after P3; D3 after P5; D4 after P6 + S.
