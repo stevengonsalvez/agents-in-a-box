@@ -668,6 +668,46 @@ fn the_cards_usage_cost_has_two_decimals() {
     assert_eq!(cost("3"), "10 of 100 tokens in context · 3.00 USD");
 }
 
+/// The card shows a cost only when the daemon would record it
+/// (`provider_usage_from_update`): USD in any case, finite, not negative.
+/// Anything else keeps the token line and drops the money, never `-0.40 USD`.
+#[test]
+fn the_cards_usage_shows_only_a_cost_the_daemon_would_record() {
+    let line = |cost: &str| {
+        let payload =
+            format!(r#"{{"sessionUpdate":"usage_update","used":10,"size":100,"cost":{cost}}}"#);
+        acp_card_text("acp.usage", &serde_json::from_str(&payload).unwrap()).unwrap()
+    };
+    let tokens_only = "10 of 100 tokens in context";
+    assert_eq!(line(r#"{"amount":-0.4,"currency":"USD"}"#), tokens_only);
+    assert_eq!(line(r#"{"amount":0.4,"currency":"EUR"}"#), tokens_only);
+    assert_eq!(line(r#"{"amount":0.4}"#), tokens_only);
+    assert_eq!(
+        line(r#"{"amount":0.4,"currency":"usd"}"#),
+        format!("{tokens_only} · 0.40 USD"),
+        "USD in any case, drawn as USD"
+    );
+    assert_eq!(
+        line(r#"{"amount":0,"currency":"USD"}"#),
+        format!("{tokens_only} · 0.00 USD")
+    );
+}
+
+/// `used` and `size` are unsigned in the ACP schema: a count past `i64::MAX`
+/// still reads rather than blanking the usage line.
+#[test]
+fn the_cards_usage_reads_unsigned_counts() {
+    let payload = serde_json::json!({
+        "sessionUpdate": "usage_update",
+        "used": u64::MAX,
+        "size": u64::MAX,
+    });
+    assert_eq!(
+        acp_card_text("acp.usage", &payload),
+        Some(format!("{} of {} tokens in context", u64::MAX, u64::MAX))
+    );
+}
+
 /// The prompt echo is operator text, and an operator pastes credentials into
 /// prompts: the card's read scrubs inside the window before its cut, like
 /// every lane, so a token straddling the cut is redacted whole.
