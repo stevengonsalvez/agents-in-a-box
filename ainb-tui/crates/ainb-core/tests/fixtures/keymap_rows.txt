@@ -43,6 +43,7 @@
     {"context":"session_list","chord":"down","action":"App(NextSession)"},
     {"context":"session_list","chord":"up","action":"App(PreviousSession)"},
     {"context":"home","chord":"d","action":"App(GoToDaemons)"},
+    {"context":"home","chord":"b","action":"App(GoToInbox)"},
     {"context":"home","chord":"o","action":"App(GoToConfig)"},
     {"context":"home","chord":"s","action":"App(GoToSessionList)"},
     {"context":"home","chord":"i","action":"App(GoToStats)"},
@@ -324,6 +325,7 @@
     {"context":"session_list","chord":"B","action":"Ui(ToggleSessionsSidebar)"},
     {"context":"session_list","chord":"M","action":"App(ToggleSessionMenuBar)"},
     {"context":"session_list","chord":"i","action":"App(GoToStats)"},
+    {"context":"session_list","chord":"b","action":"App(GoToInbox)"},
     {"context":"session_list","chord":"w","action":"App(GoToWitr)"},
     {"context":"session_list","chord":"k","action":"App(GoToSkills)"},
     {"context":"session_list","chord":"m","action":"App(GoToLearnings)"},
@@ -527,6 +529,9 @@
     {"context":"session_list.ask","chord":"down","action":"Ui(SessionAskNext)"},
     {"context":"session_list.ask","chord":"backspace","action":"Ui(SessionAskBackspace)"},
     {"context":"session_list.ask","chord":"ctrl+u","action":"Ui(SessionAskClear)"},
-    {"context":"session_recovery.filtered","chord":"esc","action":"App(SessionRecoverySearchCancel)"}
+    {"context":"session_recovery.filtered","chord":"esc","action":"App(SessionRecoverySearchCancel)"},
+    {"context":"inbox","chord":"r","action":"App(InboxMarkAllRead)"},
+    {"context":"inbox","chord":"esc","action":"App(PanelBack)"},
+    {"context":"inbox","chord":"q","action":"App(PanelBack)"}
   ]
 }
