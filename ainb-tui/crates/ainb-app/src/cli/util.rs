@@ -238,9 +238,9 @@ fn kill_switch_says_file() -> bool {
         Ok(value) if value == "file" => true,
         Ok(value) if !value.is_empty() => {
             IGNORED.call_once(|| {
-                eprintln!(
+                say(&format!(
                     "Warning: ignoring {SESSION_SOURCE_ENV}={value:?}; only \"file\" is read."
-                );
+                ));
             });
             false
         }
@@ -277,11 +277,40 @@ pub fn advertise_workspace_sessions_for_tests(on: bool) {
     TEST_ADVERTISES.store(on, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Set once a long-lived surface (the TUI, the desktop host) owns the
+/// terminal or has no terminal at all: from then on the resolver's notices go
+/// to the log, never to raw stderr, which would draw over the TUI's
+/// alternate screen. A CLI command never sets it and keeps its stderr lines.
+static LONG_LIVED_SURFACE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Mark this process as a long-lived surface (see [`LONG_LIVED_SURFACE`]).
+/// The TUI and desktop host call it before their first session read.
+pub fn mark_long_lived_surface() {
+    LONG_LIVED_SURFACE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether the resolver's notices go to the log rather than stderr.
+#[must_use]
+pub fn notices_go_to_the_log() -> bool {
+    LONG_LIVED_SURFACE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// One notice from the resolver: a stderr line for a CLI command, a log line
+/// for a long-lived surface.
+fn say(line: &str) {
+    if notices_go_to_the_log() {
+        tracing::warn!("{line}");
+    } else {
+        eprintln!("{line}");
+    }
+}
+
 /// Say once per process that sessions are on the file for now.
 fn degraded_notice() {
     static SAID: std::sync::Once = std::sync::Once::new();
     SAID.call_once(|| {
-        eprintln!("Notice: sessions are on the local sessions.json until the hangar daemon is up.");
+        say("Notice: sessions are on the local sessions.json until the hangar daemon is up.");
     });
 }
 
@@ -381,10 +410,10 @@ impl SessionSource {
             return Ok(None);
         }
         if res.truncated {
-            eprintln!(
+            say(&format!(
                 "Warning: the daemon returned only the newest {} sessions.",
                 res.sessions.len()
-            );
+            ));
         }
         let mut store = SessionStore::default();
         for entry in &res.sessions {
@@ -392,7 +421,7 @@ impl SessionSource {
                 Ok(meta) => {
                     store.sessions.insert(meta.tmux_session_name.clone(), meta);
                 }
-                Err(why) => eprintln!("Warning: skipping {why}"),
+                Err(why) => say(&format!("Warning: skipping {why}")),
             }
         }
         Ok(Some(store))
@@ -461,7 +490,7 @@ impl SessionSource {
             drop(guard);
             attempts += 1;
             if attempts == 1 {
-                eprintln!("Notice: the hangar daemon is reconciling sessions; waiting.");
+                say("Notice: the hangar daemon is reconciling sessions; waiting.");
             }
             if attempts >= NOT_READY_ATTEMPTS {
                 return Err(daemon_io_error(
