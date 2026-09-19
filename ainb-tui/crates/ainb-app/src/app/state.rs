@@ -324,7 +324,7 @@ impl AppState {
 
     /// The host's inbox read failed: the rows shown stay and say the host is
     /// unreachable, or the section is absent if it never had rows.
-    pub fn inbox_read_failed(&mut self, reason: impl Into<String>, _now_ms: i64) -> bool {
+    pub fn inbox_read_failed(&mut self, reason: impl Into<String>) -> bool {
         let reason = reason.into();
         self.inbox.update(|section| section.mark_read_failed(reason))
     }
@@ -340,11 +340,10 @@ impl AppState {
         self.inbox.update(InboxSection::reset)
     }
 
-    /// The daemon answered a "mark all read" sweep with how many rows it
-    /// flipped and the unread count after.
-    pub fn apply_inbox_mark_all_read(&mut self, marked: i64, unread: i64, now_ms: i64) -> bool {
-        self.inbox
-            .update(|section| section.apply_mark_all_read(marked, unread, now_ms))
+    /// The daemon answered a "mark all read" sweep with the unread count
+    /// after it. The rows' stamps come with the host's follow-up read.
+    pub fn apply_inbox_mark_all_read(&mut self, unread: i64) -> bool {
+        self.inbox.update(|section| section.apply_mark_all_read(unread))
     }
 
     /// Every section's current version, indexed by [`SectionId::index`].
