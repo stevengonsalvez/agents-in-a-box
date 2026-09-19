@@ -536,3 +536,17 @@ fn a_huge_line_is_classified_in_bounded_time_and_size() {
         "a 32 MiB line took {elapsed:?}: the scrub is not windowed"
     );
 }
+
+/// The summary's scrub window counts the characters the cut counts. Clipped on
+/// raw text, a run of whitespace spends the window and then collapses to one
+/// space, so a token past it is only partly scrubbed yet lands inside the cut.
+#[test]
+fn whitespace_before_a_token_cannot_push_it_out_of_the_scrub_window() {
+    let result = tool_result(&format!("{} github_pat_{}", " ".repeat(4020), "a".repeat(80)));
+    assert_eq!(result.len(), 1, "one result line: {result:?}");
+    assert!(
+        !result[0].1.contains("github_pat_"),
+        "a truncated token prefix survived: {}",
+        result[0].1
+    );
+}
