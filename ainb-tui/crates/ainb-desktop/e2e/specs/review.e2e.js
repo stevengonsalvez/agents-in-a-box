@@ -1,7 +1,8 @@
 // The review journey: a diff written by a separate process reaches the open
 // window's review tab as the reducer's own rows, a selection sent from the
-// window lands on the file the frame named, and what the window costs to draw
-// at that size is recorded rather than guessed (#1221).
+// window lands on the file the frame named, what the window costs to draw at
+// that size is recorded rather than guessed (#1221), and the settings page
+// draws the config section and takes a selection the same way.
 //
 // The diff is deliberately over a byte floor and over the frame's row bound
 // (`MAX_ROWS_TOTAL`, `ainb-app/src/wire/git_view.rs`), so the run exercises the
@@ -146,6 +147,32 @@ describe("reviewing from the window", () => {
     });
     const remountMs = Date.now() - remountStarted;
 
+    // The settings page, last, because it takes the pane over: it draws the
+    // config section the window already subscribes to, and a click on a
+    // category goes to the reducer and comes back in the frame, the same round
+    // trip the file selection above makes.
+    await click("button.settings");
+    await $(".settings-page").waitForExist({ timeout: 30_000 });
+    await browser.waitUntil(async () => (await $$(".settings-row")).length > 0, {
+      timeout: 60_000,
+      timeoutMsg: async () => `the settings page drew no row: ${await $(".settings-rows .empty").getText()}`,
+    });
+    for (const row of await $$(".settings-row")) {
+      const key = await row.getAttribute("data-key");
+      assert.ok(key, "a settings row was drawn with no key of the reducer's");
+    }
+    const categories = [];
+    for (const node of await $$(".settings-node")) categories.push(await node.getAttribute("data-node"));
+    const selected = await selectedNode();
+    const other = categories.find((id) => id !== selected);
+    assert.ok(other, `the tree drew nothing else to select: ${categories}`);
+    await click(`.settings-node[data-node="${other}"] button:not(.chevron)`, 30_000);
+    await browser.waitUntil(async () => (await selectedNode()) === other, {
+      timeout: 30_000,
+      timeoutMsg: `the frame never named ${other} as the selected category`,
+    });
+    await click(".settings-head .close", 30_000);
+
     writeFileSync(
       REPORT,
       `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, drawnMs, remountMs }, null, 2)}\n`,
@@ -182,6 +209,16 @@ async function click(selector, timeout = 60_000) {
     },
     { timeout, timeoutMsg: () => `${selector} never took a click: ${last}` },
   );
+}
+
+/** The category the frame says is selected, as the tree draws it. */
+async function selectedNode() {
+  // Read through the document rather than a `:has()` selector: this runner's
+  // WebKit is the one the bundle ships with, not the newest one.
+  return browser.execute(() => {
+    const current = document.querySelector('.settings-node button[aria-current="true"]');
+    return current === null ? null : current.closest(".settings-node").getAttribute("data-node");
+  });
 }
 
 /** The file the frame says is open, as the window draws it. */
