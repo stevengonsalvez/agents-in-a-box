@@ -169,7 +169,7 @@
       "selected_file_index": 0,
       "selected_tree_index": 0,
       "tree_items_cut": 0,
-      "worktree_path": "/parity/repo"
+      "worktree_name": "repo"
     },
     "is_current_dir_git_repo": false,
     "quick_commit_cursor": 0,

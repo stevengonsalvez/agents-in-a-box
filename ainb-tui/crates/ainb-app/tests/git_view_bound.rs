@@ -598,3 +598,138 @@ fn what_the_worst_case_projection_costs() {
 
     println!("worst case: project {projected:?}, encode {encoded:?}, {bytes} bytes");
 }
+
+/// #1212: the worktree crosses as its directory name, never its absolute
+/// path. The seam denies paths on the wire for remote surfaces, and nothing
+/// that draws the git view reads more than the name (the #1097 rule for the
+/// web rows). A credential-shaped directory name is scrubbed like any text.
+#[test]
+fn the_worktree_crosses_as_its_name_not_its_absolute_path() {
+    let mut state = state_with(1, 1, "a changed line");
+    let token = format!("ghp_{}", "C".repeat(36));
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.worktree_path = PathBuf::from("/home/sample/.worktrees/sample-repo");
+    }
+    let body = framed(&state)["git_view_state"].clone();
+    let text = serde_json::to_string(&body).expect("encodes");
+    assert!(!text.contains("/home/"), "no absolute path: {text}");
+    assert!(
+        body.get("worktree_path").is_none(),
+        "the path field is gone: {text}"
+    );
+    assert_eq!(body["worktree_name"], "sample-repo");
+
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.worktree_path = PathBuf::from(format!("/work/{token}"));
+    }
+    let text = serde_json::to_string(&framed(&state)["git_view_state"]).expect("encodes");
+    assert!(
+        !text.contains(&token),
+        "a credential-shaped name is scrubbed: {text}"
+    );
+}
+
+/// #1212: a commit's author is git config text, and people paste tokens into
+/// it as readily as into a message, so it is scrubbed like the message.
+#[test]
+fn a_commit_author_is_scrubbed() {
+    use ainb_app::git::operations::CommitInfo;
+
+    let token = format!("ghp_{}", "C".repeat(36));
+    let mut state = state_with(1, 1, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.commits = vec![CommitInfo {
+            hash_short: "abc1234".to_string(),
+            author: format!("Sample Dev {token}"),
+            date: "2026-09-19".to_string(),
+            message: "fix the thing".to_string(),
+        }];
+    }
+    let body = framed(&state)["git_view_state"].clone();
+    let text = serde_json::to_string(&body).expect("encodes");
+    assert!(!text.contains(&token), "the author's token left: {text}");
+    assert_eq!(body["commits"][0]["author"], "Sample Dev <redacted>");
+}
+
+/// #1212: markdown is scrubbed as one document before any cut. The scrub runs
+/// a chunk at a time so a spent budget stops it, and a key block whose header
+/// sits on the last line of one chunk must still redact the body in the next.
+#[test]
+fn a_markdown_key_block_across_a_scrub_chunk_is_redacted_whole() {
+    use ainb_app::components::git_view::{MarkdownLine, MarkdownStyle};
+
+    let body_line = "MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeK";
+    let mut document: Vec<String> = (0..63).map(|n| format!("line {n}")).collect();
+    document.push("-----BEGIN RSA PRIVATE KEY-----".to_string());
+    document.extend((0..3).map(|_| body_line.to_string()));
+    document.push("-----END RSA PRIVATE KEY-----".to_string());
+    document.push("after the key".to_string());
+    let mut state = state_with(1, 1, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.markdown_content = document
+            .iter()
+            .map(|content| MarkdownLine {
+                content: content.clone(),
+                style: MarkdownStyle::Paragraph,
+            })
+            .collect();
+    }
+    let body = framed(&state)["git_view_state"].clone();
+    let text = serde_json::to_string(&body).expect("encodes");
+    assert!(
+        !text.contains(body_line),
+        "the key body crossed the chunk: {text}"
+    );
+    let lines: Vec<&str> = body["markdown_content"]
+        .as_array()
+        .expect("markdown")
+        .iter()
+        .map(|line| line["content"].as_str().expect("text"))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        document.len(),
+        "one framed line per line, styles aligned"
+    );
+    assert_eq!(lines[62], "line 62");
+    assert_eq!(lines[68], "after the key");
+}
+
+/// A worktree's directory name is only neutral when it names a project. At
+/// the home directory it is the operator's username, and at the root or a
+/// path ending in `..` there is no name at all, which framed as an empty
+/// string. Both frame one fixed label instead (#1212 review).
+#[test]
+fn a_worktree_at_home_or_with_no_name_frames_a_neutral_label() {
+    let home = dirs::home_dir().expect("a home directory");
+    for path in [home.clone(), PathBuf::from("/"), PathBuf::from("/work/..")] {
+        let mut state = state_with(1, 1, "a changed line");
+        {
+            let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+            git.worktree_path = path.clone();
+        }
+        let body = framed(&state)["git_view_state"].clone();
+        assert_eq!(
+            body["worktree_name"],
+            "worktree",
+            "{} frames the label",
+            path.display()
+        );
+    }
+    if let Some(user) = home.file_name().and_then(|name| name.to_str()).map(str::to_string) {
+        let mut state = state_with(1, 1, "a changed line");
+        {
+            let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+            git.worktree_path = home;
+        }
+        let text = serde_json::to_string(&framed(&state)["git_view_state"]).expect("encodes");
+        assert!(
+            !text.contains(&format!("\"{user}\"")),
+            "the username never frames: {text}"
+        );
+    }
+}
