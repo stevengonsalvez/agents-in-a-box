@@ -2,6 +2,9 @@
 //! sessions capability and each session request as the test says, and counts
 //! what it was sent.
 
+// Each test binary that includes this uses a different part of it.
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
