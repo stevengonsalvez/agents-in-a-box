@@ -3617,7 +3617,7 @@ mod tests {
         )];
         row.is_attached = true;
         row.provider_session_id = Some("prov-1".to_string());
-        row.recent_logs = vec!["agent tick 1".to_string()];
+        row.recent_logs = Some("agent tick 1".to_string());
         row.preview_content = Some("agent tick 1".to_string());
         held.add_session(row);
         state.sessions.workspaces = vec![held];
@@ -3654,7 +3654,7 @@ mod tests {
         assert_eq!(row.errors.len(), 1);
         assert!(row.is_attached);
         assert_eq!(row.provider_session_id.as_deref(), Some("prov-1"));
-        assert_eq!(row.recent_logs, vec!["agent tick 1".to_string()]);
+        assert_eq!(row.recent_logs.as_deref(), Some("agent tick 1"));
         assert_eq!(row.preview_content.as_deref(), Some("agent tick 1"));
         let new_row = &state.sessions.workspaces[0].sessions[1];
         assert!(
