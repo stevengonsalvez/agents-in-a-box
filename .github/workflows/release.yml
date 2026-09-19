@@ -672,8 +672,11 @@ jobs:
 
   release:
     name: Create Release
+    # The CLI release never waits on the desktop legs' luck: a failed bundle
+    # leg leaves its entry out of the manifest and is named in the release
+    # body, and the tag is never left pushed with no release behind it.
     needs: [prepare, build, desktop, fleet_macos]
-    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.desktop.result == 'success' && (needs.fleet_macos.result == 'success' || needs.fleet_macos.result == 'skipped') }}
+    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && (needs.fleet_macos.result == 'success' || needs.fleet_macos.result == 'skipped') }}
     timeout-minutes: 20
     runs-on: ubuntu-latest
     permissions:
@@ -690,6 +693,7 @@ jobs:
           path: artifacts
 
       - name: Sign release manifest
+        id: manifest
         env:
           AINB_RELEASE_SIGNING_KEY: ${{ secrets.AINB_RELEASE_SIGNING_KEY }}
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -711,36 +715,77 @@ jobs:
           # The desktop bundles go under their own top-level key, NEVER into
           # assets[]: a shipped CLI matches assets[] on target alone and takes
           # the first hit, so a .dmg there would be installed as the ainb
-          # binary. The .deb is a release asset and not in the manifest; the
-          # desktop updater never replaces a package-managed install.
-          desktop_mac_sha=$(sha256sum artifacts/desktop-aarch64-apple-darwin/*.dmg | awk '{print $1}')
-          desktop_intel_sha=$(sha256sum artifacts/desktop-x86_64-apple-darwin/*.dmg | awk '{print $1}')
-          desktop_linux_sha=$(sha256sum artifacts/desktop-x86_64-unknown-linux-gnu/*.AppImage | awk '{print $1}')
-          if [ -z "${desktop_mac_sha}" ] || [ -z "${desktop_intel_sha}" ] || [ -z "${desktop_linux_sha}" ]; then
-            echo "desktop bundles missing while assembling signed manifest"
-            exit 1
+          # binary. One entry per bundle, with a `format` that tells the two
+          # Linux entries apart and a `signed` flag that says whether the
+          # bundle was signed with the Developer ID and notarised. A leg that
+          # failed has no artifact: its entries are left out, and the release
+          # body names them; the CLI release publishes regardless.
+          signed_flag="false"
+          if [ "${{ github.event.inputs.desktop_signed }}" = "true" ]; then
+            signed_flag="true"
           fi
+          desktop_entries="[]"
+          desktop_missing=""
+          add_desktop_entry() {
+            # add_desktop_entry <target> <format> <extension> <signed>
+            local target="$1" format="$2" ext="$3" signed="$4" file="" sha
+            for candidate in "artifacts/desktop-${target}"/*."${ext}"; do
+              if [ -e "$candidate" ]; then file="$candidate"; break; fi
+            done
+            if [ -z "$file" ]; then
+              desktop_missing="${desktop_missing} ${target}/${format}"
+              return 0
+            fi
+            sha=$(sha256sum "$file" | awk '{print $1}')
+            desktop_entries=$(jq -c \
+              --arg t "$target" --arg f "$format" --arg a "$(basename "$file")" \
+              --arg s "$sha" --argjson g "$signed" \
+              '. + [{target: $t, format: $f, archive: $a, sha256: $s, signed: $g}]' \
+              <<<"$desktop_entries")
+          }
+          add_desktop_entry aarch64-apple-darwin dmg dmg "$signed_flag"
+          add_desktop_entry x86_64-apple-darwin dmg dmg "$signed_flag"
+          add_desktop_entry x86_64-unknown-linux-gnu appimage AppImage false
+          add_desktop_entry x86_64-unknown-linux-gnu deb deb false
 
-          cat > artifacts/release-manifest.json <<EOF
-          {"version":"${VERSION}","assets":[
-            {"target":"aarch64-apple-darwin","archive":"ainb-${VERSION}-aarch64-apple-darwin.tar.gz","sha256":"${mac_sha}"},
-            {"target":"x86_64-apple-darwin","archive":"ainb-${VERSION}-x86_64-apple-darwin.tar.gz","sha256":"${intel_sha}"},
-            {"target":"x86_64-unknown-linux-gnu","archive":"ainb-${VERSION}-x86_64-unknown-linux-gnu.tar.gz","sha256":"${linux_sha}"}
-          ],"desktop":[
-            {"target":"aarch64-apple-darwin","archive":"ainb-desktop-${VERSION}-aarch64-apple-darwin.dmg","sha256":"${desktop_mac_sha}"},
-            {"target":"x86_64-apple-darwin","archive":"ainb-desktop-${VERSION}-x86_64-apple-darwin.dmg","sha256":"${desktop_intel_sha}"},
-            {"target":"x86_64-unknown-linux-gnu","archive":"ainb-desktop-${VERSION}-x86_64-unknown-linux-gnu.AppImage","sha256":"${desktop_linux_sha}"}
-          ]}
-          EOF
+          jq -n \
+            --arg v "${VERSION}" --arg m "${mac_sha}" --arg i "${intel_sha}" --arg l "${linux_sha}" \
+            --argjson d "${desktop_entries}" '{
+              version: $v,
+              assets: [
+                {target: "aarch64-apple-darwin", archive: ("ainb-" + $v + "-aarch64-apple-darwin.tar.gz"), sha256: $m},
+                {target: "x86_64-apple-darwin", archive: ("ainb-" + $v + "-x86_64-apple-darwin.tar.gz"), sha256: $i},
+                {target: "x86_64-unknown-linux-gnu", archive: ("ainb-" + $v + "-x86_64-unknown-linux-gnu.tar.gz"), sha256: $l}
+              ],
+              desktop: $d
+            }' > artifacts/release-manifest.json
 
           # Read the manifest back before signing it: every assets[] entry is a
-          # CLI archive and every desktop entry a desktop bundle, so a shipped
-          # CLI can never be handed a bundle for its target.
+          # CLI archive and every desktop entry a desktop bundle with a known
+          # format, so a shipped CLI can never be handed a bundle for its
+          # target.
           jq -e '
             (.assets | length == 3) and all(.assets[]; .archive | startswith("ainb-" + $v + "-"))
-            and (.desktop | length == 3) and all(.desktop[]; .archive | startswith("ainb-desktop-" + $v + "-"))
+            and (.desktop | length <= 4)
+            and all(.desktop[]; (.archive | startswith("ainb-desktop-" + $v + "-"))
+                                and (.format | IN("dmg", "appimage", "deb"))
+                                and (.signed | type == "boolean"))
           ' --arg v "${VERSION}" artifacts/release-manifest.json >/dev/null \
             || { echo "release manifest has an entry under the wrong key"; cat artifacts/release-manifest.json; exit 1; }
+          cat artifacts/release-manifest.json
+
+          # The release body is built from what was actually attached.
+          if [ -n "${desktop_missing}" ]; then
+            note="Missing from this release because their build leg failed:${desktop_missing}. The manifest's desktop key lists only the bundles attached."
+          else
+            note="All desktop bundles are attached and listed under the manifest's desktop key."
+          fi
+          if [ "$signed_flag" = "true" ]; then
+            sign_note="The macOS bundles are signed with the Developer ID and notarised, and each entry in the manifest carries signed: true."
+          else
+            sign_note="The macOS bundles are ad-hoc signed and not notarised (signed: false in the manifest), so first launch can require right-click Open, or Open Anyway in System Settings > Privacy & Security."
+          fi
+          echo "desktop_note=${note} ${sign_note}" >> "$GITHUB_OUTPUT"
 
           key_path="${RUNNER_TEMP}/ainb-release-signing-key.pem"
           printf '%s' "${AINB_RELEASE_SIGNING_KEY}" > "${key_path}"
@@ -823,11 +868,9 @@ jobs:
             One bundle per platform, each carrying its own `ainb-hangar-daemon` sidecar
             at this release's version: `ainb-desktop-<version>-aarch64-apple-darwin.dmg`
             (Apple Silicon), `ainb-desktop-<version>-x86_64-apple-darwin.dmg` (Intel),
-            and for Linux x86_64 an `.AppImage` and a `.deb`. The macOS bundles are
-            ad-hoc signed unless this run was cut with `desktop_signed`, so first
-            launch can require right-click Open or Open Anyway in System Settings >
-            Privacy & Security. The signed manifest lists the `.dmg` and `.AppImage`
-            checksums under its `desktop` key.
+            and for Linux x86_64 an `.AppImage` and a `.deb`. Every bundle attached is
+            listed under the signed manifest's `desktop` key with its `format` and a
+            `signed` flag. ${{ steps.manifest.outputs.desktop_note }}
 
             ### Manual Install
             1. Download the appropriate archive for your platform from the assets below
