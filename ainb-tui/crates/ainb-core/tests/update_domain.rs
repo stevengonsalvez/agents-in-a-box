@@ -101,7 +101,9 @@ fn manifest_with_desktop_key() -> String {
     let sha = "0".repeat(64);
     let assets: Vec<String> = TARGETS
         .iter()
-        .map(|t| format!(r#"{{"target":"{t}","archive":"ainb-1.29.0-{t}.tar.gz","sha256":"{sha}"}}"#))
+        .map(|t| {
+            format!(r#"{{"target":"{t}","archive":"ainb-1.29.0-{t}.tar.gz","sha256":"{sha}"}}"#)
+        })
         .collect();
     let desktop = [
         ("aarch64-apple-darwin", "dmg", "dmg"),
