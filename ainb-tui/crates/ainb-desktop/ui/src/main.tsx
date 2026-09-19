@@ -20,7 +20,7 @@ import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { AcpCard } from "./acp.tsx";
 import { transcriptIntent, transcriptView } from "./acp.ts";
-import { AnswerBanner } from "./answer.tsx";
+import { AnswerSlot } from "./answer.tsx";
 import { phaseOf, questionFor, type Refusal, sendInOrder } from "./answer.ts";
 import { newNotices, noticeKey } from "./notices.ts";
 import { terminal as updateDone, updateLine, type UpdatePhase } from "./update.ts";
@@ -543,9 +543,9 @@ function Shell() {
               )}
             </For>
           </nav>
-          <Show when={question()}>
-            {(shown) => <AnswerBanner question={shown()} ask={ask()} run={run} />}
-          </Show>
+          {/* One banner per open request, latched for a short grace across
+              frames that carry none (#1266): `AnswerSlot`. */}
+          <AnswerSlot question={question()} ask={ask()} run={run} />
           <Show when={transcriptKey()}>
             {(key) => (
               <AcpCard
