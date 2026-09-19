@@ -406,6 +406,9 @@ fn main() {
                 host.start_workspace_load();
                 // Section 20, the board: the reader both hosts share (#1188).
                 host.start_agent_status(agent_status_dialer(), legacy_panel);
+                // Section 21, the stats tab: read once the webview subscribes
+                // to it, dialing as the desktop does for section 20.
+                host.enable_usage(agent_status_dialer());
                 Sidecar::start(sidecar_config.clone())
             });
             let mut states = sidecar.state();
