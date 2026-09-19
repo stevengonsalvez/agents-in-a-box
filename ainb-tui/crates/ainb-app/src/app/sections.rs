@@ -852,6 +852,128 @@ impl AgentStatusSection {
     }
 }
 
+/// Section 21: usage, a fold of the daemon's `fleet/usage_summary` (D3p-e).
+///
+/// The counters have one producer, the daemon's usage projection
+/// (`ainb-hangar-daemon/src/fleet_usage.rs`), and this section computes
+/// nothing from them: it holds the last reply, bounded to the verb's own caps
+/// whatever the daemon sent, with each list's loss counted. The frame
+/// (`wire::usage`) scrubs and cuts the free text. `absent` when the daemon does
+/// not serve `fleet.usage.read`; `failure` when a read failed, with the last
+/// numbers kept rather than drawn as zeros.
+#[derive(Debug, Default)]
+pub struct UsageSection {
+    /// The last reply, bounded, or `None` until one lands.
+    pub summary: Option<HeldUsage>,
+    /// The local epoch-ms clock the held reply was received at.
+    pub received_at_ms: Option<i64>,
+    /// Why there is no summary, when the daemon cannot serve one.
+    pub absent: Option<String>,
+    /// Why the last read failed, while the held summary is kept.
+    pub failure: Option<String>,
+}
+
+/// One `fleet/usage_summary` reply as the section holds it: each list cut to
+/// the verb's cap, each string clipped to what its frame cut can show plus a
+/// scrub window, and the lists' losses counted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeldUsage {
+    pub reply: ainb_hangar_proto::fleet::FleetUsageSummaryResult,
+    pub daily_cut: usize,
+    pub providers_cut: usize,
+    pub models_cut: usize,
+    pub projects_cut: usize,
+}
+
+impl HeldUsage {
+    /// Bound `reply` to the caps a frame carries, counting what each list lost.
+    #[must_use]
+    pub fn bound(mut reply: ainb_hangar_proto::fleet::FleetUsageSummaryResult) -> Self {
+        use crate::wire::usage::{
+            USAGE_DETAIL_MAX_BYTES, USAGE_MAX_BREAKDOWN, USAGE_MAX_DAILY, USAGE_MAX_NAME_CHARS,
+            USAGE_SCRUB_WINDOW,
+        };
+        fn keep<T>(list: &mut Vec<T>, cap: usize) -> usize {
+            let cut = list.len().saturating_sub(cap);
+            list.truncate(cap);
+            cut
+        }
+        // Clipped, not cut: the frame scrubs before it cuts, so the section
+        // keeps the scrub window past the cut for a token straddling it.
+        fn clip(text: &mut String, chars: usize) {
+            if let Some((end, _)) = text.char_indices().nth(chars) {
+                text.truncate(end);
+            }
+        }
+        let name = USAGE_MAX_NAME_CHARS + USAGE_SCRUB_WINDOW;
+        let daily_cut = keep(&mut reply.daily, USAGE_MAX_DAILY);
+        let providers_cut = keep(&mut reply.providers, USAGE_MAX_BREAKDOWN);
+        let models_cut = keep(&mut reply.models, USAGE_MAX_BREAKDOWN);
+        let projects_cut = keep(&mut reply.projects, USAGE_MAX_BREAKDOWN);
+        reply.daily.iter_mut().for_each(|day| clip(&mut day.date, name));
+        reply.providers.iter_mut().for_each(|row| clip(&mut row.provider, name));
+        reply.models.iter_mut().for_each(|row| clip(&mut row.model, name));
+        for row in &mut reply.projects {
+            clip(&mut row.project, name);
+            if let Some(repo) = &mut row.repo {
+                clip(repo, name);
+            }
+        }
+        if let Some(detail) = &mut reply.detail {
+            clip(detail, USAGE_DETAIL_MAX_BYTES + USAGE_SCRUB_WINDOW);
+        }
+        Self {
+            reply,
+            daily_cut,
+            providers_cut,
+            models_cut,
+            projects_cut,
+        }
+    }
+}
+
+impl UsageSection {
+    /// Fold one reply. True when anything a surface renders changed: the same
+    /// counters read again move nothing, not even the received clock.
+    pub fn apply_read(
+        &mut self,
+        reply: ainb_hangar_proto::fleet::FleetUsageSummaryResult,
+        received_at_ms: i64,
+    ) -> bool {
+        let held = HeldUsage::bound(reply);
+        let cleared = self.absent.take().is_some() | self.failure.take().is_some();
+        if self.summary.as_ref() == Some(&held) {
+            return cleared;
+        }
+        self.summary = Some(held);
+        self.received_at_ms = Some(received_at_ms);
+        true
+    }
+
+    /// The read failed for `reason`; the held summary stays.
+    pub fn mark_read_failed(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        if self.failure.as_deref() == Some(reason.as_str()) {
+            return false;
+        }
+        self.failure = Some(reason);
+        true
+    }
+
+    /// The daemon cannot serve a summary, for `reason`: nothing is held.
+    pub fn mark_absent(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        let changed = self.summary.is_some()
+            || self.failure.is_some()
+            || self.absent.as_deref() != Some(reason.as_str());
+        self.summary = None;
+        self.received_at_ms = None;
+        self.failure = None;
+        self.absent = Some(reason);
+        changed
+    }
+}
+
 #[cfg(test)]
 mod agent_status_section_tests {
     use super::AgentStatusSection;
