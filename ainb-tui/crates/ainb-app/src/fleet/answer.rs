@@ -346,21 +346,24 @@ impl AskState {
     /// Put the cursor on the option labelled `label`, for a surface that names
     /// its pick rather than counting cursor moves off a frame.
     ///
-    /// Matched against the label as this state holds it and as a frame carries
-    /// it (scrubbed), so a label read off a frame resolves. The first match
-    /// wins: two options with one label are one answer, since the label is the
-    /// text sent. The cursor is left where it was when nothing matches, so a
-    /// send that follows cannot land on an option nobody named.
+    /// Matched against the label as this state holds it first, and only when
+    /// nothing is exact, as a frame carries it (scrubbed), so a label read off
+    /// a frame resolves and an option whose literal label is another's
+    /// scrubbed form is never beaten by position. Within a pass the first
+    /// match wins: two options with one label are one answer, since the label
+    /// is the text sent. The cursor is left where it was when nothing matches,
+    /// so a send that follows cannot land on an option nobody named.
     ///
     /// # Errors
     ///
     /// `label` is not one of `chip`'s options.
     pub fn pick(&mut self, chip: &SessionAttention, label: &str) -> Result<(), String> {
-        let index = chip
-            .options
-            .iter()
-            .position(|option| {
-                option.label == label || crate::fleet::bridge::redact::scrub(&option.label) == label
+        let exact = chip.options.iter().position(|option| option.label == label);
+        let index = exact
+            .or_else(|| {
+                chip.options
+                    .iter()
+                    .position(|option| crate::fleet::bridge::redact::scrub(&option.label) == label)
             })
             .ok_or_else(|| "that option is not offered here".to_string())?;
         self.cursor = index;
@@ -628,6 +631,19 @@ mod tests {
         let carried = crate::fleet::bridge::redact::scrub(&chip.options[1].label);
         assert_ne!(carried, chip.options[1].label, "the frame scrubbed it");
         state.pick(&chip, &carried).expect("the scrubbed label resolves");
+        assert_eq!(state.cursor(), 1);
+    }
+
+    #[test]
+    fn an_exact_label_beats_an_earlier_options_scrubbed_form() {
+        let mut state = AskState::default();
+        let secret = "use sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
+        let carried = crate::fleet::bridge::redact::scrub(secret);
+        // The second option's literal label is what the first one reads as on
+        // a frame. Naming it must pick the second, not the first by position.
+        let chip = ask_with_options(&[secret, carried.as_str()]);
+        state.retarget(&chip);
+        state.pick(&chip, &carried).expect("offered");
         assert_eq!(state.cursor(), 1);
     }
 
