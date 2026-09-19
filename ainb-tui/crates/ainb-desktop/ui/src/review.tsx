@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { GitViewView_Serialize } from "../../../ainb-app/bindings/AppState";
 import {
   bodyLines,
@@ -41,7 +41,10 @@ interface Props {
  */
 export function Review(props: Props) {
   const files = () => fileRows(props.gitView);
-  const body = () => bodyLines(props.gitView);
+  // Memoised: every drawn row, the window, the scroll effect and the row
+  // count read it, and flattening the whole body is the one part of this that
+  // is still linear in the diff.
+  const body = createMemo(() => bodyLines(props.gitView));
   const cut = () => sectionCut(props.gitView);
   const scroll = () => gitView(props.gitView)?.review_ui.scroll ?? 0;
   const scrollCut = () => gitView(props.gitView)?.review_ui.scroll_cut === true;
