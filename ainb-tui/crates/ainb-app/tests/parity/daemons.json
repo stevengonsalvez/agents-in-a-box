@@ -1,1 +1,5 @@
-{"width": 120, "height": 36, "screen": {"kind": "daemons"}}
+{"width": 120, "height": 36, "screen": {"kind": "daemons", "daemons": [
+  {"kind": "notifyd", "state": "running", "connected": true, "version": "1.28.2", "reason": "heartbeat fresh"},
+  {"kind": "hangar-daemon", "state": "running", "connected": true, "version": "1.28.2", "reason": "socket and db reachable"},
+  {"kind": "bridge", "state": "stopped", "connected": false, "error_count": 2, "last_error": "token rejected by telegram", "reason": "clean stop"}
+]}}
