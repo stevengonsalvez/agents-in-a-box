@@ -37,8 +37,10 @@ export interface SettingsRow {
   options: string[];
   /** A choice's selected option, or a bool's state as 0 or 1. */
   selected: number;
-  /** Rows the reducer refuses to write (`screen_model::read_only_reason`). */
+  /** Rows the reducer refuses to write from a renderer (`renderer_edit`). */
   readOnly: boolean;
+  /** Why, when it does. */
+  readOnlyReason: string | null;
   /** Edited and not yet written. */
   dirty: boolean;
 }
@@ -50,13 +52,118 @@ export interface SettingsCategory {
 }
 
 /**
- * Rows the reducer keeps read-only, spelled here so the form draws them
- * inert instead of sending an edit the reducer drops: `[usage]` is the
- * burndown plugin's file. Structured (opaque) rows are drawn as text the
- * reducer refuses to write; the form cannot tell them apart from the frame.
+ * The rows a renderer may edit (#1224), the page's copy of
+ * `ainb_app::config::renderer_edit`: rows whose value reaches a program the
+ * host runs are denied, then only rows on the allow list are drawn editable.
+ * The reducer judges every edit the same way; this copy only spares a round
+ * trip and draws the row inert. `parity.test.ts` diffs the two copies through
+ * `ainb-app/tests/fixtures/renderer_editable_rows.txt`.
  */
+export const DENIED_ROWS: readonly string[] = [
+  "ui_preferences.preferred_editor",
+  "acp.adapters.*.command",
+  "container_templates.*.config.command",
+  "container_templates.*.config.entrypoint",
+  "container_templates.*.config.environment.*",
+  "container_templates.*.config.image_source.path",
+  "container_templates.*.config.image_source.build_args.*",
+  "container_templates.*.config.volumes",
+  "container_templates.*.config.mount_ssh",
+  "container_templates.*.config.mount_git_config",
+  "container_templates.*.config.system_packages",
+  "container_templates.*.config.npm_packages",
+  "container_templates.*.config.python_packages",
+  "mcp_servers.*.definition.command",
+  "mcp_servers.*.definition.args",
+  "mcp_servers.*.definition.env.*",
+  "mcp_servers.*.definition.config",
+  "mcp_servers.*.installation.install_command",
+  "mcp_servers.*.installation.script",
+  "mcp_servers.*.installation.package",
+  "mcp_servers.*.installation.url",
+  "mcp_servers.*.installation.branch",
+  "docker.host",
+  "fleet.terminal",
+  "hangar_daemon.card_agent.default",
+  "plugins.enabled",
+  "plugins.disabled",
+  "plugins.*",
+  "presets.file",
+  "usage_client.cache_db",
+  "web.listen",
+  "web.insecure_bind",
+  "skills.catalog_release",
+];
+
+/** Rows the page edits; a trailing `.` allows every row under the prefix. */
+export const ALLOWED_ROWS: readonly string[] = [
+  "general.",
+  "authentication.",
+  "workspace_defaults.",
+  "ui_preferences.",
+  "ui.",
+  "docker.timeout",
+  "default_container_template",
+  "container_templates.*.name",
+  "container_templates.*.description",
+  "container_templates.*.config.working_dir",
+  "container_templates.*.config.user",
+  "container_templates.*.config.memory_limit",
+  "container_templates.*.config.cpu_limit",
+  "container_templates.*.config.ports",
+  "container_templates.*.required_env",
+  "container_templates.*.default_mcp_servers",
+  "mcp_servers.*.name",
+  "mcp_servers.*.description",
+  "mcp_servers.*.enabled_by_default",
+  "mcp_servers.*.shared",
+  "mcp_servers.*.required_env",
+  "mcp_servers.*.installation.type",
+  "mcp_servers.*.installation.version",
+  "mcp_servers.*.definition.type",
+  "fleet.",
+  "mcp_pool.",
+  "usage_client.headroom_port",
+  "usage_client.fetch_timeout_secs",
+  "usage_client.codex_ttl_secs",
+  "daemons.",
+  "notifyd.",
+  "web.read_only",
+  "acp.adapters.*.permission_mode",
+  "skills.api_key",
+  "session_reader.",
+  "hangar_daemon.autostandup.",
+  "hangar_daemon.workspace.",
+];
+
+/** The marker the frame puts where a value was scrubbed; never written back. */
+export const REDACTED = "<redacted>";
+
+/** Whether the concrete key `key` meets `pattern`, `*` standing for one map segment. */
+function matchesPattern(pattern: string, key: string): boolean {
+  const parts = pattern.split(".");
+  const prefix = pattern.endsWith(".");
+  if (prefix) parts.pop();
+  const segments = key.split(".");
+  if (prefix ? segments.length <= parts.length : segments.length !== parts.length) return false;
+  return parts.every((part, index) => part === "*" || part === segments[index]);
+}
+
+/**
+ * Why the page draws `key` inert, or `null` when the renderer may edit it.
+ * Map keys stand where the pattern has `*`, so `mcp_servers.github.definition.command`
+ * meets `mcp_servers.*.definition.command`.
+ */
+export function editRefusal(key: string): string | null {
+  if (DENIED_ROWS.some((pattern) => matchesPattern(pattern, key))) {
+    return "its value reaches a program the host runs, so the window may not set it";
+  }
+  if (ALLOWED_ROWS.some((pattern) => matchesPattern(pattern, key))) return null;
+  return "the window's settings page does not edit it";
+}
+
 function readOnly(key: string): boolean {
-  return key.startsWith("usage.");
+  return editRefusal(key) !== null;
 }
 
 function kindOf(value: ConfigValue_Serialize): RowKind {
@@ -110,6 +217,7 @@ function row(setting: ConfigSetting_Serialize, dirty: readonly string[]): Settin
     options,
     selected,
     readOnly: readOnly(setting.key),
+    readOnlyReason: editRefusal(setting.key),
     dirty: dirty.includes(setting.key),
   };
 }
@@ -142,6 +250,9 @@ export function settingCount(categories: readonly SettingsCategory[]): number {
  */
 export function rowEdit(row: SettingsRow, input: string | number | boolean): RendererIntent | null {
   if (row.readOnly) return null;
+  // The frame shows a scrubbed value; sending it back would write the marker
+  // over the real one. The reducer refuses it too.
+  if (typeof input === "string" && input.includes(REDACTED)) return null;
   let value: Record<string, string | number | boolean>;
   switch (row.kind) {
     case "text":
