@@ -23,11 +23,20 @@ use ainb_app::fleet::inbox_reader::{Dialer, InboxReader, Timing};
 /// The wait between reads while the inbox screen is not open.
 pub const OFF_SCREEN_POLL: Duration = Duration::from_secs(30);
 
+/// The least time between two reader restarts. A cadence change restarts the
+/// reader and its first read is immediate, so without a floor a key held on
+/// `b`/`esc` would dial the daemon once per toggle; with it the switch waits
+/// until the floor has passed since the last restart, at most one dial a
+/// second from toggling, and the reader that is running keeps reading.
+pub const DIAL_FLOOR: Duration = Duration::from_secs(1);
+
 /// The reader, at the cadence the current screen asks for.
 pub struct InboxHost {
     dialer: std::sync::Arc<Dialer>,
     reader: InboxReader,
     on_screen: bool,
+    dial_floor: Duration,
+    restarted_at: std::time::Instant,
 }
 
 impl InboxHost {
@@ -41,7 +50,17 @@ impl InboxHost {
             dialer,
             reader,
             on_screen: false,
+            dial_floor: DIAL_FLOOR,
+            restarted_at: std::time::Instant::now(),
         }
+    }
+
+    /// The same host with another floor between restarts; the tests shorten
+    /// it.
+    #[must_use]
+    pub const fn with_dial_floor(mut self, floor: Duration) -> Self {
+        self.dial_floor = floor;
+        self
     }
 
     /// Whether the reader is at the open screen's cadence.
@@ -75,13 +94,15 @@ impl InboxHost {
 
     /// Match the cadence to the current screen, then fold what arrived. A
     /// cadence change restarts the reader, whose first read is immediate, so
-    /// opening the screen reads at once. The section is never reset here:
-    /// what the badge counts is what the screen will show.
+    /// opening the screen reads at once, once [`DIAL_FLOOR`] has passed since
+    /// the last restart. The section is never reset here: what the badge
+    /// counts is what the screen will show.
     pub fn tick(&mut self, state: &mut AppState) -> bool {
         let wanted = state.shell.current_screen == ids::INBOX;
-        if wanted != self.on_screen {
+        if wanted != self.on_screen && self.restarted_at.elapsed() >= self.dial_floor {
             self.on_screen = wanted;
             self.reader = Self::spawn(&self.dialer, wanted);
+            self.restarted_at = std::time::Instant::now();
         }
         self.reader.drain_into(state)
     }
@@ -115,7 +136,7 @@ mod tests {
     #[tokio::test]
     async fn the_reader_runs_from_launch_and_the_screen_only_sets_the_cadence() {
         let (dialer, dials) = counting_dialer();
-        let mut host = InboxHost::new(dialer);
+        let mut host = InboxHost::new(dialer).with_dial_floor(Duration::ZERO);
         let mut state = AppState::new();
         settle(&mut host, &mut state, 5).await;
         assert!(!host.on_screen());
@@ -156,5 +177,30 @@ mod tests {
             state.inbox.get().absent.is_some(),
             "leaving the screen keeps the section"
         );
+    }
+
+    #[tokio::test]
+    async fn toggling_the_screen_dials_at_most_once_per_floor() {
+        let (dialer, dials) = counting_dialer();
+        let mut host = InboxHost::new(dialer).with_dial_floor(Duration::from_millis(300));
+        let mut state = AppState::new();
+        settle(&mut host, &mut state, 2).await;
+        let launch = dials.load(Ordering::SeqCst);
+        for _ in 0..20 {
+            state.shell.current_screen = ids::INBOX.to_string();
+            host.tick(&mut state);
+            state.shell.current_screen = ids::HOME.to_string();
+            host.tick(&mut state);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            dials.load(Ordering::SeqCst) <= launch + 1,
+            "twenty toggles inside the floor dial at most once more: {} after {launch}",
+            dials.load(Ordering::SeqCst)
+        );
+        state.shell.current_screen = ids::INBOX.to_string();
+        tokio::time::sleep(Duration::from_millis(320)).await;
+        host.tick(&mut state);
+        assert!(host.on_screen(), "past the floor the switch lands");
     }
 }
