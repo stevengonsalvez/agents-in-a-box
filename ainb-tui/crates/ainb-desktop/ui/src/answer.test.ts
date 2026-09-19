@@ -11,7 +11,9 @@ import type {
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
 import {
+  bannerKeys,
   drawnQuestion,
+  latchQuestion,
   phaseOf,
   pickIntents,
   type Question,
@@ -334,4 +336,30 @@ test("the banner reads props.question only to feed drawnQuestion", () => {
   const reads = source.match(/props\.question/g) ?? [];
   assert.equal(reads.length, 1, `props.question is read ${reads.length} times outside comments`);
   assert.match(source, /drawnQuestion\(\s*\(\) => props\.question,/, "and that one read is the drawnQuestion feed");
+});
+
+test("the banner latches on the request while a frame carries no chip and the reducer still points at it", () => {
+  // A frame between a scan apply and the next attention merge carries the
+  // row with no chip (#1263 closed one source; #1266 makes the banner not
+  // depend on it): the banner keeps the question it drew while the reducer's
+  // answer state still names that request, so its elements stay in place.
+  const shown = questionFor(sessions(mark()))!;
+  assert.equal(latchQuestion(null, shown, ask()), shown, "a frame with the question shows it");
+  assert.equal(latchQuestion(shown, null, ask()), shown, "a bare frame keeps it while the reducer is on att-7");
+  assert.equal(latchQuestion(shown, null, ask({ request: "att-8" })), null, "the reducer moved on: dropped");
+  assert.equal(latchQuestion(shown, null, ask({ request: null })), null, "the reducer cleared it: dropped");
+  assert.equal(latchQuestion(shown, null, undefined), null, "no answer state at all: dropped");
+  const next = questionFor(sessions(mark({ request: "att-8" })))!;
+  assert.equal(latchQuestion(shown, next, ask({ request: "att-8" })), next, "a new question replaces it");
+  assert.equal(latchQuestion(null, null, ask()), null);
+});
+
+test("the banner is keyed on the request id, so the same request keeps one banner across frames", () => {
+  const shown = questionFor(sessions(mark()))!;
+  const again = questionFor(sessions(mark()))!;
+  assert.notEqual(shown, again, "two frames, two objects");
+  assert.deepEqual(bannerKeys(shown), ["att-7"]);
+  assert.deepEqual(bannerKeys(again), bannerKeys(shown), "the same key, so For keeps the element");
+  assert.deepEqual(bannerKeys(questionFor(sessions(mark({ request: "att-8" })))!), ["att-8"], "a new request is a new key");
+  assert.deepEqual(bannerKeys(null), [], "no question, no banner");
 });
