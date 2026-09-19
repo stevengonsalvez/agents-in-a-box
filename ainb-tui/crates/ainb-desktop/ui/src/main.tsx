@@ -4,7 +4,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
 import { createFrameStore } from "./store.ts";
-import { shellAgentStatus, shellFleet, shellSessions, SUBSCRIBED } from "./subscription.ts";
+import { shellAgentStatus, shellFleet, shellGitView, shellSessions, SUBSCRIBED } from "./subscription.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { AcpCard } from "./acp.tsx";
@@ -13,6 +13,7 @@ import { AnswerBanner } from "./answer.tsx";
 import { phaseOf, questionFor, type Refusal, sendInOrder } from "./answer.ts";
 import { newNotices, noticeKey } from "./notices.ts";
 import { Board } from "./board.tsx";
+import { Review } from "./review.tsx";
 import { boardColumns } from "./board.ts";
 import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
@@ -87,6 +88,11 @@ function Shell() {
   // what is waiting on a human. A terminal takes the work area while it is
   // chosen, and the board is one click back.
   const [board, setBoard] = createSignal(true);
+  // The review tab holds the work area over the git view section, which the
+  // host sends bounded. It is a view of the same shell, not a screen of its
+  // own: the reducer owns the selection and the scroll, as it does for the
+  // board.
+  const [review, setReview] = createSignal(false);
   // The ACP session whose transcript card holds the work area, if any. It has
   // no tmux pane, so the card stands where its terminal would.
   const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
@@ -102,6 +108,7 @@ function Shell() {
     setActive(key);
     if (key !== null) {
       setBoard(false);
+      setReview(false);
       closeTranscript();
     }
     if (key !== null) requestAnimationFrame(() => focusers.get(key)?.());
@@ -131,6 +138,7 @@ function Shell() {
     dispatch(transcriptIntent(sessionKey));
     setTranscriptKey(sessionKey);
     setBoard(false);
+    setReview(false);
   };
   /** Close the card; the host drops the transcript and frames the default. */
   function closeTranscript() {
@@ -273,12 +281,14 @@ function Shell() {
   const sessions = () => shellSessions(store, host());
   const fleet = () => shellFleet(store, host());
   const agentStatus = () => shellAgentStatus(store, host());
+  const gitView = () => shellGitView(store, host());
   const counts = HEADER_COUNTS.map(([select, label]) => ({
     label,
     count: createMemo(() => select(store, host())),
   }));
   const idle = createMemo(() => ROOT_SELECTORS.idleCount(store, host()));
   const sessionsStale = createMemo(() => ROOT_SELECTORS.sessionsStale(store, host()));
+  const gitViewStale = createMemo(() => ROOT_SELECTORS.gitViewStale(store, host()));
   const loading = createMemo(() => ROOT_SELECTORS.workspacesLoading(store, host()));
   const elsewhere = createMemo(() => ROOT_SELECTORS.attentionElsewhere(store, host()));
   const shell = () => (host() ? store.section(host()!, "shell") : undefined);
@@ -405,17 +415,32 @@ function Shell() {
         />
         <section class="workarea">
           <nav class="tabs" aria-label="Board and terminals">
-            <span class="tab board-tab" classList={{ active: board() && transcriptKey() === null }}>
+            <span class="tab board-tab" classList={{ active: board() && !review() && transcriptKey() === null }}>
               <button
                 type="button"
                 class="tab-title"
-                aria-current={board() && transcriptKey() === null ? "page" : undefined}
+                aria-current={board() && !review() && transcriptKey() === null ? "page" : undefined}
                 onClick={() => {
                   closeTranscript();
+                  setReview(false);
                   setBoard(true);
                 }}
               >
                 Board
+              </button>
+            </span>
+            <span class="tab review-tab" classList={{ active: review() && transcriptKey() === null }}>
+              <button
+                type="button"
+                class="tab-title"
+                aria-current={review() && transcriptKey() === null ? "page" : undefined}
+                onClick={() => {
+                  closeTranscript();
+                  setBoard(false);
+                  setReview(true);
+                }}
+              >
+                Review
               </button>
             </span>
             {/* The ACP card's own place in the strip, where the session's
@@ -444,13 +469,15 @@ function Shell() {
               {(tab) => (
                 <span
                   class="tab"
-                  classList={{ active: !board() && transcriptKey() === null && tab.key === active() }}
+                  classList={{ active: !board() && !review() && transcriptKey() === null && tab.key === active() }}
                   data-state={tab.state}
                 >
                   <button
                     type="button"
                     class="tab-title"
-                    aria-current={!board() && transcriptKey() === null && tab.key === active() ? "page" : undefined}
+                    aria-current={
+                      !board() && !review() && transcriptKey() === null && tab.key === active() ? "page" : undefined
+                    }
                     onClick={() => choose(tab)}
                   >
                     {title(tab)}
@@ -482,7 +509,10 @@ function Shell() {
               />
             )}
           </Show>
-          <Show when={board() && transcriptKey() === null}>
+          <Show when={review() && transcriptKey() === null}>
+            <Review gitView={gitView()} stale={gitViewStale()} onChoose={dispatch} />
+          </Show>
+          <Show when={board() && !review() && transcriptKey() === null}>
             <Board
               agentStatus={agentStatus()}
               fleet={fleet()}
@@ -492,7 +522,7 @@ function Shell() {
               onOpenTranscript={openTranscript}
             />
           </Show>
-          <Show when={!board() && transcriptKey() === null && tabs().length === 0}>
+          <Show when={!board() && !review() && transcriptKey() === null && tabs().length === 0}>
             <p class="empty">Choose a session to open its terminal</p>
           </Show>
           {/* Keyed by tab key, not by the tab object each event replaces: a
@@ -504,7 +534,7 @@ function Shell() {
                   <TerminalView
                     tab={tab()}
                     title={title(tab())}
-                    active={!board() && transcriptKey() === null && key === active()}
+                    active={!board() && !review() && transcriptKey() === null && key === active()}
                     mac={MAC}
                     onAccelerator={onAccelerator}
                     onLeave={() => sidebar?.focus()}
