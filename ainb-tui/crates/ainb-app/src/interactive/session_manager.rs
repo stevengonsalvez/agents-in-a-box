@@ -1995,6 +1995,19 @@ impl InteractiveSessionManager {
         let tmux_sessions = String::from_utf8_lossy(&output.stdout);
         let mut discovered_sessions = Vec::new();
 
+        // P6e: one read of the store for the whole refresh, through the
+        // session source, not one per tmux session: each read can wait out
+        // the RPC deadline, and N of them would stall a refresh N times. A
+        // failed read is logged and every session goes on to phase 2.
+        let store = if tmux_sessions.lines().any(|name| name.starts_with("tmux_")) {
+            crate::cli::util::load_session_store_async().await.unwrap_or_else(|e| {
+                warn!("session store unavailable for this refresh: {e}");
+                SessionStore::default()
+            })
+        } else {
+            SessionStore::default()
+        };
+
         // Filter for our tmux sessions (prefix: tmux_)
         for tmux_name in tmux_sessions.lines() {
             if !tmux_name.starts_with("tmux_") {
@@ -2004,7 +2017,7 @@ impl InteractiveSessionManager {
             debug!("Found tmux session: {}", tmux_name);
 
             // Try to find corresponding worktree
-            if let Ok(session) = self.discover_session_from_tmux(tmux_name).await {
+            if let Ok(session) = self.discover_session_from_tmux(tmux_name, &store).await {
                 discovered_sessions.push(session);
             }
         }
@@ -2024,14 +2037,11 @@ impl InteractiveSessionManager {
     async fn discover_session_from_tmux(
         &self,
         tmux_name: &str,
+        store: &SessionStore,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         // Phase 1: Try to find session in persisted sessions.json
         // This handles the branch-mismatch case where the user changed branches in the worktree.
-        // P6e: read through the session source; a failed read goes on to phase 2.
-        let store = crate::cli::util::load_session_store_async().await.unwrap_or_else(|e| {
-            warn!("session store unavailable for tmux {tmux_name}: {e}");
-            SessionStore::default()
-        });
+        // P6e: `store` is the caller's one read for the whole refresh.
         if let Some(metadata) = store.find_by_tmux_name(tmux_name) {
             // Verify the worktree still exists
             if metadata.worktree_path.exists() {
@@ -4865,7 +4875,7 @@ trust_level = "trusted"
 
         let manager = InteractiveSessionManager::new().expect("manager");
         let discovered = manager
-            .discover_session_from_tmux(tmux_name)
+            .discover_session_from_tmux(tmux_name, &SessionStore::load())
             .await
             .expect("discover persisted session");
         let session = discovered.to_session_model();
