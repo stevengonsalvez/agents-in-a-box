@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
 import type { SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
-import { isSelected, label, ringFor, rowStatus } from "./sessions.ts";
+import { drawnRows, isSelected, label, ringFor, rowStatus } from "./sessions.ts";
 
 interface Props {
   sessions: SessionsView_Serialize | undefined;
@@ -34,14 +34,14 @@ export function Sidebar(props: Props) {
       >
         <For each={props.sessions?.workspaces}>
           {(workspace) => (
-            <Show when={workspace.sessions.length > 0}>
+            <Show when={drawnRows(workspace).length > 0}>
               <section class="workspace" data-workspace={workspace.name}>
                 <div class="workspace-name">{label(workspace.name)}</div>
                 <ul>
                 {/* The frame carries only the rows the session list's filter
                     shows, so what the sidebar draws and what the reducer's
                     navigation walks are the same set (#1180). */}
-                <For each={workspace.sessions}>
+                <For each={drawnRows(workspace)}>
                   {(session) => {
                     const selected = () => isSelected(props.sessions, session.id);
                     const ring = () => ringFor(session);
