@@ -10,7 +10,7 @@
 // is stopped through its own verb.
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,6 +95,31 @@ export function paneText(tmux) {
 }
 
 /**
+ * Fail the run when the webview the app embeds is older than the webview's
+ * source.
+ *
+ * `cargo build` bakes whatever is in `ui/dist` into the binary and never
+ * rebuilds it, so a checkout that moved on without `npm run build` launches a
+ * window from an older bundle: every spec then tests a webview nobody wrote,
+ * and the failures read as regressions in the app. Run `npm run build` in
+ * `ui/` to clear this.
+ */
+function freshBundle() {
+  const dist = resolve(HERE, "../ui/dist/index.html");
+  if (!existsSync(dist)) throw new Error(`the webview is not built: ${dist}`);
+  const built = statSync(dist).mtimeMs;
+  const src = resolve(HERE, "../ui/src");
+  const newest = readdirSync(src, { recursive: true })
+    .map((entry) => statSync(join(src, entry)).mtimeMs)
+    .reduce((a, b) => Math.max(a, b), 0);
+  if (newest > built) {
+    throw new Error(
+      `the webview bundle is older than ui/src (${new Date(built).toISOString()} vs ${new Date(newest).toISOString()}): run npm run build in ui/`,
+    );
+  }
+}
+
+/**
  * Create the world and seed `sessions` of them. Called from `onPrepare`, so
  * every wdio worker, and the app the service launches, inherits this
  * environment: nothing outside the world is read or written.
@@ -107,6 +132,7 @@ export function up(sessions = 2) {
   ]) {
     if (!existsSync(path)) throw new Error(`${name} is not built: ${path}`);
   }
+  freshBundle();
 
   const root = mkdtempSync(join(tmpdir(), "ainb-e2e-"));
   const home = join(root, "home");
