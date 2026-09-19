@@ -95,3 +95,27 @@ fn the_reader_starts_on_the_first_usage_subscription_and_the_tick_frames_it() {
         framed.borrow()
     );
 }
+
+/// The reader runs on the runtime the host holds, not whatever runtime the
+/// ticking thread happens to be in. A host with none says so on section 21
+/// instead of panicking on the tick (#1260 review).
+#[test]
+fn a_host_with_no_runtime_says_so_instead_of_spawning() {
+    support::isolated_home();
+    // Built outside any runtime, and handed none.
+    let mut host = DesktopHost::new(
+        AppConfig::default(),
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::only(&[SectionId::Usage]),
+        |_: FrameBatch| {},
+    )
+    .rescanning_every(Duration::from_secs(600))
+    .without_attention_poll();
+    host.enable_usage(dialer(std::path::PathBuf::from("/nonexistent/hangar.sock")));
+    let _ = host.tick();
+    assert_eq!(
+        host.state().usage.absent.as_deref(),
+        Some("this window has no runtime to read usage on")
+    );
+}
