@@ -3501,6 +3501,55 @@ mod tests {
     // without the user having to manually refresh.
     // ========================================================================
 
+    /// The pacing seam applies a finished scan, restarts the cadence from its
+    /// end, and starts nothing while one runs, or before the cadence or the
+    /// news floor is due.
+    #[test]
+    fn pace_workspace_load_applies_a_scan_and_waits_out_the_cadence() {
+        use crate::app::state::{WorkspaceLoadResult, WorkspaceRescan};
+
+        let mut state = AppState::new();
+        let tx = state.start_background_workspace_loading();
+
+        let at_once = WorkspaceRescan {
+            every: Duration::ZERO,
+            news_floor: Duration::ZERO,
+        };
+        assert!(
+            !state.pace_workspace_load(Some(at_once)),
+            "nothing landed yet"
+        );
+        assert!(state.workspace_scan_running(), "one scan at a time");
+
+        let before = Instant::now();
+        tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
+        assert!(
+            state.pace_workspace_load(None),
+            "the finished scan is applied"
+        );
+        assert!(!state.workspace_scan_running());
+        assert!(
+            state.host.workspace_rescan_from >= before,
+            "the cadence runs from the end of the scan"
+        );
+
+        // News inside the floor waits too.
+        state.host.workspace_scanned_generation = Some(0);
+        state
+            .host
+            .daemon_attention_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        let later = WorkspaceRescan {
+            every: Duration::from_secs(3600),
+            news_floor: Duration::from_secs(3600),
+        };
+        assert!(!state.pace_workspace_load(Some(later)));
+        assert!(
+            !state.workspace_scan_running(),
+            "no scan starts before the cadence or the news floor is due"
+        );
+    }
+
     #[test]
     fn initial_background_load_enqueues_full_refresh_for_stopped_sessions() {
         use crate::app::state::WorkspaceLoadResult;

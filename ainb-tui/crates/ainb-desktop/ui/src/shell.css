@@ -424,3 +424,157 @@ body {
   color: var(--muted);
   padding: 10px 14px;
 }
+
+/* The board: columns of agents by the state the host gave them, beside the
+   list of what is waiting on a human. */
+.board {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr minmax(220px, 320px);
+  grid-template-rows: auto 1fr;
+  gap: 12px;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.board-health {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--gold);
+  border-radius: 6px;
+  color: var(--gold);
+}
+
+.board-health[data-health="unreachable"] {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.board-columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(180px, 1fr);
+  gap: 10px;
+  overflow: auto;
+  min-height: 0;
+}
+
+.board-column,
+.attention-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.board-column h2,
+.attention-list h2 {
+  display: flex;
+  justify-content: space-between;
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--gold);
+}
+
+.board-count {
+  color: var(--muted);
+}
+
+.board-column[data-state="waiting"] {
+  border-color: var(--gold);
+}
+
+.board-column ul,
+.attention-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0 8px 8px;
+  overflow-y: auto;
+}
+
+.board-column .empty,
+.attention-list .empty,
+.elsewhere {
+  margin: 0;
+  padding: 0 10px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.board-card,
+.attention-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--highlight);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.board-card:hover:not(:disabled),
+.attention-row:hover:not(:disabled),
+.board-card:focus-visible,
+.attention-row:focus-visible {
+  border-color: var(--green);
+  outline: none;
+}
+
+.board-card:disabled,
+.attention-row:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.board-card.open {
+  border-color: var(--gold);
+}
+
+.card-title,
+.row-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-line,
+.row-detail {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-chips {
+  display: flex;
+  gap: 4px;
+}
+
+.card-chips .chip,
+.row-kind {
+  align-self: flex-start;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--highlight);
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chip[data-kind="Err"],
+.attention-row[data-kind="Err"] .row-kind {
+  color: var(--red);
+}

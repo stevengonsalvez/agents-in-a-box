@@ -157,6 +157,7 @@ fn test_renderer_frozen_with_stale_badge_unit_test() {
         delay: Duration::from_secs(1),
         attempt: 1,
         error: Some("socket dropped".to_string()),
+        scheduled_at: tokio::time::Instant::now(),
     };
     assert!(!reconnecting.is_connected());
     assert!(reconnecting.is_reconnecting());
@@ -319,12 +320,8 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
     })
     .await;
 
-    let delay1 = match s1 {
-        ConnectionState::Reconnecting { delay, .. } => delay,
-        _ => unreachable!(),
-    };
+    let (delay1, at1) = scheduled(&s1);
     assert_eq!(delay1, BACKOFF_1S);
-    let t1 = Instant::now();
 
     // 4. Observe 2nd reconnect attempt (4s backoff)
     let s2 = wait_for_condition(&mut state_rx, Duration::from_secs(5), |s| {
@@ -332,19 +329,18 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
     })
     .await;
 
-    let delay2 = match s2 {
-        ConnectionState::Reconnecting { delay, .. } => delay,
-        _ => unreachable!(),
-    };
+    let (delay2, at2) = scheduled(&s2);
     assert_eq!(delay2, BACKOFF_4S);
-    let elapsed1 = t1.elapsed();
-    // Relaxed upper bound to 2500 ms because heavily loaded CI runners (especially
-    // on macOS) experience scheduling delays, while keeping ordering assertions strict.
+    // Measured on the client's own clock, from the moment it published each
+    // attempt: the time the test takes to wake up and see an attempt is not in
+    // it. The client sleeps the whole backoff between two attempts, so the
+    // floor is the backoff itself; the ceiling allows the failed dial and a
+    // loaded runner.
+    let elapsed1 = at2 - at1;
     assert!(
-        elapsed1 >= Duration::from_millis(900) && elapsed1 <= Duration::from_millis(2500),
-        "elapsed between attempt 1 and 2 was {elapsed1:?}, expected 900-2500ms"
+        elapsed1 >= delay1 && elapsed1 <= Duration::from_millis(2500),
+        "attempt 2 was scheduled {elapsed1:?} after attempt 1, expected {delay1:?}-2500ms"
     );
-    let t2 = Instant::now();
 
     // 5. Observe 3rd reconnect attempt (16s backoff)
     let s3 = wait_for_condition(&mut state_rx, Duration::from_secs(8), |s| {
@@ -352,15 +348,12 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
     })
     .await;
 
-    let delay3 = match s3 {
-        ConnectionState::Reconnecting { delay, .. } => delay,
-        _ => unreachable!(),
-    };
+    let (delay3, at3) = scheduled(&s3);
     assert_eq!(delay3, BACKOFF_16S);
-    let elapsed2 = t2.elapsed();
+    let elapsed2 = at3 - at2;
     assert!(
-        elapsed2 >= Duration::from_millis(3600) && elapsed2 <= Duration::from_millis(5200),
-        "elapsed between attempt 2 and 3 was {elapsed2:?}, expected 3600-5200ms"
+        elapsed2 >= delay2 && elapsed2 <= Duration::from_millis(5200),
+        "attempt 3 was scheduled {elapsed2:?} after attempt 2, expected {delay2:?}-5200ms"
     );
 
     // Verify banner and stale badge during reconnect
@@ -371,23 +364,18 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
     assert!(view.stale_badge);
     assert!(view.frozen);
 
-    let t3 = Instant::now();
-
     // Observe 4th reconnect attempt (16s backoff leg)
     let s4 = wait_for_condition(&mut state_rx, Duration::from_secs(22), |s| {
         matches!(s1_attempt(s), Some(4))
     })
     .await;
 
-    let delay4 = match s4 {
-        ConnectionState::Reconnecting { delay, .. } => delay,
-        _ => unreachable!(),
-    };
+    let (delay4, at4) = scheduled(&s4);
     assert_eq!(delay4, BACKOFF_16S);
-    let elapsed3 = t3.elapsed();
+    let elapsed3 = at4 - at3;
     assert!(
-        elapsed3 >= Duration::from_millis(14_000) && elapsed3 <= Duration::from_millis(20_000),
-        "elapsed for 16s leg was {elapsed3:?}, expected 14-20s"
+        elapsed3 >= delay3 && elapsed3 <= Duration::from_millis(20_000),
+        "attempt 4 was scheduled {elapsed3:?} after attempt 3, expected {delay3:?}-20s"
     );
 
     // 6. Restart daemon in same home
@@ -434,6 +422,18 @@ async fn test_daemon_sigkill_reconnect_delays_and_resync() {
     assert_eq!(r2, r1 + 1, "revisions must be contiguous with no hole");
 
     sub.close().await;
+}
+
+/// A reconnecting state's backoff and the moment the client scheduled it.
+fn scheduled(state: &ConnectionState) -> (Duration, tokio::time::Instant) {
+    match state {
+        ConnectionState::Reconnecting {
+            delay,
+            scheduled_at,
+            ..
+        } => (*delay, *scheduled_at),
+        other => panic!("expected a reconnect attempt, got {other:?}"),
+    }
 }
 
 fn s1_attempt(state: &ConnectionState) -> Option<u32> {

@@ -8,7 +8,7 @@ import type { Frame_Serialize } from "../../../ainb-app/bindings/AppState";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { createFrameStore, type SectionName } from "./store.ts";
 
-const SECTIONS: SectionName[] = ["sessions", "workspace_load"];
+const SECTIONS: SectionName[] = ["sessions", "workspace_load", "fleet"];
 
 function frame(section: SectionName, version: number, body: unknown): Frame_Serialize {
   return { section, version, epoch: 1, host_id: "local", body };
@@ -30,6 +30,7 @@ test("every root selector returns a scalar, with and without a host", () => {
         frames: [
           frame("sessions", 1, sessions("Idle", "Running")),
           frame("workspace_load", 1, { is_loading_workspaces: true, workspace_load_error: null }),
+          frame("fleet", 1, { attention_elsewhere: 2, fleet_metadata: {}, daemon_attention: { by_session_id: {} } }),
         ],
       },
     ]);
@@ -41,6 +42,7 @@ test("every root selector returns a scalar, with and without a host", () => {
     }
     assert.equal(ROOT_SELECTORS.idleCount(store, "local"), 1);
     assert.equal(ROOT_SELECTORS.workspacesLoading(store, "local"), true);
+    assert.equal(ROOT_SELECTORS.attentionElsewhere(store, "local"), 2, "read off a populated Fleet frame");
     dispose();
   });
 });

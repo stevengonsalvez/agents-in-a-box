@@ -1,11 +1,12 @@
 //! The desktop's embedded host: one `AppState`, driven through `dispatch`, with
 //! every change framed for the webview.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ainb_app::app::RendererHost;
 use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
+use ainb_app::app::state::WorkspaceRescan;
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
 use ainb_app::{AppState, CommandId, Effect, Intent, Keymap};
@@ -64,7 +65,9 @@ const MAX_REPORT_ROUNDS: usize = 32;
 
 /// One row the palette offers: a command the webview may send by name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct PaletteEntry {
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub id: CommandId,
     /// What the row does, as the keymap documents it.
     pub doc: &'static str,
@@ -78,21 +81,6 @@ pub struct PaletteEntry {
     pub active: bool,
 }
 
-/// How long after a scan finishes the window asks for the next one.
-///
-/// A session another process creates reaches the sidebar only because this
-/// runs: the scan is what finds it, and nothing else tells this window it
-/// exists. A scan that finds the same list writes no Sessions frame, so the
-/// cadence costs a scan rather than a reframe; the WorkspaceLoad flag it does
-/// move is the "write only what changed" audit's, #1139.
-///
-/// Strictly longer than the floor the state publishes
-/// (`AppState::workspace_rescan_floor`, its own scan budget), and measured
-/// from the end of a scan, so a scan that times out is followed by a gap
-/// instead of the next one starting as it gives up.
-pub const WORKSPACE_RESCAN: Duration =
-    Duration::from_secs(ainb_app::AppState::workspace_rescan_floor().as_secs() + 5);
-
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
     state: AppState,
@@ -100,9 +88,9 @@ pub struct DesktopHost<S: FrameSink> {
     layout: DesktopLayout,
     mirror: Mirror,
     sink: S,
-    /// When the last scan was asked for, so the tick can pace the next.
-    scanned_at: Instant,
-    rescan_every: Duration,
+    /// How the tick asks the state to keep the session list fresh: the
+    /// cadence, and the floor under daemon news (#1156).
+    rescan: WorkspaceRescan,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -116,22 +104,34 @@ impl<S: FrameSink> DesktopHost<S> {
         subscription: Subscription,
         sink: S,
     ) -> Self {
+        let mut state = AppState::with_config(config);
+        // This shell is the surface a person sits at, so an answer sent from
+        // this window is recorded as the desktop's. The sidecar already tells
+        // the daemon the same thing about this process (`sidecar::surface`).
+        state.host.surface = ainb_hangar_proto::connections::SurfaceKind::Desktop;
         Self {
-            state: AppState::with_config(config),
+            state,
             keymap,
             layout: DesktopLayout::default(),
             mirror: Mirror::new(host_id, subscription),
             sink,
-            scanned_at: Instant::now(),
-            rescan_every: WORKSPACE_RESCAN,
+            rescan: WorkspaceRescan::default(),
         }
     }
 
-    /// Rescan on `every` instead of [`WORKSPACE_RESCAN`]. For tests, which
+    /// Rescan on `every` instead of [`AppState::WORKSPACE_RESCAN`]. For tests, which
     /// cannot wait ten seconds to see the second scan.
     #[must_use]
     pub const fn rescanning_every(mut self, every: Duration) -> Self {
-        self.rescan_every = every;
+        self.rescan.every = every;
+        self
+    }
+
+    /// Let news start a scan `floor` after the last one instead of after the
+    /// state's own scan budget. For tests, as [`Self::rescanning_every`] is.
+    #[must_use]
+    pub const fn flooring_news_at(mut self, floor: Duration) -> Self {
+        self.rescan.news_floor = floor;
         self
     }
 
@@ -161,14 +161,11 @@ impl<S: FrameSink> DesktopHost<S> {
     /// the effects that work queued.
     #[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
     pub fn tick(&mut self) -> Vec<Effect> {
-        let was_scanning = self.state.workspace_scan_running();
-        self.state.check_workspace_loading_complete();
-        // The cadence runs from the end of a scan, not its start: a scan that
-        // took the whole Docker budget would otherwise be followed by the next
-        // one immediately.
-        if was_scanning && !self.state.workspace_scan_running() {
-            self.scanned_at = Instant::now();
-        }
+        // A session another process created is found by a scan and by nothing
+        // else, so the window keeps asking for one: on daemon news once the
+        // news floor has passed, else on the cadence. The pacing is the
+        // state's (#1107, #1156).
+        self.state.pace_workspace_load(Some(self.rescan));
         // The poller is idempotent by an atomic, so starting it every tick is
         // its documented use. Every read here is by shared reference: a `&mut`
         // path through the `Versioned` Fleet section would bump it each tick.
@@ -182,12 +179,12 @@ impl<S: FrameSink> DesktopHost<S> {
         // reducer paces it: at once on daemon news, otherwise on its own
         // cadence, and a merge that finds nothing new bumps nothing.
         self.state.refresh_attention(ainb_app::fleet::daemons::heartbeat::now_ms());
-        // A session another process created is found by a scan and by nothing
-        // else, so the window keeps asking for one. Never two at once: the
-        // reducer owns the load and reports it running.
-        if !self.state.workspace_scan_running() && self.scanned_at.elapsed() >= self.rescan_every {
-            self.state.start_workspace_load();
-        }
+        // What the answer worker reported, the tab reconciled, and the composer
+        // pointed at the request it is showing. Without it an answer sent from
+        // this window would leave the row reading SENT for as long as the shell
+        // is open: the worker reports into the state, and this is the only
+        // thing in this process that folds it.
+        self.state.tick_surfaces(ainb_app::fleet::daemons::heartbeat::now_ms());
         let effects = self.state.take_effects();
         self.pump();
         effects

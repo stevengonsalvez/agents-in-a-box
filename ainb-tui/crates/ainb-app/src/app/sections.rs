@@ -193,6 +193,10 @@ pub struct PluginPresence {
     pub registered: bool,
     /// Its render has blown its budget, so input sent to it sits unserviced.
     pub wedged: bool,
+    /// The ABI revision its manifest declares, 0 while it is not registered.
+    /// The router sends a key only to a plugin at or past that key's
+    /// `min_abi` (#1171).
+    pub abi: u32,
 }
 
 /// The requests keeping one plugin screen rendering for hosts that are not
@@ -490,6 +494,15 @@ pub struct SessionsSection {
     /// session-list render reads this set with an O(1) lookup, so it never
     /// re-parses `favorites.yaml` or opens a git repo per frame.
     pub favorite_workspace_paths: HashSet<PathBuf>,
+    /// The session rows the filter hides, by id, as the reducer decides it
+    /// (`AppState::session_passes_filter`), recomputed on every tick.
+    ///
+    /// A set beside the list rather than a shorter list: the selection is
+    /// expressed as an index into the workspace's own `sessions`, so a frame
+    /// that dropped the hidden rows would move every row below one (#1157). A
+    /// renderer draws the rows it is given and skips the ids in here, instead
+    /// of carrying its own copy of the filter rule.
+    pub hidden_sessions: HashSet<Uuid>,
 }
 
 impl Default for SessionsSection {
@@ -503,6 +516,7 @@ impl Default for SessionsSection {
             expand_all_workspaces: true, // Default to expanded view
             // AppState::default overwrites this from the loaded config.
             session_filter: crate::app::state::SessionFilter::default(),
+            hidden_sessions: HashSet::new(),
             attached_session_id: None,
             favorite_workspace_paths: HashSet::new(),
         }
@@ -593,6 +607,15 @@ pub struct FleetSection {
     /// Survives a change of checkbox set on purpose: an operator who ticks a
     /// fifth session halfway through typing must not lose what they typed.
     pub broadcast: crate::fleet::broadcast::Broadcast,
+    /// The open conversation, as a frame carries it: bounded and scrubbed,
+    /// written by the reducer's tick from the chat host in `HostOnlyState`.
+    ///
+    /// Here rather than in a section of its own (there is no twenty-first,
+    /// #1076) and rather than on `ClaudeChatSection`, which is the Docker
+    /// claude-chat pane: an ACP transcript under that name would put two
+    /// unrelated things in one place. It belongs with `ask_state` and
+    /// `broadcast` because it is the same attention-and-answer family.
+    pub conversation: crate::fleet::conversation::Conversation,
     /// The daemon's half of the attention picture, refreshed by
     /// [`crate::fleet::attention_poll`] on its own thread.
     ///
@@ -656,6 +679,7 @@ impl Default for FleetSection {
             live_window: crate::models::live_window::LiveWindow::default(),
             ask_state: crate::fleet::answer::AskState::default(),
             broadcast: crate::fleet::broadcast::Broadcast::default(),
+            conversation: crate::fleet::conversation::Conversation::default(),
             daemon_attention: Arc::new(Mutex::new(
                 crate::fleet::attention::DaemonAttention::default(),
             )),
@@ -999,6 +1023,14 @@ pub type BranchRefreshPayload = (
     Result<Vec<crate::git::branch_list::BranchEntry>, String>,
 );
 
+/// What `AppState::project_conversation` last read: the open topic, its
+/// composer's length in characters, and its send refusal.
+pub(crate) type ConversationMark = (
+    ainb_plugin_hangar::screen::fleet_chat::ChatTopic,
+    usize,
+    Option<String>,
+);
+
 /// What only the process running the reducer can use: channels and task
 /// handles, worker liveness flags, the handles background workers write
 /// through, and the timers that pace the tick.
@@ -1009,6 +1041,18 @@ pub type BranchRefreshPayload = (
 /// `tests/host_side_effects.rs`.
 #[derive(Debug)]
 pub struct HostOnlyState {
+    /// What kind of surface this process is, as it names itself to the daemon.
+    ///
+    /// The answer path carries it to `attention/answer`, and the daemon
+    /// records the winning row under it (base spec `:307`, `answered_by =
+    /// "<kind>@<host>"`), so this is how a second surface learns whether the
+    /// person who answered sat at a terminal or at the desktop shell.
+    ///
+    /// `Tui` unless a host says otherwise: the terminal is the reducer's
+    /// original surface, so no existing host changes its provenance by the
+    /// field arriving, and a new host that forgets is recorded as the one it
+    /// was a copy of rather than as `unknown`.
+    pub surface: ainb_hangar_proto::connections::SurfaceKind,
     // Tmux integration
     pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,
     /// Whether a workspace scan has ever been applied. A later scan that finds
@@ -1036,6 +1080,13 @@ pub struct HostOnlyState {
     pub workspace_load_started: Option<Instant>,
     /// Channel receiver for background workspace loading results
     pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
+    /// When a host's rescan cadence runs from: the end of the last workspace
+    /// scan, or the state's creation before any has finished.
+    pub(crate) workspace_rescan_from: Instant,
+    /// The daemon's publish counter as it stood when the last workspace scan
+    /// started, so news it brings can start the next one early. `None` until
+    /// a scan has started: news is a reason to look again.
+    pub(crate) workspace_scanned_generation: Option<u64>,
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
     // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
@@ -1117,6 +1168,11 @@ pub struct HostOnlyState {
     /// from is not being read, and keeping N of them alive means N poll loops
     /// against the daemon for conversations nobody is looking at.
     pub session_chat: Option<(String, crate::fleet::chat_host::ChatHost)>,
+    /// What the framed conversation was last projected from: the open topic,
+    /// its composer's length and its send refusal. A tick that reports no news
+    /// and finds this unchanged leaves `fleet.conversation` alone rather than
+    /// rebuilding fifty rows to compare them.
+    pub(crate) conversation_mark: Option<ConversationMark>,
     /// Whether the attention poller thread is alive, so the render loop can
     /// start one without having to remember whether it already did.
     pub attention_poll_running: Arc<std::sync::atomic::AtomicBool>,
@@ -1142,6 +1198,7 @@ pub struct HostOnlyState {
 impl Default for HostOnlyState {
     fn default() -> Self {
         Self {
+            surface: ainb_hangar_proto::connections::SurfaceKind::Tui,
             tmux_sessions: HashMap::new(),
             workspaces_applied: false,
             preview_update_task: None,
@@ -1152,6 +1209,8 @@ impl Default for HostOnlyState {
             host_tmux_session: None,
             workspace_load_started: None,
             workspace_load_receiver: None,
+            workspace_rescan_from: Instant::now(),
+            workspace_scanned_generation: None,
             last_snapshot_time: None,
             last_preview_update: None,
             last_attention_refresh: None,
@@ -1172,6 +1231,7 @@ impl Default for HostOnlyState {
             pal_dial: crate::fleet::pal_dial::PalDial::new(),
             daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta::default(),
             session_chat: None,
+            conversation_mark: None,
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             attention_attached_at: HashMap::new(),

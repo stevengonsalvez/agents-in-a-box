@@ -157,6 +157,8 @@ impl App {
                 crate::app::sections::PluginPresence {
                     registered: handle.lifecycle_state(&pid).is_some(),
                     wedged: handle.render_wedged(&pid),
+                    // The manifest's ABI, for the keys it can decode (#1171).
+                    abi: handle.plugin_abi(&pid).unwrap_or(0),
                 },
             );
 
@@ -434,7 +436,7 @@ impl App {
         self.state.start_workspace_load();
 
         // Note: Log streaming will be initialized after workspaces are loaded
-        // This happens in tick() when check_workspace_loading_complete() returns true
+        // This happens in tick() when pace_workspace_load() applies the load
     }
 
     /// Initialize log streaming for all running sessions
@@ -502,8 +504,9 @@ impl App {
 
         self.state.refresh_statusline();
 
-        // Check for completed background workspace loading
-        if self.state.check_workspace_loading_complete() {
+        // Apply a finished workspace load. The TUI refreshes its list on its
+        // own events, so it asks for no rescan cadence.
+        if self.state.pace_workspace_load(None) {
             info!("Background workspace loading completed, initializing log streaming");
             // Now that workspaces are loaded, initialize log streaming
             if let Err(e) = self.init_log_streaming_for_sessions().await {

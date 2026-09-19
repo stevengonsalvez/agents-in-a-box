@@ -4,9 +4,10 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
 import { createFrameStore } from "./store.ts";
-import { shellSessions, SUBSCRIBED } from "./subscription.ts";
+import { shellAgentStatus, shellFleet, shellSessions, SUBSCRIBED } from "./subscription.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
+import { Board } from "./board.tsx";
 import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
 import {
@@ -83,6 +84,10 @@ function Shell() {
   // Terminal tabs: the strip is the Rust side's; which tab shows is ours.
   const [tabs, setTabs] = createSignal<Tab[]>([]);
   const [active, setActive] = createSignal<string | null>(null);
+  // The board is the window's landing surface: what every agent is doing, and
+  // what is waiting on a human. A terminal takes the work area while it is
+  // chosen, and the board is one click back.
+  const [board, setBoard] = createSignal(true);
   const focusers = new Map<string, () => void>();
   const tabKeys = createMemo(
     () => tabs().map((tab) => tab.key),
@@ -93,6 +98,7 @@ function Shell() {
 
   const activate = (key: string | null) => {
     setActive(key);
+    if (key !== null) setBoard(false);
     if (key !== null) requestAnimationFrame(() => focusers.get(key)?.());
   };
   const showTabs = (view: TabsView) => {
@@ -101,7 +107,14 @@ function Shell() {
       if (!view.tabs.some((tab) => tab.key === key)) focusers.delete(key);
     }
     if (view.focus !== null) activate(view.focus);
-    else if (!view.tabs.some((tab) => tab.key === active())) activate(view.tabs[0]?.key ?? null);
+    else if (!view.tabs.some((tab) => tab.key === active())) {
+      // The shown tab ended (an unrelated tmux session died, say): point at
+      // the next one WITHOUT leaving the board. `activate` means a person chose
+      // a terminal; this is the strip tidying up after itself.
+      const next = view.tabs[0]?.key ?? null;
+      setActive(next);
+      if (next !== null && !board()) requestAnimationFrame(() => focusers.get(next)?.());
+    }
   };
   // A refused intent comes back with the row and the reason: say so, or a
   // key the window may not use (onboarding installs, a commit) looks dead.
@@ -226,6 +239,8 @@ function Shell() {
   // In this node the window holds exactly one host: this machine's daemon.
   const host = peer;
   const sessions = () => shellSessions(store, host());
+  const fleet = () => shellFleet(store, host());
+  const agentStatus = () => shellAgentStatus(store, host());
   const counts = HEADER_COUNTS.map(([select, label]) => ({
     label,
     count: createMemo(() => select(store, host())),
@@ -233,6 +248,7 @@ function Shell() {
   const idle = createMemo(() => ROOT_SELECTORS.idleCount(store, host()));
   const sessionsStale = createMemo(() => ROOT_SELECTORS.sessionsStale(store, host()));
   const loading = createMemo(() => ROOT_SELECTORS.workspacesLoading(store, host()));
+  const elsewhere = createMemo(() => ROOT_SELECTORS.attentionElsewhere(store, host()));
 
   /** A tab's title: its session's name when the sidebar knows it. */
   const title = (tab: Tab) => {
@@ -325,9 +341,18 @@ function Shell() {
         />
         <section class="workarea">
           <nav class="tabs" aria-label="Terminal tabs">
+            <span class="tab board-tab" classList={{ active: board() }}>
+              <button type="button" class="tab-title" onClick={() => setBoard(true)}>
+                Board
+              </button>
+            </span>
             <For each={tabs()}>
               {(tab) => (
-                <span class="tab" classList={{ active: tab.key === active() }} data-state={tab.state}>
+                <span
+                  class="tab"
+                  classList={{ active: !board() && tab.key === active() }}
+                  data-state={tab.state}
+                >
                   <button type="button" class="tab-title" onClick={() => choose(tab)}>
                     {title(tab)}
                   </button>
@@ -343,7 +368,16 @@ function Shell() {
               )}
             </For>
           </nav>
-          <Show when={tabs().length === 0}>
+          <Show when={board()}>
+            <Board
+              agentStatus={agentStatus()}
+              fleet={fleet()}
+              sessions={sessions()}
+              elsewhere={elsewhere()}
+              onChoose={dispatch}
+            />
+          </Show>
+          <Show when={!board() && tabs().length === 0}>
             <p class="empty">Choose a session to open its terminal</p>
           </Show>
           {/* Keyed by tab key, not by the tab object each event replaces: a
@@ -355,7 +389,7 @@ function Shell() {
                   <TerminalView
                     tab={tab()}
                     title={title(tab())}
-                    active={key === active()}
+                    active={!board() && key === active()}
                     mac={MAC}
                     onAccelerator={onAccelerator}
                     onLeave={() => sidebar?.focus()}

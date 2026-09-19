@@ -8,16 +8,11 @@
 
 import type { Session_Serialize, SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
 import { allSessions, label, rowStatus } from "./sessions.ts";
+import type { PaletteEntry } from "../../bindings/Desktop.ts";
 import { openRowIntent, type RendererIntent } from "./tabs.ts";
 
-/** `ainb_desktop::host::PaletteEntry`. */
-export interface PaletteEntry {
-  id: string;
-  doc: string;
-  context: string;
-  chord: string | null;
-  active: boolean;
-}
+/** Generated from `ainb_desktop::host::PaletteEntry` (#1158). */
+export type { PaletteEntry };
 
 /** One offered row: what it draws, and the intent choosing it sends. */
 export interface PaletteRow {

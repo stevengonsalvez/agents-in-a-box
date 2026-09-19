@@ -11,6 +11,7 @@ use crate::app::intent::{Args, Intent};
 use crate::app::keymap::CommandId;
 use crate::app::state::{FocusedPane, SessionListRowId};
 use crate::components::code_review::render::ReviewRowId;
+use crate::components::session_tabs::SessionTab;
 use crate::components::sidebar::SidebarItem;
 use crate::components::skill_manager_screen::FocusedSkillPane;
 
@@ -23,6 +24,8 @@ pub mod ids {
     pub const SESSION_LIST_OPEN_ROW_MENU: &str = "session_list.open_row_menu";
     /// `{"pane": "sessions" | "live_logs" | "preview"}`
     pub const SESSION_LIST_FOCUS_PANE: &str = "session_list.focus_pane";
+    /// `{"tab": SessionTab}`, spelled as the frame spells it.
+    pub const SESSION_LIST_SELECT_TAB: &str = "session_list.select_tab";
     /// `{"width": u16, "collapsed": bool}`
     pub const SESSION_LIST_SAVE_PANE_LAYOUT: &str = "session_list.save_pane_layout";
     /// No arguments.
@@ -49,6 +52,7 @@ pub mod ids {
         SESSION_LIST_SELECT_ROW,
         SESSION_LIST_OPEN_ROW_MENU,
         SESSION_LIST_FOCUS_PANE,
+        SESSION_LIST_SELECT_TAB,
         SESSION_LIST_SAVE_PANE_LAYOUT,
         SKILL_MANAGER_ALL_SOURCES,
         SKILL_MANAGER_SELECT_SOURCE,
@@ -91,6 +95,16 @@ pub fn focus_session_pane(pane: &FocusedPane) -> Intent {
         FocusedPane::Preview => "preview",
     };
     command(ids::SESSION_LIST_FOCUS_PANE, json!({ "pane": pane }))
+}
+
+/// Show the session tab a click names.
+///
+/// The strip's own key cycles; a pointer, and a board card, name the pane they
+/// want. The reducer still resolves it, so naming a disabled tab lands where
+/// the strip would have.
+#[must_use]
+pub fn select_session_tab(tab: SessionTab) -> Intent {
+    command(ids::SESSION_LIST_SELECT_TAB, json!({ "tab": tab }))
 }
 
 /// Persist the sessions pane layout a renderer just changed: the sidebar's
@@ -218,6 +232,12 @@ struct PaneArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TabArgs {
+    tab: SessionTab,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LayoutArgs {
     fraction: f64,
     collapsed: bool,
@@ -270,6 +290,9 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
                 "preview" => Some(AppEvent::SessionListFocusPane(FocusedPane::Preview)),
                 _ => None,
             })
+        }
+        AppEvent::SessionListSelectTab(_) => {
+            parse::<TabArgs>(args).map(|args| AppEvent::SessionListSelectTab(args.tab))
         }
         AppEvent::SaveSessionsPaneLayout { .. } => parse::<LayoutArgs>(args)
             .filter(|args| (0.0..=1.0).contains(&args.fraction))

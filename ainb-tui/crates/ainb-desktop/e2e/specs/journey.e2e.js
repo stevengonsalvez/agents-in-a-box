@@ -63,7 +63,11 @@ describe("the desktop shell", () => {
       timeout: 60_000,
       timeoutMsg: "the tab painted no bytes from its pane",
     });
-    assert.ok((await $(".tab .tab-title").getText()).length > 0, "the tab strip names the session");
+    // Past the fixed Board tab, which always has a title: this is the session's.
+    assert.ok(
+      (await $(".tab:not(.board-tab) .tab-title").getText()).length > 0,
+      "the tab strip names the session",
+    );
 
     // A typed line reaches the pane. The agent on the other end is a separate
     // process on a real tmux server and echoes what it reads, so the pane's

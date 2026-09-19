@@ -137,6 +137,25 @@ fn csi_tilde(code: u8, mod_param: u8) -> Vec<u8> {
     }
 }
 
+/// A paste for the embed, re-joined after crossterm split it (#1003).
+///
+/// crossterm ends a bracketed paste at the first `ESC[201~` it reads, so a
+/// clipboard carrying its own terminator arrives as an `Event::Paste` holding
+/// the text before it, then the rest as ordinary key events. Forwarded as keys,
+/// the rest would run in the pane: a return and a command are typed. The host
+/// drains every event already queued behind the paste and hands the keys
+/// here; each is appended as the bytes it stands for, and the whole is then
+/// wrapped as one sanitized paste, so the tail lands as text.
+pub fn rejoin_paste(text: &str, tail: &[KeyEvent]) -> Vec<u8> {
+    let mut bytes = text.as_bytes().to_vec();
+    for key in tail {
+        if let Some(encoded) = encode_key_event(key) {
+            bytes.extend_from_slice(&encoded);
+        }
+    }
+    bytes
+}
+
 /// Encode a mouse event into SGR (mode 1006) bytes for the embed PTY, translating
 /// terminal-global coordinates into 1-based pane-local ones. `inner` is the embed's
 /// interior rect (inside the border) — the cells the PseudoTerminal actually
@@ -243,6 +262,18 @@ mod tests {
     }
 
     // ── exhaustive table (validation matrix C10) ───────────────────────────
+    #[test]
+    fn a_split_paste_rejoins_its_tail_as_the_bytes_it_was() {
+        let tail = [
+            key(KeyCode::Enter),
+            key(KeyCode::Char('l')),
+            key(KeyCode::Char('s')),
+            key(KeyCode::Enter),
+        ];
+        assert_eq!(rejoin_paste("echo safe", &tail), b"echo safe\rls\r");
+        assert_eq!(rejoin_paste("plain", &[]), b"plain");
+    }
+
     #[test]
     fn special_keys_map_to_terminal_sequences() {
         assert_eq!(enc(KeyCode::Enter), vec![b'\r']);

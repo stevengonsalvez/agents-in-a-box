@@ -512,6 +512,7 @@ view!(SessionsView<'a> for SessionsSection {
     session_filter: crate::app::state::SessionFilter,
     attached_session_id: Option<uuid::Uuid>,
     favorite_workspace_paths: std::collections::HashSet<std::path::PathBuf>,
+    hidden_sessions: std::collections::HashSet<uuid::Uuid>,
 });
 
 view!(SessionLabelsView<'a> for SessionLabelsSection {
@@ -579,6 +580,7 @@ view!(FleetView<'a> for FleetSection {
     live_window: crate::models::live_window::LiveWindow,
     ask_state: crate::fleet::answer::AskState,
     broadcast: crate::fleet::broadcast::Broadcast,
+    conversation: crate::fleet::conversation::Conversation,
     #[serde(serialize_with = "locked")]
     #[cfg_attr(feature = "typescript-bindings", specta(type = crate::fleet::attention::DaemonAttention))]
     daemon_attention: Mutex<crate::fleet::attention::DaemonAttention>,
@@ -717,6 +719,75 @@ mod tests {
         let disk = serde_json::to_value(&session).expect("serialises");
         assert!(disk.get("attention").is_none(), "{disk}");
         assert!(disk.get("live_attention").is_none(), "{disk}");
+    }
+
+    /// D2 seam 4: the open conversation rides the Fleet frame as a bounded,
+    /// scrubbed window. A conversation is exactly where a pasted credential
+    /// ends up, so neither a message body nor a held tool call's arguments
+    /// reach a renderer verbatim, and the operator's unsent draft never leaves
+    /// the process that is typing it.
+    #[test]
+    fn the_fleet_frame_carries_the_conversation_bounded_and_scrubbed() {
+        use crate::fleet::conversation::{
+            Conversation, ConversationActor, ConversationCard, ConversationCardState,
+            ConversationKind, ConversationRow, MAX_ROWS,
+        };
+        // Assembled at runtime, so no credential-shaped literal is committed.
+        let key = format!("sk-ant-{}", "api03-abcdefghijklmnopqrstuvwxyz");
+        let rows: Vec<ConversationRow> = (0..MAX_ROWS + 10)
+            .map(|index| ConversationRow {
+                id: format!("m-{index}"),
+                actor: ConversationActor::Session("claude:s-1".to_string()),
+                kind: ConversationKind::Agent,
+                reply: false,
+                body: format!("Use {key} for the call"),
+                truncated: false,
+            })
+            .collect();
+        let body = with_scratch_home(|| {
+            let mut state = AppState::new();
+            state.fleet.get_mut().conversation = Conversation {
+                rows,
+                cards: vec![ConversationCard {
+                    confirm_id: "c-1".to_string(),
+                    tool: "shell".to_string(),
+                    arguments: serde_json::json!({ "command": format!("curl -H {key}") }),
+                    arguments_bytes: 40,
+                    state: ConversationCardState::Open,
+                    detail: String::new(),
+                }],
+                composer: "half a sentence nobody has sent".to_string(),
+                ..Conversation::default()
+            };
+            section_json(&state, SectionId::Fleet, &frame::HostId::local())
+        });
+
+        let conversation = &body["conversation"];
+        let framed = conversation["rows"].as_array().expect("rows");
+        assert_eq!(
+            framed.len(),
+            MAX_ROWS + 10,
+            "the projection bounds the list, not serde"
+        );
+        let first = framed[0]["body"].as_str().expect("a body");
+        assert!(first.starts_with("Use "), "{first}");
+        assert!(!first.contains(&key), "the body is scrubbed: {first}");
+
+        let argument =
+            conversation["cards"][0]["arguments"]["command"].as_str().expect("a command");
+        assert!(
+            !argument.contains(&key),
+            "every string inside a tool call is scrubbed: {argument}"
+        );
+
+        assert_eq!(
+            conversation["composer_len"], 31,
+            "the draft crosses as its length: {conversation}"
+        );
+        assert!(
+            conversation.get("composer").is_none(),
+            "and never as its text: {conversation}"
+        );
     }
 
     /// #1052: the changelog is static content and its scroll is renderer-local,

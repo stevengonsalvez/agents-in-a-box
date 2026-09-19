@@ -1271,6 +1271,12 @@ pub fn defaults() -> Vec<Binding> {
         ),
         unbound(
             Context::screen("session_list"),
+            "select_tab",
+            AppEvent::SessionListSelectTab(crate::components::session_tabs::SessionTab::Preview),
+            "Show the session tab a click names",
+        ),
+        unbound(
+            Context::screen("session_list"),
             "save_pane_layout",
             AppEvent::SaveSessionsPaneLayout {
                 fraction: 0.0,

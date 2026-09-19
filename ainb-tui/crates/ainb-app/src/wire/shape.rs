@@ -337,6 +337,7 @@ pub const TYPED_LABELS: &[&str] = &[
     "fleet.ask.in_flight_draft",
     "fleet.ask.delivered_via",
     "fleet.broadcast.text",
+    "fleet.conversation.composer",
     "git_view.commit_message_input",
     "git_view.quick_commit_message",
     "new_session.pick_repo.filter",
@@ -534,6 +535,11 @@ fn alternate_state(seed: &mut dyn Seed, round: usize) -> AppState {
         let failed = Err(seed.text("fleet.broadcast.failure", Captured));
         fleet.broadcast.publish_outcome(pick(vec![sent, failed], round));
         fleet.broadcast.tick();
+        // The conversation's other text-free status, so the leak walk sees the
+        // `Opening` leaf as well as the `Unavailable` one the base sample holds.
+        fleet.conversation.status = crate::fleet::conversation::ConversationStatus::Opening {
+            call: "fleet/channel_create".to_string(),
+        };
     }
 
     // ---- session labels: every attachable ref, as menu target and rename target
@@ -1085,6 +1091,86 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
         for c in seed.text("fleet.broadcast.text", Typed).chars() {
             fleet.broadcast.push(c);
         }
+
+        // The open conversation, as the reducer projects it: one row per actor
+        // and one card per decode outcome, so every scrubbed leaf below it is
+        // walked by the leak checks rather than sitting behind an empty list.
+        {
+            use crate::fleet::conversation::{
+                Conversation, ConversationActor, ConversationCard, ConversationCardState,
+                ConversationKind, ConversationRow, ConversationStatus, ConversationTopic,
+            };
+            fn row(
+                actor: ConversationActor,
+                kind: ConversationKind,
+                body: String,
+            ) -> ConversationRow {
+                ConversationRow {
+                    id: "m-1".to_string(),
+                    actor,
+                    kind,
+                    reply: false,
+                    body,
+                    truncated: true,
+                }
+            }
+            let operator_body = seed.text("fleet.conversation.operator_body", Captured);
+            let pal_body = seed.text("fleet.conversation.pal_body", Captured);
+            let session_body = seed.text("fleet.conversation.session_body", Captured);
+            let unattributed_body = seed.text("fleet.conversation.unattributed_body", Captured);
+            fleet.conversation = Conversation {
+                topic: ConversationTopic::Pal,
+                scope_key: Some("channel:01J8Z".to_string()),
+                target_session_key: Some("claude:s-1".to_string()),
+                // The variant that carries text: `Live` and `Opening` have
+                // none, so this is the one a leak check has to walk.
+                status: ConversationStatus::Unavailable {
+                    detail: seed.text("fleet.conversation.unavailable", Captured),
+                },
+                rows: vec![
+                    row(
+                        ConversationActor::Operator,
+                        ConversationKind::User,
+                        operator_body,
+                    ),
+                    row(ConversationActor::Pal, ConversationKind::Agent, pal_body),
+                    row(
+                        ConversationActor::Session("claude:s-1".to_string()),
+                        ConversationKind::Marker,
+                        session_body,
+                    ),
+                    row(
+                        ConversationActor::Unattributed,
+                        ConversationKind::Agent,
+                        unattributed_body,
+                    ),
+                ],
+                rows_held: 4,
+                cards: vec![
+                    ConversationCard {
+                        confirm_id: "c-1".to_string(),
+                        tool: "shell".to_string(),
+                        arguments: serde_json::json!({
+                            "command": seed.text("fleet.conversation.card_argument", Captured),
+                        }),
+                        arguments_bytes: 64,
+                        state: ConversationCardState::Open,
+                        detail: String::new(),
+                    },
+                    ConversationCard {
+                        confirm_id: "c-2".to_string(),
+                        tool: "unknown".to_string(),
+                        arguments: serde_json::Value::Null,
+                        arguments_bytes: 0,
+                        state: ConversationCardState::Unrecognised,
+                        detail: seed.text("fleet.conversation.card_detail", Captured),
+                    },
+                ],
+                cards_held: 2,
+                send_block: seed.text("fleet.conversation.send_block", Captured),
+                composer: seed.text("fleet.conversation.composer", Typed),
+            };
+        }
         {
             let mut attention =
                 fleet.daemon_attention.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1228,6 +1314,7 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
             crate::app::sections::PluginPresence {
                 registered: true,
                 wedged: false,
+                abi: ainb_plugin_protocol::manifest::ABI_VERSION,
             },
         );
     }
@@ -1315,6 +1402,13 @@ fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
         );
         shell.preview_content = Some(seed.text("session.shell.preview_content", Captured));
         state.sessions.get_mut().workspaces[0].shell_session = Some(shell);
+        // One hidden row, so the verdict's leaf reaches the leak walk: ids
+        // only, and the walk proves it.
+        let hidden = state.sessions.get_mut().workspaces[0]
+            .sessions
+            .first()
+            .map(|session| session.id);
+        state.sessions.get_mut().hidden_sessions.extend(hidden);
     }
     {
         let tmux = state.tmux.get_mut();

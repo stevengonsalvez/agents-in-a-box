@@ -59,6 +59,52 @@ impl Executor for Recorder {
 }
 
 #[test]
+fn a_host_that_never_draws_still_lands_an_answer_outcome() {
+    // The send worker reports into the state. This shell has none of the
+    // terminal's draw loop, so unless its tick folds the report, an answer sent
+    // from this window leaves the row reading SENT for as long as it is open.
+    use ainb_app::fleet::answer::{AnswerPhase, request_id};
+    use ainb_app::fleet::attention::{AttentionKind, SessionAttention};
+
+    let log = Log::default();
+    let mut host = host(&[SectionId::Shell], &log);
+    let _ = host.tick();
+    let chip = SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into());
+
+    // Exactly what a worker does when the daemon has answered.
+    host.state().fleet.ask_state.reports().lock().expect("inbox").push((
+        request_id(&chip),
+        AnswerPhase::Delivered {
+            via: "tmux (feat-login)".to_string(),
+        },
+    ));
+    let _ = host.tick();
+
+    assert!(
+        matches!(
+            host.state().fleet.ask_state.phase_for(&chip),
+            Some(AnswerPhase::Delivered { .. })
+        ),
+        "the desktop's own tick folded the outcome"
+    );
+}
+
+#[test]
+fn an_answer_from_this_window_is_recorded_as_the_desktops() {
+    // The daemon stamps `answered_by` from the kind the connection declares,
+    // and the answer path dials with the kind the state carries. A shell that
+    // left it at the default would record every answer as the TUI's, and the
+    // concurrency gate would read a surface nobody sat at.
+    let log = Log::default();
+    let host = host(&[SectionId::Shell], &log);
+
+    assert_eq!(
+        host.state().host.surface,
+        ainb_hangar_proto::connections::SurfaceKind::Desktop
+    );
+}
+
+#[test]
 fn the_first_batch_frames_every_subscribed_section_and_nothing_else() {
     let log = Log::default();
     let mut host = host(&[SectionId::Sessions, SectionId::Shell], &log);
@@ -405,4 +451,37 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     found
+}
+
+/// Seam 4 reaches the desktop: the host's own tick opens the conversation the
+/// open tab names and frames it. The terminal used to open and tick chat hosts
+/// only while drawing, so on this shell `fleet.conversation` stayed the default
+/// forever.
+#[test]
+fn a_desktop_tick_frames_the_open_conversation() {
+    use ainb_app::app::pointer::select_session_tab;
+    use ainb_app::components::session_tabs::SessionTab;
+    use ainb_app::fleet::conversation::{Conversation, ConversationTopic};
+
+    let log = Log::default();
+    let mut host = host(&[SectionId::Fleet], &log);
+    let mut recorder = Recorder(Rc::clone(&log));
+    host.open_sessions(&mut recorder);
+    let _ = host.dispatch(select_session_tab(SessionTab::Pal));
+    log.borrow_mut().clear();
+
+    let _ = host.tick();
+
+    let conversation = &host.state().fleet.conversation;
+    assert_ne!(
+        *conversation,
+        Conversation::default(),
+        "the tick projected it"
+    );
+    assert_eq!(conversation.topic, ConversationTopic::Pal);
+    assert!(
+        log.borrow().iter().any(|frame| frame == "frame fleet"),
+        "and framed it: {:?}",
+        log.borrow()
+    );
 }

@@ -221,7 +221,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, id: String) {
         match msg {
             Message::Text(txt) => match serde_json::from_str::<ClientFrame>(&txt) {
                 Ok(ClientFrame::Input { data }) => {
-                    if bridge.write_input(data.as_bytes()).is_err() {
+                    if bridge.write_input(&pane_input(&data)).is_err() {
                         break;
                     }
                 }
@@ -417,10 +417,33 @@ impl PtyBridge {
     }
 }
 
+/// The bytes an input frame writes to the pane.
+///
+/// xterm.js wraps a browser paste in the bracketed-paste markers without
+/// checking the payload, so a paste is rebuilt from its escape-free payload: a
+/// clipboard carrying its own terminator cannot end the paste and type the rest
+/// as keys (#1003). Typed input passes through unchanged.
+fn pane_input(data: &str) -> std::borrow::Cow<'_, [u8]> {
+    ainb_app::tmux::paste::rebracket(data.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_input_frame_cannot_end_a_paste_early() {
+        let hostile = "\x1b[200~echo safe\x1b[201~\recho pwned\r\x1b[201~";
+        let written = pane_input(hostile);
+        assert_eq!(
+            written.as_ref(),
+            b"\x1b[200~echo safe[201~\recho pwned\r\x1b[201~",
+            "one paste, the terminator inside it as text"
+        );
+        assert_eq!(pane_input("ls -la\r").as_ref(), b"ls -la\r");
+        assert_eq!(pane_input("\x1b[A").as_ref(), b"\x1b[A");
+    }
 
     #[test]
     fn client_frame_parses_input() {
