@@ -6,7 +6,43 @@
 //! Carries all thirteen fields of `SessionMetadata` (session_manager.rs:94-124).
 
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
+
+/// What [`SessionsRepo::upsert`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpsertOutcome {
+    /// The row was inserted or updated.
+    Written,
+    /// The tmux session name is bound to another session id; nothing changed.
+    TmuxNameTaken {
+        /// The session id that holds the name.
+        holder: String,
+    },
+}
+
+/// The completion marker of one `sessions.json` import (migration 0102).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportMarker {
+    /// The file the import read.
+    pub source_path: String,
+    /// Unix milliseconds when the import finished.
+    pub completed_at: i64,
+    /// Rows written.
+    pub imported: i64,
+    /// Records whose id or tmux name was already present.
+    pub skipped: i64,
+    /// Records that failed validation and stayed in the file only.
+    pub rejected: i64,
+}
+
+/// What [`SessionsRepo::complete_import`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// This call imported and wrote the marker.
+    Completed(ImportMarker),
+    /// A marker for the source already existed; nothing was written.
+    AlreadyCompleted,
+}
 
 /// One session row in the `sessions` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,19 +103,26 @@ impl SessionRow {
 pub struct SessionsRepo;
 
 impl SessionsRepo {
-    /// List all sessions, optionally filtered by workspace name, newest first.
+    /// List at most `limit` sessions, optionally filtered by workspace name,
+    /// newest first.
+    ///
+    /// The caller picks the bound: the RPC handler asks for one row past its
+    /// cap so it can tell the client the answer was truncated.
     pub async fn list(
         pool: &SqlitePool,
         workspace_name: Option<&str>,
+        limit: u32,
     ) -> Result<Vec<SessionRow>, sqlx::Error> {
         let rows = if let Some(ws) = workspace_name {
             sqlx::query(
                 "SELECT session_id, tmux_session_name, worktree_path, workspace_name, \
                  created_at, agent_type, headroom_enabled, rtk_enabled, skip_permissions, \
                  model, model_source, codex_model, codex_thread_id \
-                 FROM sessions WHERE workspace_name = ? ORDER BY created_at DESC",
+                 FROM sessions WHERE workspace_name = ? \
+                 ORDER BY created_at DESC, session_id LIMIT ?",
             )
             .bind(ws)
+            .bind(i64::from(limit))
             .fetch_all(pool)
             .await?
         } else {
@@ -87,8 +130,9 @@ impl SessionsRepo {
                 "SELECT session_id, tmux_session_name, worktree_path, workspace_name, \
                  created_at, agent_type, headroom_enabled, rtk_enabled, skip_permissions, \
                  model, model_source, codex_model, codex_thread_id \
-                 FROM sessions ORDER BY created_at DESC",
+                 FROM sessions ORDER BY created_at DESC, session_id LIMIT ?",
             )
+            .bind(i64::from(limit))
             .fetch_all(pool)
             .await?
         };
@@ -132,21 +176,62 @@ impl SessionsRepo {
         Ok(row.map(SessionRow::from_row))
     }
 
-    /// Upsert a session into the table atomically.
-    pub async fn upsert(pool: &SqlitePool, session: &SessionRow) -> Result<(), sqlx::Error> {
-        let mut tx = pool.begin().await?;
-        sqlx::query("DELETE FROM sessions WHERE session_id = ? OR tmux_session_name = ?")
-            .bind(&session.session_id)
-            .bind(&session.tmux_session_name)
-            .execute(&mut *tx)
-            .await?;
+    /// Insert or update the row keyed by `session.session_id`.
+    ///
+    /// A tmux session name is bound to one session id at a time. When another
+    /// session id already holds `session.tmux_session_name` the write is
+    /// refused with [`UpsertOutcome::TmuxNameTaken`] and neither row changes:
+    /// rebinding a name to a new identity is a delete followed by an upsert,
+    /// done deliberately by the caller, never a side effect of an upsert.
+    pub async fn upsert(
+        pool: &SqlitePool,
+        session: &SessionRow,
+    ) -> Result<UpsertOutcome, sqlx::Error> {
+        // IMMEDIATE takes the write lock before the name check, so no other
+        // writer can bind the name between the check and the insert. A
+        // dropped transaction rolls back.
+        let mut tx = pool.begin_with(crate::repo::fleet::IMMEDIATE_TRANSACTION).await?;
+        let outcome = Self::upsert_on(&mut tx, session).await?;
+        if outcome == UpsertOutcome::Written {
+            tx.commit().await?;
+        }
+        Ok(outcome)
+    }
+
+    async fn upsert_on(
+        conn: &mut SqliteConnection,
+        session: &SessionRow,
+    ) -> Result<UpsertOutcome, sqlx::Error> {
+        let holder: Option<String> = sqlx::query_scalar(
+            "SELECT session_id FROM sessions WHERE tmux_session_name = ? AND session_id != ?",
+        )
+        .bind(&session.tmux_session_name)
+        .bind(&session.session_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some(holder) = holder {
+            return Ok(UpsertOutcome::TmuxNameTaken { holder });
+        }
 
         sqlx::query(
             "INSERT INTO sessions ( \
              session_id, tmux_session_name, worktree_path, workspace_name, \
              created_at, agent_type, headroom_enabled, rtk_enabled, \
              skip_permissions, model, model_source, codex_model, codex_thread_id \
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(session_id) DO UPDATE SET \
+             tmux_session_name = excluded.tmux_session_name, \
+             worktree_path = excluded.worktree_path, \
+             workspace_name = excluded.workspace_name, \
+             created_at = excluded.created_at, \
+             agent_type = excluded.agent_type, \
+             headroom_enabled = excluded.headroom_enabled, \
+             rtk_enabled = excluded.rtk_enabled, \
+             skip_permissions = excluded.skip_permissions, \
+             model = excluded.model, \
+             model_source = excluded.model_source, \
+             codex_model = excluded.codex_model, \
+             codex_thread_id = excluded.codex_thread_id",
         )
         .bind(&session.session_id)
         .bind(&session.tmux_session_name)
@@ -161,11 +246,10 @@ impl SessionsRepo {
         .bind(&session.model_source)
         .bind(&session.codex_model)
         .bind(&session.codex_thread_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
 
-        tx.commit().await?;
-        Ok(())
+        Ok(UpsertOutcome::Written)
     }
 
     /// Delete a session by its UUID string.
@@ -187,5 +271,117 @@ impl SessionsRepo {
             .execute(pool)
             .await?;
         Ok(res.rows_affected() > 0)
+    }
+
+    /// The completion marker for the import of `source_path`, if that import
+    /// has finished (migration 0102).
+    pub async fn import_marker(
+        pool: &SqlitePool,
+        source_path: &str,
+    ) -> Result<Option<ImportMarker>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT source_path, completed_at, imported, skipped, rejected \
+             FROM session_import WHERE source_path = ?",
+        )
+        .bind(source_path)
+        .fetch_optional(pool)
+        .await?;
+        Ok(row.map(|row| ImportMarker {
+            source_path: row.get("source_path"),
+            completed_at: row.get("completed_at"),
+            imported: row.get("imported"),
+            skipped: row.get("skipped"),
+            rejected: row.get("rejected"),
+        }))
+    }
+
+    /// Whether ANY import has completed on this home.
+    pub async fn any_import_completed(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_import")
+            .fetch_one(pool)
+            .await?;
+        Ok(n > 0)
+    }
+
+    /// Write the imported `rows` and the completion marker for `source_path`
+    /// in one `IMMEDIATE` transaction.
+    ///
+    /// A row whose session id or tmux name is already present is skipped and
+    /// counted, never overwritten. When a marker for `source_path` already
+    /// exists nothing is written and [`ImportOutcome::AlreadyCompleted`] is
+    /// returned, so two daemons booting on one home import once.
+    /// `rejected` is the caller's count of records that failed validation;
+    /// it is stored on the marker so the failure stays visible.
+    pub async fn complete_import(
+        pool: &SqlitePool,
+        source_path: &str,
+        rows: &[SessionRow],
+        rejected: i64,
+        completed_at: i64,
+    ) -> Result<ImportOutcome, sqlx::Error> {
+        let mut tx = pool.begin_with(crate::repo::fleet::IMMEDIATE_TRANSACTION).await?;
+        let outcome =
+            Self::complete_import_on(&mut tx, source_path, rows, rejected, completed_at).await?;
+        if matches!(outcome, ImportOutcome::Completed(_)) {
+            tx.commit().await?;
+        }
+        Ok(outcome)
+    }
+
+    async fn complete_import_on(
+        conn: &mut SqliteConnection,
+        source_path: &str,
+        rows: &[SessionRow],
+        rejected: i64,
+        completed_at: i64,
+    ) -> Result<ImportOutcome, sqlx::Error> {
+        let done: Option<String> =
+            sqlx::query_scalar("SELECT source_path FROM session_import WHERE source_path = ?")
+                .bind(source_path)
+                .fetch_optional(&mut *conn)
+                .await?;
+        if done.is_some() {
+            return Ok(ImportOutcome::AlreadyCompleted);
+        }
+
+        let mut imported = 0_i64;
+        let mut skipped = 0_i64;
+        for row in rows {
+            let present: Option<String> = sqlx::query_scalar(
+                "SELECT session_id FROM sessions WHERE session_id = ? OR tmux_session_name = ?",
+            )
+            .bind(&row.session_id)
+            .bind(&row.tmux_session_name)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if present.is_some() {
+                skipped += 1;
+                continue;
+            }
+            match Self::upsert_on(conn, row).await? {
+                UpsertOutcome::Written => imported += 1,
+                UpsertOutcome::TmuxNameTaken { .. } => skipped += 1,
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO session_import (source_path, completed_at, imported, skipped, rejected) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(source_path)
+        .bind(completed_at)
+        .bind(imported)
+        .bind(skipped)
+        .bind(rejected)
+        .execute(&mut *conn)
+        .await?;
+
+        Ok(ImportOutcome::Completed(ImportMarker {
+            source_path: source_path.to_string(),
+            completed_at,
+            imported,
+            skipped,
+            rejected,
+        }))
     }
 }
