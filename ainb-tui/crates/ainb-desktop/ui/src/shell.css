@@ -854,6 +854,23 @@ body {
   font-size: 12px;
 }
 
+.review-file-head {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--text);
+}
+
+.review-file-head.open {
+  color: var(--gold);
+}
+
+.review-status {
+  color: var(--muted);
+}
+
 .review-hunk {
   display: flex;
   gap: 8px;
