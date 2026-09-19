@@ -90,7 +90,9 @@ fn a_read_frames_its_totals_days_and_breakdowns_as_the_daemon_counted_them() {
     );
     assert_eq!(summary["providers"][0]["name"], "claude");
     assert_eq!(summary["models"][0]["name"], "claude-opus-5");
-    assert_eq!(summary["projects"][0]["name"], "agents-in-a-box");
+    // Every project key frames as its leaf segment, so a hyphenated name
+    // shortens to its last word; the repo still names it whole.
+    assert_eq!(summary["projects"][0]["name"], "box");
     assert_eq!(
         summary["projects"][0]["repo"],
         "stevengonsalvez/agents-in-a-box"
