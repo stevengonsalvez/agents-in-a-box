@@ -918,6 +918,11 @@ body {
   background: rgb(55, 32, 35);
 }
 
+.review-emph {
+  background: rgb(60, 70, 45);
+  border-radius: 2px;
+}
+
 .review-lineno {
   color: var(--muted);
   text-align: right;
