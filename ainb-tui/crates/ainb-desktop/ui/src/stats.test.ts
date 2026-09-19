@@ -135,3 +135,13 @@ test("token counts are the five token fields, formatted", () => {
   assert.equal(tokens(bucket(1)), 11);
   assert.equal(formatTokens(1234567), "1,234,567");
 });
+
+test("a withheld section says the numbers are the last that fitted", () => {
+  const fresh = statsView(view(), false);
+  assert.equal(fresh.status, null);
+  const stale = statsView(view(), true);
+  assert.equal(stale.state, "ready", "the held numbers still draw");
+  assert.match(stale.status ?? "", /too large to send.*last numbers that fitted/);
+  const staleScanning = statsView(view({ summary: summary({ state: "scanning", totals: null }) }), true);
+  assert.match(staleScanning.status ?? "", /still scanning.*too large to send/);
+});
