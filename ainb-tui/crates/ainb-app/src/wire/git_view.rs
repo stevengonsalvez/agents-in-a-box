@@ -370,7 +370,17 @@ impl Place {
             } else {
                 file.hunks.len()
             };
-            let frame_hunks = frame.map_or(0, |frame| frame.hunks.len());
+            // Zeroed for a collapsed or binary file exactly as the model side
+            // is: `flatten` gives such a file its heading and nothing else, so
+            // counting its hunks here would shift every later file's hunk base
+            // and put the cursor on another file's line.
+            let frame_hunks = frame.map_or(0, |frame| {
+                if frame.collapsed || frame.binary {
+                    0
+                } else {
+                    frame.hunks.len()
+                }
+            });
             files.push(PlacedFile {
                 model_row,
                 frame_row,
@@ -397,9 +407,10 @@ impl Place {
     fn row(&self, row: usize) -> (usize, bool) {
         let Some(file) = self.files.iter().find(|file| row < file.model_row + file.model_rows)
         else {
-            // Past the last row the model has: the end of what was framed.
+            // Past the last row the model has. A review with no rows at all is
+            // not a cut one: there was nothing to leave out.
             let last = self.files.last().map_or(0, |file| file.frame_row + file.frame_rows);
-            return (last.saturating_sub(1), true);
+            return (last.saturating_sub(1), last > 0);
         };
         let local = row - file.model_row;
         if file.frame_rows == 0 {
@@ -419,7 +430,7 @@ impl Place {
         let Some(file) = self.files.iter().find(|file| hunk < file.model_hunk + file.model_hunks)
         else {
             let last = self.files.last().map_or(0, |file| file.frame_hunk + file.frame_hunks);
-            return (last.saturating_sub(1), true);
+            return (last.saturating_sub(1), last > 0);
         };
         let local = hunk - file.model_hunk;
         if file.frame_hunks == 0 {
@@ -442,9 +453,13 @@ fn model_file_rows(file: &ReviewFile) -> usize {
         .hunks
         .iter()
         .map(|hunk| {
-            usize::from(hunk.gap_before > hunk.expanded_before)
-                + hunk.rows.len()
-                + usize::from(hunk.gap_after > hunk.expanded_after)
+            hunk_rows(
+                hunk.gap_before,
+                hunk.expanded_before,
+                hunk.rows.len(),
+                hunk.gap_after,
+                hunk.expanded_after,
+            )
         })
         .sum::<usize>()
 }
@@ -458,11 +473,33 @@ fn frame_file_rows(file: &ReviewFileFrame) -> usize {
         .hunks
         .iter()
         .map(|hunk| {
-            usize::from(hunk.gap_before > hunk.expanded_before)
-                + hunk.rows.len()
-                + usize::from(hunk.gap_after > hunk.expanded_after)
+            hunk_rows(
+                hunk.gap_before,
+                hunk.expanded_before,
+                hunk.rows.len(),
+                hunk.gap_after,
+                hunk.expanded_after,
+            )
         })
         .sum::<usize>()
+}
+
+/// The virtual rows one hunk contributes, as `flatten` counts them: an expand
+/// affordance for each gap still hidden, and a row per code line.
+///
+/// The gaps do NOT depend on the rows. `flatten`
+/// (`components/code_review/render.rs:121-145`) pushes `ExpandBefore` before
+/// it walks the rows and `ExpandAfter` after, each on its own `hidden > 0`,
+/// so a hunk with no rows left still shows the two affordances around where
+/// they were.
+const fn hunk_rows(
+    gap_before: usize,
+    expanded_before: usize,
+    rows: usize,
+    gap_after: usize,
+    expanded_after: usize,
+) -> usize {
+    (gap_before > expanded_before) as usize + rows + (gap_after > expanded_after) as usize
 }
 
 /// `set`, in an order a frame can repeat: a set has none of its own, so which
