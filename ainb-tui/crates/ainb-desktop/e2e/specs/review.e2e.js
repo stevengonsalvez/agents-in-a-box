@@ -123,7 +123,22 @@ describe("reviewing from the window", () => {
     const already = await openFile();
     const wanted = drawn.find((path) => path !== already);
     assert.ok(wanted, `every drawn file is already the open one: ${drawn}`);
-    await $(`.review-file[data-file="${wanted}"]`).click();
+    // Re-found immediately before the click, and clicked through a retry: the
+    // window redraws this list on every frame the host sends, so an element
+    // read a moment ago can be detached by the time the click lands, and a
+    // stale reference is the runner's report of a redraw, not of a bug.
+    await browser.waitUntil(
+      async () => {
+        try {
+          await $(`.review-file[data-file="${wanted}"]`).click();
+          return true;
+        } catch (error) {
+          if (!/stale element|no longer attached/i.test(String(error))) throw error;
+          return false;
+        }
+      },
+      { timeout: 30_000, timeoutMsg: `the row for ${wanted} kept being redrawn under the click` },
+    );
     await browser.waitUntil(async () => (await openFile()) === wanted, {
       timeout: 30_000,
       timeoutMsg: `the frame never named ${wanted} as the open file`,
