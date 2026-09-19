@@ -59,10 +59,10 @@ pub struct Timing {
 impl Default for Timing {
     fn default() -> Self {
         Self {
-            ready_every: Duration::from_secs(15 * 60),
+            ready_every: Duration::from_mins(15),
             scanning_every: Duration::from_secs(10),
             backoff_initial: Duration::from_millis(500),
-            backoff_max: Duration::from_secs(60),
+            backoff_max: Duration::from_mins(1),
         }
     }
 }
@@ -70,8 +70,9 @@ impl Default for Timing {
 /// One thing the task learned, for the host loop to fold into section 21.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UsageUpdate {
-    /// A reply landed, received at this local epoch-ms clock.
-    Read(FleetUsageSummaryResult, i64),
+    /// A reply landed, received at this local epoch-ms clock. Boxed: the
+    /// reply is the one large variant.
+    Read(Box<FleetUsageSummaryResult>, i64),
     /// A read or the dial failed, for this reason.
     Failed(String),
     /// The daemon cannot serve the read.
@@ -135,7 +136,7 @@ impl Drop for UsageReader {
 /// Fold one update into section 21 through its reducer entry points.
 pub fn apply(state: &mut AppState, update: UsageUpdate) -> bool {
     match update {
-        UsageUpdate::Read(reply, received_at_ms) => state.apply_usage_read(reply, received_at_ms),
+        UsageUpdate::Read(reply, received_at_ms) => state.apply_usage_read(*reply, received_at_ms),
         UsageUpdate::Failed(reason) => state.usage_read_failed(reason),
         UsageUpdate::Absent(reason) => state.usage_absent(reason),
     }
@@ -188,7 +189,7 @@ async fn read(client: &DaemonClient, timing: Timing) -> (UsageUpdate, Option<Dur
             } else {
                 timing.ready_every
             };
-            (UsageUpdate::Read(reply, now_ms()), Some(wait))
+            (UsageUpdate::Read(Box::new(reply), now_ms()), Some(wait))
         }
         Err(DaemonError::Rpc {
             code: METHOD_NOT_FOUND,
