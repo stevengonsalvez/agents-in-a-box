@@ -147,7 +147,7 @@ async fn run(dialer: Dialer, tx: mpsc::UnboundedSender<UsageUpdate>, timing: Tim
     loop {
         let (update, wait) = match dialer() {
             Ok(client) => read(&client, timing).await,
-            Err(error) => (UsageUpdate::Failed(error.to_string()), None),
+            Err(error) => (UsageUpdate::Failed(failure(&error)), None),
         };
         let wait = wait.unwrap_or_else(|| {
             let wait = backoff;
@@ -174,7 +174,7 @@ async fn read(client: &DaemonClient, timing: Timing) -> (UsageUpdate, Option<Dur
             );
         }
         Ok(_) => {}
-        Err(error) => return (UsageUpdate::Failed(error.to_string()), None),
+        Err(error) => return (UsageUpdate::Failed(failure(&error)), None),
     }
     let params = FleetUsageSummaryParams {
         period: FleetUsagePeriod::Trailing30Days,
@@ -198,7 +198,26 @@ async fn read(client: &DaemonClient, timing: Timing) -> (UsageUpdate, Option<Dur
             UsageUpdate::Absent(NOT_SERVED.to_string()),
             Some(timing.ready_every),
         ),
-        Err(error) => (UsageUpdate::Failed(error.to_string()), None),
+        Err(error) => (UsageUpdate::Failed(failure(&error)), None),
+    }
+}
+
+/// The reason a failed dial or read renders.
+///
+/// Generic for a dial or token failure, as the agent status reader's is: those
+/// errors carry the absolute socket path, which belongs in the log, not in a
+/// frame. Every other error is the daemon's own text, which the frame scrubs.
+fn failure(error: &DaemonError) -> String {
+    match error {
+        DaemonError::Connect { .. } => {
+            tracing::debug!(error = %error, "usage: daemon not reachable");
+            "daemon not reachable".to_string()
+        }
+        DaemonError::Token(_) | DaemonError::NoHome => {
+            tracing::debug!(error = %error, "usage: daemon credentials unavailable");
+            "daemon credentials unavailable".to_string()
+        }
+        other => other.to_string(),
     }
 }
 
