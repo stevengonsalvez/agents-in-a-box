@@ -1190,6 +1190,8 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::LoginFinished { .. }
         | AppEvent::DaemonActionFinished { .. }
         | AppEvent::PersistFailed { .. }
+        | AppEvent::InboxMarkAllRead
+        | AppEvent::InboxMarkAllReadFinished { .. }
         | AppEvent::GitReviewSelectRow { .. }
         | AppEvent::GitViewScrollBy(..)
         | AppEvent::HomeSidebarClickItem { .. }
