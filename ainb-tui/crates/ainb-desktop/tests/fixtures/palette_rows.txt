@@ -139,6 +139,7 @@ home.content.page_up|home.content|pageup|false
 home.content.up|home.content|up|false
 home.daemons|home|d|false
 home.hangar|home|g|false
+home.inbox|home|b|false
 home.learnings|home|m|false
 home.logs|home|l|false
 home.mcp_pool|home|p|false
@@ -154,7 +155,9 @@ home.skills|home|c|false
 home.stats|home|i|false
 home.toggle_focus|home|tab|false
 home.witr|home|w|false
-inbox.mark_all_read|inbox|-|false
+inbox.back_q|inbox|q|false
+inbox.back|inbox|esc|false
+inbox.mark_all_read|inbox|r|false
 log_history.back|log_history|esc|false
 log_history.cleanup_upper|log_history|C|false
 log_history.cleanup|log_history|c|false
@@ -339,6 +342,7 @@ session_list.editor|session_list|o|true
 session_list.expand|session_list|E|true
 session_list.git|session_list|g|true
 session_list.headroom_or_help|session_list|H|true
+session_list.inbox|session_list|b|true
 session_list.learnings|session_list|m|true
 session_list.logs_pane.bottom|session_list.logs_pane|end|false
 session_list.logs_pane.down|session_list.logs_pane|down|false
