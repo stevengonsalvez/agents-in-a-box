@@ -805,3 +805,52 @@ async fn a_delete_that_reached_only_the_file_is_finished_by_the_next_pass() {
     assert_eq!(outcome.deleted, vec![gone.to_string()]);
     assert_eq!(ids(&table(pool).await), vec![kept]);
 }
+
+/// A `sessions.json` that goes missing while the table holds sessions is not
+/// read as "no sessions": the pass is refused, every row stays, and the
+/// marker is left as it was. The watcher's tick right after the file went
+/// away is the case that matters.
+#[tokio::test]
+async fn a_missing_file_never_empties_a_populated_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    let kept = "00000000-0000-0000-0000-0000000000b7";
+    sessions_file(&sessions_path, &[(kept, "ainb-kept", "ws")]);
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+    let mut watch = ReconcileWatch::new(&sessions_path);
+    assert!(watch.tick(pool).await.unwrap().is_ok());
+    let source = reconcile_key(&marker_key(&sessions_path));
+    let marker = SessionsRepo::import_marker(pool, &source).await.unwrap();
+
+    fs::remove_file(&sessions_path).unwrap();
+    let err = watch.tick(pool).await.expect("a vanished file is a change").unwrap_err();
+    assert!(format!("{err:#}").contains("missing"), "{err:#}");
+    assert_eq!(
+        ids(&table(pool).await),
+        vec![kept],
+        "a missing file emptied the table"
+    );
+    assert_eq!(
+        SessionsRepo::import_marker(pool, &source).await.unwrap(),
+        marker
+    );
+}
+
+/// A fresh home (no file, no rows) still completes its pass, or the table
+/// could never become authoritative and the capability never engage.
+#[tokio::test]
+async fn a_fresh_home_with_no_file_still_completes_its_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+
+    let outcome = reconcile_sessions(pool, &sessions_path).await.unwrap();
+    assert_eq!(outcome.marker.imported, 0);
+    assert!(outcome.deleted.is_empty());
+    let source = marker_key(&sessions_path);
+    assert!(SessionsRepo::import_complete_for(pool, &source).await.unwrap());
+}
