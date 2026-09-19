@@ -1824,7 +1824,9 @@ async fn run_interactive(
         codex_model: None,
         codex_thread_id: None,
     };
-    if let Err(e) = ainb_hangar_store::repo::sessions::SessionsRepo::upsert(pool, &session_row).await {
+    if let Err(e) =
+        ainb_hangar_store::repo::sessions::SessionsRepo::upsert(pool, &session_row).await
+    {
         tracing::warn!(task_id = %task.id, error = %e, "sessions table write failed");
     }
     if let Err(e) = ainb_fleet_core::session_registry::register_session(&record) {
