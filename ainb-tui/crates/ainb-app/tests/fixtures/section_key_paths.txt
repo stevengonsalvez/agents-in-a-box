@@ -398,11 +398,13 @@ git_view.git_view_state.review.files[].hunks[].rows[].kind
 git_view.git_view_state.review.files[].hunks[].rows[].new_lineno
 git_view.git_view_state.review.files[].hunks[].rows[].old_lineno
 git_view.git_view_state.review.files[].hunks[].rows[].raw
+git_view.git_view_state.review.files[].hunks_cut
 git_view.git_view_state.review.files[].insertions
 git_view.git_view_state.review.files[].language
 git_view.git_view_state.review.files[].path
 git_view.git_view_state.review.files[].rows_cut
 git_view.git_view_state.review.files[].status
+git_view.git_view_state.review.files_cut
 git_view.git_view_state.review_ui.collapsed_dirs[]
 git_view.git_view_state.review_ui.current_hunk
 git_view.git_view_state.review_ui.scroll
