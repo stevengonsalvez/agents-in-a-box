@@ -454,6 +454,9 @@ pub mod fake_daemon {
         pub after_subscribe: Vec<Value>,
         /// Close the connection after acking the subscription.
         pub close_after_subscribe: bool,
+        /// Hold the subscription open until this is notified, then close it,
+        /// as a daemon that dies mid-stream does.
+        pub hang_up: Option<std::sync::Arc<tokio::sync::Notify>>,
     }
 
     impl Fake {
@@ -465,6 +468,7 @@ pub mod fake_daemon {
                 answer: std::sync::Arc::new(answer),
                 after_subscribe: Vec::new(),
                 close_after_subscribe: false,
+                hang_up: None,
             }
         }
 
@@ -521,6 +525,10 @@ pub mod fake_daemon {
                     }
                     for event in &fake.after_subscribe {
                         send(&mut writer, event).await;
+                    }
+                    if let Some(hang_up) = &fake.hang_up {
+                        hang_up.notified().await;
+                        return;
                     }
                 }
                 _ => {}
