@@ -257,7 +257,23 @@ async fn reconcile_pass(
     .await
     .context("sessions.json read task")??;
     let (sessions, rejected) = match content {
-        None => (Vec::new(), 0),
+        // A missing file is "no sessions" only on a fresh home. With rows in
+        // the table it is far more likely a file that went away (deleted,
+        // moved, a home on a volume that is not mounted) than a user who
+        // killed every session, and the existence rule would turn it into an
+        // empty table. So the pass is refused, the marker left as it was, and
+        // the watcher tries again. A fresh home (no file, no rows) still
+        // commits, or the table could never become authoritative.
+        None => {
+            if !SessionsRepo::list(pool, None, 1).await?.is_empty() {
+                bail!(
+                    "{} is missing while the sessions table holds sessions; \
+                     refusing a pass that would delete them",
+                    sessions_path.display()
+                );
+            }
+            (Vec::new(), 0)
+        }
         Some(content) => parse_records(&content)
             .with_context(|| format!("could not parse {}", sessions_path.display()))?,
     };
