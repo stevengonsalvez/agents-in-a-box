@@ -570,7 +570,7 @@ fn text_typed_at_the_composer_row_lands_in_the_reducers_composer() {
     use ainb_app::components::session_tabs::SessionTab;
     use ainb_app::fleet::attention::{AttentionKind, SessionAttention};
     use ainb_app::models::{Session, Workspace};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     scratch_home();
     let mut state = AppState::new();
@@ -586,14 +586,22 @@ fn text_typed_at_the_composer_row_lands_in_the_reducers_composer() {
     state.sessions.workspaces = vec![workspace];
     state.sessions.selected_workspace_index = Some(0);
     state.sessions.selected_session_index = Some(0);
-    state.host.last_attention_refresh = Some(Instant::now());
+    // Ahead of now, so the merge's cadence cannot come due however long the
+    // runner takes between here and the type: `elapsed` on a future instant is
+    // zero. The chip under test is a daemon one, and a merge with no daemon
+    // reachable takes it off the row, leaving no question to type into.
+    state.host.last_attention_refresh = Some(Instant::now() + Duration::from_secs(600));
     let mut host = DesktopHost::hosting(
         state,
         Keymap::defaults(),
         HostId::local(),
         Subscription::only(&[SectionId::Fleet]),
         |_batch: FrameBatch| {},
-    );
+    )
+    // The other way in: the poller's first publish is news, which runs the
+    // merge whatever the cadence says. This test is about the reducer's
+    // composer, so it runs no poller.
+    .without_attention_poll();
 
     let _ = host.dispatch(select_session_tab(SessionTab::Ask));
     let _ = host.tick();
