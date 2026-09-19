@@ -1034,6 +1034,22 @@ fn a_commit_selection_past_the_list_frames_as_the_last_and_says_so() {
         "and the frame says the selection was not in it"
     );
 
+    // The list budget frames none of the three commits: the selection is off
+    // what the frame carries even at index 0, and the flag says so.
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.selected_commit_index = 0;
+    }
+    let view = &framed_within(&state, 64 * 1024, 0)["git_view_state"];
+    assert_eq!(view["commits"].as_array().map(Vec::len), Some(0));
+    assert_eq!(view["commits_cut"].as_u64(), Some(3));
+    assert_eq!(view["selected_commit_index"].as_u64(), Some(0));
+    assert_eq!(
+        view["selected_commit_cut"].as_bool(),
+        Some(true),
+        "zero commits framed out of three: the selection is not in the frame"
+    );
+
     {
         let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
         git.commits.clear();
