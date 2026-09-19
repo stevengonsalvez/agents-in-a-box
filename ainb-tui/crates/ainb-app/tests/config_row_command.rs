@@ -65,7 +65,8 @@ fn persisted_keys(effects: Vec<Effect>) -> Vec<String> {
 }
 
 /// A row of the kind `pick` names, off the daemon and plugin rows, which
-/// persist elsewhere than config.toml.
+/// persist elsewhere than config.toml, and off the rows the renderer policy
+/// refuses.
 fn find_row<T>(
     state: &AppState,
     pick: impl Fn(&ainb_app::config::settings_model::ConfigSetting) -> Option<T>,
@@ -77,6 +78,9 @@ fn find_row<T>(
         .values()
         .flatten()
         .filter(|row| !row.key.starts_with("hangar_daemon.") && !row.key.starts_with("plugin"))
+        // And off the rows a renderer may not edit (#1224): those are
+        // `config_renderer_edits.rs`'s to prove refused.
+        .filter(|row| ainb_app::config::renderer_edit::refusal(&row.key).is_none())
         .collect();
     keys.sort_by(|a, b| a.key.cmp(&b.key));
     keys.into_iter().find_map(|row| pick(row)).expect("a row of that kind")
