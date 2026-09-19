@@ -182,6 +182,36 @@ fn the_production_resolver_is_the_file_while_dark() {
     assert!(matches!(source, SessionSource::File), "{source:?}");
 }
 
+/// On the file path a mutation that changes nothing leaves `sessions.json`
+/// untouched, as v2's orphan cleanup did (it saved only on change); one that
+/// changes something rewrites it.
+#[test]
+fn a_file_mutation_that_changes_nothing_does_not_rewrite_the_file() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let homes = Homes::new();
+    let meta = make_session("sess-file-1", "file-ws");
+    let mut store = SessionStore::default();
+    store.upsert(meta.clone());
+    // Compact, unlike SessionStore::save, so a rewrite shows in the bytes.
+    let compact = serde_json::to_vec(&store).expect("serialize store");
+    fs::write(homes.sessions_json(), &compact).expect("write sessions.json");
+
+    let rt = rt();
+    let source = SessionSource::File;
+    rt.block_on(source.mutate(|s| s.remove_by_session_id(Uuid::new_v4())))
+        .expect("no-op mutate");
+    assert_eq!(
+        homes.file_bytes(),
+        Some(compact.clone()),
+        "a no-op rewrote the file"
+    );
+
+    rt.block_on(source.mutate(|s| s.remove_by_session_id(meta.session_id)))
+        .expect("real mutate");
+    assert_ne!(homes.file_bytes(), Some(compact));
+    assert!(SessionStore::load().sessions.is_empty());
+}
+
 /// No daemon at all: the file is the source and is read as-is.
 #[test]
 fn with_no_daemon_the_file_is_the_source() {
