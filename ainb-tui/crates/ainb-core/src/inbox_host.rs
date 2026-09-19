@@ -63,7 +63,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use ainb_hangar_client::DaemonError;
+    use ainb_app::fleet::bridge::daemon::DaemonError;
 
     fn counting_dialer() -> (Dialer, Arc<AtomicUsize>) {
         let dials = Arc::new(AtomicUsize::new(0));
