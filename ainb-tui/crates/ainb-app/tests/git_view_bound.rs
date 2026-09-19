@@ -677,10 +677,21 @@ fn a_row_in_a_file_the_budget_dropped_frames_at_what_follows_it() {
         })
         .sum();
 
+    // Ten files of 400 rows fill MAX_ROWS_TOTAL, so they frame a heading and
+    // 400 rows each (4,010 rows), and the last two frame their heading alone:
+    // 4,012 rows, indices up to 4,011. The person is inside the last file, so
+    // the nearest row the frame has is that file's heading, the last row of
+    // all. One past it would be the arithmetic saturating on the row COUNT
+    // rather than on the sum.
     assert_eq!(view["scroll_cut"].as_bool(), Some(true));
-    assert!(
-        view["scroll"].as_u64().expect("a scroll") <= framed_rows,
-        "the offset is inside the rows the frame carries"
+    assert_eq!(
+        framed_rows, 4_012,
+        "the frame's rows, as the caps leave them"
+    );
+    assert_eq!(
+        view["scroll"].as_u64(),
+        Some(4_011),
+        "the last row the frame carries, not one past it"
     );
 }
 
@@ -823,6 +834,22 @@ fn a_row_past_a_part_way_cut_says_it_was_cut() {
         cut["scroll_cut"].as_bool(),
         Some(true),
         "and it says the row the terminal is on is not in the frame"
+    );
+
+    // The gap below the hunk is the same gap however many rows were sent:
+    // hidden context does not shrink with them. The model draws it under row
+    // 500, the frame under row 400, and the person on it is on a row the frame
+    // DID send.
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.scroll = 501;
+    }
+    let gap = &framed(&state)["git_view_state"]["review_ui"];
+    assert_eq!(gap["scroll"].as_u64(), Some(401), "the frame's own gap row");
+    assert_eq!(
+        gap["scroll_cut"].as_bool(),
+        Some(false),
+        "a row the frame drew is not a row it cut"
     );
 }
 
