@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ConfigView_Serialize, HangarView_Serialize } from "../../../ainb-app/bindings/AppState";
-import { editRefusal, settingsLines } from "./settings.ts";
+import { editRefusal, SECRET_REASON, settingsLines } from "./settings.ts";
 
 const PARITY_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../ainb-app/tests/parity");
 
@@ -81,6 +81,9 @@ test("the page's edit policy is the reducer's, row for row", () => {
     .filter((line) => line !== "")
     .map((line) => line.split(" ") as [string, string]);
   assert.ok(verdicts.length > 100, "the fixture lists the registry");
-  const wrong = verdicts.filter(([verdict, key]) => (editRefusal(key) === null) !== (verdict === "allow"));
+  const wrong = verdicts.filter(([verdict, key]) => {
+    const refusal = editRefusal(key, verdict === "secret");
+    return verdict === "allow" ? refusal !== null : verdict === "secret" ? refusal !== SECRET_REASON : refusal === null;
+  });
   assert.deepEqual(wrong, [], "rows where the page and the reducer disagree");
 });
