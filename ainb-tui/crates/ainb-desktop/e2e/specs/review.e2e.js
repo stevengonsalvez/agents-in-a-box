@@ -23,9 +23,13 @@ const REPORT = process.env.AINB_E2E_REVIEW_REPORT ?? join(HERE, "..", "review-re
 /** The shell accelerator, as this platform spells it. */
 const MOD = process.platform === "darwin" ? ["Meta"] : ["Control", "Shift"];
 
-/** Files and lines the journey writes: past MAX_ROWS_TOTAL (4,000) together. */
+/**
+ * Files and lines the journey writes. Together they are 10,800 rows, well past
+ * the frame's MAX_ROWS_TOTAL of 4,000, and over half a MiB of text, which is
+ * the floor below.
+ */
 const FILES = 12;
-const LINES = 500;
+const LINES = 900;
 
 /** The diff must be at least this large, or the bound is never reached. */
 const BYTE_FLOOR = 512 * 1024;
@@ -75,6 +79,10 @@ describe("reviewing from the window", () => {
     // palette rather than through anything this spec reaches into.
     await browser.keys([...MOD, "k"]);
     await $(".palette-query").waitForExist({ timeout: 30_000 });
+    // The palette draws the first PALETTE_ROWS of the list until a query
+    // narrows it, and this row is far down, so it is asked for by id: the
+    // detail line a row carries is "<context> · <id>".
+    await browser.keys("session_list.git");
     const command = await $('.palette-row[data-row="command:session_list.git"]');
     await command.waitForExist({ timeout: 30_000 });
     await command.click();
@@ -93,7 +101,8 @@ describe("reviewing from the window", () => {
 
     // Every path drawn is one the reducer framed, and every one of them is a
     // file this run wrote: nothing minted in the window.
-    const drawn = await Promise.all((await $$(".review-file")).map((file) => file.getAttribute("data-file")));
+    const drawn = [];
+    for (const file of await $$(".review-file")) drawn.push(await file.getAttribute("data-file"));
     assert.ok(drawn.length > 0, "the sidebar of the review drew no file");
     for (const path of drawn) {
       assert.match(path, /^generated_\d+\.rs$/, `the window drew ${path}, which this run did not write`);
