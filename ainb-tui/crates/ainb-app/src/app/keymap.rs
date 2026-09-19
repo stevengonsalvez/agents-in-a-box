@@ -1195,6 +1195,8 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::PersistFailed { .. }
         | AppEvent::InboxMarkAllRead
         | AppEvent::InboxMarkAllReadFinished { .. }
+        | AppEvent::InboxScrollUp
+        | AppEvent::InboxScrollDown
         | AppEvent::GitReviewSelectRow { .. }
         | AppEvent::GitViewScrollBy(..)
         | AppEvent::HomeSidebarClickItem { .. }

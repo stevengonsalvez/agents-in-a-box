@@ -1528,6 +1528,11 @@ pub struct HostOnlyState {
     /// sweep: a second press while it is in flight emits nothing, and the
     /// report clears it.
     pub inbox_mark_in_flight: bool,
+    /// The inbox screen's first drawn row, an index into
+    /// `InboxSection::entries`. Owned by the reducer, bounded by it: a new
+    /// read that shrinks the list pulls it back, so the screen never draws
+    /// from past the end. Host-only, the desktop's list scrolls in the DOM.
+    pub inbox_scroll: usize,
     /// When each attached session was last seen attached by
     /// `AppState::refresh_attention`.
     ///
@@ -1579,6 +1584,7 @@ impl Default for HostOnlyState {
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             inbox_mark_in_flight: false,
+            inbox_scroll: 0,
             attention_attached_at: HashMap::new(),
         }
     }

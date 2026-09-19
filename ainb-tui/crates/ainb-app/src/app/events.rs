@@ -290,6 +290,10 @@ pub enum AppEvent {
     InboxMarkAllReadFinished {
         outcome: crate::fleet::inbox_write::MarkAllReadOutcome,
     },
+    /// Move the inbox screen's first row up one, bounded at the top.
+    InboxScrollUp,
+    /// Move the inbox screen's first row down one, bounded at the last row.
+    InboxScrollDown,
     /// Click the code review sidebar row `target`; nothing when it is gone.
     GitReviewSelectRow {
         target: crate::components::code_review::render::ReviewRowId,
@@ -4281,6 +4285,8 @@ impl EventHandler {
                 state.host.inbox_mark_in_flight = true;
                 state.emit(Effect::InboxMarkAllRead);
             }
+            AppEvent::InboxScrollUp => state.scroll_inbox_by(-1),
+            AppEvent::InboxScrollDown => state.scroll_inbox_by(1),
             AppEvent::InboxMarkAllReadFinished { outcome } => {
                 state.host.inbox_mark_in_flight = false;
                 if outcome.ok {
@@ -5736,8 +5742,8 @@ impl EventHandler {
             AppEvent::GoToInbox => {
                 tracing::info!("Navigating to Inbox");
                 // A panel: Esc pops back to where it was opened from. The host
-                // starts the section's reader when it sees this screen and
-                // stops it when the screen is left, so nothing here reads.
+                // reads the section for the TUI's whole life and only quickens
+                // its cadence while this screen is open, so nothing here reads.
                 if state.shell.current_screen != screen_ids::INBOX {
                     state.shell.previous_screen = Some(state.shell.current_screen.clone());
                 }

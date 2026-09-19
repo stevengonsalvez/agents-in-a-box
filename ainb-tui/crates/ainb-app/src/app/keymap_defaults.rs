@@ -1600,6 +1600,10 @@ pub fn defaults() -> Vec<Binding> {
     // write is a whole-inbox sweep, so the row is named for what it does.
     append_app_rows!(rows, Context::screen("inbox"),
         mark_all_read: "r" => AppEvent::InboxMarkAllRead,
+        scroll_down: "j" => AppEvent::InboxScrollDown,
+        scroll_down_arrow: "down" => AppEvent::InboxScrollDown,
+        scroll_up: "k" => AppEvent::InboxScrollUp,
+        scroll_up_arrow: "up" => AppEvent::InboxScrollUp,
         back: "esc" => AppEvent::PanelBack,
         back_q: "q" => AppEvent::PanelBack,
     );

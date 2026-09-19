@@ -84,7 +84,16 @@ impl InboxReader {
     /// handed before calling this, since its subscribe command has none.
     #[must_use]
     pub fn spawn(dialer: Dialer) -> Self {
-        Self::spawn_with(read_through(dialer), Timing::default())
+        Self::spawn_timed(dialer, Timing::default())
+    }
+
+    /// [`Self::spawn`] at a cadence of the host's choosing: the terminal
+    /// reads slowly while the inbox screen is not the one open, so its
+    /// unread badge is live without a daemon round trip every few seconds
+    /// for a screen nobody is looking at.
+    #[must_use]
+    pub fn spawn_timed(dialer: Dialer, timing: Timing) -> Self {
+        Self::spawn_with(read_through(dialer), timing)
     }
 
     /// Start the task over any read, with its timing given. For tests, and
@@ -231,13 +240,30 @@ mod tests {
         }
     }
 
+    /// When each call of a [`scripted`] read was made.
+    type Stamps = Arc<std::sync::Mutex<Vec<std::time::Instant>>>;
+
     /// A read answering from a script, one answer per call, the last repeated.
     fn scripted(answers: Vec<Result<InboxListResult, DaemonError>>) -> (Read, Arc<AtomicUsize>) {
+        let (read, _, calls) = scripted_stamped(answers);
+        (read, calls)
+    }
+
+    /// [`scripted`], also recording when each call was made, for the tests
+    /// that assert a wait between two calls: a gap is measured between the
+    /// calls themselves, so a loaded machine that stretches every sleep
+    /// cannot fail it, where a fixed sleep on the test's side could.
+    fn scripted_stamped(
+        answers: Vec<Result<InboxListResult, DaemonError>>,
+    ) -> (Read, Stamps, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
+        let stamps: Stamps = Arc::default();
         let counter = Arc::clone(&calls);
+        let stamper = Arc::clone(&stamps);
         let answers = Arc::new(answers);
         let read: Read = Box::new(move || {
             let n = counter.fetch_add(1, Ordering::SeqCst);
+            stamper.lock().unwrap().push(std::time::Instant::now());
             let answers = Arc::clone(&answers);
             Box::pin(async move {
                 let index = n.min(answers.len() - 1);
@@ -251,7 +277,19 @@ mod tests {
                 }
             })
         });
-        (read, calls)
+        (read, stamps, calls)
+    }
+
+    /// Wait, bounded, until the read was called `n` times.
+    async fn called(calls: &AtomicUsize, n: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while calls.load(Ordering::SeqCst) < n {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting on call {n}"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
     }
 
     async fn drain_until(
@@ -284,12 +322,8 @@ mod tests {
         assert!(state.versions()[SectionId::Inbox.index()] > before);
         // It keeps reading, and the same rows again bump nothing.
         let after = state.versions()[SectionId::Inbox.index()];
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        called(&calls, 3).await;
         reader.drain_into(&mut state);
-        assert!(
-            calls.load(Ordering::SeqCst) >= 3,
-            "the reader polls on its cadence"
-        );
         assert_eq!(state.versions()[SectionId::Inbox.index()], after);
     }
 
@@ -325,7 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_daemon_without_the_method_leaves_the_section_absent() {
-        let (read, calls) = scripted(vec![Err(DaemonError::Rpc {
+        let (read, stamps, calls) = scripted_stamped(vec![Err(DaemonError::Rpc {
             code: METHOD_NOT_FOUND,
             message: "method not found".into(),
         })]);
@@ -333,12 +367,23 @@ mod tests {
         let mut state = AppState::new();
         drain_until(&mut reader, &mut state, |s| s.inbox.get().absent.is_some()).await;
         assert!(state.inbox.get().absent.as_deref().unwrap().contains("hangar/inbox_list"));
-        let seen = calls.load(Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(15)).await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            seen,
-            "an absent method waits the long backoff"
+        // The retry after an absent method is the long backoff, not the short
+        // one a failure starts at: measured between the two calls, since the
+        // task's sleep can run long on a loaded machine but never short.
+        called(&calls, 2).await;
+        let gap = {
+            let stamps = stamps.lock().unwrap();
+            stamps[1].duration_since(stamps[0])
+        };
+        assert!(
+            gap >= fast().backoff_max,
+            "an absent method waits the long backoff: {gap:?} < {:?}",
+            fast().backoff_max
+        );
+        reader.drain_into(&mut state);
+        assert!(
+            state.inbox.get().absent.is_some(),
+            "still absent after the retry"
         );
     }
 

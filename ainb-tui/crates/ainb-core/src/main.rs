@@ -204,8 +204,9 @@ async fn tokio_main() -> Result<()> {
                 Box::new(fleet::bridge::daemon::tui_client),
                 config::tunables::legacy_panel(),
             );
-            // Section 16 (D3-prime): read only while the inbox screen is
-            // open, the same rule the desktop applies to its subscription.
+            // Section 16 (D3-prime): read for the TUI's whole life, slowly
+            // while the inbox screen is closed (the legend's unread badge)
+            // and at the normal cadence while it is open.
             let mut inbox_host =
                 ainb::inbox_host::InboxHost::new(Box::new(fleet::bridge::daemon::tui_client));
 
