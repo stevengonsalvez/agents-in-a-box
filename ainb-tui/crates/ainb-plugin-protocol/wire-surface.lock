@@ -5,7 +5,7 @@
 #
 # The regenerator REFUSES to write while the surface has changed but
 # ainb-plugin-protocol's version has not. Bump the version first.
-protocol_version = "0.3.0"
+protocol_version = "0.3.1"
 
 [lib]
 reexport errors :: { ProtocolError , RpcError }
@@ -73,6 +73,7 @@ struct ConfigField [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Dese
   field label: String
   field default: String [# [serde (default)]]
   field choices: Vec < String > [# [serde (default)]]
+const ABI_VERSION: u32 = 2
 struct PluginMeta [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
   field name: String
   field version: String
@@ -197,6 +198,7 @@ enum KeyCode [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserializ
   variant PageUp
   variant PageDown
   variant F { n: u8 }
+KeyCode::const fn min_abi (& self) -> u32
 enum KeyKind [# [derive (Debug , Clone , Copy , PartialEq , Eq , Default , Serialize , Deserialize)] # [serde (rename_all = "snake_case")]]
   variant Press
   variant Repeat
