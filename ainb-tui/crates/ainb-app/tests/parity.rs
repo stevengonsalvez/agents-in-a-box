@@ -1,6 +1,12 @@
 // ABOUTME: Every committed parity fixture builds into an AppState that opens
-// the screen it names. The renderer half of parity lives in
-// `ainb-core/tests/parity_snapshots.rs`, which draws these same fixtures.
+// the screen it names, and every fixture with an expected-facts list shows
+// each of those facts in the screen the ratatui half drew.
+//
+// The renderer half lives in `ainb-core/tests/parity_snapshots.rs`, which
+// draws these same fixtures, and the webview half in
+// `ainb-desktop/ui/src/parity.test.ts`, which renders them from the committed
+// frames. The facts list is ONE file read by both, so a fact only one renderer
+// shows is a fact the other is missing, rather than two lists that drift.
 
 #[path = "parity/support.rs"]
 mod support;
@@ -17,7 +23,7 @@ fn every_parity_fixture_builds_the_screen_it_names() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
     let fixtures = ParityFixture::all_in(&dir);
     assert!(
-        fixtures.len() >= 12,
+        fixtures.len() >= 13,
         "expected a fixture per screen, found {}",
         fixtures.len()
     );
@@ -33,4 +39,64 @@ fn every_parity_fixture_builds_the_screen_it_names() {
             "{name} has no committed snapshot"
         );
     }
+}
+
+/// The facts a fixture must show, as its list gives them: comments and blank
+/// lines dropped.
+fn facts(list: &str) -> Vec<&str> {
+    list.lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
+}
+
+/// Every fact of `list` that `drawn` does not show.
+///
+/// The screen is joined into one text first: a fact is what the screen says,
+/// not where it says it, and the two renderers wrap and pad differently.
+fn missing<'a>(drawn: &str, list: &'a str) -> Vec<&'a str> {
+    let text: String = drawn.lines().map(str::trim).collect::<Vec<_>>().join("\n");
+    facts(list).into_iter().filter(|fact| !text.contains(fact)).collect()
+}
+
+#[test]
+fn every_expected_fact_is_on_the_screen_the_ratatui_half_drew() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
+    let mut checked = 0;
+    for (name, _) in ParityFixture::all_in(&dir) {
+        let list = dir.join(format!("facts/{name}.txt"));
+        if !list.is_file() {
+            continue;
+        }
+        let list = std::fs::read_to_string(&list).expect("the facts list");
+        let drawn = std::fs::read_to_string(dir.join(format!("{name}.snap")))
+            .unwrap_or_else(|error| panic!("{name}: no committed snapshot: {error}"));
+
+        assert!(
+            !facts(&list).is_empty(),
+            "{name}: the facts list has no facts in it"
+        );
+        assert_eq!(
+            missing(&drawn, &list),
+            Vec::<&str>::new(),
+            "{name}: the screen the ratatui half drew is missing these facts"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no fixture has an expected-facts list");
+}
+
+/// The check has to be able to fail, or a stubbed renderer passes it: one fact
+/// taken out of what a renderer drew is one fact the suite reports.
+#[test]
+fn a_fact_missing_from_the_drawing_is_caught() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
+    let list = std::fs::read_to_string(dir.join("facts/git_review.txt")).expect("the facts list");
+    let drawn = std::fs::read_to_string(dir.join("git_review.snap")).expect("the snapshot");
+
+    let dropped = facts(&list)[0];
+    let mutated = drawn.replace(dropped, "");
+
+    assert_eq!(missing(&mutated, &list), vec![dropped]);
+    assert_eq!(missing(&drawn, &list), Vec::<&str>::new());
 }
