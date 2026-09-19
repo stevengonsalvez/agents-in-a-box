@@ -18,7 +18,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 import solid from "vite-plugin-solid";
-import type { GitViewView_Serialize, PluginsHostView_Serialize, UsageView } from "../../../ainb-app/bindings/AppState";
+import type { GitViewView_Serialize, PluginsHostView_Serialize, UsageView, InboxView_Serialize } from "../../../ainb-app/bindings/AppState";
 
 const parityDir = new URL("../../../ainb-app/tests/parity/", import.meta.url);
 
@@ -220,5 +220,50 @@ test("a stats tab given one model fewer fails the facts", async () => {
     missing(lost, "stats"),
     [],
     "a render missing a whole model still showed every expected fact, so the list proves nothing",
+  );
+});
+
+/**
+ * Server-render the inbox page over `fixture`'s committed inbox frame
+ * (D3p-d), with `change` applied to that frame first: the DOM half of the
+ * one inbox fixture, over the section and nothing else.
+ */
+async function drawInbox(fixture: string, change: (inbox: InboxView_Serialize) => void = () => {}): Promise<string> {
+  const server = await createServer({
+    configFile: false,
+    root: fileURLToPath(new URL("..", import.meta.url)),
+    plugins: [solid({ ssr: true })],
+    server: { middlewareMode: true, hmr: false },
+    appType: "custom",
+    ssr: { noExternal: ["solid-js"] },
+    logLevel: "silent",
+  });
+  try {
+    const { Inbox } = await server.ssrLoadModule("/src/inbox.tsx");
+    const { renderToString } = await server.ssrLoadModule("solid-js/web");
+    const inbox = framed(fixture, "inbox") as InboxView_Serialize;
+    change(inbox);
+    return renderToString(() => Inbox({ inbox, onChoose: () => {}, onClose: () => {} }));
+  } finally {
+    await server.close();
+  }
+}
+
+test("the inbox page shows every fact the inbox fixture's list names", async () => {
+  const html = await drawInbox("inbox");
+
+  assert.ok(facts("inbox").length > 0, "the facts list has facts in it");
+  assert.deepEqual(missing(html, "inbox"), [], text(html));
+});
+
+test("an inbox page given one entry fewer fails the facts", async () => {
+  const lost = await drawInbox("inbox", (inbox) => {
+    inbox.entries.shift();
+  });
+
+  assert.notDeepEqual(
+    missing(lost, "inbox"),
+    [],
+    "a render missing an inbox row still showed every expected fact, so the list proves nothing",
   );
 });
