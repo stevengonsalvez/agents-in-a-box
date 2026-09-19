@@ -54,8 +54,16 @@ fn sweeps(effects: &[Effect]) -> usize {
 fn a_held_key_is_one_sweep_until_the_report_lands() {
     let keymap = Keymap::defaults();
     let mut state = on_inbox();
-    assert_eq!(sweeps(&mark(&mut state, &keymap)), 1, "the first press sends the sweep");
-    assert_eq!(sweeps(&mark(&mut state, &keymap)), 0, "a second press in flight sends nothing");
+    assert_eq!(
+        sweeps(&mark(&mut state, &keymap)),
+        1,
+        "the first press sends the sweep"
+    );
+    assert_eq!(
+        sweeps(&mark(&mut state, &keymap)),
+        0,
+        "a second press in flight sends nothing"
+    );
     assert_eq!(sweeps(&mark(&mut state, &keymap)), 0);
 
     let report = reports::inbox_mark_all_read_finished(&MarkAllReadOutcome {
@@ -69,7 +77,11 @@ fn a_held_key_is_one_sweep_until_the_report_lands() {
     let effects = dispatch(&mut state, &keymap, &mut NoRenderer, report);
     assert!(effects.is_empty(), "a report queues no effect");
     assert_eq!(state.inbox.get().unread, 0, "the daemon's count is folded");
-    assert_eq!(sweeps(&mark(&mut state, &keymap)), 1, "after the report a press sends again");
+    assert_eq!(
+        sweeps(&mark(&mut state, &keymap)),
+        1,
+        "after the report a press sends again"
+    );
 }
 
 #[test]
@@ -91,7 +103,11 @@ fn the_report_folds_the_daemons_rows_and_never_a_local_stamp() {
         }),
     });
     let _ = dispatch(&mut state, &keymap, &mut NoRenderer, report);
-    assert_eq!(state.inbox.get().entries[0].read_at, Some(777), "the stamp is the daemon's");
+    assert_eq!(
+        state.inbox.get().entries[0].read_at,
+        Some(777),
+        "the stamp is the daemon's"
+    );
 }
 
 #[test]
@@ -109,5 +125,9 @@ fn a_failed_sweep_clears_the_guard_and_flips_nothing() {
     });
     let _ = dispatch(&mut state, &keymap, &mut NoRenderer, report);
     assert_eq!(state.inbox.get().unread, 1, "nothing flipped on a failure");
-    assert_eq!(sweeps(&mark(&mut state, &keymap)), 1, "the guard is released by the failed report");
+    assert_eq!(
+        sweeps(&mark(&mut state, &keymap)),
+        1,
+        "the guard is released by the failed report"
+    );
 }
