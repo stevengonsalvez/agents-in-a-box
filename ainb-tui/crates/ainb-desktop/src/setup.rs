@@ -23,7 +23,11 @@ use ainb_app::setup::{
 use serde::{Deserialize, Serialize};
 
 /// One of the writes the settings page may ask the shell to confirm.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+///
+/// `Debug` is written by hand: the telemetry write carries a token, and a
+/// `{:?}` of it would put that token in the log `show_log` reads back into
+/// the window.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SetupWrite {
@@ -45,6 +49,28 @@ pub enum SetupWrite {
     },
 }
 
+impl std::fmt::Debug for SetupWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InstallDependency { id } => {
+                f.debug_struct("InstallDependency").field("id", id).finish()
+            }
+            Self::InstallAllDependencies => f.write_str("InstallAllDependencies"),
+            Self::WriteTmuxConfig => f.write_str("WriteTmuxConfig"),
+            Self::FinishOpenTelemetry {
+                otlp_endpoint,
+                instance_id,
+                ..
+            } => f
+                .debug_struct("FinishOpenTelemetry")
+                .field("otlp_endpoint", otlp_endpoint)
+                .field("instance_id", instance_id)
+                .field("api_token", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
 /// What the confirmation dialog asks: a title and the body naming exactly
 /// what is written outside ainb.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +80,47 @@ pub struct Confirmation {
 }
 
 impl SetupWrite {
+    /// The variant's name, for a log line that must carry nothing else.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::InstallDependency { .. } => "install_dependency",
+            Self::InstallAllDependencies => "install_all_dependencies",
+            Self::WriteTmuxConfig => "write_tmux_config",
+            Self::FinishOpenTelemetry { .. } => "finish_open_telemetry",
+        }
+    }
+
+    /// What the write needs before a dialog is worth showing: the telemetry
+    /// fields present, and the endpoint an `https://` URL, because the token
+    /// is sent to it.
+    ///
+    /// # Errors
+    ///
+    /// Which field is missing or not https, for a toast.
+    pub fn validate(&self) -> Result<(), String> {
+        let Self::FinishOpenTelemetry {
+            otlp_endpoint,
+            instance_id,
+            api_token,
+        } = self
+        else {
+            return Ok(());
+        };
+        if otlp_endpoint.trim().is_empty()
+            || instance_id.trim().is_empty()
+            || api_token.trim().is_empty()
+        {
+            return Err(
+                "OpenTelemetry needs all three fields: endpoint, instance ID and token".to_string(),
+            );
+        }
+        if !otlp_endpoint.trim().starts_with("https://") {
+            return Err("the OTLP endpoint must be an https:// URL".to_string());
+        }
+        Ok(())
+    }
+
     /// The question the shell puts to the person before running this write.
     #[must_use]
     pub fn confirmation(&self) -> Confirmation {
@@ -84,12 +151,22 @@ impl SetupWrite {
                        of the current file is kept beside it."
                     .to_string(),
             },
-            Self::FinishOpenTelemetry { .. } => Confirmation {
+            // The dialog is the trust anchor for fields the webview typed, so
+            // it shows the endpoint the token will be sent to and the instance
+            // id, never the token.
+            Self::FinishOpenTelemetry {
+                otlp_endpoint,
+                instance_id,
+                ..
+            } => Confirmation {
                 title: "Finish the OpenTelemetry setup?".to_string(),
-                body: "This writes the OTLP environment into Claude Code's settings.json and \
-                       appends a line to your shell rc so every shell sources it. The \
-                       credentials stay in ainb's own env file."
-                    .to_string(),
+                body: format!(
+                    "This writes the OTLP environment into Claude Code's settings.json and \
+                     appends a line to your shell rc so every shell sources it. The \
+                     credentials stay in ainb's own env file.\n\nEndpoint: {}\nInstance ID: {}",
+                    otlp_endpoint.trim(),
+                    instance_id.trim()
+                ),
             },
         }
     }
@@ -150,20 +227,17 @@ impl SetupWrite {
                 instance_id,
                 api_token,
             } => {
+                Self::FinishOpenTelemetry {
+                    otlp_endpoint: otlp_endpoint.clone(),
+                    instance_id: instance_id.clone(),
+                    api_token: api_token.clone(),
+                }
+                .validate()?;
                 let creds = ainb_app::otel::GrafanaCloudCreds {
                     otlp_endpoint: otlp_endpoint.trim().to_string(),
                     instance_id: instance_id.trim().to_string(),
                     api_token: api_token.trim().to_string(),
                 };
-                if creds.otlp_endpoint.is_empty()
-                    || creds.instance_id.is_empty()
-                    || creds.api_token.is_empty()
-                {
-                    return Err(
-                        "OpenTelemetry needs all three fields: endpoint, instance ID and token"
-                            .to_string(),
-                    );
-                }
                 let host = ainb_app::otel::detect_host_name();
                 let failed = |error| format!("OpenTelemetry setup failed: {error:#}");
                 ainb_app::otel::write_assets().map_err(failed)?;
