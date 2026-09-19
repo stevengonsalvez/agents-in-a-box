@@ -839,7 +839,13 @@ impl InboxSection {
             .entries
             .into_iter()
             .filter(|row| {
-                let ids = [&row.id, &row.subject_id, &row.kind, &row.event, &row.recipient];
+                let ids = [
+                    &row.id,
+                    &row.subject_id,
+                    &row.kind,
+                    &row.event,
+                    &row.recipient,
+                ];
                 ids.iter().all(|id| id_like(id))
             })
             .collect();
@@ -912,7 +918,8 @@ impl InboxSection {
 
     /// The host reconnected: drop everything so the next read builds fresh.
     pub fn reset(&mut self) -> bool {
-        let changed = !self.entries.is_empty() || self.absent.is_some() || self.unreachable.is_some();
+        let changed =
+            !self.entries.is_empty() || self.absent.is_some() || self.unreachable.is_some();
         *self = Self::default();
         changed
     }
@@ -1005,7 +1012,10 @@ mod inbox_section_tests {
         assert!(section.mark_read_failed("io"));
         assert_eq!(section.unreachable.as_deref(), Some("io"));
         assert_eq!(section.entries.len(), 1);
-        assert!(!section.mark_read_failed("io"), "the same reason twice is no change");
+        assert!(
+            !section.mark_read_failed("io"),
+            "the same reason twice is no change"
+        );
     }
 
     #[test]
@@ -1014,7 +1024,10 @@ mod inbox_section_tests {
         assert!(section.mark_read_failed("first"));
         assert!(section.mark_read_failed("second"));
         assert_eq!(section.absent.as_deref(), Some("second"));
-        assert!(section.unreachable.is_none(), "absent and unreachable never both");
+        assert!(
+            section.unreachable.is_none(),
+            "absent and unreachable never both"
+        );
     }
 
     #[test]
@@ -1041,7 +1054,10 @@ mod inbox_section_tests {
         let reason = section.absent.as_deref().unwrap();
         assert!(!reason.contains(&"k".repeat(48)));
         assert!(reason.ends_with(INBOX_SUMMARY_CUT_MARKER));
-        assert!(reason.chars().count() <= super::MAX_INBOX_REASON_CHARS + INBOX_SUMMARY_CUT_MARKER.len());
+        assert!(
+            reason.chars().count()
+                <= super::MAX_INBOX_REASON_CHARS + INBOX_SUMMARY_CUT_MARKER.len()
+        );
     }
 
     #[test]
