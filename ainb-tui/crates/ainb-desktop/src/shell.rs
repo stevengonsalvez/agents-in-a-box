@@ -136,7 +136,9 @@ pub const BOARD_COLUMNS: usize = 5;
 /// there: a proof reading the line would otherwise take that renderer for one
 /// that drew five columns (#1194).
 #[must_use]
-pub fn board_columns(board: &[(ainb_hangar_proto::agent_status::AgentState, usize)]) -> (Vec<String>, usize) {
+pub fn board_columns(
+    board: &[(ainb_hangar_proto::agent_status::AgentState, usize)],
+) -> (Vec<String>, usize) {
     let columns = board
         .iter()
         .take(BOARD_COLUMNS)
@@ -162,7 +164,13 @@ mod tests {
         let (columns, dropped) = board_columns(&five);
         assert_eq!(
             columns,
-            ["working=1", "waiting=2", "idle=0", "exited=3", "unverifiable=4"]
+            [
+                "working=1",
+                "waiting=2",
+                "idle=0",
+                "exited=3",
+                "unverifiable=4"
+            ]
         );
         assert_eq!(dropped, 0);
 
