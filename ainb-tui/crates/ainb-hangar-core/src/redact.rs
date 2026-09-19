@@ -242,6 +242,30 @@ pub fn scrub_lines<S: AsRef<str>>(lines: &[S]) -> Vec<String> {
         .collect()
 }
 
+/// Scrub every string value in a JSON document, in place.
+///
+/// For a structured payload that leaves the process as JSON (a transcript
+/// chunk on the wire, #1199). Scrubbing each string on its own, rather than
+/// the serialised text, keeps the document valid: an unclosed PEM block in
+/// one value ends at that value instead of eating every field after it, and
+/// a value is scrubbed as the text it decodes to, not its escaped form.
+///
+/// Object keys are left as they are. They are the producer's structure
+/// (`content`, `rawInput`), not operator text, and rewriting one would change
+/// the shape every reader parses against.
+pub fn scrub_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => {
+            if find_secret(text).is_some() {
+                *text = scrub(text);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(scrub_json),
+        serde_json::Value::Object(fields) => fields.values_mut().for_each(scrub_json),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
 fn scrub_shapes(input: &str) -> String {
     let mut out = std::borrow::Cow::Borrowed(input);
     for (name, re) in shapes() {
@@ -387,6 +411,47 @@ mod tests {
     // file matches a secret scanner.
     fn fake(prefix: &str, body: char, len: usize) -> String {
         format!("{prefix}{}", body.to_string().repeat(len))
+    }
+
+    #[test]
+    fn scrub_json_scrubs_every_string_value_and_keeps_the_shape() {
+        let github = fake("ghp_", 'C', 36);
+        let pem = format!("-----BEGIN RSA PRIVATE KEY-----\n{}", "M".repeat(64));
+        let mut value = serde_json::json!({
+            "content": { "text": format!("token {github} here") },
+            "argv": ["curl", format!("x-api-key: {}", fake("sk-ant-api03-", 'A', 40))],
+            "rawOutput": pem,
+            "after": "kept",
+            "exitCode": 0,
+            "ok": true,
+            "none": null,
+        });
+        scrub_json(&mut value);
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "content": { "text": format!("token {REDACTED} here") },
+                "argv": ["curl", format!("x-api-key: {REDACTED}")],
+                "rawOutput": REDACTED,
+                "after": "kept",
+                "exitCode": 0,
+                "ok": true,
+                "none": null,
+            }),
+            "an unclosed key ends at its own value, and nothing else changes"
+        );
+        assert_eq!(find_secret(&value.to_string()), None);
+    }
+
+    #[test]
+    fn scrub_json_leaves_object_keys_alone() {
+        let github = fake("ghp_", 'C', 36);
+        let mut value = serde_json::json!({ github.clone(): "v" });
+        scrub_json(&mut value);
+        assert!(
+            value.get(&github).is_some(),
+            "keys are structure and are not rewritten"
+        );
     }
 
     #[test]
