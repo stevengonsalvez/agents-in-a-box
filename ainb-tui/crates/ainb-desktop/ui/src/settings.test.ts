@@ -118,9 +118,9 @@ test("an edit names the row by key and carries only what the widget chose", () =
   assert.deepEqual(rowEdit(by("authentication.claude_provider"), 0), {
     Command: [SET_ROW, { key: "authentication.claude_provider", value: { Choice: 0 } }],
   });
-  assert.deepEqual(rowEdit(by("fleet.bridge.telegram.token"), "keychain:tg"), {
-    Command: [SET_ROW, { key: "fleet.bridge.telegram.token", value: { Secret: "keychain:tg" } }],
-  });
+  assert.equal(rowEdit(by("fleet.bridge.telegram.token"), "keychain:tg"), null, "a secret is not set from the window");
+  assert.ok(by("fleet.bridge.telegram.token").readOnly);
+  assert.match(by("fleet.bridge.telegram.token").readOnlyReason!, /set from the terminal/);
   assert.deepEqual(rowEdit(by("ui_preferences.show_git_status"), false), {
     Command: [SET_ROW, { key: "ui_preferences.show_git_status", value: { Bool: false } }],
   });
@@ -140,6 +140,10 @@ test("an edit that does not fit the row is not sent", () => {
   assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), 1.5), null, "an integer row");
   assert.equal(rowEdit(by("ui_preferences.show_git_status"), "yes"), null, "a bool is a boolean");
   assert.equal(rowEdit(by("usage.plan.id"), "pro"), null, "a read-only row");
+  assert.equal(rowEdit(by("workspace_defaults.branch_prefix"), "x".repeat(2001)), null, "over the text bound");
+  assert.deepEqual(rowEdit(by("workspace_defaults.branch_prefix"), "g6a\u202E/\u0007"), {
+    Command: [SET_ROW, { key: "workspace_defaults.branch_prefix", value: { Text: "g6a/" } }],
+  }, "control and format characters are stripped");
   assert.equal(rowEdit(by("workspace_defaults.branch_prefix"), REDACTED), null, "the scrubbed marker is never written back");
   assert.equal(rowEdit(by("workspace_defaults.branch_prefix"), `x${REDACTED}y`), null, "nor inside a value");
 });
@@ -155,23 +159,25 @@ test("a row whose value the host runs is drawn inert, with the reason, whatever 
   const rows = settingsCategories(view).flatMap((category) => category.rows);
   const editor = rows.find((row) => row.key === "ui_preferences.preferred_editor")!;
   assert.ok(editor.readOnly);
-  assert.match(editor.readOnlyReason!, /program the host runs/);
+  assert.match(editor.readOnlyReason!, /host runs, binds or trusts/);
   assert.equal(rowEdit(editor, "evil"), null);
   const usage = rows.find((row) => row.key === "usage.plan.id")!;
-  assert.match(usage.readOnlyReason!, /does not edit it/);
+  assert.match(usage.readOnlyReason!, /host runs, binds or trusts/, "[usage] is the burndown plugin's file");
   assert.equal(rows.find((row) => row.key === "workspace_defaults.branch_prefix")!.readOnlyReason, null);
 });
 
-test("map keys meet their pattern, and the deny list wins over an allowed prefix", () => {
-  assert.match(editRefusal("mcp_servers.github.definition.command")!, /program the host runs/);
-  assert.match(editRefusal("container_templates.claude-dev.config.entrypoint")!, /program the host runs/);
-  assert.equal(editRefusal("acp.adapters.claude-agent-acp.permission_mode"), null);
-  assert.match(editRefusal("acp.adapters.claude-agent-acp.command")!, /program the host runs/);
+test("map keys meet their pattern, there are no prefixes, and a secret is refused first", () => {
+  assert.match(editRefusal("mcp_servers.github.definition.command")!, /host runs, binds or trusts/);
+  assert.match(editRefusal("container_templates.claude-dev.config.entrypoint")!, /host runs, binds or trusts/);
+  assert.match(editRefusal("acp.adapters.claude-agent-acp.permission_mode")!, /host runs, binds or trusts/);
+  assert.match(editRefusal("acp.adapters.claude-agent-acp.command")!, /host runs, binds or trusts/);
+  assert.match(editRefusal("fleet.bridge.telegram.user_id")!, /host runs, binds or trusts/);
   assert.equal(editRefusal("ui_preferences.theme"), null);
-  assert.match(editRefusal("fleet.terminal")!, /program the host runs/);
+  assert.match(editRefusal("fleet.terminal")!, /host runs, binds or trusts/);
   assert.equal(editRefusal("fleet.idle_min"), null);
   assert.match(editRefusal("no.such.row")!, /does not edit it/);
-  assert.match(editRefusal("ui_preferences")!, /does not edit it/, "a prefix needs a row under it");
+  assert.match(editRefusal("ui.no_such_row")!, /does not edit it/, "a sibling does not allow a new row");
+  assert.match(editRefusal("fleet.bridge.telegram.token", true)!, /set from the terminal/);
 });
 
 test("opening and closing the page walk the reducer through its own rows", () => {
