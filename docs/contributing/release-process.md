@@ -88,7 +88,12 @@ checksums only.
 ### Signing and notarisation
 
 The macOS bundles are ad-hoc signed unless the workflow is run with
-`desktop_signed` set. With it set, the job requires all six Apple secrets
+`desktop_signed` set: `bundle.macOS.signingIdentity` in `tauri.conf.json` is
+`-`, the ad-hoc identity, because the bundler signs nothing at all when it is
+given no identity, and an unsigned binary does not launch on Apple Silicon.
+The unsigned bundle step carries no Apple variable in its environment at all,
+since the bundler reads a defined-but-empty `APPLE_CERTIFICATE` as a
+certificate to import. With it set, the job requires all six Apple secrets
 below, passes them to the bundler, which signs with the Developer ID, submits
 for notarisation and staples, and then asserts `spctl --assess --type execute`
 accepts the app. Without it, the job records "ad-hoc signed, not notarised" in
