@@ -18,7 +18,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 import solid from "vite-plugin-solid";
-import type { GitViewView_Serialize } from "../../../ainb-app/bindings/AppState";
+import type { GitViewView_Serialize, UsageView } from "../../../ainb-app/bindings/AppState";
 
 const parityDir = new URL("../../../ainb-app/tests/parity/", import.meta.url);
 
@@ -108,5 +108,53 @@ test("a renderer given one file fewer fails the facts", async () => {
     missing(lost, "git_review"),
     [],
     "a render missing a whole file still showed every expected fact, so the list proves nothing",
+  );
+});
+
+/**
+ * Server-render the stats tab over `fixture`'s committed usage frame, with
+ * `change` applied to that frame first.
+ *
+ * `stats` is a DOM-half fixture only: the terminal's stats is burndown's
+ * plugin paint on `analytics`, and a second built-in beside it would be the
+ * drift the section set stops (spec, D3-prime parity amendment).
+ */
+async function drawStats(fixture: string, change: (usage: UsageView) => void = () => {}): Promise<string> {
+  const server = await createServer({
+    configFile: false,
+    root: fileURLToPath(new URL("..", import.meta.url)),
+    plugins: [solid({ ssr: true })],
+    server: { middlewareMode: true, hmr: false },
+    appType: "custom",
+    ssr: { noExternal: ["solid-js"] },
+    logLevel: "silent",
+  });
+  try {
+    const { Stats } = await server.ssrLoadModule("/src/stats.tsx");
+    const { renderToString } = await server.ssrLoadModule("solid-js/web");
+    const usage = framed(fixture, "usage") as UsageView;
+    change(usage);
+    return renderToString(() => Stats({ usage }));
+  } finally {
+    await server.close();
+  }
+}
+
+test("the stats tab shows every fact the stats fixture's list names", async () => {
+  const html = await drawStats("stats");
+
+  assert.ok(facts("stats").length > 0, "the facts list has facts in it");
+  assert.deepEqual(missing(html, "stats"), [], text(html));
+});
+
+test("a stats tab given one model fewer fails the facts", async () => {
+  const lost = await drawStats("stats", (usage) => {
+    usage.summary?.models.shift();
+  });
+
+  assert.notDeepEqual(
+    missing(lost, "stats"),
+    [],
+    "a render missing a whole model still showed every expected fact, so the list proves nothing",
   );
 });
