@@ -4129,7 +4129,11 @@ impl EventHandler {
                     let now = crate::fleet::daemons::heartbeat::now_ms();
                     state.apply_inbox_mark_all_read(outcome.marked, outcome.unread, now);
                 } else {
-                    let why = outcome.error.as_deref().unwrap_or("not sent");
+                    // The daemon's own error text can carry a path or a token:
+                    // scrubbed before it is logged or shown.
+                    let why = crate::fleet::bridge::redact::scrub(
+                        outcome.error.as_deref().unwrap_or("not sent"),
+                    );
                     tracing::warn!(op_id = %outcome.op_id, %why, "mark all read did not land");
                     state.add_error_notification(format!("Could not mark the inbox read: {why}"));
                 }
