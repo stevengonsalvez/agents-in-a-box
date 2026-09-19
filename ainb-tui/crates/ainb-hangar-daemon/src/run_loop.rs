@@ -1852,9 +1852,11 @@ async fn run_interactive(
     // recorded on the row, so a registry write fault is logged and ignored rather
     // than failing the run (the external-dep / degrade rule).
     //
-    // P6d: the same record is written to the daemon's `sessions` table, with
-    // what was actually launched (provider, permission bypass, model) rather
-    // than the Claude defaults. A retry of the task reuses the tmux name, so it
+    // P6d: the same record is also shadow-written to the daemon's `sessions`
+    // table, with what was actually launched (provider, permission bypass,
+    // model) rather than the defaults. While the capability is dark the file
+    // write below stays the registration every reader sees; the table write is
+    // best-effort and a failure is logged, never fails the run. A retry of the task reuses the tmux name, so it
     // reuses the id already bound to that name instead of colliding with it.
     let (agent_type, skip_permissions, model) = interactive_launch(
         dispatch.backend,
