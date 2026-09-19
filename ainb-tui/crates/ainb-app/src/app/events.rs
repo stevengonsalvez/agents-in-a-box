@@ -7558,8 +7558,10 @@ fn run_catalog_search(
 mod catalog_search_tokio_guard {
     use super::run_catalog_search;
 
-    // Serialize env mutation against other env-touching tests in this binary.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Serialize env mutation against other env-touching tests in this binary,
+    // through the crate's one lock: a private mutex here ordered this test
+    // against itself only.
+    use crate::env_lock::ENV_LOCK;
 
     /// Regression: `run_catalog_search` must run the `reqwest::blocking`
     /// search off the runtime thread. Building a blocking client inside a
