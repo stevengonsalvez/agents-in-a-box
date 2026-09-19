@@ -572,27 +572,33 @@ pub enum AppEvent {
     GoToHangar,                          // Navigate to the Hangar control plane (plugin screen)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
-    ConfigBack,             // Return to home screen (Esc)
-    ConfigNextCategory,     // Navigate to next category
-    ConfigPrevCategory,     // Navigate to previous category
-    ConfigNextSetting,      // Navigate to next setting
-    ConfigPrevSetting,      // Navigate to previous setting
-    ConfigSwitchPane,       // Toggle focus between category and settings pane (Tab)
-    ConfigNavigateUp,       // Navigate up within current focused pane
-    ConfigNavigateDown,     // Navigate down within current focused pane
-    ConfigFocusCategories,  // Switch focus to categories pane (Left)
-    ConfigFocusSettings,    // Switch focus to settings pane (Right)
-    ConfigEditSetting,      // Start editing current setting (Enter)
-    ConfigSaveEdit,         // Save current edit (Enter while editing)
-    ConfigCancelEdit,       // Cancel current edit (Esc while editing)
-    ConfigEditChar(char),   // Input character while editing
-    ConfigEditBackspace,    // Backspace while editing
-    ConfigSaveAll,          // Save all settings (S)
-    ConfigToggleExpand,     // Open/close the selected section in the tree (Enter/Space)
-    ConfigSearchStart,      // Open the `/` filter over every row
+    ConfigBack,            // Return to home screen (Esc)
+    ConfigNextCategory,    // Navigate to next category
+    ConfigPrevCategory,    // Navigate to previous category
+    ConfigNextSetting,     // Navigate to next setting
+    ConfigPrevSetting,     // Navigate to previous setting
+    ConfigSwitchPane,      // Toggle focus between category and settings pane (Tab)
+    ConfigNavigateUp,      // Navigate up within current focused pane
+    ConfigNavigateDown,    // Navigate down within current focused pane
+    ConfigFocusCategories, // Switch focus to categories pane (Left)
+    ConfigFocusSettings,   // Switch focus to settings pane (Right)
+    ConfigEditSetting,     // Start editing current setting (Enter)
+    ConfigSaveEdit,        // Save current edit (Enter while editing)
+    ConfigCancelEdit,      // Cancel current edit (Esc while editing)
+    ConfigEditChar(char),  // Input character while editing
+    ConfigEditBackspace,   // Backspace while editing
+    ConfigSaveAll,         // Save all settings (S)
+    /// A form's edit of the row `key`, `config.set_row`: resolved against the
+    /// row's kind, then written through the key-level save the popup uses.
+    ConfigSetRow {
+        key: String,
+        edit: crate::config::settings_model::ConfigRowEdit,
+    },
+    ConfigToggleExpand, // Open/close the selected section in the tree (Enter/Space)
+    ConfigSearchStart,  // Open the `/` filter over every row
     ConfigSearchChar(char), // Type into the `/` filter
-    ConfigSearchBackspace,  // Backspace in the `/` filter
-    ConfigSearchCancel,     // Close the `/` filter (Esc)
+    ConfigSearchBackspace, // Backspace in the `/` filter
+    ConfigSearchCancel, // Close the `/` filter (Esc)
     ConfigSecretToKeychain, // Store a credential literal in the OS keychain (Ctrl+K)
     // API Key configuration
     ConfigApiKeyStart,  // Start API key input mode (when on API Key Status)
@@ -2307,6 +2313,73 @@ impl EventHandler {
     /// the file so unknown sections survive), then `save_external_keys` writes the
     /// rest. On success the edits are cleared, so a later save cannot rewrite a
     /// value another process has since changed.
+    /// The value `edit` gives the row `key`, or `None` when no such row is
+    /// editable or the edit does not fit the row's kind: a choice takes an
+    /// index into its own options, a secret takes a reference, and a plain
+    /// text edit never lands on a secret row.
+    fn resolve_config_row_edit(
+        state: &AppState,
+        key: &str,
+        edit: &crate::config::settings_model::ConfigRowEdit,
+    ) -> Option<crate::app::state::ConfigValue> {
+        use crate::app::state::{ConfigValue, SecretValue};
+        use crate::config::settings_model::ConfigRowEdit;
+        if crate::config::screen_model::read_only_reason(key).is_some() {
+            return None;
+        }
+        let row = state
+            .config
+            .config_screen_state
+            .settings
+            .values()
+            .flatten()
+            .find(|row| row.key == key)?;
+        match (&row.value, edit) {
+            (ConfigValue::Text(_), ConfigRowEdit::Text(text)) => {
+                Some(ConfigValue::Text(text.clone()))
+            }
+            (ConfigValue::Secret(_), ConfigRowEdit::Secret(reference)) => {
+                Some(ConfigValue::Secret(SecretValue {
+                    reference: reference.clone(),
+                    resolved: secret_reference_is_set(reference),
+                }))
+            }
+            (ConfigValue::Bool(_), ConfigRowEdit::Bool(value)) => Some(ConfigValue::Bool(*value)),
+            (ConfigValue::Choice(options, _), ConfigRowEdit::Choice(index))
+                if *index < options.len() =>
+            {
+                Some(ConfigValue::Choice(options.clone(), *index))
+            }
+            (ConfigValue::Number(_), ConfigRowEdit::Number(value)) => {
+                Some(ConfigValue::Number(*value))
+            }
+            _ => None,
+        }
+    }
+
+    /// Set the row `key` to `value` and write it now, so the change becomes
+    /// the config and survives a restart without an explicit save-all. `S`
+    /// remains as the explicit save-all. One path for the popup's confirm and
+    /// a form's `config.set_row`.
+    fn apply_config_row_edit(
+        state: &mut AppState,
+        key: &str,
+        value: crate::app::state::ConfigValue,
+    ) {
+        tracing::info!("Config setting {} changed to: {}", key, value.display());
+        state.config.config_screen_state.set_row_value(key, value);
+        match Self::persist_config_screen(state) {
+            Ok(outcome) => {
+                if let Some(message) = outcome.message() {
+                    state.add_success_notification(message);
+                }
+            }
+            Err(e) => {
+                state.add_error_notification(format!("Failed to save setting: {e}"));
+            }
+        }
+    }
+
     fn persist_config_screen(state: &mut AppState) -> anyhow::Result<PersistOutcome> {
         let pending = state.config.config_screen_state.pending_edits().len();
         // Daemon rows are excluded: they go to SQLite, and
@@ -5791,6 +5864,11 @@ impl EventHandler {
             AppEvent::ConfigEditBackspace => {
                 state.config.config_screen_state.edit_buffer.pop();
             }
+            AppEvent::ConfigSetRow { key, edit } => {
+                if let Some(value) = Self::resolve_config_row_edit(state, &key, &edit) {
+                    Self::apply_config_row_edit(state, &key, value);
+                }
+            }
             AppEvent::ConfigSaveAll => {
                 tracing::info!("Saving all settings to config file");
                 match Self::persist_config_screen(state) {
@@ -6096,29 +6174,7 @@ impl EventHandler {
                         };
 
                         if let Some(updated) = updated {
-                            tracing::info!(
-                                "Config setting {} changed to: {}",
-                                setting_key,
-                                updated.display()
-                            );
-                            state.config.config_screen_state.set_row_value(&setting_key, updated);
-                        }
-
-                        // Auto-persist: write config.toml immediately, so the change
-                        // *becomes* the config (and survives a reopen/restart)
-                        // without the user having to remember `S` save-all. `S`
-                        // remains as an explicit save-all; `Esc` still cancels the
-                        // single edit before it reaches here.
-                        match Self::persist_config_screen(state) {
-                            Ok(outcome) => {
-                                if let Some(message) = outcome.message() {
-                                    state.add_success_notification(message);
-                                }
-                            }
-                            Err(e) => {
-                                state
-                                    .add_error_notification(format!("Failed to save setting: {e}"));
-                            }
+                            Self::apply_config_row_edit(state, &setting_key, updated);
                         }
                     }
                 }
