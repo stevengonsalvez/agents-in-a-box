@@ -20,21 +20,25 @@ export const PLUGIN_OWNERS: Readonly<Record<string, string>> = {
   hangar: "hangar-tui",
 };
 
-/** One of the three states a plugin screen shows with nothing to paint. */
+/**
+ * One of the three states a plugin screen shows with nothing to paint.
+ * `plugin` is `null` for a screen no plugin owns, which the terminal titles
+ * "plugin unavailable".
+ */
 export type Placeholder =
-  | { kind: "not_registered"; screen: string; plugin: string }
-  | { kind: "no_frame"; screen: string; plugin: string }
-  | { kind: "render_error"; screen: string; plugin: string; error: string };
+  | { kind: "not_registered"; screen: string; plugin: string | null }
+  | { kind: "no_frame"; screen: string; plugin: string | null }
+  | { kind: "render_error"; screen: string; plugin: string | null; error: string; cut: boolean };
 
 /** The placeholder `screen` shows, from the plugins_host frame. */
 export function placeholderFor(screen: string, pluginsHost: PluginsHostView_Serialize): Placeholder {
-  const plugin = PLUGIN_OWNERS[screen] ?? screen;
-  if (!pluginsHost.plugin_presence[screen]?.registered) {
+  const plugin = PLUGIN_OWNERS[screen] ?? null;
+  if (plugin === null || !pluginsHost.plugin_presence[screen]?.registered) {
     return { kind: "not_registered", screen, plugin };
   }
   const error = pluginsHost.plugin_render_errors[screen];
   if (error !== undefined) {
-    return { kind: "render_error", screen, plugin, error };
+    return { kind: "render_error", screen, plugin, error: error.text, cut: error.cut };
   }
   return { kind: "no_frame", screen, plugin };
 }
