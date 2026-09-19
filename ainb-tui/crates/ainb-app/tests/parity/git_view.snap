@@ -3,9 +3,9 @@
 ────┘        └──────────────────────────────────────────────────────────────────────────────────────────────────────────
 ╭ 📋  Code Review 2 files +4 -1  Hunk 1/2 ──────────────────────────────────────────────────────────────────────────────╮
 │ 📁  Changed Files (2)    │∨ src/lib.rs   +1 • -1   [Modified]                                                         │
-│▶ ▼ 📁  src (1)           │   1   fn main() {                                                                          │
-│  └ [M] lib.rs           │   2 ▌     println!("old");                                                                 │
-│  [A] README.md          │   2 ▌     println!("new");                                                                 │
+│▶ ▶ 📁  src (1)           │   1   fn main() {                                                                          │
+│  [A] README.md          │   2 ▌     println!("old");                                                                 │
+│                         │   2 ▌     println!("new");                                                                 │
 │                         │   3   }                                                                                    │
 │                         │∨ README.md   +3 • -0   [Added]                                                             │
 │                         │   1 ▌ # Parity                                                                             │
