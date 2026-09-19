@@ -70,8 +70,9 @@ pub fn shared() -> &'static Path {
         .path()
 }
 
-/// Held by whichever test currently owns the home directory.
-static HOME: Mutex<()> = Mutex::new(());
+/// The lock every test that touches the environment takes, the crate's own and
+/// the only one in this process.
+use ainb_app::env_lock::ENV_LOCK as HOME;
 
 /// The thread holding [`HOME`], so a second guard on the same thread says what
 /// happened instead of hanging on the lock forever.
