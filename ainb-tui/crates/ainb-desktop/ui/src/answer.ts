@@ -155,14 +155,15 @@ function moves(from: number, to: number): RendererIntent[] {
  * question, then ONE pick naming the option by its label. The reducer resolves
  * the label against the options it holds when the pick runs, so a frame
  * landing between two intents cannot move a counted cursor onto another
- * option (#1191). None at all when the frame is not pointed at this question,
- * or when `index` names no option it offers.
+ * option (#1191). The pick names the request the person read, and the reducer
+ * refuses it once the question has moved on. None at all when the frame is
+ * not pointed at this question, or when `index` names no option it offers.
  */
 export function pickIntents(question: Question, ask: AskState_Serialize | undefined, index: number): RendererIntent[] {
   if (!pointedAt(question, ask) || !question.answerable) return [];
   const label = question.options[index];
   if (label === undefined) return [];
-  return [...focusIntents(question), { Command: ["session_list.ask.pick", { label }] }];
+  return [...focusIntents(question), { Command: ["session_list.ask.pick", { request: question.request, label }] }];
 }
 
 /**
