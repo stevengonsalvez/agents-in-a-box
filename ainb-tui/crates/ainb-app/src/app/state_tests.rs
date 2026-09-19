@@ -2976,6 +2976,92 @@ mod tests {
         assert_eq!(fleet(&state), folded);
     }
 
+    /// The desktop's counterpart of the terminal's attach: the reducer asking
+    /// the window to open or bring forward a session's tab puts the pane in
+    /// front of the person, so what was already there stops nagging. The next
+    /// refresh stamps that instant as the clear point through the same fold
+    /// the terminal's detach uses (the baseline keeps one writer); a question
+    /// raised after it still marks, which is what the banner needs (#1272).
+    #[test]
+    fn on_the_desktop_bringing_a_tab_forward_sets_the_clear_point() {
+        use crate::app::events::{AppEvent, EventHandler};
+        use crate::app::versioned::SectionId;
+        let cwd = "/work/desktop-focus";
+        let mut state = state_with_session_at(cwd, Some("tmux_focus"));
+        state.host.surface = ainb_hangar_proto::connections::SurfaceKind::Desktop;
+        let id = state.sessions.workspaces[0].sessions[0].id;
+        state.sessions.selected_workspace_index = Some(0);
+        state.sessions.selected_session_index = Some(0);
+        let fleet = |state: &AppState| state.versions()[SectionId::Fleet.index()];
+
+        state.merge_attention(1_000);
+        assert_eq!(state.fleet.attention_baseline.get(&id), None);
+        let before = fleet(&state);
+
+        EventHandler::process_event(AppEvent::AttachTmuxSession, &mut state);
+        let _ = state.take_effects();
+        state.merge_attention(2_000);
+        assert_eq!(
+            state.fleet.attention_baseline.get(&id),
+            Some(&2_000),
+            "the refresh after the tab came forward is the clear point"
+        );
+        assert_ne!(fleet(&state), before, "folded once, so Fleet bumped once");
+        let folded = fleet(&state);
+        state.merge_attention(3_000);
+        assert_eq!(state.fleet.attention_baseline.get(&id), Some(&2_000));
+        assert_eq!(fleet(&state), folded, "and is not written again");
+
+        // What the clear point does: a question from before the tab came
+        // forward is one the person has seen; one raised after still marks.
+        let baseline = state.attention_clear_point(id);
+        let seen = vec![rec("claude", cwd, "PermissionRequest", 1_500)];
+        assert_eq!(
+            AppState::attention_for_session(cwd, Some("claude"), false, baseline, 4_000, &seen),
+            None
+        );
+        let fresh = vec![rec("claude", cwd, "PermissionRequest", 2_500)];
+        assert!(
+            AppState::attention_for_session(cwd, Some("claude"), false, baseline, 4_000, &fresh)
+                .is_some()
+        );
+
+        // Bringing the tab forward again moves it again.
+        EventHandler::process_event(AppEvent::AttachTmuxSession, &mut state);
+        let _ = state.take_effects();
+        state.merge_attention(5_000);
+        assert_eq!(state.fleet.attention_baseline.get(&id), Some(&5_000));
+    }
+
+    /// The terminal's rule is untouched: attaching there moves the clear
+    /// point through the scan's `is_attached`, never through the attach
+    /// event, so the event alone writes nothing.
+    #[test]
+    fn on_the_terminal_the_attach_event_leaves_the_clear_point_to_the_scan() {
+        use crate::app::events::{AppEvent, EventHandler};
+        use crate::app::versioned::SectionId;
+        let mut state = state_with_session_at("/work/terminal-focus", Some("tmux_term"));
+        assert_eq!(
+            state.host.surface,
+            ainb_hangar_proto::connections::SurfaceKind::Tui
+        );
+        let id = state.sessions.workspaces[0].sessions[0].id;
+        state.sessions.selected_workspace_index = Some(0);
+        state.sessions.selected_session_index = Some(0);
+        let fleet = |state: &AppState| state.versions()[SectionId::Fleet.index()];
+
+        state.merge_attention(1_000);
+        let before = fleet(&state);
+        EventHandler::process_event(AppEvent::AttachTmuxSession, &mut state);
+        let _ = state.take_effects();
+        assert!(state.host.attention_focus_pending.is_empty());
+        // The scan has not seen it attached yet: nothing folds.
+        state.sessions.workspaces[0].sessions[0].is_attached = false;
+        state.merge_attention(2_000);
+        assert_eq!(state.fleet.attention_baseline.get(&id), None);
+        assert_eq!(fleet(&state), before);
+    }
+
     #[test]
     fn missing_tmux_stop_cannot_regain_a_stale_daemon_question() {
         use crate::fleet::attention::{AttentionKind, SessionAttention};
