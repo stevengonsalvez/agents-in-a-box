@@ -6,8 +6,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ainb_app::config::AppConfig;
-use ainb_app::config::registry::registry_key;
-use ainb_app::config::renderer_edit::{DENIED, DENIED_REASON, NOT_DRAWN_REASON};
+use ainb_app::config::registry::{self, registry_key};
+use ainb_app::config::renderer_edit::{DENIED, DENIED_REASON, NOT_DRAWN_REASON, SECRET_REASON};
 use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
 use ainb_app::{Chord, CommandId, Intent, Keymap, SectionId};
 use ainb_desktop::host::DesktopHost;
@@ -36,7 +36,7 @@ fn host(log: &Log) -> DesktopHost<impl FnMut(FrameBatch)> {
 fn set_row(key: &str) -> Intent {
     Intent::Command(
         CommandId::new("config.set_row"),
-        serde_json::json!({ "key": key, "value": { "Text": "evil" } }),
+        serde_json::json!({ "key": key, "value": { "Text": "evil" }, "revision": 0 }),
     )
 }
 
@@ -69,6 +69,11 @@ fn a_spawn_row_is_refused_by_name_and_by_key_sequence() {
     let mut host = host(&log);
     let mut by_key = 0;
     for (pattern, _) in DENIED {
+        // A secret row on the deny list is refused as a secret first; the
+        // secret test below covers it.
+        if registry::row(pattern).is_some_and(|row| matches!(row.kind, registry::RowKind::Secret)) {
+            continue;
+        }
         // By name, whether or not the default config has such a row: the
         // key is judged, not the row.
         let named = pattern.replace('*', "sample");
@@ -109,11 +114,54 @@ fn a_drawn_row_passes_and_an_undrawn_row_is_refused() {
         None
     );
 
-    let key = on_row(&mut host, "usage.plan.id").expect("a default row");
-    let refusal = host.refused_from_renderer(&set_row(&key)).expect("an undrawn row");
+    // Every registry row is classified, so an unclassified row can only be
+    // one the schema does not have yet: judged by name, deny by default.
+    let refusal = host
+        .refused_from_renderer(&set_row("new.row.nobody.classified"))
+        .expect("an unclassified row");
     assert_eq!(refusal.reason, NOT_DRAWN_REASON);
+    let key = on_row(&mut host, "usage.plan.id").expect("a default row");
+    let refusal = host.refused_from_renderer(&set_row(&key)).expect("the plugin's row");
+    assert_eq!(refusal.reason, DENIED_REASON);
+}
+
+/// A secret row is refused from the window by name and by Enter, with the
+/// reason that says where a secret is set; so is the keychain prompt.
+#[test]
+fn a_secret_row_and_the_keychain_prompt_are_refused_from_the_window() {
+    let log = Log::default();
+    let mut host = host(&log);
+    let key = on_row(&mut host, "fleet.bridge.telegram.token").expect("a default secret row");
+    let refusal = host.refused_from_renderer(&set_row(&key)).expect("by name");
+    assert_eq!(refusal.reason, SECRET_REASON);
     let refusal = host
         .refused_from_renderer(&Intent::Key(Chord::parse("enter").expect("chord")))
-        .expect("an undrawn row by Enter");
-    assert_eq!(refusal.reason, NOT_DRAWN_REASON);
+        .expect("by Enter");
+    assert_eq!(refusal.reason, SECRET_REASON);
+    let refusal = host
+        .refused_from_renderer(&Intent::Key(Chord::parse("ctrl+k").expect("chord")))
+        .expect("the keychain prompt");
+    assert_eq!(refusal.reason, SECRET_REASON);
+}
+
+/// A payload the row cannot parse is refused at the seam, not judged on the
+/// row's placeholder and left for the reducer to drop.
+#[test]
+fn a_payload_that_does_not_fit_the_row_is_refused_closed() {
+    let log = Log::default();
+    let mut host = host(&log);
+    on_row(&mut host, "workspace_defaults.branch_prefix").expect("a default row");
+    let malformed = Intent::Command(
+        CommandId::new("config.set_row"),
+        serde_json::json!({ "key": "workspace_defaults.branch_prefix", "value": { "Text": "x" } }),
+    );
+    let refusal = host.refused_from_renderer(&malformed).expect("no revision");
+    assert!(refusal.reason.contains("does not fit"), "{refusal:?}");
+    let refusal = host
+        .refused_from_renderer(&Intent::Command(
+            CommandId::new("config.set_row"),
+            serde_json::json!({ "bogus": true }),
+        ))
+        .expect("wrong fields");
+    assert!(refusal.reason.contains("does not fit"), "{refusal:?}");
 }
