@@ -97,6 +97,7 @@ function atTheBound(): GitViewView_Serialize {
       collapsed_dirs: [],
       collapsed_dirs_cut: 0,
       scroll: 0,
+      scroll_cut: false,
       current_hunk: 0,
     },
   };
