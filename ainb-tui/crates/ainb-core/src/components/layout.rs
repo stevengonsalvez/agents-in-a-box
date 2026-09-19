@@ -311,6 +311,10 @@ impl LayoutComponent {
     pub fn new() -> Self {
         let mut screens = ScreenRegistry::new();
         register_builtins(&mut screens);
+        // The inbox screen (D3-prime) registers from here, through the
+        // registry's public `register`, so `app/screens/builtin.rs` stays as
+        // it is.
+        screens.register(Box::new(crate::components::inbox::InboxScreen));
         Self {
             session_list: SessionListComponent::new(),
             logs_viewer: LogsViewerComponent::new(),
@@ -958,11 +962,19 @@ impl LayoutComponent {
         // home-menu letter here (the session-list key handler binds the
         // same set), and closing a panel returns to this screen.
         //
-        // The `b inbox` hint and its unread badge are gone with the Inbox
-        // screen: a session's notification history is the `log` tab on this
-        // screen now, and the fleet-wide view is the hangar plugin's own.
+        // The `b inbox` hint is back with the inbox screen (D3-prime), its
+        // badge the unread count the daemon reported on the inbox section.
         let mut line4_spans = Vec::new();
+        line4_spans.extend([key("b", GOLD), desc(" inbox")]);
+        let unread = state.inbox.get().unread;
+        if unread > 0 {
+            line4_spans.push(Span::styled(
+                format!(" {unread}"),
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ));
+        }
         line4_spans.extend([
+            desc(" "),
             key("i", GOLD),
             desc(" stats "),
             key("w", GOLD),
