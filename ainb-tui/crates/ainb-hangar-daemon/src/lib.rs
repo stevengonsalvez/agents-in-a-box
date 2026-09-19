@@ -971,11 +971,12 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // boot path. Its first tick is immediate, so the first pass starts
         // now, but the RPC socket does not wait for it: a pass can wait up to
         // its flock bound on a CLI holding sessions.json.lock, and boot must
-        // not. Until that pass commits, `workspace/session_list` answers
-        // `import_complete: false` and clients stay on the file, which is
-        // what they do anyway while the capability is dark. The watcher then
+        // not. The first-pass gate armed here holds every session read until
+        // that pass commits: a read waits up to FIRST_PASS_WAIT, then answers
+        // not-ready, so no row this boot has not reconciled is served. The watcher then
         // runs a pass whenever the file changes, and ends with the process
         // like the scheduler below.
+        crate::session_import::arm_first_pass_gate();
         tokio::spawn(
             crate::session_import::ReconcileWatch::new(&sessions_path).run(store.pool().clone()),
         );
