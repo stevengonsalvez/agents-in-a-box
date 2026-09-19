@@ -129,11 +129,23 @@ impl Session<'_> {
         path
     }
 
-    fn send_enter(&self) {
+    /// Type `line` into the pane as literal keys, then Enter. An empty line
+    /// sends Enter alone.
+    fn send_line(&self, line: &str) {
+        let target = format!("={}:", self.name);
+        if !line.is_empty() {
+            let status = self
+                .server
+                .command()
+                .args(["send-keys", "-t", &target, "-l", line])
+                .status()
+                .expect("send-keys runs");
+            assert!(status.success(), "{line:?} typed into {}", self.name);
+        }
         let status = self
             .server
             .command()
-            .args(["send-keys", "-t", &format!("={}:", self.name), "Enter"])
+            .args(["send-keys", "-t", &target, "Enter"])
             .status()
             .expect("send-keys runs");
         assert!(status.success(), "Enter sent to {}", self.name);
@@ -278,7 +290,7 @@ fn a_paste_carrying_the_terminator_lands_as_literal_text() {
     let server = Server::new();
     let session = server.start(
         "d1c-paste",
-        r#"env -i PATH=/usr/bin:/bin TERM=xterm-256color PS1='ready> ' sh -c "command -v zsh >/dev/null && exec zsh -f; exec bash --norc --noprofile""#,
+        r#"env -i PATH=/usr/bin:/bin TERM=xterm-256color sh -c "command -v zsh >/dev/null && exec zsh -f; exec bash --norc --noprofile""#,
     );
     let (terminals, _recorder, _reports) = terminals(&server);
     assert_eq!(
@@ -286,13 +298,20 @@ fn a_paste_carrying_the_terminator_lands_as_literal_text() {
         None,
         "the tab opened"
     );
-    wait_for("the shell prompt", || session.capture().contains("ready>"));
+    // Set inside the shell, not inherited: macOS zsh -f ignores a PS1 from
+    // the environment and keeps its `host%` prompt, where Linux zsh takes it.
+    // The line waits in the pty until the shell reads it. Only a line that
+    // STARTS with the prompt counts, since the typed line itself echoes it.
+    session.send_line("PS1='ready> '");
+    wait_for("the shell prompt", || {
+        session.capture().lines().any(|line| line.starts_with("ready>"))
+    });
     // The shell's own output, not the tab's: tmux turns bracketed paste on
     // for every client it drives, so the tab sees `ESC[?2004h` whatever the
     // shell does. Both shells re-arm the mode on each prompt, so an empty
     // line after the pipe is open draws one the pipe records.
     let shell_output = session.pipe_output();
-    session.send_enter();
+    session.send_line("");
     wait_for("the shell to turn bracketed paste on", || {
         std::fs::read(&shell_output)
             .unwrap_or_default()
