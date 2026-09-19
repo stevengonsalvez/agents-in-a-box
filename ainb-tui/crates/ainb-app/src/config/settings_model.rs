@@ -285,6 +285,24 @@ impl ConfigValue {
     }
 }
 
+/// A row edit a renderer sends by key, `config.set_row`, before the reducer
+/// resolves it against the row's own [`ConfigValue`] kind.
+///
+/// It carries what the person chose and nothing the frame already holds: a
+/// choice is its option index, a secret is its reference (`$ENV_VAR` or
+/// `keychain:<service>`), never a literal. An edit whose kind does not fit the
+/// row is dropped, so a form cannot turn a choice into free text.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ConfigRowEdit {
+    Text(String),
+    /// A secret row's reference, exactly as config.toml would hold it.
+    Secret(String),
+    Bool(bool),
+    /// The index of the chosen option in the row's own list.
+    Choice(usize),
+    Number(i64),
+}
+
 /// View filter for the session tree, cycled by `Shift+F` or its clickable title chip.
 ///
 /// Phase 2 of `load_interactive_mode_sessions` started surfacing Stopped sessions
