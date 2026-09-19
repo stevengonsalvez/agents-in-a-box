@@ -98,7 +98,7 @@ pub enum ScreenFixture {
     /// Section 21 holding one `fleet/usage_summary` reply, as the daemon
     /// sends it, on the terminal's `analytics` screen (burndown's).
     Stats {
-        usage: ainb_hangar_proto::fleet::FleetUsageSummaryResult,
+        usage: Box<ainb_hangar_proto::fleet::FleetUsageSummaryResult>,
     },
 }
 
@@ -202,7 +202,7 @@ impl ParityFixture {
                     Some(ainb_app::components::onboarding::OnboardingState::new());
             }
             ScreenFixture::Stats { usage } => {
-                state.apply_usage_read(usage.clone(), 0);
+                state.apply_usage_read((**usage).clone(), 0);
             }
             ScreenFixture::Home
             | ScreenFixture::SessionList
