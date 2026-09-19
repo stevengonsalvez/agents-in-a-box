@@ -134,6 +134,7 @@ impl Executor for DesktopExecutor {
                             marked: 0,
                             unread: 0,
                             error: Some(format!("the worker did not start: {error}")),
+                            after: None,
                         };
                         vec![reports::inbox_mark_all_read_finished(&outcome)]
                     }
