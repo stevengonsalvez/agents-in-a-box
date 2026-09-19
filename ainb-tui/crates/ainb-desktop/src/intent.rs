@@ -43,9 +43,43 @@ pub fn is_host_authored(id: &CommandId) -> bool {
         || ainb_app::app::plugin_action::ids::ALL.contains(&id.as_str())
 }
 
+/// The updater's command ids. The window may run the update the host
+/// resolved (check, apply, roll back, discard the previous, read the
+/// settings); which channel and tag it comes from is set in the terminal and
+/// the config file only, never from the window.
+pub mod update {
+    pub const CHECK: &str = "update.check";
+    pub const APPLY: &str = "update.apply";
+    pub const ROLLBACK: &str = "update.rollback";
+    pub const DISCARD_PREVIOUS: &str = "update.discard_previous";
+    pub const SETTINGS: &str = "update.settings";
+    pub const SET_SETTINGS: &str = "update.set_settings";
+    /// Every updater id.
+    pub const ALL: [&str; 6] = [
+        CHECK,
+        APPLY,
+        ROLLBACK,
+        DISCARD_PREVIOUS,
+        SETTINGS,
+        SET_SETTINGS,
+    ];
+    /// The ids the window may send.
+    pub const FROM_WEBVIEW: [&str; 5] = [CHECK, APPLY, ROLLBACK, DISCARD_PREVIOUS, SETTINGS];
+}
+
+/// The refusal for an updater id the window may not send, `None` when it may.
+#[must_use]
+pub fn update_refusal(id: &str) -> Option<Refusal> {
+    (update::ALL.contains(&id) && !update::FROM_WEBVIEW.contains(&id)).then(|| Refusal {
+        command: CommandId::new(id),
+        reason: "the update channel is set in the terminal or the config file, not the window",
+    })
+}
+
 /// Whether the webview may not send `id`.
 ///
-/// Two families: a host-authored row ([`is_host_authored`]), and a row that
+/// Three families: a host-authored row ([`is_host_authored`]), an updater id
+/// that chooses where updates come from ([`update_refusal`]), and a row that
 /// writes outside ainb, which runs only from its key
 /// ([`Keymap::is_key_only`]), whatever surface names it.
 ///
@@ -53,7 +87,22 @@ pub fn is_host_authored(id: &CommandId) -> bool {
 /// may offer and what it may send cannot drift apart.
 #[must_use]
 pub fn refused_from_webview(keymap: &Keymap, id: &CommandId) -> bool {
-    is_host_authored(id) || keymap.is_key_only(id)
+    is_host_authored(id) || update_refusal(id.as_str()).is_some() || keymap.is_key_only(id)
+}
+
+/// The most characters one toast carries.
+pub const MAX_TOAST_CHARS: usize = 300;
+
+/// `text` as the webview may show it in a toast: control and format
+/// characters removed and paths replaced ([`typed_text`],
+/// [`crate::sidecar::scrub_paths`]), then cut to [`MAX_TOAST_CHARS`]. The
+/// scrub runs first, so nothing cut ever counted.
+#[must_use]
+pub fn toast_text(text: &str) -> String {
+    crate::sidecar::scrub_paths(&typed_text(text))
+        .chars()
+        .take(MAX_TOAST_CHARS)
+        .collect()
 }
 
 impl TryFrom<RendererIntent> for Intent {
