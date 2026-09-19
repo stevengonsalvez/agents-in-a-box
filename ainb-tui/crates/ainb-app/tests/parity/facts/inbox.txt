@@ -1,0 +1,18 @@
+# What both renderers must show for the inbox fixture: one list, checked
+# against the ratatui snapshot (tests/parity.rs) and against the webview's own
+# render (ainb-desktop/ui/src/parity.test.ts). A fact deleted from either
+# renderer's output fails the suite.
+#
+# The fixture carries 101 rows (three named, 98 filler) and one summary past
+# the 256-character cut, so the cut path is what the facts read: the row past
+# the cap is not shown, the long summary ends in the marker, and the counters
+# say so, above the rows, so a screen too short for a hundred rows still shows
+# them. Facts are renderer-neutral: what is shown, not how it is framed.
+New issue: the inbox reads the daemon
+New comment on issue-7
+New issue: the release checklist for the desktop bundle
+[cut]
+1 more rows not shown
+1 summaries cut
+Task queued: filler-0
+mark all read
