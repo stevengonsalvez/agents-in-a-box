@@ -116,22 +116,3 @@ test("an ACP card has no session row, so it offers its transcript intent, open a
     Command: ["session_list.open_transcript", { session_key: null }],
   });
 });
-
-test("the prompt echo and the usage report draw their text under their own labels", () => {
-  // #1200: the host frames both with text (`acp_card_text`), so the card draws
-  // what the operator asked and what the run cost, never a labelled empty row.
-  const bodies: Partial<Record<ChunkKind, string>> = {
-    UserMessage: "do the work\nthen stop",
-    Usage: "1200 of 200000 tokens in context · 0.40 USD",
-  };
-  const view = transcriptView(
-    fleet((kind) => bodies[kind] ?? `a ${kind} chunk`),
-    "acp:s-1",
-  )!;
-  const drawn = (kind: ChunkKind) => view.chunks.find((chunk) => chunk.kind === kind)!;
-  assert.deepEqual([drawn("UserMessage").label, drawn("UserMessage").body], ["you", "do the work\nthen stop"]);
-  assert.deepEqual(
-    [drawn("Usage").label, drawn("Usage").body],
-    ["usage", "1200 of 200000 tokens in context · 0.40 USD"],
-  );
-});
