@@ -48,7 +48,7 @@ fn state_with(rows: Vec<InboxEntryRow>) -> AppState {
     state
 }
 
-fn frame(state: &AppState) -> serde_json::Value {
+fn view_of(state: &AppState) -> serde_json::Value {
     section_json(state, SectionId::Inbox, &HostId::local())
 }
 
@@ -69,7 +69,7 @@ fn the_bounds_sit_below_the_daemons_cap_and_the_frame_ceiling() {
 fn rows_past_the_cap_are_cut_and_counted() {
     let rows: Vec<_> = (0..MAX_INBOX_ROWS + 37).map(|n| row(n, "New issue: x")).collect();
     let state = state_with(rows);
-    let frame = frame(&state);
+    let frame = view_of(&state);
     assert_eq!(frame["entries"].as_array().map(Vec::len), Some(MAX_INBOX_ROWS));
     assert_eq!(frame["rows_cut"], 37);
     assert_eq!(frame["summaries_cut"], 0);
@@ -82,7 +82,7 @@ fn rows_past_the_cap_are_cut_and_counted() {
 fn a_long_summary_is_cut_with_a_marker_and_counted() {
     let long = "x".repeat(MAX_INBOX_SUMMARY_CHARS + 500);
     let state = state_with(vec![row(0, &long), row(1, "short")]);
-    let frame = frame(&state);
+    let frame = view_of(&state);
     let cut = frame["entries"][0]["summary"].as_str().expect("summary");
     assert!(cut.ends_with(INBOX_SUMMARY_CUT_MARKER), "cut summary carries the marker: {cut}");
     assert_eq!(
@@ -98,7 +98,7 @@ fn a_long_summary_is_cut_with_a_marker_and_counted() {
 fn a_multibyte_summary_is_cut_on_a_char_boundary() {
     let long = "é".repeat(MAX_INBOX_SUMMARY_CHARS + 3);
     let state = state_with(vec![row(0, &long)]);
-    let cut = frame(&state)["entries"][0]["summary"].as_str().unwrap().to_string();
+    let cut = view_of(&state)["entries"][0]["summary"].as_str().unwrap().to_string();
     assert!(cut.starts_with(&"é".repeat(MAX_INBOX_SUMMARY_CHARS)));
     assert!(cut.ends_with(INBOX_SUMMARY_CUT_MARKER));
 }
@@ -108,7 +108,7 @@ fn a_row_whose_id_is_not_an_id_is_dropped_and_counted() {
     let mut bad = row(0, "ok");
     bad.subject_id = "i".repeat(MAX_INBOX_ID_CHARS + 1);
     let state = state_with(vec![bad, row(1, "kept")]);
-    let frame = frame(&state);
+    let frame = view_of(&state);
     assert_eq!(frame["entries"].as_array().map(Vec::len), Some(1));
     assert_eq!(frame["entries"][0]["summary"], "kept");
     assert_eq!(frame["rows_cut"], 1);
@@ -131,7 +131,7 @@ fn the_worst_case_read_frames_inside_the_budget_and_says_what_it_cut() {
         })
         .collect();
     let state = state_with(rows);
-    let frame = frame(&state);
+    let frame = view_of(&state);
     let bytes = encoded_len(&frame);
     assert!(
         bytes < MAX_INBOX_BYTES,
@@ -153,7 +153,7 @@ fn a_credential_past_the_cut_does_not_survive_and_the_marker_draws() {
     );
     let summary = format!("{}{token}", "New issue: ".repeat(MAX_INBOX_SUMMARY_CHARS / 11));
     let state = state_with(vec![row(0, &summary)]);
-    let cut = frame(&state)["entries"][0]["summary"].as_str().unwrap().to_string();
+    let cut = view_of(&state)["entries"][0]["summary"].as_str().unwrap().to_string();
     assert!(!cut.contains(&"A".repeat(30)), "the token's head survived the frame: {cut}");
     assert!(cut.contains("<redacted>"), "the redaction marker is drawn: {cut}");
     assert!(cut.ends_with(INBOX_SUMMARY_CUT_MARKER));
@@ -163,14 +163,14 @@ fn a_credential_past_the_cut_does_not_survive_and_the_marker_draws() {
 fn a_credential_inside_the_cut_is_scrubbed_on_the_frame() {
     let summary = format!("Task started: sk-{}", "k".repeat(48));
     let state = state_with(vec![row(0, &summary)]);
-    let drawn = frame(&state)["entries"][0]["summary"].as_str().unwrap().to_string();
+    let drawn = view_of(&state)["entries"][0]["summary"].as_str().unwrap().to_string();
     assert!(!drawn.contains(&"k".repeat(48)), "the key survived: {drawn}");
 }
 
 #[test]
 fn the_read_folds_unread_and_a_repeat_read_changes_nothing() {
     let mut state = state_with(vec![row(0, "a"), row(1, "b"), row(3, "c")]);
-    let before = frame(&state);
+    let before = view_of(&state);
     assert_eq!(before["unread"], 2);
     assert_eq!(before["absent"], serde_json::Value::Null);
     assert!(
@@ -183,20 +183,20 @@ fn the_read_folds_unread_and_a_repeat_read_changes_nothing() {
 fn a_failed_read_keeps_the_rows_and_says_the_host_is_unreachable() {
     let mut state = state_with(vec![row(0, "a")]);
     assert!(state.inbox_read_failed("daemon io: broken pipe", NOW + 5));
-    let frame = frame(&state);
+    let frame = view_of(&state);
     assert_eq!(frame["entries"].as_array().map(Vec::len), Some(1));
     assert_eq!(frame["unreachable"], "daemon io: broken pipe");
     assert_eq!(frame["absent"], serde_json::Value::Null);
     // A read landing again clears it.
     assert!(state.apply_inbox_read(read(vec![row(0, "a"), row(2, "b")]), NOW + 6));
-    assert_eq!(frame(&state)["unreachable"], serde_json::Value::Null);
+    assert_eq!(view_of(&state)["unreachable"], serde_json::Value::Null);
 }
 
 #[test]
 fn an_absent_daemon_frames_the_reason_and_no_rows() {
     let mut state = AppState::new();
     assert!(state.inbox_absent("daemon has no hangar/inbox_list"));
-    let frame = frame(&state);
+    let frame = view_of(&state);
     assert_eq!(frame["absent"], "daemon has no hangar/inbox_list");
     assert_eq!(frame["entries"].as_array().map(Vec::len), Some(0));
     assert!(!state.inbox_absent("daemon has no hangar/inbox_list"), "same reason, no change");
@@ -205,9 +205,9 @@ fn an_absent_daemon_frames_the_reason_and_no_rows() {
 #[test]
 fn mark_all_read_folds_the_daemons_count_and_stamps_the_rows() {
     let mut state = state_with(vec![row(1, "a"), row(3, "b"), row(0, "c")]);
-    assert_eq!(frame(&state)["unread"], 2);
+    assert_eq!(view_of(&state)["unread"], 2);
     assert!(state.apply_inbox_mark_all_read(2, 0, NOW + 9));
-    let frame = frame(&state);
+    let frame = view_of(&state);
     assert_eq!(frame["unread"], 0);
     assert!(
         frame["entries"].as_array().unwrap().iter().all(|e| e["read_at"].is_i64()),
@@ -223,6 +223,6 @@ fn a_reader_of_the_empty_shape_still_decodes_the_new_frame() {
     #[derive(serde::Deserialize)]
     struct OldInboxView {}
     let state = state_with(vec![row(0, "a")]);
-    let frame = frame(&state);
+    let frame = view_of(&state);
     let _old: OldInboxView = serde_json::from_value(frame).expect("the old shape decodes");
 }
