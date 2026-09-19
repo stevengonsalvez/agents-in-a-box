@@ -10,6 +10,7 @@ import type {
   HangarView_Serialize,
   GitViewView_Serialize,
   HostId,
+  InboxView_Serialize,
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
 import type { FrameStore, SectionName } from "./store.ts";
@@ -29,6 +30,7 @@ export const SUBSCRIBED: SectionName[] = [
   "agent_status",
   "hangar",
   "git_view",
+  "inbox",
 ];
 
 /**
@@ -81,4 +83,13 @@ export function configRevision(store: FrameStore, host: HostId | undefined): num
  */
 export function shellGitView(store: FrameStore, host: HostId | undefined): GitViewView_Serialize | undefined {
   return host === undefined ? undefined : store.section(host, "git_view");
+}
+
+/**
+ * The inbox page's rows and the header's unread count: section 16, the
+ * daemon's inbox as the host folded it (D3p-c). Subscribing to it is what
+ * starts the host's inbox reader.
+ */
+export function shellInbox(store: FrameStore, host: HostId | undefined): InboxView_Serialize | undefined {
+  return host === undefined ? undefined : store.section(host, "inbox");
 }
