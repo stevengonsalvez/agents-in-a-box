@@ -1153,6 +1153,59 @@ pub struct SessionStore {
 #[must_use = "the sessions.json lock is released as soon as the guard is dropped"]
 pub struct SessionStoreGuard {
     _file: std::fs::File,
+    _held: HeldLockMark,
+}
+
+/// Threads that hold the `sessions.json` lock (P6e), by count.
+///
+/// `flock` on a second descriptor in the same process blocks until the first
+/// is released, so a thread that holds [`SessionStore::lock`] and then asks
+/// the resolver for the store would wait on itself forever. The resolver
+/// checks this map first ([`SessionStore::ensure_lock_not_held`]) and turns
+/// that into an immediate error. Keyed by thread id rather than thread-local,
+/// so a guard dropped on another thread still clears the thread that took it.
+static HELD_LOCKS: std::sync::Mutex<Vec<(std::thread::ThreadId, u32)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Marks the current thread as holding the `sessions.json` lock until it
+/// drops.
+#[must_use = "the held-lock mark clears as soon as it is dropped"]
+pub struct HeldLockMark {
+    thread: std::thread::ThreadId,
+}
+
+impl HeldLockMark {
+    /// Mark the current thread.
+    pub fn enter() -> Self {
+        let thread = std::thread::current().id();
+        let mut held = HELD_LOCKS.lock().unwrap_or_else(|p| p.into_inner());
+        match held.iter_mut().find(|(t, _)| *t == thread) {
+            Some((_, n)) => *n += 1,
+            None => held.push((thread, 1)),
+        }
+        Self { thread }
+    }
+
+    fn held_by_current_thread() -> bool {
+        let thread = std::thread::current().id();
+        HELD_LOCKS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .any(|(t, n)| *t == thread && *n > 0)
+    }
+}
+
+impl Drop for HeldLockMark {
+    fn drop(&mut self) {
+        let mut held = HELD_LOCKS.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(i) = held.iter().position(|(t, _)| *t == self.thread) {
+            held[i].1 -= 1;
+            if held[i].1 == 0 {
+                held.swap_remove(i);
+            }
+        }
+    }
 }
 
 impl SessionStore {
@@ -1211,7 +1264,49 @@ impl SessionStore {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         let file = ainb_fleet_core::session_registry::lock_sessions_store_at(dir)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        Ok(SessionStoreGuard { _file: file })
+        Ok(SessionStoreGuard {
+            _file: file,
+            _held: HeldLockMark::enter(),
+        })
+    }
+
+    /// Take the lock once without blocking. `Ok(None)` means another
+    /// descriptor holds it; the caller retries on its own bounded schedule
+    /// (P6e: the resolver never waits on this lock without a deadline).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store directory can't be created or `flock`
+    /// fails for a reason other than contention.
+    pub fn try_lock() -> Result<Option<SessionStoreGuard>, std::io::Error> {
+        let path = Self::storage_path();
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let file = ainb_fleet_core::session_registry::try_lock_sessions_store_at(dir)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(file.map(|file| SessionStoreGuard {
+            _file: file,
+            _held: HeldLockMark::enter(),
+        }))
+    }
+
+    /// Fail at once when the current thread already holds the lock.
+    ///
+    /// Taking it again from the same thread would block forever (see
+    /// [`HeldLockMark`]). The resolver's entry points call this before they
+    /// touch the store, so nesting is an error, never a hang.
+    ///
+    /// # Errors
+    ///
+    /// When the current thread holds [`SessionStore::lock`].
+    pub fn ensure_lock_not_held() -> Result<(), std::io::Error> {
+        if HeldLockMark::held_by_current_thread() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "sessions.json lock is already held by this thread; \
+                 release it before reading or writing the store through the resolver",
+            ));
+        }
+        Ok(())
     }
 
     /// Locked read-modify-write: take the [`lock`](Self::lock), load the store
