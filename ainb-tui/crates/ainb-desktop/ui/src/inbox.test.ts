@@ -6,7 +6,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { InboxRowFrame_Serialize, InboxView_Serialize } from "../../../ainb-app/bindings/AppState";
-import { age, CLOSE_INBOX, inboxView, MARK_ALL_READ, OPEN_INBOX, unreadCount } from "./inbox.ts";
+import {
+  age,
+  CLOSE_INBOX,
+  inboxView,
+  MARK_ALL_READ,
+  OPEN_INBOX,
+  scrollIntents,
+  unreadCount,
+} from "./inbox.ts";
 
 const row = (n: number, read: number | null = null): InboxRowFrame_Serialize => ({
   id: `01J0INBOX00000000000000000${n}`,
@@ -112,4 +120,37 @@ test("the page opens and closes the reducer's inbox screen, the rows the termina
     { Command: ["inbox.back", null] },
     { Command: ["home.sessions", null] },
   ]);
+});
+
+test("the page draws from the reducer's scroll, the window the terminal draws", () => {
+  // `scroll` is an index into `entries`, framed so a mirrored surface draws
+  // the same window (`wire/inbox.rs`, `components/inbox.rs`).
+  const entries = [row(4), row(3), row(2), row(1)];
+  const at = (scroll: number) => inboxView(view({ entries, scroll }));
+  assert.deepEqual(
+    at(0).rows.map((entry) => entry.summary),
+    ["issue 4 opened [cut]", "issue 3 opened [cut]", "issue 2 opened [cut]", "issue 1 opened [cut]"],
+  );
+  assert.deepEqual(
+    at(2).rows.map((entry) => entry.summary),
+    ["issue 2 opened [cut]", "issue 1 opened [cut]"],
+    "the rows above the offset are the ones the terminal has scrolled past",
+  );
+  assert.equal(at(2).scrolled, true, "and the page says it starts part way");
+  assert.equal(at(0).scrolled, false);
+  // A scroll past the end (a read that shrank the list) still draws a row.
+  assert.equal(at(99).rows.length, 1);
+});
+
+test("the wheel asks the reducer for one command per row, bounded", () => {
+  // The reducer moves one row per command (`inbox.scroll_up`/`_down`), so a
+  // wheel of n rows is n commands, capped so one flick cannot flood the host.
+  assert.deepEqual(scrollIntents(2), [
+    { Command: ["inbox.scroll_down", null] },
+    { Command: ["inbox.scroll_down", null] },
+  ]);
+  assert.deepEqual(scrollIntents(-1), [{ Command: ["inbox.scroll_up", null] }]);
+  assert.deepEqual(scrollIntents(0), []);
+  assert.equal(scrollIntents(500).length, 10, "capped");
+  assert.equal(scrollIntents(-500).length, 10, "capped upward too");
 });
