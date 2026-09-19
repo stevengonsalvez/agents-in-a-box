@@ -287,6 +287,10 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "the host the joined read came from (`local` today), an identity, not an address",
     ),
     (
+        "UsageSummaryFrame.detail",
+        "the daemon's safe status detail on a partial or unavailable usage summary, scrubbed then cut to 1,024 bytes",
+    ),
+    (
         "AgentDef.source_path",
         "agent definition file under ~/.claude/agents",
     ),
@@ -799,10 +803,6 @@ const TYPE_ALLOW: &[(&str, &str)] = &[
     (
         "McpServerDefinition.env",
         "env var names with every value `<redacted>` in frame",
-    ),
-    (
-        "PluginsHostView.plugin_render_errors",
-        "plugin render failures keyed by screen id, scrubbed",
     ),
     (
         "RepositoryPreset.environment",

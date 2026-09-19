@@ -1,0 +1,16 @@
+# Direct SessionStore::{load,lock,mutate} calls outside the resolver
+# (ainb-app/src/cli/util.rs), locked by tests/session_store_call_sites.rs.
+# Every line left is a P6e-4 writer site that still takes the file lock
+# itself; P6e-4 moves each onto cli::util::mutate_session_store and this
+# list ends empty. Readers go through cli::util::load_session_store.
+# Regenerate: UPDATE_SESSION_STORE_CALL_SITES=1 cargo test -p ainb-app --test session_store_call_sites
+ainb-app/src/app/state.rs | SessionStore::load() | 1
+ainb-app/src/app/state.rs | SessionStore::lock() | 1
+ainb-app/src/app/state.rs | SessionStore::mutate(|store2| { | 1
+ainb-app/src/components/session_recovery.rs | SessionStore::mutate(|store| store.upsert(metadata)) | 1
+ainb-app/src/components/session_recovery.rs | SessionStore::mutate(|store| { | 1
+ainb-app/src/config/persist.rs | SessionStore::mutate(|store| { | 1
+ainb-app/src/interactive/session_manager.rs | SessionStore::load() | 1
+ainb-app/src/interactive/session_manager.rs | SessionStore::lock() | 1
+ainb-app/src/interactive/session_manager.rs | SessionStore::mutate(|store| store.upsert(metadata)) | 2
+ainb-app/src/interactive/session_manager.rs | SessionStore::mutate(|store| { | 2

@@ -3336,6 +3336,38 @@ mod tests {
         );
     }
 
+    /// On the desktop a row is attached whenever its terminal tab is open, and
+    /// the banner over that tab is where the question is answered, so the chip
+    /// must still land. The terminal's rule stands there: attaching shows the
+    /// pane full screen, where the question is already in front of the person.
+    #[test]
+    fn on_the_desktop_an_attached_session_keeps_its_chip() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let cwd = "/work/attached";
+        let mut state = state_with_session_at(cwd, Some("tmux_proj"));
+        state.host.surface = ainb_hangar_proto::connections::SurfaceKind::Desktop;
+        state.sessions.workspaces[0].sessions[0].is_attached = true;
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into()),
+        );
+
+        state.merge_attention(2_000);
+
+        let chips = &state.sessions.workspaces[0].sessions[0].live_attention;
+        assert_eq!(
+            chips.len(),
+            1,
+            "the question is on the row the window shows"
+        );
+        assert_eq!(chips[0].kind, AttentionKind::Ask);
+        assert_eq!(
+            state.fleet.attention_elsewhere, 0,
+            "and it is not reported as waiting elsewhere"
+        );
+    }
+
     #[test]
     fn an_attached_session_claims_its_cwd_so_it_is_not_reported_elsewhere() {
         use crate::fleet::attention::{AttentionKind, SessionAttention};
@@ -3587,6 +3619,134 @@ mod tests {
             state.shell.pending_async_action,
             Some(AsyncAction::CleanupOrphaned),
             "an already-queued action must not be overwritten by the refresh hand-off"
+        );
+    }
+
+    /// A scan discovers rows; the host sets the rest on them (the chips, the
+    /// errors, the provider id, the attach mark, the logs and preview). A scan
+    /// that found a change used to replace the rows wholesale, so a frame
+    /// between it and the next attention merge showed a waiting row with no
+    /// question on it, and the desktop banner unmounted under a click.
+    #[test]
+    fn a_scan_that_changed_the_list_keeps_what_the_host_set_on_a_row() {
+        use crate::app::state::WorkspaceLoadResult;
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        use crate::models::{Session, Workspace};
+
+        let mut state = AppState::new();
+        let mut held = Workspace::new("api".to_string(), "/repo/api".into());
+        let mut row = Session::new("feat".to_string(), "/repo/api/wt".to_string());
+        let id = row.id;
+        row.live_attention = vec![SessionAttention::daemon(
+            AttentionKind::Ask,
+            1_000,
+            "att-7".into(),
+        )];
+        row.errors = vec![SessionAttention::daemon(
+            AttentionKind::Err,
+            900,
+            "att-6".into(),
+        )];
+        row.is_attached = true;
+        row.provider_session_id = Some("prov-1".to_string());
+        row.recent_logs = Some("agent tick 1".to_string());
+        row.preview_content = Some("agent tick 1".to_string());
+        held.add_session(row);
+        state.sessions.workspaces = vec![held];
+        state.host.workspaces_applied = true;
+
+        // The scan found a change: the same row, at a scan's defaults, and a
+        // new one beside it.
+        let mut found = Workspace::new("api".to_string(), "/repo/api".into());
+        let mut same = Session::new("feat".to_string(), "/repo/api/wt".to_string());
+        same.id = id;
+        found.add_session(same);
+        found.add_session(Session::new(
+            "spike".to_string(),
+            "/repo/api/wt2".to_string(),
+        ));
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(vec![found])).expect("send load result");
+
+        assert!(
+            state.check_workspace_loading_complete(),
+            "the scan was applied"
+        );
+        assert_eq!(
+            state.sessions.workspaces[0].sessions.len(),
+            2,
+            "with the new row"
+        );
+        let row = state.find_session(id).expect("the held row is still listed");
+        assert_eq!(
+            row.live_attention.len(),
+            1,
+            "the question is still on the row"
+        );
+        assert_eq!(row.errors.len(), 1);
+        assert!(row.is_attached);
+        assert_eq!(
+            row.provider_session_id.as_deref(),
+            Some("prov-1"),
+            "a scan that found no id falls back to the held one"
+        );
+        assert_eq!(row.recent_logs.as_deref(), Some("agent tick 1"));
+        assert_eq!(row.preview_content.as_deref(), Some("agent tick 1"));
+        let new_row = &state.sessions.workspaces[0].sessions[1];
+        assert!(
+            new_row.live_attention.is_empty(),
+            "a row the host never saw stays bare"
+        );
+    }
+
+    /// The provider id is the scan's to learn: `to_session_model` is its only
+    /// writer, so a scan that found one must land it, and a held value is
+    /// only the fallback for a scan that found none. Carrying the held value
+    /// over the scan's froze it, and an Approve chip on a row whose thread id
+    /// arrived later never got its broker route.
+    #[test]
+    fn a_scan_that_learned_a_provider_id_lands_it_over_the_held_one() {
+        use crate::app::state::WorkspaceLoadResult;
+        use crate::models::{Session, Workspace};
+
+        let mut state = AppState::new();
+        let mut held = Workspace::new("api".to_string(), "/repo/api".into());
+        let mut without = Session::new("feat".to_string(), "/repo/api/wt".to_string());
+        let without_id = without.id;
+        without.provider_session_id = None;
+        let mut stale = Session::new("spike".to_string(), "/repo/api/wt2".to_string());
+        let stale_id = stale.id;
+        stale.provider_session_id = Some("prov-old".to_string());
+        held.add_session(without);
+        held.add_session(stale);
+        state.sessions.workspaces = vec![held];
+        state.host.workspaces_applied = true;
+
+        let mut found = Workspace::new("api".to_string(), "/repo/api".into());
+        let mut learned = Session::new("feat".to_string(), "/repo/api/wt".to_string());
+        learned.id = without_id;
+        learned.provider_session_id = Some("prov-new".to_string());
+        let mut relearned = Session::new("spike".to_string(), "/repo/api/wt2".to_string());
+        relearned.id = stale_id;
+        relearned.provider_session_id = Some("prov-newer".to_string());
+        found.add_session(learned);
+        found.add_session(relearned);
+        // A third row the scan lists without an id keeps the one it had.
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(vec![found])).expect("send load result");
+        assert!(state.check_workspace_loading_complete());
+
+        assert_eq!(
+            state
+                .find_session(without_id)
+                .and_then(|row| row.provider_session_id.as_deref()),
+            Some("prov-new"),
+            "an id the scan learned lands"
+        );
+        assert_eq!(
+            state.find_session(stale_id).and_then(|row| row.provider_session_id.as_deref()),
+            Some("prov-newer"),
+            "and a newer one replaces the held one"
         );
     }
 

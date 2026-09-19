@@ -105,6 +105,15 @@ impl From<DaemonError> for CliFailure {
                 exit_code: EXIT_OTHER,
                 next: None,
             },
+            // The daemon is serving and cannot serve this build: the message
+            // names which binary to move, and no retry changes it.
+            DaemonError::Incompatible { .. } => Self {
+                kind: "daemon",
+                message,
+                retryable: false,
+                exit_code: EXIT_DAEMON,
+                next: None,
+            },
             DaemonError::Rpc { code, .. } => {
                 if code == ainb_hangar_proto::auth::UNAUTHORIZED {
                     Self {

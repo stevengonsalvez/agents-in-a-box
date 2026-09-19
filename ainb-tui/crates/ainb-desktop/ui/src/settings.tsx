@@ -17,6 +17,7 @@ import {
   toggleNode,
   type SettingsRow,
 } from "./settings.ts";
+import { sidecarDaemonLine, type SidecarState } from "./sidecar.ts";
 import type { RendererIntent } from "./tabs.ts";
 
 interface Props {
@@ -26,6 +27,8 @@ interface Props {
   revision: number;
   /** The hangar frame the daemons panel draws. */
   hangar: HangarView_Serialize | undefined;
+  /** The sidecar's state: the daemon this window is on, once connected. */
+  sidecar: SidecarState;
   /** The Setup panel's host read, `null` until it answers. */
   setup: SetupView | null;
   /** Send intents in order, each applied before the next. */
@@ -152,6 +155,7 @@ export function SettingsPage(props: Props) {
         <Show when={daemons().length === 0}>
           <p class="empty">{collected() === null ? "reading daemon health" : "no daemons found"}</p>
         </Show>
+        <Show when={sidecarDaemonLine(props.sidecar)}>{(line) => <p class="sidecar-daemon">{line()}</p>}</Show>
         <ul class="hook-health">
           <For each={hooks()}>{(line) => <li>{line}</li>}</For>
         </ul>

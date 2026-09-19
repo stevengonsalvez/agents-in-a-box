@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { click, setPaletteQuery } from "../support.js";
 import { env, paneText, run, seed, seeded } from "../world.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -55,7 +56,7 @@ describe("the desktop shell", () => {
     const first = sessions.find((session) => session.id === firstId);
     assert.ok(first, `the sidebar's first row ${firstId} is one of the seeded sessions`);
     attached = first;
-    await firstRow.click();
+    await click(`.session-row[data-session="${firstId}"]`);
     const tab = await $(".terminal[data-tab]");
     await tab.waitForExist({ timeout: 60_000 });
     const key = await tab.getAttribute("data-tab");
@@ -75,7 +76,7 @@ describe("the desktop shell", () => {
     // process on a real tmux server and echoes what it reads, so the pane's
     // own capture is the proof that the keys crossed the whole path.
     const typed = `e2e-${Date.now()}`;
-    await $(`.terminal[data-tab="${key}"] .xterm`).click();
+    await click(`.terminal[data-tab="${key}"] .xterm`);
     // The characters go in through the webview's own input event, and Enter
     // through the driver. WebKitGTK's driver synthesises a character keydown
     // whose keyCode is the character code, which the terminal reads as a
@@ -99,12 +100,11 @@ describe("the desktop shell", () => {
     // command, whose effect is the session list's own selection moving, and a
     // live session, whose effect is a tab.
     const selected = async () => await $(".session-row.selected").getAttribute("data-session");
-    await (await $$(".session-row"))[0].click();
+    await click(".session-row");
     const wasSelected = await selected();
 
     await browser.keys([...MOD, "k"]);
-    await $(".palette-query").waitForExist({ timeout: 30_000 });
-    await browser.keys("Select next session");
+    await setPaletteQuery("Select next session");
     await browser.waitUntil(async () => (await $$(".palette-row")).length > 0, {
       timeout: 15_000,
       timeoutMsg: "the palette offered no row for the command",
@@ -125,12 +125,7 @@ describe("the desktop shell", () => {
     assert.ok(other, "the world seeded a second session");
     const tabsNow = (await $$(".tab")).length;
     await browser.keys([...MOD, "k"]);
-    await $(".palette-query").waitForExist({ timeout: 30_000 });
-    await browser.execute((text) => {
-      const query = document.querySelector(".palette-query");
-      query.value = text;
-      query.dispatchEvent(new Event("input", { bubbles: true }));
-    }, other.branch);
+    await setPaletteQuery(other.branch);
     await browser.waitUntil(
       async () =>
         (await $$(".palette-row")).length > 0 &&

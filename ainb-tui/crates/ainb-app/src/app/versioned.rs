@@ -96,7 +96,7 @@ impl<T> DerefMut for Versioned<T> {
     }
 }
 
-/// The 20 sections, in the order [`SectionVersions`] indexes them.
+/// The 21 sections, in the order [`SectionVersions`] indexes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SectionId {
     Sessions,
@@ -120,10 +120,13 @@ pub enum SectionId {
     Shell,
     /// Section 20: agent status from one joined daemon read (#1015).
     AgentStatus,
+    /// Section 21: usage, a fold of the daemon's `fleet/usage_summary`
+    /// (D3p-e), appended so no section is renumbered.
+    Usage,
 }
 
 impl SectionId {
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 21;
 
     pub const ALL: [Self; Self::COUNT] = [
         Self::Sessions,
@@ -146,6 +149,7 @@ impl SectionId {
         Self::Onboarding,
         Self::Shell,
         Self::AgentStatus,
+        Self::Usage,
     ];
 
     pub const fn index(self) -> usize {

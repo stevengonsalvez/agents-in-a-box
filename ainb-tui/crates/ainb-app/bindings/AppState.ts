@@ -3772,7 +3772,7 @@ export type PluginsHostView = PluginsHostView_Serialize;
 export type PluginsHostView_Serialize = {
 	plugin_captures_text: { [key in string]: boolean },
 	plugin_presence: { [key in string]: PluginPresence },
-	plugin_render_errors: { [key in string]: string },
+	plugin_render_errors: { [key in string]: RenderErrorFrame },
 };
 
 /**
@@ -3842,6 +3842,15 @@ export type RecoveryViewMode =
 
 export type RecoveryView_Serialize = {
 	session_recovery_state: SessionRecoveryState_Serialize,
+};
+
+/**
+ *  One plugin's render error as a frame carries it: scrubbed, then cut to
+ *  [`RENDER_ERROR_MAX_CHARS`], with `cut` saying whether it was.
+ */
+export type RenderErrorFrame = {
+	text: string,
+	cut: boolean,
 };
 
 /**
@@ -4125,6 +4134,7 @@ export type SectionBodies_Serialize = {
 	onboarding: OnboardingView_Serialize,
 	shell: ShellView_Serialize,
 	agent_status: AgentStatusView,
+	usage: UsageView,
 };
 
 /**
@@ -5232,6 +5242,23 @@ export type UnitRow_Serialize = {
 	declared_uri: string,
 };
 
+/**  Token counts and, when every call was priced, the cost. */
+export type UsageBucketFrame = {
+	input_tokens: number,
+	cache_creation_tokens: number,
+	cache_read_tokens: number,
+	output_tokens: number,
+	reasoning_tokens: number,
+	call_count: number,
+	session_count: number,
+	project_count: number,
+	/**
+	 *  `None` when a call in the bucket had no canonical rate: draw the
+	 *  tokens, never a zero cost.
+	 */
+	cost_usd: number | null,
+};
+
 /**
  *  How ainb FETCHES and caches usage data.
  * 
@@ -5296,6 +5323,19 @@ export type UsageConfig = {
 	model_aliases?: { [key in string]: string },
 };
 
+/**  One day. */
+export type UsageDayFrame = {
+	/**  `YYYY-MM-DD`, UTC. */
+	date: string,
+	bucket: UsageBucketFrame,
+};
+
+/**  One provider or model. */
+export type UsageNamedFrame = {
+	name: string,
+	bucket: UsageBucketFrame,
+};
+
 export type UsagePlan = {
 	id: UsagePlanId,
 	monthly_usd: number | null,
@@ -5307,6 +5347,61 @@ export type UsagePlan = {
 export type UsagePlanId = "claude-pro" | "claude-max" | "claude-max5x" | "cursor-pro" | "custom" | "none";
 
 export type UsagePlanProvider = "all" | "claude" | "codex" | "cursor" | "antigravity";
+
+/**  One project, with its upstream repository when the daemon resolved one. */
+export type UsageProjectFrame = {
+	name: string,
+	repo: string | null,
+	bucket: UsageBucketFrame,
+};
+
+/**  Whether the daemon's summary is complete, as the daemon says. */
+export type UsageState = 
+/**  Still building a summary: no totals yet, and none to draw as zero. */
+"scanning" | 
+/**  Complete for every configured source. */
+"ready" | 
+/**  Useful, with one or more sources not fully read. */
+"partial" | 
+/**  The daemon cannot provide a summary. */
+"unavailable";
+
+/**  One `fleet/usage_summary` reply, bounded. */
+export type UsageSummaryFrame = {
+	state: UsageState,
+	/**  `None` while scanning: never a synthesised zero. */
+	totals: UsageBucketFrame | null,
+	/**  Oldest first, at most [`USAGE_MAX_DAILY`]. */
+	daily: UsageDayFrame[],
+	/**  Days the frame did not carry. */
+	daily_cut: number,
+	providers: UsageNamedFrame[],
+	providers_cut: number,
+	models: UsageNamedFrame[],
+	models_cut: number,
+	projects: UsageProjectFrame[],
+	projects_cut: number,
+	/**
+	 *  The daemon's own word on a partial or unavailable summary, scrubbed and
+	 *  cut to [`USAGE_DETAIL_MAX_BYTES`].
+	 */
+	detail: string | null,
+};
+
+/**  Section 21 on the wire. */
+export type UsageView = {
+	/**
+	 *  Why there is no summary: the daemon does not serve `fleet.usage.read`,
+	 *  or nothing can be read. Scrubbed.
+	 */
+	absent: string | null,
+	/**
+	 *  Why the last read failed while the last summary is still drawn.
+	 *  Scrubbed.
+	 */
+	failure: string | null,
+	summary: UsageSummaryFrame | null,
+};
 
 /**  Validation result for a git directory path */
 export type ValidatedPath = ValidatedPath_Serialize;

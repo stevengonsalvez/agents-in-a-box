@@ -1,0 +1,8 @@
+# What both renderers must show for the plugin_connecting fixture (D3p-f): a
+# registered plugin whose first frame has not landed. Checked against the
+# ratatui snapshot (tests/parity.rs) and the webview's render of the same frame
+# (ainb-desktop/ui/src/parity.test.ts).
+#
+# Facts are renderer-neutral: what is shown, not how it is spaced or framed.
+Abtop — connecting…
+waiting for the plugin's first frame

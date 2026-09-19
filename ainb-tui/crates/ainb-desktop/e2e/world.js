@@ -10,8 +10,9 @@
 // is stopped through its own verb.
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { OWNER_FILE } from "./cleanup.js";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -95,6 +96,40 @@ export function paneText(tmux) {
 }
 
 /**
+ * Fail the run when the webview the app embeds is older than the webview's
+ * source.
+ *
+ * `cargo build` bakes whatever is in `ui/dist` into the binary and never
+ * rebuilds it, so a checkout that moved on without `npm run build` launches a
+ * window from an older bundle: every spec then tests a webview nobody wrote,
+ * and the failures read as regressions in the app. Run `npm run build` in
+ * `ui/` to clear this.
+ */
+function freshBundle() {
+  const dist = resolve(HERE, "../ui/dist/index.html");
+  if (!existsSync(dist)) throw new Error(`the webview is not built: ${dist}`);
+  const built = statSync(dist).mtimeMs;
+  const src = resolve(HERE, "../ui/src");
+  // The sources, and the files outside them that change what a build
+  // produces: the page the bundle is injected into, the manifest, the
+  // lockfile a dependency bump moves, and the build's own config.
+  const inputs = readdirSync(src, { recursive: true })
+    .map((entry) => join(src, entry))
+    .concat(
+      ["index.html", "package.json", "package-lock.json", "vite.config.ts"].map((name) =>
+        resolve(HERE, "../ui", name),
+      ),
+    )
+    .filter((path) => existsSync(path));
+  const newest = inputs.map((path) => statSync(path).mtimeMs).reduce((a, b) => Math.max(a, b), 0);
+  if (newest > built) {
+    throw new Error(
+      `the webview bundle is older than ui/src (${new Date(built).toISOString()} vs ${new Date(newest).toISOString()}): run npm run build in ui/`,
+    );
+  }
+}
+
+/**
  * Create the world and seed `sessions` of them. Called from `onPrepare`, so
  * every wdio worker, and the app the service launches, inherits this
  * environment: nothing outside the world is read or written.
@@ -107,8 +142,12 @@ export function up(sessions = 2) {
   ]) {
     if (!existsSync(path)) throw new Error(`${name} is not built: ${path}`);
   }
+  freshBundle();
 
   const root = mkdtempSync(join(tmpdir(), "ainb-e2e-"));
+  // The run that owns this world, so a later run's cleanup leaves it alone
+  // while this process lives (cleanup.js).
+  writeFileSync(join(root, OWNER_FILE), String(process.pid));
   const home = join(root, "home");
   const hangar = join(home, ".agents-in-a-box");
   const bin = join(root, "bin");

@@ -500,7 +500,12 @@ pub mod fake_daemon {
                     )
                     .await;
                 }
-                "fleet/roster_status" | "fleet/snapshot" | "fleet/status" => {
+                // `fleet/usage_summary` too: the usage reader's tests (D3p-e)
+                // share this fake rather than growing a second one.
+                "fleet/roster_status"
+                | "fleet/snapshot"
+                | "fleet/status"
+                | "fleet/usage_summary" => {
                     let index = {
                         let mut calls = fake.calls.lock().unwrap();
                         calls.push(method.clone());
