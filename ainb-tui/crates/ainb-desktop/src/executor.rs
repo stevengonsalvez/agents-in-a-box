@@ -114,6 +114,32 @@ impl Executor for DesktopExecutor {
                     )],
                 }
             }
+            Effect::InboxMarkAllRead => {
+                use ainb_hangar_proto::connections::SurfaceKind;
+                let tx = self.deferred_tx.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("ainb-desktop-inbox-mark-read".into())
+                    .spawn(move || {
+                        let outcome = ainb_app::fleet::inbox_write::mark_all_read_blocking(|| {
+                            ainb_app::fleet::bridge::daemon::surface_client(SurfaceKind::Desktop)
+                        });
+                        let _ = tx.send(reports::inbox_mark_all_read_finished(&outcome));
+                    });
+                match spawned {
+                    Ok(_) => Vec::new(),
+                    Err(error) => {
+                        let outcome = ainb_app::fleet::inbox_write::MarkAllReadOutcome {
+                            op_id: String::new(),
+                            ok: false,
+                            marked: 0,
+                            unread: 0,
+                            error: Some(format!("the worker did not start: {error}")),
+                            after: None,
+                        };
+                        vec![reports::inbox_mark_all_read_finished(&outcome)]
+                    }
+                }
+            }
             Effect::Persist(store) => match ainb_app::config::persist::write(&store) {
                 Ok(()) => Vec::new(),
                 Err(error) => vec![reports::persist_failed(store.store_id(), &error)],

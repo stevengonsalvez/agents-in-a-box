@@ -11,6 +11,7 @@
 mod menu;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -266,6 +267,91 @@ fn dispatch(window: tauri::State<'_, Window>, intent: RendererIntent) -> Option<
     refusal
 }
 
+/// What the settings page's Setup panel shows: the catalog's dependencies as
+/// detected now, and the two files (#1175). A host read, never a frame, off
+/// the main thread because detection probes binaries.
+#[tauri::command]
+async fn setup_status() -> ainb_desktop::setup::SetupView {
+    tauri::async_runtime::spawn_blocking(ainb_desktop::setup::status)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "setup status did not run");
+            ainb_desktop::setup::SetupView {
+                dependencies: Vec::new(),
+                tmux_conf_present: false,
+                otel: ainb_desktop::setup::OtelView {
+                    env_file_present: false,
+                    settings_env_present: false,
+                    alloy_installed: false,
+                    alloy_running: false,
+                },
+            }
+        })
+}
+
+/// Whether a setup confirmation dialog is on screen.
+static SETUP_DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// Ask the shell to run one of the onboarding writes that the window may
+/// not run itself (#1175). The write runs only after the person answers a
+/// native dialog the shell owns; a script in the page can call this command
+/// and can do nothing more, because the dialog is the OS's. The outcome comes
+/// back as a toast, and `true` says the write ran. Async, so the blocking
+/// dialog and the install never sit on the main thread.
+#[tauri::command]
+async fn setup_write(app: tauri::AppHandle, write: ainb_desktop::setup::SetupWrite) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    // The variant only: the telemetry write carries a token, and this log is
+    // what `show_log` reads back into the window.
+    let kind = write.kind();
+    if let Err(message) = write.validate() {
+        tracing::info!(write = kind, "setup write refused before the dialog");
+        if let Err(error) = app.emit("toast", &message) {
+            tracing::warn!(%error, "setup refusal not delivered to the webview");
+        }
+        return false;
+    }
+    // One dialog at a time: a script that calls this in a loop must not
+    // stack native dialogs on the person.
+    if SETUP_DIALOG_OPEN
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        tracing::info!(write = kind, "setup write refused: a dialog is open");
+        if let Err(error) = app.emit("toast", "a setup dialog is already open") {
+            tracing::warn!(%error, "setup refusal not delivered to the webview");
+        }
+        return false;
+    }
+    let confirmation = write.confirmation();
+    let confirmed = app
+        .dialog()
+        .message(confirmation.body)
+        .title(confirmation.title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Continue".to_string(),
+            "Cancel".to_string(),
+        ))
+        .blocking_show();
+    SETUP_DIALOG_OPEN.store(false, Ordering::Release);
+    tracing::info!(write = kind, confirmed, "setup write");
+    if !confirmed {
+        return false;
+    }
+    let outcome = tauri::async_runtime::spawn_blocking(move || write.run())
+        .await
+        .unwrap_or_else(|error| Err(format!("the write did not run: {error}")));
+    let (ran, message) = match outcome {
+        Ok(message) => (true, message),
+        Err(message) => (false, message),
+    };
+    if let Err(error) = app.emit("toast", &message) {
+        tracing::warn!(%error, "setup outcome not delivered to the webview");
+    }
+    ran
+}
+
 /// Where the daemon connection stands, for the banner on first paint.
 #[tauri::command]
 fn sidecar_state(window: tauri::State<'_, Window>) -> SidecarView {
@@ -368,7 +454,8 @@ compile_error!("the wdio WebDriver must never be built into a release binary");
 compile_error!("a release build must carry `bundled`, or the window loads build.devUrl");
 
 fn main() {
-    let builder = tauri::Builder::default();
+    // The native confirmation in front of the onboarding writes (#1175).
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
     // Only a `wdio` build carries the embedded WebDriver the journey drives.
     #[cfg(feature = "wdio")]
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
@@ -398,7 +485,10 @@ fn main() {
                 // Nothing is framed until the webview subscribes.
                 Subscription::none(),
                 frames.clone(),
-            );
+            )
+            // `subscribe` is a synchronous command on the main thread, so the
+            // inbox reader it starts needs the app runtime handed to it.
+            .on_runtime(tauri::async_runtime::handle().inner().clone());
             let daemon_bin = daemon_bin()?;
             let sidecar_config = SidecarConfig::new(hangar_home, daemon_bin);
             // Both spawn onto the app's tokio runtime, so they start inside it.
@@ -490,6 +580,8 @@ fn main() {
             subscribe,
             dispatch,
             sidecar_state,
+            setup_status,
+            setup_write,
             show_log,
             retry_sidecar,
             palette,

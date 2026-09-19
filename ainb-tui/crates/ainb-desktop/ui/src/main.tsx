@@ -4,7 +4,16 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
 import { createFrameStore } from "./store.ts";
-import { shellAgentStatus, shellFleet, shellGitView, shellSessions, SUBSCRIBED } from "./subscription.ts";
+import {
+  configRevision,
+  shellAgentStatus,
+  shellConfig,
+  shellFleet,
+  shellGitView,
+  shellHangar,
+  shellSessions,
+  SUBSCRIBED,
+} from "./subscription.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { AcpCard } from "./acp.tsx";
@@ -17,6 +26,9 @@ import { Review } from "./review.tsx";
 import { boardColumns } from "./board.ts";
 import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
+import { SettingsPage } from "./settings.tsx";
+import { CLOSE_SETTINGS, OPEN_SETTINGS } from "./settings.ts";
+import type { SetupView, SetupWrite } from "../../bindings/Desktop.ts";
 import {
   accelerator,
   openRowIntent,
@@ -95,9 +107,19 @@ function Shell() {
   // The ACP session whose transcript card holds the work area, if any. It has
   // no tmux pane, so the card stands where its terminal would.
   const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
-  /** Whether `which` holds the work area: the transcript card takes it first. */
+  /**
+   * Whether `which` holds the work area: the transcript card takes it first,
+   * and the settings page (the reducer on its Config screen) takes it over all
+   * three.
+   */
   const showing = (which: "board" | "review" | "terminal") =>
-    transcriptKey() === null && pane() === which;
+    transcriptKey() === null && !settings() && pane() === which;
+  // The settings page: the config section as a form, the daemons panel and
+  // the Setup panel (D3d). Whether it is open is the reducer's: the page shows
+  // while `shell.current_screen` is the Config screen. Opening walks the
+  // reducer there, where the form's row edits are in context; closing walks
+  // it back to the session list the sidebar is. The window keeps no copy.
+  const [setup, setSetup] = createSignal<SetupView | null>(null);
   const focusers = new Map<string, () => void>();
   const tabKeys = createMemo(
     () => tabs().map((tab) => tab.key),
@@ -111,6 +133,7 @@ function Shell() {
     if (key !== null) {
       setPane("terminal");
       closeTranscript();
+      closeSettings();
     }
     if (key !== null) requestAnimationFrame(() => focusers.get(key)?.());
   };
@@ -159,6 +182,21 @@ function Shell() {
   };
   /** Select a session-list row and attach it, so the reducer marks it attached. */
   const openRow = (row: RowId) => dispatch(openRowIntent(row));
+  const refreshSetup = () => void invoke<SetupView>("setup_status").then(setSetup);
+  const openSettings = () => {
+    closeTranscript();
+    void run(OPEN_SETTINGS);
+    refreshSetup();
+  };
+  const closeSettings = () => {
+    if (!settings()) return;
+    void run(CLOSE_SETTINGS);
+  };
+  /** The shell confirms in its own dialog, runs the write, and toasts the outcome. */
+  const setupWrite = (write: SetupWrite) =>
+    void invoke<boolean>("setup_write", { write }).then((ran) => {
+      if (ran) refreshSetup();
+    });
 
   // The palette is mounted only while it is open: each opening lists the
   // commands afresh, with the host's answer for which of them run now.
@@ -292,6 +330,10 @@ function Shell() {
   const loading = createMemo(() => ROOT_SELECTORS.workspacesLoading(store, host()));
   const elsewhere = createMemo(() => ROOT_SELECTORS.attentionElsewhere(store, host()));
   const shell = () => (host() ? store.section(host()!, "shell") : undefined);
+  const config = () => shellConfig(store, host());
+  const hangar = () => shellHangar(store, host());
+  /** The reducer is on its Config screen, which is the settings page. */
+  const settings = createMemo(() => shell()?.current_screen === "config");
   const ask = () => fleet()?.ask_state;
   const question = createMemo(() => questionFor(sessions()));
 
@@ -369,8 +411,13 @@ function Shell() {
             </span>
           </Show>
         </span>
-        {/* ponytail: the settings page is D3; the entry is drawn and inert until then. */}
-        <button type="button" class="settings" disabled title="Settings">
+        <button
+          type="button"
+          class="settings"
+          title="Settings"
+          aria-pressed={settings()}
+          onClick={() => (settings() ? closeSettings() : openSettings())}
+        >
           ⚙
         </button>
       </header>
@@ -504,6 +551,21 @@ function Shell() {
                 }}
               />
             )}
+          </Show>
+          <Show when={settings()}>
+            <SettingsPage
+              config={config()}
+              revision={configRevision(store, host())}
+              hangar={hangar()}
+              setup={setup()}
+              run={(intents) => void run(intents)}
+              onSetupWrite={setupWrite}
+              onRefreshSetup={refreshSetup}
+              onClose={() => {
+                closeSettings();
+                setPane("board");
+              }}
+            />
           </Show>
           <Show when={showing("review")}>
             <Review gitView={gitView()} stale={gitViewStale()} onChoose={dispatch} />
