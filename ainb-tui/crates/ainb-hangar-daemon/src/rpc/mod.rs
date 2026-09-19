@@ -2055,16 +2055,24 @@ fn message_wire(
 /// Project one transcript row onto the wire. A payload that is not valid JSON
 /// is carried as a string rather than dropped: the ledger's `raw_payload` is
 /// exactly what the provider sent.
+///
+/// The payload is scrubbed here, the one place every chunk leaves the daemon
+/// by (the read and both pushes), so no client has to scrub what it renders
+/// (#1199). Every string value is scrubbed; object keys are the provider's
+/// structure and stay. The ledger itself keeps the stored bytes, which
+/// `raw_blake3` and the prune export depend on.
 fn transcript_chunk_wire(
     row: &ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRow,
 ) -> ainb_hangar_proto::fleet::FleetTranscriptChunk {
+    let mut payload = serde_json::from_str(&row.raw_payload)
+        .unwrap_or_else(|_| serde_json::Value::String(row.raw_payload.clone()));
+    ainb_hangar_core::redact::scrub_json(&mut payload);
     ainb_hangar_proto::fleet::FleetTranscriptChunk {
         ingest_order: row.ingest_order,
         event_id: row.event_id.clone(),
         session_key: row.session_key.clone().unwrap_or_default(),
         event_type: row.event_type.clone(),
-        payload: serde_json::from_str(&row.raw_payload)
-            .unwrap_or_else(|_| serde_json::Value::String(row.raw_payload.clone())),
+        payload,
         observed_at: row.observed_at,
     }
 }
