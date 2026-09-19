@@ -4451,6 +4451,9 @@ impl AppState {
         // P6e: a process that could not reach a ready daemon keeps its
         // sessions on the file and says so, once; it retries in the
         // background and says so again, once, when it is back on the daemon.
+        // A long-lived surface: the resolver's notices go to the log and to
+        // the notification below, never to raw stderr under the TUI.
+        crate::cli::util::mark_long_lived_surface();
         crate::cli::util::watch_degraded_session_source().await;
         match crate::cli::util::session_source_notice().await {
             Some(notice @ crate::cli::util::SessionSourceNotice::Degraded) => {
