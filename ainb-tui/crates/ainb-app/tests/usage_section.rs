@@ -311,21 +311,20 @@ fn an_absent_reason_is_cut() {
 
 /// A project's key is the producer's aggregation key, and for a provider that
 /// keys by working directory it is that path with its separators dashed
-/// (`-home-<user>-src-app`). The frame carries a label, never the operator's
-/// home: this host's home is stripped, another user's home prefix is dropped,
-/// and a slash path keeps only its leaf.
+/// (`-home-<user>-src-app`, `-Volumes-Work-<user>-src-app`). Every key frames
+/// as its leaf segment, split on `/`, `\\` and `-`, so no root, user or
+/// parent directory crosses whatever the root is (the #1260 review's call).
 #[test]
-fn a_project_key_shaped_like_a_path_frames_without_the_home() {
+fn every_project_key_frames_as_its_leaf_segment() {
     let home = dirs::home_dir().expect("a home");
     let dashed_home = home.to_string_lossy().replace('/', "-");
     let mut reply = ready();
     let keys = [
-        format!("{dashed_home}-src-agents-in-a-box"),
-        format!("{}-src-app", dashed_home.trim_start_matches('-')),
-        "-Users-sample-user-work-api".to_string(),
-        "-home-other-code-web".to_string(),
+        format!("{dashed_home}-src-api"),
+        "-Volumes-Work-alice-src-web".to_string(),
+        "-Users-sample-user-work-cli".to_string(),
         format!("{}/src/tool", home.display()),
-        "agents-in-a-box".to_string(),
+        r"C:\Users\bob\code\site".to_string(),
     ];
     reply.projects = keys
         .iter()
@@ -344,22 +343,59 @@ fn a_project_key_shaped_like_a_path_frames_without_the_home() {
         .iter()
         .map(|row| row["name"].as_str().expect("a name"))
         .collect();
-    assert_eq!(
-        names,
-        [
-            "src-agents-in-a-box",
-            "src-app",
-            "user-work-api",
-            "code-web",
-            "tool",
-            "agents-in-a-box",
-        ]
-    );
-    let user = home.file_name().expect("a user").to_string_lossy().to_string();
+    assert_eq!(names, ["api", "web", "cli", "tool", "site"]);
+    // Dashed, since the section's other rows name the `claude` provider.
+    let dashed_user = format!("-{}-", home.file_name().expect("a user").to_string_lossy());
     let text = serde_json::to_string(&body).expect("encodes");
-    assert!(!text.contains(&dashed_home), "a dashed home framed: {text}");
-    assert!(
-        !text.contains(&format!("-{user}-")),
-        "the user framed: {text}"
+    for leaked in [
+        dashed_home.as_str(),
+        "Volumes",
+        "alice",
+        "sample",
+        "bob",
+        dashed_user.as_str(),
+    ] {
+        assert!(!text.contains(leaked), "`{leaked}` framed: {text}");
+    }
+}
+
+/// Two keys that fold to one label are one row: their counts added, a cost
+/// only when both were priced, a repo only when both named the same one, in
+/// the place the first of them held.
+#[test]
+fn keys_that_fold_to_one_label_merge_into_one_row() {
+    let mut reply = ready();
+    let row =
+        |key: &str, repo: Option<&str>, input: u64, cost: Option<f64>| FleetUsageProjectBucket {
+            project: key.to_string(),
+            repo: repo.map(str::to_string),
+            bucket: bucket(input, cost),
+        };
+    reply.projects = vec![
+        row("-home-a-src-app", Some("o/app"), 10, Some(1.0)),
+        row("-home-b-lib", None, 5, Some(0.5)),
+        row("-Volumes-x-app", Some("o/app"), 20, Some(2.0)),
+        row("-home-c-lib", Some("o/lib"), 7, None),
+    ];
+    let mut state = AppState::new();
+    state.apply_usage_read(reply, 1);
+    let body = framed(&state);
+    let projects = body["summary"]["projects"].as_array().expect("projects");
+    assert_eq!(projects.len(), 2, "{body}");
+    assert_eq!(projects[0]["name"], "app");
+    assert_eq!(projects[0]["bucket"]["input_tokens"], 30);
+    assert_eq!(projects[0]["bucket"]["call_count"], 12);
+    assert_eq!(
+        projects[0]["bucket"]["cost_usd"], 3.0,
+        "both priced: the sum"
     );
+    assert_eq!(projects[0]["repo"], "o/app", "the same repo: kept");
+    assert_eq!(projects[1]["name"], "lib");
+    assert_eq!(projects[1]["bucket"]["input_tokens"], 12);
+    assert!(
+        projects[1]["bucket"]["cost_usd"].is_null(),
+        "one unpriced: unpriced"
+    );
+    assert!(projects[1]["repo"].is_null(), "a repo on one only: none");
+    assert_eq!(body["summary"]["projects_cut"], 0, "a merge is not a cut");
 }
