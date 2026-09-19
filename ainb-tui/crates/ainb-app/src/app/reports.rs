@@ -54,6 +54,8 @@ pub mod ids {
     /// `{"store": String, "error": String}`, where `store` is a
     /// `Persist::store_id` such as `"config"`
     pub const PERSIST_FAILED: &str = "global.persist_failed";
+    /// `{"outcome": MarkAllReadOutcome}`
+    pub const INBOX_MARK_ALL_READ_FINISHED: &str = "global.inbox_mark_all_read_finished";
 
     /// Every report command id.
     pub const ALL: &[&str] = &[
@@ -76,6 +78,7 @@ pub mod ids {
         LOGIN_FINISHED,
         DAEMON_ACTION_FINISHED,
         PERSIST_FAILED,
+        INBOX_MARK_ALL_READ_FINISHED,
     ];
 }
 
@@ -392,6 +395,12 @@ pub fn daemon_action_finished(report: &DaemonActionReport) -> Intent {
     command(ids::DAEMON_ACTION_FINISHED, json!({ "report": report }))
 }
 
+/// Report how a "mark all read" sweep of the inbox ended.
+#[must_use]
+pub fn inbox_mark_all_read_finished(outcome: &crate::fleet::inbox_write::MarkAllReadOutcome) -> Intent {
+    command(ids::INBOX_MARK_ALL_READ_FINISHED, json!({ "outcome": outcome }))
+}
+
 /// Report that the host could not write the store `store_id` names
 /// ([`crate::app::effect::Persist::store_id`]).
 #[must_use]
@@ -527,6 +536,12 @@ struct PersistFailedArgs {
     error: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InboxMarkArgs {
+    outcome: crate::fleet::inbox_write::MarkAllReadOutcome,
+}
+
 fn parse<T: for<'de> Deserialize<'de>>(args: &Args) -> Option<T> {
     serde_json::from_value(args.clone()).ok()
 }
@@ -628,6 +643,11 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
             parse::<PersistFailedArgs>(args).map(|args| AppEvent::PersistFailed {
                 store: args.store,
                 error: args.error,
+            })
+        }
+        AppEvent::InboxMarkAllReadFinished { .. } => {
+            parse::<InboxMarkArgs>(args).map(|args| AppEvent::InboxMarkAllReadFinished {
+                outcome: args.outcome,
             })
         }
         _ => return None,
