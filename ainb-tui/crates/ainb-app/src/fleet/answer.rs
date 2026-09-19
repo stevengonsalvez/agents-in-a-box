@@ -343,29 +343,35 @@ impl AskState {
         };
     }
 
-    /// Put the cursor on the option labelled `label`, for a surface that names
-    /// its pick rather than counting cursor moves off a frame.
+    /// Put the cursor on option `index`, for a surface that names its pick
+    /// rather than counting cursor moves off a frame, with `label` as the
+    /// check that the option at that index is the one the person read.
     ///
-    /// Matched against the label as this state holds it first, and only when
-    /// nothing is exact, as a frame carries it (scrubbed), so a label read off
-    /// a frame resolves and an option whose literal label is another's
-    /// scrubbed form is never beaten by position. Within a pass the first
-    /// match wins: two options with one label are one answer, since the label
-    /// is the text sent. The cursor is left where it was when nothing matches,
-    /// so a send that follows cannot land on an option nobody named.
+    /// By index, because a frame's labels are scrubbed at serialization: two
+    /// options whose labels scrub alike cannot be told apart by label (#1248).
+    /// By label too, because a list that changed under the pick would otherwise
+    /// be answered by position: the option at `index` must read as `label`,
+    /// exactly or as a frame carries it (scrubbed). The cursor is left where
+    /// it was when either check fails, so a send that follows cannot land on
+    /// an option nobody named.
     ///
     /// # Errors
     ///
-    /// `label` is not one of `chip`'s options.
-    pub fn pick(&mut self, chip: &SessionAttention, label: &str) -> Result<(), String> {
-        let exact = chip.options.iter().position(|option| option.label == label);
-        let index = exact
-            .or_else(|| {
-                chip.options
-                    .iter()
-                    .position(|option| crate::fleet::bridge::redact::scrub(&option.label) == label)
-            })
+    /// `index` is past `chip`'s options, or the option there does not read as
+    /// `label`.
+    pub fn pick(
+        &mut self,
+        chip: &SessionAttention,
+        index: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        let option = chip
+            .options
+            .get(index)
             .ok_or_else(|| "that option is not offered here".to_string())?;
+        if option.label != label && crate::fleet::bridge::redact::scrub(&option.label) != label {
+            return Err("the options changed under the pick; read them again".to_string());
+        }
         self.cursor = index;
         self.focus = AskFocus::Options;
         Ok(())
@@ -591,21 +597,14 @@ mod tests {
     }
 
     #[test]
-    fn a_pick_by_label_lands_on_that_option_wherever_it_now_sits() {
+    fn a_pick_by_index_lands_on_that_option_when_its_label_reads_right() {
         let mut state = AskState::default();
-        let shown = ask_with_options(&["staging", "production", "local"]);
-        state.retarget(&shown);
-        // A frame lands between the click and the send and reorders the
-        // options: the label still names the same answer.
-        let reordered = ask_with_options(&["local", "production", "staging"]);
-        state.pick(&reordered, "staging").expect("offered");
+        let chip = ask_with_options(&["staging", "production", "local"]);
+        state.retarget(&chip);
+        state.pick(&chip, 2, "local").expect("offered");
         assert_eq!(state.cursor(), 2);
         assert_eq!(state.focus(), AskFocus::Options);
-        assert_eq!(
-            state.answer_text(&reordered).as_deref(),
-            Ok("staging"),
-            "the answer is the label that was picked"
-        );
+        assert_eq!(state.answer_text(&chip).as_deref(), Ok("local"));
     }
 
     #[test]
@@ -615,51 +614,51 @@ mod tests {
         state.retarget(&chip);
         state.move_cursor(&chip, 2);
         assert_eq!(state.focus(), AskFocus::FreeText);
-        state.pick(&chip, "production").expect("offered");
+        state.pick(&chip, 1, "production").expect("offered");
         assert_eq!(state.cursor(), 1);
         assert_eq!(state.focus(), AskFocus::Options);
     }
 
     #[test]
-    fn a_pick_names_the_label_as_a_frame_carries_it() {
+    fn two_options_that_scrub_alike_are_told_apart_by_index() {
+        // Both labels carry a secret shape and read the same on a frame: the
+        // index picks the second, which no label match could (#1248).
         let mut state = AskState::default();
-        let chip = ask_with_options(&[
-            "deploy",
-            "use sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789",
-        ]);
-        state.retarget(&chip);
-        let carried = crate::fleet::bridge::redact::scrub(&chip.options[1].label);
-        assert_ne!(carried, chip.options[1].label, "the frame scrubbed it");
-        state.pick(&chip, &carried).expect("the scrubbed label resolves");
-        assert_eq!(state.cursor(), 1);
-    }
-
-    #[test]
-    fn an_exact_label_beats_an_earlier_options_scrubbed_form() {
-        let mut state = AskState::default();
-        let secret = "use sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
-        let carried = crate::fleet::bridge::redact::scrub(secret);
-        // The second option's literal label is what the first one reads as on
-        // a frame. Naming it must pick the second, not the first by position.
-        let chip = ask_with_options(&[secret, carried.as_str()]);
-        state.retarget(&chip);
-        state.pick(&chip, &carried).expect("offered");
-        assert_eq!(state.cursor(), 1);
-    }
-
-    #[test]
-    fn a_label_nobody_offered_is_refused_and_moves_nothing() {
-        let mut state = AskState::default();
-        let chip = ask_with_options(&["staging", "production"]);
-        state.retarget(&chip);
-        state.move_cursor(&chip, 1);
-        let refused = state.pick(&chip, "prod").expect_err("not offered");
-        assert_eq!(refused, "that option is not offered here");
-        assert_eq!(state.cursor(), 1, "the cursor stays where it was");
-        assert!(
-            state.pick(&chip, "").is_err(),
-            "an empty label names nothing"
+        let first = "use sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
+        let second = "use sk-ant-api03-zyxwvutsrqponmlkjihgfedcba9876543210";
+        let chip = ask_with_options(&[first, second]);
+        let carried = crate::fleet::bridge::redact::scrub(second);
+        assert_eq!(
+            carried,
+            crate::fleet::bridge::redact::scrub(first),
+            "the frame shows them alike"
         );
+        state.retarget(&chip);
+        state
+            .pick(&chip, 1, &carried)
+            .expect("the scrubbed label reads right at index 1");
+        assert_eq!(state.cursor(), 1);
+        assert_eq!(state.answer_text(&chip).as_deref(), Ok(second));
+    }
+
+    #[test]
+    fn a_list_that_changed_under_the_pick_is_refused_and_moves_nothing() {
+        let mut state = AskState::default();
+        let shown = ask_with_options(&["staging", "production", "local"]);
+        state.retarget(&shown);
+        state.move_cursor(&shown, 1);
+        // A frame lands between the click and the send and reorders the
+        // options: position 2 is no longer what the person read there.
+        let reordered = ask_with_options(&["local", "production", "staging"]);
+        let refused = state.pick(&reordered, 2, "local").expect_err("changed");
+        assert_eq!(
+            refused,
+            "the options changed under the pick; read them again"
+        );
+        assert_eq!(state.cursor(), 1, "the cursor stays where it was");
+        let refused = state.pick(&reordered, 7, "local").expect_err("past the list");
+        assert_eq!(refused, "that option is not offered here");
+        assert_eq!(state.cursor(), 1);
     }
 
     #[test]

@@ -23,6 +23,7 @@ import {
   segments,
   selectFileIntent,
   wheelRows,
+  windowLines,
 } from "./review.ts";
 
 const row = (n: number, text: string): DiffRow_Serialize => ({
@@ -91,6 +92,7 @@ function section(
     commits: [],
     commits_cut: 0,
     selected_commit_index: 0,
+    selected_commit_cut: false,
     review: { files, files_cut: 0 },
     review_ui: {
       selected_file: selected,
@@ -188,6 +190,18 @@ test("the section says what the budget cost it, or says nothing at all", () => {
     sectionCut(shortened),
     "Over the frame's budget: 12 changed paths, 900 diff lines not sent",
   );
+});
+
+test("rows the files lost are said at the top, not only file by file", () => {
+  // The shape a real repository hits first: every file framed, each cut to the
+  // per-file cap, nothing else cut at all. Without the sum the section says
+  // nothing and a diff missing thousands of rows reads as a short one.
+  const cut = section([
+    file("a.rs", [hunk(1, [row(1, "one")])], { rows_cut: 3_600, hunks_cut: 2 }),
+    file("b.rs", [hunk(1, [row(1, "two")])], { rows_cut: 1_400 }),
+  ]);
+
+  assert.equal(sectionCut(cut), "Over the frame's budget: 5000 rows, 2 hunks not sent");
 });
 
 test("a section that has not arrived draws nothing rather than throwing", () => {
@@ -491,4 +505,30 @@ test("the highlighted hunk is the one the frame's cursor names, past a collapsed
     [false, "@@ -1 +1 @@"],
     [true, "@@ -20 +20 @@"],
   ], html);
+});
+
+test("the window draws the viewport's rows and an overscan on each side", () => {
+  const rows = Array.from({ length: 300 }, (_, n) => row(n, `line ${n}`));
+  const lines = bodyLines(section([file("a.rs", [hunk(1, rows)])]));
+  const drawn = windowLines(lines, 100, 40, 10);
+  const indexes = drawn.map((line) => line.index).filter((index) => index !== undefined);
+  assert.equal(indexes[0], 90, "the window opens an overscan above the reducer's offset");
+  assert.equal(indexes.at(-1), 149, "and closes an overscan below the last row on screen");
+  assert.ok(drawn.length < lines.length, "the window is smaller than the body");
+});
+
+test("a window that opens inside a hunk still carries its header", () => {
+  const rows = Array.from({ length: 200 }, (_, n) => row(n, `line ${n}`));
+  const lines = bodyLines(section([file("a.rs", [hunk(1, rows)])]));
+  const drawn = windowLines(lines, 100, 20, 0);
+  assert.equal(drawn[0]?.kind, "hunk", "the header of the hunk the window opens in is drawn");
+  assert.equal(drawn[1]?.index, 100, "and the first row is the reducer's own offset");
+});
+
+test("the window at the top of the body starts at the first line", () => {
+  const rows = Array.from({ length: 50 }, (_, n) => row(n, `line ${n}`));
+  const lines = bodyLines(section([file("a.rs", [hunk(1, rows)])]));
+  const drawn = windowLines(lines, 0, 10, 20);
+  assert.equal(drawn[0]?.index, 0, "there is nothing above row zero to overscan into");
+  assert.deepEqual(drawn[0]?.kind, "file", "and the file heading is that row");
 });

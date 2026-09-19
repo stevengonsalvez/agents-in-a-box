@@ -28,6 +28,14 @@ const NEW: &str = "00000000-0000-0000-0000-00000000f002";
 /// the margin that tells the two apart. A debug build answers in about 0.35 s
 /// from spawn on the dev box, so a false red needs the runner to be about
 /// four times slower than that.
+/// How long the four session RPCs may take, together, while the lock is
+/// held. The slowest is the reconcile: it can wait for the watcher's pass to
+/// give up the in-process pass lock (one flock bound), then wait out its own
+/// flock bound, so two bounds, plus one more of margin for a loaded runner.
+fn all_answer_within() -> Duration {
+    ainb_hangar_daemon::session_import::SESSIONS_FLOCK_BOUND * 3
+}
+
 fn opens_within() -> Duration {
     ainb_hangar_daemon::session_import::SESSIONS_FLOCK_BOUND * 3 / 4
 }
@@ -210,11 +218,10 @@ async fn no_session_rpc_touches_the_table_before_the_first_pass() {
     // The reconcile RPC is exempt from the gate (a committed pass is what
     // opens it). It runs its own pass, which fails on the held lock: an
     // internal error naming the lock, not the gate's not-ready refusal.
+    // Matched on the code alone: the gate's refusal is `STORE_UNAVAILABLE`,
+    // the pass's own failure is the internal error.
     let reconcile = match reconcile {
-        Err(DaemonError::Rpc {
-            code: -32603,
-            message,
-        }) if message.contains("lock") => Held::PassRanIntoTheLock,
+        Err(DaemonError::Rpc { code: -32603, .. }) => Held::PassRanIntoTheLock,
         other => Held::Served(format!("{other:?}")),
     };
     let held = [
@@ -239,7 +246,7 @@ async fn no_session_rpc_touches_the_table_before_the_first_pass() {
         assert_eq!(got, want, "{method} before the first pass");
     }
     assert!(
-        waited < Duration::from_secs(5),
+        waited < all_answer_within(),
         "the wait was not bounded: {waited:?}"
     );
 

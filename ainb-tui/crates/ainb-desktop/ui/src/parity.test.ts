@@ -18,7 +18,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 import solid from "vite-plugin-solid";
-import type { GitViewView_Serialize } from "../../../ainb-app/bindings/AppState";
+import type { GitViewView_Serialize, PluginsHostView_Serialize, UsageView } from "../../../ainb-app/bindings/AppState";
 
 const parityDir = new URL("../../../ainb-app/tests/parity/", import.meta.url);
 
@@ -89,6 +89,10 @@ async function drawReview(
   }
 }
 
+// The review tab draws a window of its body now, not the whole of it (#1221),
+// so a fixture bigger than one window would only ever show the facts inside
+// that window. `git_review` is three small files and fits in one, which is why
+// the list below can still name every fact the tab draws.
 test("the review tab shows every fact the fixture's list names", async () => {
   const html = await drawReview("git_review");
 
@@ -108,5 +112,113 @@ test("a renderer given one file fewer fails the facts", async () => {
     missing(lost, "git_review"),
     [],
     "a render missing a whole file still showed every expected fact, so the list proves nothing",
+  );
+});
+
+/**
+ * Server-render the plugin placeholder for `screen` over `fixture`'s committed
+ * plugins_host frame (D3p-f), with `change` applied to that frame first.
+ */
+async function drawPlaceholder(
+  fixture: string,
+  screen: string,
+  change: (pluginsHost: PluginsHostView_Serialize) => void = () => {},
+): Promise<string> {
+  const server = await createServer({
+    configFile: false,
+    root: fileURLToPath(new URL("..", import.meta.url)),
+    plugins: [solid({ ssr: true })],
+    server: { middlewareMode: true, hmr: false },
+    appType: "custom",
+    ssr: { noExternal: ["solid-js"] },
+    logLevel: "silent",
+  });
+  try {
+    const { PluginPlaceholder } = await server.ssrLoadModule("/src/plugin_placeholder.tsx");
+    const { renderToString } = await server.ssrLoadModule("solid-js/web");
+    const pluginsHost = framed(fixture, "plugins_host") as PluginsHostView_Serialize;
+    change(pluginsHost);
+    return renderToString(() => PluginPlaceholder({ screen, pluginsHost }));
+  } finally {
+    await server.close();
+  }
+}
+
+test("the plugin placeholder shows every fact the plugins_host list names", async () => {
+  const html = await drawPlaceholder("plugins_host", "witr");
+
+  assert.ok(facts("plugins_host").length > 0, "the facts list has facts in it");
+  assert.deepEqual(missing(html, "plugins_host"), [], text(html));
+});
+
+test("a placeholder given no render error fails the plugins_host facts", async () => {
+  const lost = await drawPlaceholder("plugins_host", "witr", (pluginsHost) => {
+    delete pluginsHost.plugin_render_errors.witr;
+  });
+
+  assert.notDeepEqual(
+    missing(lost, "plugins_host"),
+    [],
+    "a render without the recorded error still showed every expected fact, so the list proves nothing",
+  );
+});
+
+for (const [fixture, screen] of [
+  ["plugin_not_registered", "learnings"],
+  ["plugin_connecting", "abtop"],
+] as const) {
+  test(`the plugin placeholder shows every fact the ${fixture} list names`, async () => {
+    const html = await drawPlaceholder(fixture, screen);
+
+    assert.ok(facts(fixture).length > 0, "the facts list has facts in it");
+    assert.deepEqual(missing(html, fixture), [], text(html));
+  });
+}
+
+/**
+ * Server-render the stats tab over `fixture`'s committed usage frame, with
+ * `change` applied to that frame first.
+ *
+ * `stats` is a DOM-half fixture only: the terminal's stats is burndown's
+ * plugin paint on `analytics`, and a second built-in beside it would be the
+ * drift the section set stops (spec, D3-prime parity amendment).
+ */
+async function drawStats(fixture: string, change: (usage: UsageView) => void = () => {}): Promise<string> {
+  const server = await createServer({
+    configFile: false,
+    root: fileURLToPath(new URL("..", import.meta.url)),
+    plugins: [solid({ ssr: true })],
+    server: { middlewareMode: true, hmr: false },
+    appType: "custom",
+    ssr: { noExternal: ["solid-js"] },
+    logLevel: "silent",
+  });
+  try {
+    const { Stats } = await server.ssrLoadModule("/src/stats.tsx");
+    const { renderToString } = await server.ssrLoadModule("solid-js/web");
+    const usage = framed(fixture, "usage") as UsageView;
+    change(usage);
+    return renderToString(() => Stats({ usage }));
+  } finally {
+    await server.close();
+  }
+}
+
+test("the stats tab shows every fact the stats fixture's list names", async () => {
+  const html = await drawStats("stats");
+
+  assert.ok(facts("stats").length > 0, "the facts list has facts in it");
+  assert.deepEqual(missing(html, "stats"), [], text(html));
+});
+
+test("a stats tab given one model fewer fails the facts", async () => {
+  const lost = await drawStats("stats", (usage) => {
+    usage.summary?.models.shift();
+  });
+
+  assert.notDeepEqual(
+    missing(lost, "stats"),
+    [],
+    "a render missing a whole model still showed every expected fact, so the list proves nothing",
   );
 });

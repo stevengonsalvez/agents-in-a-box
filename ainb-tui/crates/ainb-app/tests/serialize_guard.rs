@@ -72,6 +72,7 @@ fn neither_app_state_nor_any_section_can_be_serialised() {
         ("OnboardingSection", is_serialize!(OnboardingSection)),
         ("ShellSection", is_serialize!(ShellSection)),
         ("AgentStatusSection", is_serialize!(AgentStatusSection)),
+        ("UsageSection", is_serialize!(UsageSection)),
     ];
     assert_eq!(sections.len(), ainb_app::SectionId::COUNT + 1);
     let serialisable: Vec<_> =

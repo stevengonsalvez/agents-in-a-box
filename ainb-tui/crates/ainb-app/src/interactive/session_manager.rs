@@ -1032,7 +1032,7 @@ pub async fn rollback_failed_interactive_launch(
         }
     }
 
-    if let Err(error) = SessionStore::mutate(|store| {
+    if let Err(error) = crate::cli::util::mutate_session_store(|store| {
         if let Some(tmux_name) = exact_tmux_name {
             store.remove_by_tmux_name(tmux_name);
         }
@@ -1043,7 +1043,7 @@ pub async fn rollback_failed_interactive_launch(
 }
 
 pub fn persist_codex_thread_id(session_id: Uuid, thread_id: String) -> anyhow::Result<()> {
-    SessionStore::mutate(|store| {
+    crate::cli::util::mutate_session_store(|store| {
         if let Some(metadata) =
             store.sessions.values_mut().find(|metadata| metadata.session_id == session_id)
         {
@@ -1153,6 +1153,61 @@ pub struct SessionStore {
 #[must_use = "the sessions.json lock is released as soon as the guard is dropped"]
 pub struct SessionStoreGuard {
     _file: std::fs::File,
+    _held: Option<HeldLockMark>,
+}
+
+/// Threads that hold the `sessions.json` lock (P6e), by count.
+///
+/// `flock` on a second descriptor in the same process blocks until the first
+/// is released, so a thread that holds [`SessionStore::lock`] and then asks
+/// the resolver for the store would wait on itself forever. The resolver
+/// checks this map first ([`SessionStore::ensure_lock_not_held`]) and turns
+/// that into an immediate error. Keyed by thread id rather than thread-local,
+/// so a guard dropped on another thread still clears the thread that took it.
+static HELD_LOCKS: std::sync::Mutex<Vec<(std::thread::ThreadId, u32)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Marks the current thread as holding the `sessions.json` lock until it
+/// drops.
+#[must_use = "the held-lock mark clears as soon as it is dropped"]
+pub struct HeldLockMark {
+    thread: std::thread::ThreadId,
+}
+
+impl HeldLockMark {
+    /// Mark the current thread.
+    pub fn enter() -> Self {
+        let thread = std::thread::current().id();
+        {
+            let mut held = HELD_LOCKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match held.iter_mut().find(|(t, _)| *t == thread) {
+                Some((_, n)) => *n += 1,
+                None => held.push((thread, 1)),
+            }
+        }
+        Self { thread }
+    }
+
+    fn held_by_current_thread() -> bool {
+        let thread = std::thread::current().id();
+        HELD_LOCKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|(t, n)| *t == thread && *n > 0)
+    }
+}
+
+impl Drop for HeldLockMark {
+    fn drop(&mut self) {
+        let mut held = HELD_LOCKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(i) = held.iter().position(|(t, _)| *t == self.thread) {
+            held[i].1 -= 1;
+            if held[i].1 == 0 {
+                held.swap_remove(i);
+            }
+        }
+    }
 }
 
 impl SessionStore {
@@ -1211,7 +1266,55 @@ impl SessionStore {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         let file = ainb_fleet_core::session_registry::lock_sessions_store_at(dir)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        Ok(SessionStoreGuard { _file: file })
+        Ok(SessionStoreGuard {
+            _file: file,
+            _held: Some(HeldLockMark::enter()),
+        })
+    }
+
+    /// Take the lock once without blocking. `Ok(None)` means another
+    /// descriptor holds it; the caller retries on its own bounded schedule
+    /// (P6e: the resolver never waits on this lock without a deadline).
+    ///
+    /// Unlike [`lock`](Self::lock) this does not mark the calling thread: it
+    /// is for async code, whose guard can outlive the thread that took it
+    /// while that thread runs other tasks. Such a caller marks only the
+    /// synchronous stretch where it runs code that might nest, with
+    /// [`HeldLockMark::enter`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store directory can't be created or `flock`
+    /// fails for a reason other than contention.
+    pub fn try_lock() -> Result<Option<SessionStoreGuard>, std::io::Error> {
+        let path = Self::storage_path();
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let file = ainb_fleet_core::session_registry::try_lock_sessions_store_at(dir)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(file.map(|file| SessionStoreGuard {
+            _file: file,
+            _held: None,
+        }))
+    }
+
+    /// Fail at once when the current thread already holds the lock.
+    ///
+    /// Taking it again from the same thread would block forever (see
+    /// [`HeldLockMark`]). The resolver's entry points call this before they
+    /// touch the store, so nesting is an error, never a hang.
+    ///
+    /// # Errors
+    ///
+    /// When the current thread holds [`SessionStore::lock`].
+    pub fn ensure_lock_not_held() -> Result<(), std::io::Error> {
+        if HeldLockMark::held_by_current_thread() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "sessions.json lock is already held by this thread; \
+                 release it before reading or writing the store through the resolver",
+            ));
+        }
+        Ok(())
     }
 
     /// Locked read-modify-write: take the [`lock`](Self::lock), load the store
@@ -1572,7 +1675,7 @@ impl InteractiveSessionManager {
         };
         // Locked RMW so a concurrent `ainb kill` / recovery / daemon register
         // can't lost-update this upsert (pu4).
-        if let Err(e) = SessionStore::mutate(|store| store.upsert(metadata)) {
+        if let Err(e) = crate::cli::util::mutate_session_store(|store| store.upsert(metadata)) {
             warn!("Failed to persist session metadata: {}", e);
             // Continue anyway - session is still usable, just won't survive restarts gracefully
         }
@@ -1843,7 +1946,7 @@ impl InteractiveSessionManager {
             codex_thread_id: codex_remote.and_then(|remote| remote.thread_id),
         };
         // Locked RMW (pu4): serialise against concurrent kill/recovery writers.
-        if let Err(e) = SessionStore::mutate(|store| store.upsert(metadata)) {
+        if let Err(e) = crate::cli::util::mutate_session_store(|store| store.upsert(metadata)) {
             warn!("Failed to persist session metadata: {}", e);
         }
 
@@ -1875,6 +1978,26 @@ impl InteractiveSessionManager {
     pub async fn list_sessions(
         &mut self,
     ) -> Result<Vec<InteractiveSession>, InteractiveSessionError> {
+        // P6e: one read of the store, through the session source. A failed
+        // read is logged and every session goes on to phase 2.
+        let store = crate::cli::util::load_session_store_async().await.unwrap_or_else(|e| {
+            warn!("session store unavailable for this refresh: {e}");
+            SessionStore::default()
+        });
+        self.list_sessions_with(&store).await
+    }
+
+    /// [`list_sessions`](Self::list_sessions) against a store the caller has
+    /// already read, so one refresh reads the store once however many tmux
+    /// sessions it walks (each read can wait out the RPC deadline).
+    ///
+    /// # Errors
+    ///
+    /// When tmux cannot be listed.
+    pub async fn list_sessions_with(
+        &mut self,
+        store: &SessionStore,
+    ) -> Result<Vec<InteractiveSession>, InteractiveSessionError> {
         info!("Discovering Interactive sessions from tmux");
 
         // Get all tmux sessions
@@ -1901,7 +2024,7 @@ impl InteractiveSessionManager {
             debug!("Found tmux session: {}", tmux_name);
 
             // Try to find corresponding worktree
-            if let Ok(session) = self.discover_session_from_tmux(tmux_name).await {
+            if let Ok(session) = self.discover_session_from_tmux(tmux_name, store).await {
                 discovered_sessions.push(session);
             }
         }
@@ -1921,10 +2044,11 @@ impl InteractiveSessionManager {
     async fn discover_session_from_tmux(
         &self,
         tmux_name: &str,
+        store: &SessionStore,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         // Phase 1: Try to find session in persisted sessions.json
-        // This handles the branch-mismatch case where the user changed branches in the worktree
-        let store = SessionStore::load();
+        // This handles the branch-mismatch case where the user changed branches in the worktree.
+        // P6e: `store` is the caller's one read for the whole refresh.
         if let Some(metadata) = store.find_by_tmux_name(tmux_name) {
             // Verify the worktree still exists
             if metadata.worktree_path.exists() {
@@ -2389,11 +2513,17 @@ impl InteractiveSessionManager {
                          falling back to sessions.json",
                         session_id, e
                     );
-                    let store_name = SessionStore::load()
-                        .sessions()
-                        .values()
-                        .find(|m| m.session_id == session_id)
-                        .map(|m| m.tmux_session_name.clone());
+                    let store_name = crate::cli::util::load_session_store_async()
+                        .await
+                        .map_err(|e| warn!("session store unavailable: {e}"))
+                        .ok()
+                        .and_then(|store| {
+                            store
+                                .sessions()
+                                .values()
+                                .find(|m| m.session_id == session_id)
+                                .map(|m| m.tmux_session_name.clone())
+                        });
                     if let Some(ref n) = store_name {
                         info!("Resolved tmux name from sessions.json: {}", n);
                     } else {
@@ -2465,28 +2595,30 @@ impl InteractiveSessionManager {
         // Best-effort lock: if it can't be taken we still clean up (unlocked)
         // rather than leak the metadata — the guard is held across load+save and
         // dropped before the reap read below.
-        let lock_guard = SessionStore::lock()
-            .map_err(|e| {
-                warn!("Failed to lock sessions.json for removal: {e}; proceeding unlocked");
-            })
-            .ok();
-        let mut store = SessionStore::load();
-        if let Some(ref name) = tmux_session_name {
-            store.remove_by_tmux_name(name);
-        }
-        store.remove_by_session_id(session_id); // Also remove by ID in case tmux name changed
-        if let Err(e) = store.save() {
+        // P6e: one read-modify-write through the process's session source,
+        // under its bounded lock. A failure is logged and the removal goes on
+        // (the tmux session and worktree are already gone); the reap below is
+        // then skipped, since what remains is unknown.
+        let mut remaining_headroom = None;
+        if let Err(e) = crate::cli::util::mutate_session_store_async(|store| {
+            if let Some(ref name) = tmux_session_name {
+                store.remove_by_tmux_name(name);
+            }
+            store.remove_by_session_id(session_id); // Also remove by ID in case tmux name changed
+            remaining_headroom =
+                Some(store.sessions.values().filter(|m| m.headroom_enabled).count());
+        })
+        .await
+        {
             warn!("Failed to update sessions.json after removal: {}", e);
             // Continue anyway - removal was successful
         }
-        drop(lock_guard);
 
         // Idle-reap: if no Headroom-enabled sessions remain, stop the shared
         // proxy so it doesn't linger after the last consumer is gone.
         // `headroom::stop()` is a no-op when the proxy wasn't ainb-spawned (no
         // pid file), so a user's own `headroom proxy` is never touched.
-        let remaining_headroom = store.sessions.values().filter(|m| m.headroom_enabled).count();
-        if remaining_headroom == 0 {
+        if remaining_headroom == Some(0) {
             info!("No Headroom sessions remain — reaping shared proxy");
             crate::headroom::stop();
         }
@@ -4752,7 +4884,7 @@ trust_level = "trusted"
 
         let manager = InteractiveSessionManager::new().expect("manager");
         let discovered = manager
-            .discover_session_from_tmux(tmux_name)
+            .discover_session_from_tmux(tmux_name, &SessionStore::load())
             .await
             .expect("discover persisted session");
         let session = discovered.to_session_model();
@@ -4814,9 +4946,10 @@ trust_level = "trusted"
         assert_eq!(metadata.launch_model().as_deref(), Some("Opus"));
     }
 
-    /// pu4: `SessionStore::mutate` must serialise concurrent load-modify-save
+    /// pu4, on the P6e write path: `cli::util::mutate_session_store` (every
+    /// writer's path since P6e-4) must serialise concurrent load-modify-save
     /// through the cross-process lock so racing writers never lost-update the
-    /// store. Two thread pools each upsert a disjoint set of keys into the SAME
+    /// store. In this test process the source is the file. Two thread pools each upsert a disjoint set of keys into the SAME
     /// `sessions.json`; with the naked (pre-fix) RMW the interleaving where both
     /// threads load the same base and write back only their own entry would drop
     /// updates. Under the lock every key survives.
@@ -4859,7 +4992,7 @@ trust_level = "trusted"
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    SessionStore::mutate(|store| store.upsert(mk(i)))
+                    crate::cli::util::mutate_session_store(|store| store.upsert(mk(i)))
                         .expect("locked mutate must succeed");
                 })
             })

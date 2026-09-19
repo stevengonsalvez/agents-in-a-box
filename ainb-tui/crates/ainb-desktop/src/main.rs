@@ -11,6 +11,7 @@
 mod menu;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,10 +20,11 @@ use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
 use ainb_app::{Intent, Keymap};
 use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::{DesktopHost, FrameSink, agent_status_dialer};
-use ainb_desktop::intent::{Refusal, RendererIntent};
+use ainb_desktop::intent::{self, Refusal, RendererIntent, update};
 use ainb_desktop::shell::Shell;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarState, SidecarView};
 use ainb_desktop::terminal::{TabEvents, TabsView, Terminals, Tmux};
+use ainb_desktop::updater::{self, Check, Install, Phase, Settings as UpdateSettings, Updater};
 use ainb_hangar_proto::agent_status::AgentState;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Emitter, Manager};
@@ -67,6 +69,9 @@ struct Window {
     terminals: Option<Terminals>,
     sidecar: Sidecar,
     sidecar_config: SidecarConfig,
+    /// The updater and the last check it made, which "install" acts on.
+    updater: Arc<Mutex<Updater>>,
+    last_check: Arc<Mutex<Option<Check>>>,
 }
 
 /// What the renderer applied, for the proof harness to read from the log: the
@@ -266,7 +271,243 @@ fn dispatch(window: tauri::State<'_, Window>, intent: RendererIntent) -> Option<
     refusal
 }
 
+/// What the settings page's Setup panel shows: the catalog's dependencies as
+/// detected now, and the two files (#1175). A host read, never a frame, off
+/// the main thread because detection probes binaries.
+#[tauri::command]
+async fn setup_status() -> ainb_desktop::setup::SetupView {
+    tauri::async_runtime::spawn_blocking(ainb_desktop::setup::status)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "setup status did not run");
+            ainb_desktop::setup::SetupView {
+                dependencies: Vec::new(),
+                tmux_conf_present: false,
+                otel: ainb_desktop::setup::OtelView {
+                    env_file_present: false,
+                    settings_env_present: false,
+                    alloy_installed: false,
+                    alloy_running: false,
+                },
+            }
+        })
+}
+
+/// Whether a setup confirmation dialog is on screen.
+static SETUP_DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// Ask the shell to run one of the onboarding writes that the window may
+/// not run itself (#1175). The write runs only after the person answers a
+/// native dialog the shell owns; a script in the page can call this command
+/// and can do nothing more, because the dialog is the OS's. The outcome comes
+/// back as a toast, and `true` says the write ran. Async, so the blocking
+/// dialog and the install never sit on the main thread.
+#[tauri::command]
+async fn setup_write(app: tauri::AppHandle, write: ainb_desktop::setup::SetupWrite) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    // The variant only: the telemetry write carries a token, and this log is
+    // what `show_log` reads back into the window.
+    let kind = write.kind();
+    if let Err(message) = write.validate() {
+        tracing::info!(write = kind, "setup write refused before the dialog");
+        if let Err(error) = app.emit("toast", &message) {
+            tracing::warn!(%error, "setup refusal not delivered to the webview");
+        }
+        return false;
+    }
+    // One dialog at a time: a script that calls this in a loop must not
+    // stack native dialogs on the person.
+    if SETUP_DIALOG_OPEN
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        tracing::info!(write = kind, "setup write refused: a dialog is open");
+        if let Err(error) = app.emit("toast", "a setup dialog is already open") {
+            tracing::warn!(%error, "setup refusal not delivered to the webview");
+        }
+        return false;
+    }
+    let confirmation = write.confirmation();
+    let confirmed = app
+        .dialog()
+        .message(confirmation.body)
+        .title(confirmation.title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Continue".to_string(),
+            "Cancel".to_string(),
+        ))
+        .blocking_show();
+    SETUP_DIALOG_OPEN.store(false, Ordering::Release);
+    tracing::info!(write = kind, confirmed, "setup write");
+    if !confirmed {
+        return false;
+    }
+    let outcome = tauri::async_runtime::spawn_blocking(move || write.run())
+        .await
+        .unwrap_or_else(|error| Err(format!("the write did not run: {error}")));
+    let (ran, message) = match outcome {
+        Ok(message) => (true, message),
+        Err(message) => (false, message),
+    };
+    if let Err(error) = app.emit("toast", &message) {
+        tracing::warn!(%error, "setup outcome not delivered to the webview");
+    }
+    ran
+}
+
 /// Where the daemon connection stands, for the banner on first paint.
+/// A toast to the webview (scrubbed, then cut), or a log line when the window
+/// is not there.
+fn handle_toast(handle: &tauri::AppHandle, text: String) {
+    if let Err(error) = handle.emit("toast", intent::toast_text(&text)) {
+        tracing::warn!(%error, text, "update toast not delivered to the webview");
+    }
+}
+
+/// The updater's phase to the webview, for its status line.
+fn emit_phase(handle: &tauri::AppHandle, phase: Phase) {
+    if let Err(error) = handle.emit("update", &phase) {
+        tracing::warn!(%error, "update phase not delivered to the webview");
+    }
+}
+
+/// The one gate the updater's commands pass through: `id` is refused from
+/// the window when it chooses where updates come from
+/// (`intent::update_refusal`, the list `refused_from_webview` shares).
+fn update_gate(id: &str) -> Result<(), String> {
+    match intent::update_refusal(id) {
+        Some(refusal) => Err(format!(
+            "{} is not run from the window: {}",
+            refusal.command, refusal.reason
+        )),
+        None => Ok(()),
+    }
+}
+
+/// One line for the toast, per outcome.
+fn describe_check(check: &Check) -> String {
+    match check {
+        Check::Off => "Updates are off in this app's settings.".to_string(),
+        Check::Current { running, .. } => format!("Agents in a Box {running} is current."),
+        Check::Available { version, .. } => {
+            format!(
+                "Agents in a Box {version} is available: Install Update and Restart from the menu."
+            )
+        }
+        Check::Declined { reason } => format!("Update declined: {reason}"),
+    }
+}
+
+/// Run the check off the main thread and remember what it found.
+async fn run_update_check(handle: &tauri::AppHandle) -> Check {
+    emit_phase(handle, Phase::Checking);
+    let window = handle.state::<Window>();
+    let updater = Arc::clone(&window.updater);
+    let last = Arc::clone(&window.last_check);
+    let check = tauri::async_runtime::spawn_blocking(move || {
+        updater
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .check(env!("CARGO_PKG_VERSION"))
+    })
+    .await
+    .unwrap_or_else(|error| Check::Declined {
+        reason: format!("the check did not run: {error}"),
+    });
+    *last.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(check.clone());
+    check
+}
+
+/// Stage and swap what the last check found, off the main thread.
+async fn run_update_apply(handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let window = handle.state::<Window>();
+    let updater = Arc::clone(&window.updater);
+    let check = window
+        .last_check
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or_else(|| "run Check for Updates first".to_string())?;
+    let phases = handle.clone();
+    let version = match &check {
+        Check::Available { version, .. } => version.clone(),
+        _ => String::new(),
+    };
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let install = Install::detect().map_err(|error| error.to_string())?;
+        updater
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .apply_with(&check, &install, &mut |phase| emit_phase(&phases, phase))
+            .map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|inner| inner);
+    match &result {
+        Ok(_) => emit_phase(handle, Phase::Installed { version }),
+        Err(reason) => emit_phase(
+            handle,
+            Phase::Failed {
+                reason: intent::toast_text(reason),
+            },
+        ),
+    }
+    result
+}
+
+async fn run_update_rollback() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let install = Install::detect().map_err(|error| error.to_string())?;
+        updater::rollback(&install).map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Remove the one rollback slot, at the person's request only.
+async fn run_update_discard_previous() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let install = Install::detect().map_err(|error| error.to_string())?;
+        updater::clear_previous(&install).map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// The updater's check, for the webview.
+#[tauri::command]
+async fn update_check(app: tauri::AppHandle) -> Result<Check, String> {
+    update_gate(update::CHECK)?;
+    Ok(run_update_check(&app).await)
+}
+
+/// Install what the last check found and restart into it.
+#[tauri::command]
+async fn update_apply(app: tauri::AppHandle) -> Result<(), String> {
+    update_gate(update::APPLY)?;
+    run_update_apply(&app).await?;
+    app.restart();
+}
+
+// Rolling back and removing the previous have no command: a page script
+// could force a downgrade or delete the only recovery copy. They run from
+// the native menu only (`menu::UPDATE_ROLLBACK`, `menu::UPDATE_DISCARD_PREVIOUS`).
+
+/// The updater's local settings, to read. They are set in the terminal or
+/// the config file: there is no command that writes them.
+#[tauri::command]
+fn update_settings(window: tauri::State<'_, Window>) -> Result<UpdateSettings, String> {
+    update_gate(update::SETTINGS)?;
+    Ok(window
+        .updater
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .settings()
+        .clone())
+}
+
 #[tauri::command]
 fn sidecar_state(window: tauri::State<'_, Window>) -> SidecarView {
     window.sidecar.state().borrow().view()
@@ -368,7 +609,8 @@ compile_error!("the wdio WebDriver must never be built into a release binary");
 compile_error!("a release build must carry `bundled`, or the window loads build.devUrl");
 
 fn main() {
-    let builder = tauri::Builder::default();
+    // The native confirmation in front of the onboarding writes (#1175).
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
     // Only a `wdio` build carries the embedded WebDriver the journey drives.
     #[cfg(feature = "wdio")]
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
@@ -403,12 +645,23 @@ fn main() {
             // inbox reader it starts needs the app runtime handed to it.
             .on_runtime(tauri::async_runtime::handle().inner().clone());
             let daemon_bin = daemon_bin()?;
+            // A swap a crash interrupted is finished before anything else,
+            // so the next launch is the new version.
+            match updater::repair_at_startup() {
+                Ok(true) => tracing::info!("finished an interrupted update"),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "an interrupted update was not finished"),
+            }
+            let updater = Arc::new(Mutex::new(Updater::new(hangar_home.clone())));
             let sidecar_config = SidecarConfig::new(hangar_home, daemon_bin);
             // Both spawn onto the app's tokio runtime, so they start inside it.
             let sidecar = tauri::async_runtime::block_on(async {
                 host.start_workspace_load();
                 // Section 20, the board: the reader both hosts share (#1188).
                 host.start_agent_status(agent_status_dialer(), legacy_panel);
+                // Section 21, the stats tab: read once the webview subscribes
+                // to it, dialing as the desktop does for section 20.
+                host.enable_usage(agent_status_dialer());
                 Sidecar::start(sidecar_config.clone())
             });
             let mut states = sidecar.state();
@@ -438,9 +691,50 @@ fn main() {
                 terminals,
                 sidecar,
                 sidecar_config,
+                updater,
+                last_check: Arc::new(Mutex::new(None)),
             });
 
             menu::install(app.handle());
+            app.on_menu_event(|app, event| {
+                let handle = app.clone();
+                match event.id().as_ref() {
+                    menu::UPDATE_CHECK => {
+                        tauri::async_runtime::spawn(async move {
+                            let check = run_update_check(&handle).await;
+                            handle_toast(&handle, describe_check(&check));
+                        });
+                    }
+                    menu::UPDATE_INSTALL => {
+                        tauri::async_runtime::spawn(async move {
+                            match run_update_apply(&handle).await {
+                                Ok(path) => {
+                                    tracing::info!(path = %path.display(), "update installed; restarting");
+                                    handle.restart();
+                                }
+                                Err(error) => handle_toast(&handle, format!("Update not installed: {error}")),
+                            }
+                        });
+                    }
+                    menu::UPDATE_ROLLBACK => {
+                        tauri::async_runtime::spawn(async move {
+                            match run_update_rollback().await {
+                                Ok(()) => handle.restart(),
+                                Err(error) => handle_toast(&handle, format!("Roll back failed: {error}")),
+                            }
+                        });
+                    }
+                    menu::UPDATE_DISCARD_PREVIOUS => {
+                        tauri::async_runtime::spawn(async move {
+                            match run_update_discard_previous().await {
+                                Ok(()) => handle_toast(&handle, "The previous version was removed.".to_string()),
+                                Err(error) => handle_toast(&handle, format!("The previous version was not removed: {error}")),
+                            }
+                        });
+                    }
+                    _ => {}
+                }
+            });
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -493,6 +787,8 @@ fn main() {
             subscribe,
             dispatch,
             sidecar_state,
+            setup_status,
+            setup_write,
             show_log,
             retry_sidecar,
             palette,
@@ -504,7 +800,10 @@ fn main() {
             terminal_ack,
             terminal_input,
             terminal_resize,
-            terminal_close
+            terminal_close,
+            update_check,
+            update_apply,
+            update_settings
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

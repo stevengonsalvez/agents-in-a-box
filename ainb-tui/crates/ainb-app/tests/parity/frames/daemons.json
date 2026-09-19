@@ -147,7 +147,49 @@
       "menu": null,
       "outcomes": {},
       "selected": 0,
-      "shared": null
+      "shared": {
+        "atc": null,
+        "collected_at_ms": 1700000000000,
+        "collector_parked": false,
+        "evidence_census": null,
+        "evidence_collected_at_ms": 0,
+        "hook_health": null,
+        "last_touch_ms": 1700000000000,
+        "rows": [
+          {
+            "connected": true,
+            "error_count": 0,
+            "inbound_expected": 0,
+            "inbound_live": 0,
+            "kind": "notifyd",
+            "reason": "heartbeat fresh",
+            "state": "running",
+            "version": "1.28.2",
+            "version_current": true
+          },
+          {
+            "connected": true,
+            "error_count": 0,
+            "inbound_expected": 0,
+            "inbound_live": 0,
+            "kind": "hangar-daemon",
+            "reason": "socket and db reachable",
+            "state": "running",
+            "version": "1.28.2",
+            "version_current": true
+          },
+          {
+            "connected": false,
+            "error_count": 2,
+            "inbound_expected": 0,
+            "inbound_live": 0,
+            "kind": "bridge",
+            "last_error": "token rejected by telegram",
+            "reason": "clean stop",
+            "state": "stopped"
+          }
+        ]
+      }
     },
     "hangar_daemon_config_loaded": false
   },
@@ -160,6 +202,7 @@
     "received_at_ms": 0,
     "recipient": "",
     "rows_cut": 0,
+    "scroll": 0,
     "summaries_cut": 0,
     "unreachable": null,
     "unread": 0
@@ -3272,5 +3315,10 @@
     "absent": null,
     "head_revision": 0,
     "view": null
+  },
+  "usage": {
+    "absent": null,
+    "failure": null,
+    "summary": null
   }
 }

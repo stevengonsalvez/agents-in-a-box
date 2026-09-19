@@ -296,6 +296,7 @@
     "received_at_ms": 0,
     "recipient": "",
     "rows_cut": 0,
+    "scroll": 0,
     "summaries_cut": 0,
     "unreachable": null,
     "unread": 0
@@ -3408,5 +3409,10 @@
     "absent": null,
     "head_revision": 0,
     "view": null
+  },
+  "usage": {
+    "absent": null,
+    "failure": null,
+    "summary": null
   }
 }

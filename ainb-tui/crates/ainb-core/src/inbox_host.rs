@@ -1,58 +1,110 @@
-//! The terminal's inbox reader host (D3-prime): section 16 is read only while
-//! the inbox screen is open, the rule the desktop applies to its `inbox`
-//! subscription, so no daemon RPC is issued per tick for a screen nobody has
-//! open.
+//! The terminal's inbox reader host (D3-prime): section 16 is read for the
+//! TUI's whole life, slowly while the inbox screen is not the one open and
+//! at the reader's normal cadence while it is, so the unread badge on the
+//! session-list legend is live and the open screen is fresh.
 //!
 //! ```text
-//!  tick ──current_screen == inbox?──▶ start reader ──drain──▶ section 16
-//!       ──left the screen?─────────▶ drop reader, reset section
+//!  launch ──▶ reader at OFF_SCREEN_POLL ──drain──▶ section 16 (badge)
+//!  screen opened ──▶ reader at Timing::default().poll, fresh read now
+//!  screen left ────▶ back to OFF_SCREEN_POLL; the section is kept
 //! ```
+//!
+//! "Once the daemon is connected" is the reader's own dial: each read dials a
+//! fresh client and backs off while the daemon is not there, so the first
+//! read that lands is the connection, and until then the section carries the
+//! dial's failure as its reason.
+
+use std::time::Duration;
 
 use ainb_app::AppState;
 use ainb_app::app::screens::ids;
-use ainb_app::fleet::inbox_reader::{Dialer, InboxReader};
+use ainb_app::fleet::inbox_reader::{Dialer, InboxReader, Timing};
 
-/// The reader, while the inbox screen is open, and the dialer it is started
-/// with each time.
+/// The wait between reads while the inbox screen is not open.
+pub const OFF_SCREEN_POLL: Duration = Duration::from_secs(30);
+
+/// The least time between two reader restarts. A cadence change restarts the
+/// reader and its first read is immediate, so without a floor a key held on
+/// `b`/`esc` would dial the daemon once per toggle; with it the switch waits
+/// until the floor has passed since the last restart, at most one dial a
+/// second from toggling, and the reader that is running keeps reading.
+pub const DIAL_FLOOR: Duration = Duration::from_secs(1);
+
+/// The reader, at the cadence the current screen asks for.
 pub struct InboxHost {
     dialer: std::sync::Arc<Dialer>,
-    reader: Option<InboxReader>,
+    reader: InboxReader,
+    on_screen: bool,
+    dial_floor: Duration,
+    restarted_at: std::time::Instant,
 }
 
 impl InboxHost {
-    /// A host that will dial through `dialer` whenever the screen opens.
-    /// Starts nothing until [`Self::tick`] sees the screen.
+    /// Start reading through `dialer` at the off-screen cadence. Must be
+    /// called inside a tokio runtime, which the TUI's main is.
     #[must_use]
     pub fn new(dialer: Dialer) -> Self {
+        let dialer = std::sync::Arc::new(dialer);
+        let reader = Self::spawn(&dialer, false);
         Self {
-            dialer: std::sync::Arc::new(dialer),
-            reader: None,
+            dialer,
+            reader,
+            on_screen: false,
+            dial_floor: DIAL_FLOOR,
+            restarted_at: std::time::Instant::now(),
         }
     }
 
-    /// Whether the reader is running, which it is exactly while the inbox
-    /// screen is the current one.
+    /// The same host with another floor between restarts; the tests shorten
+    /// it.
     #[must_use]
-    pub const fn running(&self) -> bool {
-        self.reader.is_some()
+    pub const fn with_dial_floor(mut self, floor: Duration) -> Self {
+        self.dial_floor = floor;
+        self
     }
 
-    /// Start or stop the reader to match the current screen, then fold what
-    /// arrived. Must be called inside a tokio runtime, which the TUI loop is.
+    /// Whether the reader is at the open screen's cadence.
+    #[must_use]
+    pub const fn on_screen(&self) -> bool {
+        self.on_screen
+    }
+
+    /// The wait between reads at the current cadence.
+    #[must_use]
+    pub fn poll(&self) -> Duration {
+        Self::timing(self.on_screen).poll
+    }
+
+    fn timing(on_screen: bool) -> Timing {
+        let normal = Timing::default();
+        if on_screen {
+            normal
+        } else {
+            Timing {
+                poll: OFF_SCREEN_POLL,
+                ..normal
+            }
+        }
+    }
+
+    fn spawn(dialer: &std::sync::Arc<Dialer>, on_screen: bool) -> InboxReader {
+        let dialer = std::sync::Arc::clone(dialer);
+        InboxReader::spawn_timed(Box::new(move || dialer()), Self::timing(on_screen))
+    }
+
+    /// Match the cadence to the current screen, then fold what arrived. A
+    /// cadence change restarts the reader, whose first read is immediate, so
+    /// opening the screen reads at once, once [`DIAL_FLOOR`] has passed since
+    /// the last restart. The section is never reset here: what the badge
+    /// counts is what the screen will show.
     pub fn tick(&mut self, state: &mut AppState) -> bool {
         let wanted = state.shell.current_screen == ids::INBOX;
-        match (wanted, self.reader.is_some()) {
-            (true, false) => {
-                let dialer = std::sync::Arc::clone(&self.dialer);
-                self.reader = Some(InboxReader::spawn(Box::new(move || dialer())));
-            }
-            (false, true) => {
-                self.reader = None;
-                return state.inbox_reset();
-            }
-            _ => {}
+        if wanted != self.on_screen && self.restarted_at.elapsed() >= self.dial_floor {
+            self.on_screen = wanted;
+            self.reader = Self::spawn(&self.dialer, wanted);
+            self.restarted_at = std::time::Instant::now();
         }
-        self.reader.as_mut().is_some_and(|reader| reader.drain_into(state))
+        self.reader.drain_into(state)
     }
 }
 
@@ -60,7 +112,6 @@ impl InboxHost {
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
     use super::*;
     use ainb_app::fleet::bridge::daemon::DaemonError;
@@ -83,39 +134,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_reader_runs_only_while_the_inbox_screen_is_open() {
+    async fn the_reader_runs_from_launch_and_the_screen_only_sets_the_cadence() {
         let (dialer, dials) = counting_dialer();
-        let mut host = InboxHost::new(dialer);
+        let mut host = InboxHost::new(dialer).with_dial_floor(Duration::ZERO);
         let mut state = AppState::new();
         settle(&mut host, &mut state, 5).await;
-        assert!(!host.running());
-        assert_eq!(dials.load(Ordering::SeqCst), 0, "home dials nothing");
-
-        state.shell.current_screen = ids::INBOX.to_string();
-        settle(&mut host, &mut state, 5).await;
-        assert!(host.running());
+        assert!(!host.on_screen());
+        assert_eq!(
+            host.poll(),
+            OFF_SCREEN_POLL,
+            "slow while the screen is closed"
+        );
         assert!(
             dials.load(Ordering::SeqCst) >= 1,
-            "the screen starts the reads"
+            "home reads too: the badge needs the count"
         );
         assert!(
             state.inbox.get().absent.is_some(),
             "a failed dial lands as the absent reason"
         );
 
+        state.shell.current_screen = ids::INBOX.to_string();
+        host.tick(&mut state);
+        assert!(host.on_screen());
+        assert_eq!(
+            host.poll(),
+            Timing::default().poll,
+            "normal cadence on the screen"
+        );
+        let before = dials.load(Ordering::SeqCst);
+        settle(&mut host, &mut state, 5).await;
+        assert!(
+            dials.load(Ordering::SeqCst) > before,
+            "opening the screen reads at once"
+        );
+
         state.shell.current_screen = ids::HOME.to_string();
         host.tick(&mut state);
-        assert!(!host.running());
+        assert!(!host.on_screen());
+        assert_eq!(host.poll(), OFF_SCREEN_POLL);
         assert!(
-            state.inbox.get().absent.is_none(),
-            "leaving the screen resets the section"
+            state.inbox.get().absent.is_some(),
+            "leaving the screen keeps the section"
         );
-        let seen = dials.load(Ordering::SeqCst);
-        settle(&mut host, &mut state, 30).await;
-        assert_eq!(
-            dials.load(Ordering::SeqCst),
-            seen,
-            "no read after the screen is left"
+    }
+
+    #[tokio::test]
+    async fn toggling_the_screen_dials_at_most_once_per_floor() {
+        let (dialer, dials) = counting_dialer();
+        let mut host = InboxHost::new(dialer).with_dial_floor(Duration::from_millis(300));
+        let mut state = AppState::new();
+        settle(&mut host, &mut state, 2).await;
+        let launch = dials.load(Ordering::SeqCst);
+        for _ in 0..20 {
+            state.shell.current_screen = ids::INBOX.to_string();
+            host.tick(&mut state);
+            state.shell.current_screen = ids::HOME.to_string();
+            host.tick(&mut state);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            dials.load(Ordering::SeqCst) <= launch + 1,
+            "twenty toggles inside the floor dial at most once more: {} after {launch}",
+            dials.load(Ordering::SeqCst)
         );
+        state.shell.current_screen = ids::INBOX.to_string();
+        tokio::time::sleep(Duration::from_millis(320)).await;
+        host.tick(&mut state);
+        assert!(host.on_screen(), "past the floor the switch lands");
     }
 }

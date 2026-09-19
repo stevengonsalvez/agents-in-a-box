@@ -1,16 +1,18 @@
-import { createEffect, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { GitViewView_Serialize } from "../../../ainb-app/bindings/AppState";
 import {
   bodyLines,
   fileRows,
   gitView,
   keyRows,
+  MAX_PAGE_ROWS,
   ROW_PX,
   scrollIntent,
   sectionCut,
   segments,
   selectFileIntent,
   wheelRows,
+  windowLines,
   WITHHELD,
 } from "./review.ts";
 import type { RendererIntent } from "./tabs.ts";
@@ -40,7 +42,10 @@ interface Props {
  */
 export function Review(props: Props) {
   const files = () => fileRows(props.gitView);
-  const body = () => bodyLines(props.gitView);
+  // Memoised: every drawn row, the window, the scroll effect and the row
+  // count read it, and flattening the whole body is the one part of this that
+  // is still linear in the diff.
+  const body = createMemo(() => bodyLines(props.gitView));
   const cut = () => sectionCut(props.gitView);
   const scroll = () => gitView(props.gitView)?.review_ui.scroll ?? 0;
   const scrollCut = () => gitView(props.gitView)?.review_ui.scroll_cut === true;
@@ -48,16 +53,50 @@ export function Review(props: Props) {
   let bodyElement: HTMLDivElement | undefined;
   /** Pixels a wheel has sent that have not yet made a whole row. */
   let pending = 0;
-  /** Rows the body can show at once, for a page key and a page wheel. */
-  const rowsPerPage = () => Math.max(Math.floor((bodyElement?.clientHeight ?? 0) / ROW_PX), 1);
+  /**
+   * Rows the body can show at once, for a page key, a page wheel and the
+   * window drawn below. It is a signal because the drawing reads it: a plain
+   * read of `clientHeight` would fix the window at whatever the body measured
+   * when it first mounted.
+   */
+  const [rowsPerPage, setRowsPerPage] = createSignal(40);
+  onMount(() => {
+    const measure = () =>
+      setRowsPerPage(
+        Math.min(Math.max(Math.floor((bodyElement?.clientHeight ?? 0) / ROW_PX), 1), MAX_PAGE_ROWS),
+      );
+    measure();
+    // The body, not the window: a pane that grows because the sidebar
+    // collapsed or the banner cleared changes how many rows fit without the
+    // window ever being resized.
+    if (typeof ResizeObserver === "function" && bodyElement !== undefined) {
+      const observer = new ResizeObserver(measure);
+      observer.observe(bodyElement);
+      onCleanup(() => observer.disconnect());
+      return;
+    }
+    window.addEventListener("resize", measure);
+    onCleanup(() => window.removeEventListener("resize", measure));
+  });
+
+  /**
+   * What is drawn: the rows around the reducer's offset, never the whole body.
+   *
+   * The body overflows nothing (`.review-body` hides it) and the offset is the
+   * frame's, so the window has no scroll position of its own to keep and
+   * nothing below the last drawn row to reach. Drawing all 4,000 rows at the
+   * frame's bound cost a real window fifty seconds (#1221).
+   */
+  const drawn = () => windowLines(body(), scroll(), rowsPerPage());
 
   // The offset is the reducer's, so the body is put where the frame says
   // rather than wherever the last wheel left it: the terminal and this window
   // show the same rows, and #1221 can window them by the same number.
   createEffect(() => {
     const first = scroll();
-    // Read the body so a new frame's rows re-run this after they are drawn.
-    body();
+    // Read the drawn rows so a new frame's window re-runs this after it is
+    // drawn.
+    drawn();
     const element = bodyElement;
     if (element === undefined) return;
     const row = element.querySelector<HTMLElement>(`[data-vrow="${first}"]`);
@@ -141,10 +180,14 @@ export function Review(props: Props) {
             }}
           >
             <Show
-              when={body().length > 0}
+              when={drawn().length > 0}
               fallback={<p class="empty">Nothing to show for these changes</p>}
             >
-              <For each={body()}>
+              {/* The window is a page of a longer diff, so the rows carry their
+                  place in the whole of it: without the count and the index, a
+                  reader is told the diff is eighty rows long. */}
+              <div role="table" aria-rowcount={body().length} aria-label="Diff rows">
+                <For each={drawn()}>
                 {(line) =>
                   line.kind === "file" ? (
                     <p
@@ -152,6 +195,8 @@ export function Review(props: Props) {
                       classList={{ open: line.open }}
                       data-head={line.file.path}
                       data-vrow={line.index}
+                      role="row"
+                      aria-rowindex={line.index + 1}
                     >
                       <span class="review-path">{line.file.path}</span>
                       <span class="review-counts">
@@ -167,11 +212,17 @@ export function Review(props: Props) {
                       {line.header}
                     </p>
                   ) : line.kind === "expand" ? (
-                    <p class="review-expand" data-vrow={line.index}>
+                    <p class="review-expand" data-vrow={line.index} role="row" aria-rowindex={line.index + 1}>
                       <span class="review-hidden">{line.hidden} lines hidden</span>
                     </p>
                   ) : (
-                    <p class="review-row" data-kind={line.row.kind.toLowerCase()} data-vrow={line.index}>
+                    <p
+                      class="review-row"
+                      data-kind={line.row.kind.toLowerCase()}
+                      data-vrow={line.index}
+                      role="row"
+                      aria-rowindex={line.index + 1}
+                    >
                       <span class="review-lineno">{line.row.old_lineno ?? ""}</span>
                       <span class="review-lineno">{line.row.new_lineno ?? ""}</span>
                       <span class="review-text">
@@ -186,7 +237,8 @@ export function Review(props: Props) {
                     </p>
                   )
                 }
-              </For>
+                </For>
+              </div>
             </Show>
           </div>
         </div>

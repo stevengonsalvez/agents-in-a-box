@@ -10,9 +10,13 @@ import { createFrameStore, type FrameStore, type SectionName } from "./store.ts"
 import {
   AHEAD_OF_READERS,
   shellAgentStatus,
+  shellConfig,
   shellFleet,
   shellGitView,
+  shellHangar,
+  shellInbox,
   shellSessions,
+  shellUsage,
   SUBSCRIBED,
 } from "./subscription.ts";
 
@@ -55,11 +59,17 @@ test("the shell chrome reads only subscribed sections, and the list names no unr
     shellSessions(store, "local");
     shellAgentStatus(store, "local");
     shellFleet(store, "local");
+    shellConfig(store, "local");
+    shellHangar(store, "local");
     shellGitView(store, "local");
+    shellUsage(store, "local");
+    shellInbox(store, "local");
     dispose();
   });
 
   assert.ok(read.has("sessions"), "the recorder saw the chrome's reads");
+  assert.ok(read.has("usage"), "the stats tab reads section 21");
+  assert.ok(read.has("inbox"), "the inbox page reads section 16");
   const subscribed = new Set<string>(SUBSCRIBED);
   for (const name of read) {
     assert.ok(subscribed.has(name), `the chrome reads "${name}", which is not subscribed`);
@@ -82,6 +92,8 @@ test("reading without a host reads no section", () => {
     assert.equal(shellSessions(store, undefined), undefined);
     assert.equal(shellAgentStatus(store, undefined), undefined);
     assert.equal(shellFleet(store, undefined), undefined);
+    assert.equal(shellConfig(store, undefined), undefined);
+    assert.equal(shellHangar(store, undefined), undefined);
     assert.equal(shellGitView(store, undefined), undefined);
     dispose();
   });

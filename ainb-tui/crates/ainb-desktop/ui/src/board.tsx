@@ -10,6 +10,7 @@ import {
   type BoardCard,
   type BoardColumn,
 } from "./board.ts";
+import { keyedList, sameKeys } from "./keyed.ts";
 import { label } from "./sessions.ts";
 import type { RendererIntent } from "./tabs.ts";
 
@@ -51,6 +52,16 @@ export function Board(props: Props) {
   });
   const health = createMemo(() => boardHealth(props.agentStatus));
   const waiting = createMemo(() => attentionRows(props.fleet, props.sessions));
+  // Drawn by key, not by object identity (#1267). Every frame that reaches
+  // these projections builds new column, card and row objects, and `For` keys
+  // by identity, so the board rebuilt every card button under a pointer that
+  // was already over one. The keys are the column's state, the card's
+  // session key and the row's own key, all stable across frames, so an
+  // unchanged card keeps its node and only its text is patched.
+  const columnList = createMemo(() => keyedList(columns(), (column) => column.state));
+  const columnKeys = createMemo(() => columnList().keys, [], { equals: sameKeys });
+  const waitingList = createMemo(() => keyedList(waiting(), (row) => row.key));
+  const waitingKeys = createMemo(() => waitingList().keys, [], { equals: sameKeys });
 
   const show = (sessionId: string | null, openRequest: boolean) => {
     if (sessionId === null) return;
@@ -81,51 +92,62 @@ export function Board(props: Props) {
         )}
       </Show>
       <div class="board-columns">
-        <For each={columns()}>
-          {(column) => (
-            <div class="board-column" data-state={column.state}>
-              <h2>
-                {COLUMN_TITLES[column.state]}
-                <span class="board-count">{column.cards.length}</span>
-              </h2>
-              <Show when={column.cards.length > 0} fallback={<p class="empty">Nothing here</p>}>
-                <ul>
-                  <For each={column.cards}>
-                    {(card) => (
-                      <li>
-                        <button
-                          type="button"
-                          class="board-card"
-                          classList={{ open: card.hasOpenRequest }}
-                          data-card={card.key}
-                          disabled={card.sessionId === null && !card.acp}
-                          onClick={() =>
-                            card.sessionId === null && card.acp
-                              ? props.onOpenTranscript(card.key)
-                              : show(card.sessionId, card.hasOpenRequest)
-                          }
-                        >
-                          <span class="card-title">{card.title}</span>
-                          <span class="card-line">{cardLine(card)}</span>
-                          <Show when={card.attention.length > 0}>
-                            <span class="card-chips">
-                              <For each={card.attention}>
-                                {(kind) => (
-                                  <span class="chip" data-kind={kind}>
-                                    {kind}
-                                  </span>
-                                )}
-                              </For>
-                            </span>
-                          </Show>
-                        </button>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              </Show>
-            </div>
-          )}
+        <For each={columnKeys()}>
+          {(columnKey) => {
+            const column = () => columnList().byKey.get(columnKey);
+            const cards = createMemo(() => keyedList(column()?.cards ?? [], (card) => card.key));
+            const cardKeys = createMemo(() => cards().keys, [], { equals: sameKeys });
+            return (
+              <div class="board-column" data-state={column()?.state}>
+                <h2>
+                  {COLUMN_TITLES[column()?.state ?? "idle"]}
+                  <span class="board-count">{cardKeys().length}</span>
+                </h2>
+                <Show when={cardKeys().length > 0} fallback={<p class="empty">Nothing here</p>}>
+                  <ul>
+                    <For each={cardKeys()}>
+                      {(cardKey) => {
+                        // The card as the latest frame has it, read when it is
+                        // drawn and again when it is clicked.
+                        const card = () => cards().byKey.get(cardKey);
+                        return (
+                          <li>
+                            <button
+                              type="button"
+                              class="board-card"
+                              classList={{ open: card()?.hasOpenRequest }}
+                              data-card={card()?.key}
+                              disabled={card()?.sessionId === null && !card()?.acp}
+                              onClick={() => {
+                                const now = card();
+                                if (now === undefined) return;
+                                if (now.sessionId === null && now.acp) props.onOpenTranscript(now.key);
+                                else show(now.sessionId, now.hasOpenRequest);
+                              }}
+                            >
+                              <span class="card-title">{card()?.title}</span>
+                              <span class="card-line">{cardLine(card())}</span>
+                              <Show when={(card()?.attention.length ?? 0) > 0}>
+                                <span class="card-chips">
+                                  <For each={card()?.attention}>
+                                    {(kind) => (
+                                      <span class="chip" data-kind={kind}>
+                                        {kind}
+                                      </span>
+                                    )}
+                                  </For>
+                                </span>
+                              </Show>
+                            </button>
+                          </li>
+                        );
+                      }}
+                    </For>
+                  </ul>
+                </Show>
+              </div>
+            );
+          }}
         </For>
       </div>
       <aside class="attention-list" aria-label="Waiting on you">
@@ -137,25 +159,28 @@ export function Board(props: Props) {
           }
         >
           <ul>
-            <For each={waiting()}>
-              {(row) => (
-                <li>
-                  <button
-                    type="button"
-                    class="attention-row"
-                    data-row={row.key}
-                    data-kind={row.kind}
-                    disabled={row.sessionId === null}
-                    onClick={() => show(row.sessionId, true)}
-                  >
-                    <span class="row-kind">{row.kind}</span>
-                    <span class="row-title">{row.title}</span>
-                    <Show when={row.detail}>
-                      <span class="row-detail">{row.detail}</span>
-                    </Show>
-                  </button>
-                </li>
-              )}
+            <For each={waitingKeys()}>
+              {(key) => {
+                const row = () => waitingList().byKey.get(key);
+                return (
+                  <li>
+                    <button
+                      type="button"
+                      class="attention-row"
+                      data-row={row()?.key}
+                      data-kind={row()?.kind}
+                      disabled={row()?.sessionId === null}
+                      onClick={() => show(row()?.sessionId ?? null, true)}
+                    >
+                      <span class="row-kind">{row()?.kind}</span>
+                      <span class="row-title">{row()?.title}</span>
+                      <Show when={row()?.detail}>
+                        <span class="row-detail">{row()?.detail}</span>
+                      </Show>
+                    </button>
+                  </li>
+                );
+              }}
             </For>
           </ul>
         </Show>
@@ -170,7 +195,8 @@ export function Board(props: Props) {
 }
 
 /** The line under a card's title: what it is and how it is reachable. */
-function cardLine(card: BoardCard): string {
+function cardLine(card: BoardCard | undefined): string {
+  if (card === undefined) return "";
   // The model is free text off the frame, drawn through the same rule as a
   // session name, so a bidi override or an escape cannot restyle the card.
   const parts = [

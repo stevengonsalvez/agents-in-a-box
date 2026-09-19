@@ -14,11 +14,12 @@
 // a HOME, a hangar home and a tmux server whose teardown pulls the ground from
 // under the other.
 
-import { APP_BIN, down, up } from "./world.js";
+import { APP_BIN, down, freshBundle, up } from "./world.js";
+import { cleanUpBeforeRun } from "./cleanup.js";
 
 export const config = {
   runner: "local",
-  specs: ["./specs/journey.e2e.js", "./specs/answer.e2e.js"],
+  specs: ["./specs/journey.e2e.js", "./specs/answer.e2e.js", "./specs/review.e2e.js"],
   maxInstances: 1,
   framework: "mocha",
   reporters: ["spec"],
@@ -39,6 +40,11 @@ export const config = {
 
   onPrepare(config, capabilities) {
     refuseConcurrentRuns(config, capabilities);
+    // Before anything is cleared or started: a stale webview bundle fails the
+    // run without removing another run's leftovers or stopping a daemon.
+    freshBundle();
+    // What earlier runs left: their worlds and this worktree's daemons.
+    cleanUpBeforeRun();
     up(2);
   },
   onComplete() {

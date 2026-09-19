@@ -68,3 +68,40 @@ test("a memo over a root selector stays quiet when a drain keeps its value", () 
   assert.equal(runs.idle, afterFirst + 1);
   dispose();
 });
+
+test("usageStale reads the stale mark on section 21, not on any other", () => {
+  createRoot((dispose) => {
+    const store = createFrameStore(["usage", "git_view"]);
+    assert.equal(ROOT_SELECTORS.usageStale(store, "local"), false);
+    store.applyDrain("local", [{ frames: [], oversize: [{ section: "usage", version: 2, bytes: 5_000_000 }] }]);
+    assert.equal(ROOT_SELECTORS.usageStale(store, "local"), true);
+    assert.equal(ROOT_SELECTORS.gitViewStale(store, "local"), false);
+    dispose();
+  });
+});
+
+test("inboxUnread is the daemon's unread count for the header, 0 with no section", () => {
+  createRoot((dispose) => {
+    const store = createFrameStore(["inbox"]);
+    assert.equal(ROOT_SELECTORS.inboxUnread(store, "local"), 0);
+    store.applyDrain("local", [
+      {
+        frames: [
+          frame("inbox", 1, {
+            entries: [],
+            unread: 4,
+            recipient: "operator",
+            absent: null,
+            unreachable: null,
+            rows_cut: 0,
+            summaries_cut: 0,
+            received_at_ms: 1,
+          }),
+        ],
+      },
+    ]);
+    assert.equal(ROOT_SELECTORS.inboxUnread(store, "local"), 4);
+    assert.equal(ROOT_SELECTORS.inboxUnread(store, undefined), 0);
+    dispose();
+  });
+});

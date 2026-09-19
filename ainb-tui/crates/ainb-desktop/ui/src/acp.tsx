@@ -1,5 +1,6 @@
-import { For, Show } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
 import type { TranscriptView } from "./acp.ts";
+import { keyedList, sameKeys } from "./keyed.ts";
 
 interface Props {
   /** The Fleet session key the card was opened for. */
@@ -33,7 +34,15 @@ export function AcpCard(props: Props) {
         </button>
       </header>
       <Show when={props.view} fallback={<p class="empty">Opening the transcript</p>}>
-        {(view) => (
+        {(view) => {
+          // Drawn by key, not by object identity (#1267). `transcriptView`
+          // builds new chunk objects on every read, and `For` keys by
+          // identity, so every line of a transcript was re-created whenever
+          // the Fleet frame moved, losing a selection mid-read. The key is the
+          // chunk's order, which does not change once the daemon has sent it.
+          const chunks = createMemo(() => keyedList(view().chunks, (chunk) => String(chunk.key)));
+          const chunkKeys = createMemo(() => chunks().keys, [], { equals: sameKeys });
+          return (
           <>
             <Show when={view().status}>
               {(line) => (
@@ -50,23 +59,27 @@ export function AcpCard(props: Props) {
               fallback={<p class="empty">Nothing in this run yet</p>}
             >
               <ol class="acp-chunks">
-                <For each={view().chunks}>
-                  {(chunk) => (
-                    <li class="acp-chunk" data-kind={chunk.kind}>
-                      <span class="acp-kind">{chunk.label}</span>
-                      <span class="acp-body">
-                        {chunk.body}
-                        <Show when={chunk.truncated}>
-                          <span class="acp-cut"> (cut)</span>
-                        </Show>
-                      </span>
-                    </li>
-                  )}
+                <For each={chunkKeys()}>
+                  {(key) => {
+                    const chunk = () => chunks().byKey.get(key);
+                    return (
+                      <li class="acp-chunk" data-kind={chunk()?.kind} data-chunk={chunk()?.key}>
+                        <span class="acp-kind">{chunk()?.label}</span>
+                        <span class="acp-body">
+                          {chunk()?.body}
+                          <Show when={chunk()?.truncated}>
+                            <span class="acp-cut"> (cut)</span>
+                          </Show>
+                        </span>
+                      </li>
+                    );
+                  }}
                 </For>
               </ol>
             </Show>
           </>
-        )}
+          );
+        }}
       </Show>
     </section>
   );

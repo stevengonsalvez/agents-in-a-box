@@ -1,0 +1,6 @@
+# Direct SessionStore::{load,lock,mutate} calls outside the resolver
+# (ainb-app/src/cli/util.rs), locked by tests/session_store_call_sites.rs.
+# Empty since P6e-4: every read goes through cli::util::load_session_store
+# and every write through cli::util::mutate_session_store. A new line is a
+# regression unless it carries its reason here.
+# Regenerate: UPDATE_SESSION_STORE_CALL_SITES=1 cargo test -p ainb-app --test session_store_call_sites

@@ -43,9 +43,44 @@ pub fn is_host_authored(id: &CommandId) -> bool {
         || ainb_app::app::plugin_action::ids::ALL.contains(&id.as_str())
 }
 
+/// The updater's command ids. The window may check, apply the update the
+/// host resolved, and read the settings. Rolling back (a forced downgrade),
+/// removing the previous (the only recovery copy) and choosing the channel
+/// or the tag are the native menu's, the terminal's and the config file's,
+/// never the window's.
+pub mod update {
+    pub const CHECK: &str = "update.check";
+    pub const APPLY: &str = "update.apply";
+    pub const ROLLBACK: &str = "update.rollback";
+    pub const DISCARD_PREVIOUS: &str = "update.discard_previous";
+    pub const SETTINGS: &str = "update.settings";
+    pub const SET_SETTINGS: &str = "update.set_settings";
+    /// Every updater id.
+    pub const ALL: [&str; 6] = [
+        CHECK,
+        APPLY,
+        ROLLBACK,
+        DISCARD_PREVIOUS,
+        SETTINGS,
+        SET_SETTINGS,
+    ];
+    /// The ids the window may send.
+    pub const FROM_WEBVIEW: [&str; 3] = [CHECK, APPLY, SETTINGS];
+}
+
+/// The refusal for an updater id the window may not send, `None` when it may.
+#[must_use]
+pub fn update_refusal(id: &str) -> Option<Refusal> {
+    (update::ALL.contains(&id) && !update::FROM_WEBVIEW.contains(&id)).then(|| Refusal {
+        command: CommandId::new(id),
+        reason: "the menu, the terminal or the config file does this, not the window",
+    })
+}
+
 /// Whether the webview may not send `id`.
 ///
-/// Two families: a host-authored row ([`is_host_authored`]), and a row that
+/// Three families: a host-authored row ([`is_host_authored`]), an updater id
+/// that chooses where updates come from ([`update_refusal`]), and a row that
 /// writes outside ainb, which runs only from its key
 /// ([`Keymap::is_key_only`]), whatever surface names it.
 ///
@@ -53,7 +88,56 @@ pub fn is_host_authored(id: &CommandId) -> bool {
 /// may offer and what it may send cannot drift apart.
 #[must_use]
 pub fn refused_from_webview(keymap: &Keymap, id: &CommandId) -> bool {
-    is_host_authored(id) || keymap.is_key_only(id)
+    is_host_authored(id) || update_refusal(id.as_str()).is_some() || keymap.is_key_only(id)
+}
+
+/// The most characters one toast carries.
+pub const MAX_TOAST_CHARS: usize = 300;
+
+/// `text` as the webview may show it in a toast: control and format
+/// characters removed and paths replaced ([`typed_text`],
+/// [`crate::sidecar::scrub_paths`]), then cut to [`MAX_TOAST_CHARS`]. The
+/// scrub runs first, so nothing cut ever counted.
+#[must_use]
+pub fn toast_text(text: &str) -> String {
+    crate::sidecar::scrub_paths(&typed_text(text))
+        .chars()
+        .take(MAX_TOAST_CHARS)
+        .collect()
+}
+
+/// The plugin screens the desktop may watch: `PLUGIN_SCREENS` less
+/// `analytics` (D3p-f). The stats tab draws burndown's counters from the
+/// daemon's usage projection, so a cell painting burndown's own screen beside
+/// it would put the same numbers on the desktop twice, from two scans.
+pub const DESKTOP_WATCHABLE_SCREENS: &[&str] = &[
+    ainb_app::app::screens::ids::WITR,
+    ainb_app::app::screens::ids::LEARNINGS,
+    ainb_app::app::screens::ids::ABTOP,
+    ainb_app::app::screens::ids::HANGAR,
+];
+
+/// Why a watch of `screen` is refused on the desktop, or `None` when the
+/// screen is one it may watch. Every screen outside
+/// [`DESKTOP_WATCHABLE_SCREENS`] is refused; `analytics` names the stats tab.
+#[must_use]
+pub fn watch_refusal(screen: &str) -> Option<&'static str> {
+    if DESKTOP_WATCHABLE_SCREENS.contains(&screen) {
+        None
+    } else if screen == ainb_app::app::screens::ids::ANALYTICS {
+        Some("the stats tab draws analytics' counters on the desktop")
+    } else {
+        Some("not a plugin screen the desktop watches")
+    }
+}
+
+/// The watch refusal for a `plugin.owned.watch_screen` command, from its
+/// `screen` argument.
+fn watched_screen_refusal(id: &CommandId, args: &ainb_app::app::Args) -> Option<&'static str> {
+    if id.as_str() != ainb_app::app::plugin_action::ids::WATCH_SCREEN {
+        return None;
+    }
+    watch_refusal(args.get("screen")?.as_str()?)
 }
 
 impl TryFrom<RendererIntent> for Intent {
@@ -62,6 +146,15 @@ impl TryFrom<RendererIntent> for Intent {
     type Error = Refusal;
 
     fn try_from(intent: RendererIntent) -> Result<Self, Refusal> {
+        if let RendererIntent::Command(id, args) = &intent {
+            if let Some(reason) = watched_screen_refusal(id, args) {
+                tracing::warn!("command `{id}` refused from the webview: {reason}");
+                return Err(Refusal {
+                    command: id.clone(),
+                    reason,
+                });
+            }
+        }
         match intent {
             RendererIntent::Key(chord) => Ok(Self::Key(chord)),
             RendererIntent::Command(id, _) if is_host_authored(&id) => {

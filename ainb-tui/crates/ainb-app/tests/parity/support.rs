@@ -14,6 +14,7 @@
 //! crate as `ainb_app` in both.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use uuid::Uuid;
@@ -21,7 +22,9 @@ use uuid::Uuid;
 use ainb_app::app::AppState;
 use ainb_app::app::screens::ids;
 use ainb_app::components::code_review::model::{DiffRow, Hunk, ReviewFile, ReviewModel, RowKind};
+use ainb_app::components::daemons::Snapshot;
 use ainb_app::components::git_view::{GitFileStatus, GitTab, GitViewState};
+use ainb_app::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
 use ainb_app::models::{Session, SessionStatus, Workspace};
 
 /// One committed scenario.
@@ -38,6 +41,12 @@ pub struct ParityFixture {
     pub selected: Option<[usize; 2]>,
     #[serde(default)]
     pub help_visible: bool,
+    /// Why this fixture has no ratatui half, when it has none. The terminal
+    /// renderer and its snapshot checks skip it; the frames dump and the
+    /// webview half still take it. `stats` is the one: the terminal's stats is
+    /// burndown's plugin paint, not a built-in screen (D3-prime).
+    #[serde(default)]
+    pub dom_only: Option<String>,
     pub screen: ScreenFixture,
 }
 
@@ -75,7 +84,13 @@ pub enum ScreenFixture {
     SessionList,
     NewSessionPickRepo,
     Config,
-    Daemons,
+    /// The daemons screen over a collected snapshot, so both renderers draw
+    /// rows and not only a table's headings: each `DaemonFixture` is one
+    /// daemon as the collector would report it.
+    Daemons {
+        #[serde(default)]
+        daemons: Vec<DaemonFixture>,
+    },
     GitView {
         files: Vec<ReviewFileFixture>,
         /// Sidebar directories the person has collapsed. A fixture carries one
@@ -107,6 +122,52 @@ pub struct InboxRowFixture {
     pub summary: String,
     #[serde(default)]
     pub read: bool,
+    /// Section 21 holding one `fleet/usage_summary` reply, as the daemon
+    /// sends it, on the terminal's `analytics` screen (burndown's).
+    Stats {
+        usage: Box<ainb_hangar_proto::fleet::FleetUsageSummaryResult>,
+    },
+    /// A plugin screen with nothing painted yet, which draws one of the three
+    /// fallback placeholders (D3p-f): not registered, registered with a render
+    /// error, or registered with no frame yet.
+    Plugin {
+        screen: PluginScreenFixture,
+        /// The host's runtime has the plugin registered.
+        #[serde(default)]
+        registered: bool,
+        /// The render error the host recorded for the screen.
+        #[serde(default)]
+        render_error: Option<String>,
+    },
+}
+
+/// A screen `PLUGIN_SCREENS` hands to a plugin.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginScreenFixture {
+    Analytics,
+    Witr,
+    Learnings,
+    Abtop,
+    Hangar,
+}
+
+/// One daemon row of a `daemons` fixture.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonFixture {
+    /// `DaemonKind`'s lowercase id.
+    pub kind: DaemonKind,
+    pub state: DaemonState,
+    #[serde(default)]
+    pub connected: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub error_count: u64,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,7 +219,7 @@ impl ParityFixture {
             ScreenFixture::SessionList => ids::SESSION_LIST,
             ScreenFixture::NewSessionPickRepo => ids::NEW_SESSION,
             ScreenFixture::Config => ids::CONFIG,
-            ScreenFixture::Daemons => ids::DAEMONS,
+            ScreenFixture::Daemons { .. } => ids::DAEMONS,
             ScreenFixture::GitView { .. } => ids::GIT_VIEW,
             ScreenFixture::SessionRecovery => ids::SESSION_RECOVERY,
             ScreenFixture::SkillManager => ids::SKILL_MANAGER,
@@ -166,6 +227,14 @@ impl ParityFixture {
             ScreenFixture::Onboarding => ids::ONBOARDING,
             ScreenFixture::SetupMenu => ids::SETUP_MENU,
             ScreenFixture::Inbox { .. } => ids::INBOX,
+            ScreenFixture::Stats { .. } => ids::ANALYTICS,
+            ScreenFixture::Plugin { screen, .. } => match screen {
+                PluginScreenFixture::Analytics => ids::ANALYTICS,
+                PluginScreenFixture::Witr => ids::WITR,
+                PluginScreenFixture::Learnings => ids::LEARNINGS,
+                PluginScreenFixture::Abtop => ids::ABTOP,
+                PluginScreenFixture::Hangar => ids::HANGAR,
+            },
         }
     }
 
@@ -208,10 +277,42 @@ impl ParityFixture {
                 state.onboarding.onboarding_state =
                     Some(ainb_app::components::onboarding::OnboardingState::new());
             }
+            ScreenFixture::Stats { usage } => {
+                state.apply_usage_read((**usage).clone(), 0);
+            }
+            ScreenFixture::Plugin {
+                registered,
+                render_error,
+                ..
+            } => {
+                let screen = self.screen_id().to_string();
+                let host = &mut state.plugins_host;
+                host.plugin_presence.insert(
+                    screen.clone(),
+                    ainb_app::app::sections::PluginPresence {
+                        registered: *registered,
+                        ..Default::default()
+                    },
+                );
+                if let Some(error) = render_error {
+                    host.plugin_render_errors.insert(screen, error.clone());
+                }
+            }
+            ScreenFixture::Daemons { daemons } => {
+                // A collected snapshot, at a fixed clock so the relative
+                // columns and the frame dump do not move between runs, and
+                // not parked, so the render's touch spawns no collector.
+                let snapshot = Snapshot {
+                    rows: daemons.iter().map(build_daemon).collect(),
+                    collected_at_ms: 1_700_000_000_000,
+                    last_touch_ms: 1_700_000_000_000,
+                    ..Snapshot::default()
+                };
+                state.hangar.daemons_state.shared = Some(Arc::new(Mutex::new(snapshot)));
+            }
             ScreenFixture::Home
             | ScreenFixture::SessionList
             | ScreenFixture::Config
-            | ScreenFixture::Daemons
             | ScreenFixture::SessionRecovery
             | ScreenFixture::SkillManager
             | ScreenFixture::LogHistory
@@ -270,6 +371,32 @@ fn build_workspace((index, fixture): (usize, &WorkspaceFixture)) -> Workspace {
         workspace.add_session(built);
     }
     workspace
+}
+
+fn build_daemon(fixture: &DaemonFixture) -> DaemonStatus {
+    DaemonStatus {
+        kind: fixture.kind,
+        state: fixture.state,
+        pid: None,
+        uptime_ms: None,
+        version: fixture.version.clone(),
+        // A version the fixture names is this binary's, so the terminal
+        // prints it rather than "unknown".
+        version_current: fixture.version.as_ref().map(|_| true),
+        connected: fixture.connected,
+        channel: None,
+        last_activity_at: None,
+        error_count: fixture.error_count,
+        last_error: fixture.last_error.clone(),
+        last_attention_poll_at: None,
+        last_attention_error: None,
+        inbound_expected: 0,
+        inbound_live: 0,
+        last_inbound_error: None,
+        reason: fixture.reason.clone(),
+        scheduler_orphan: None,
+        atc_instance: None,
+    }
 }
 
 fn build_review_file(fixture: &ReviewFileFixture) -> ReviewFile {

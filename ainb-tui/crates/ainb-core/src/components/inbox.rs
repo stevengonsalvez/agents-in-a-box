@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::app::AppState;
 use crate::app::screens::{Screen, ids};
@@ -37,7 +37,9 @@ impl Screen for InboxScreen {
     }
 }
 
-/// Draw the inbox section into `area`.
+/// Draw the inbox section into `area`, its rows from the section's `scroll`
+/// down, one row per line and clipped at the width, so the footer can say
+/// which rows are on screen.
 pub fn render(frame: &mut Frame, area: Rect, section: &InboxSection) {
     let outer = Block::default()
         .title(Line::from(vec![
@@ -63,16 +65,26 @@ pub fn render(frame: &mut Frame, area: Rect, section: &InboxSection) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    frame.render_widget(
-        Paragraph::new(body_lines(section)).wrap(Wrap { trim: false }),
-        chunks[0],
+    let notes = note_lines(section);
+    let room = usize::from(chunks[0].height).saturating_sub(notes.len());
+    let scroll = section.scroll.min(section.entries.len().saturating_sub(1));
+    let shown = section.entries.len().min(scroll.saturating_add(room));
+    let mut lines = notes;
+    lines.extend(
+        section.entries[scroll..shown]
+            .iter()
+            .map(|row| row_line(row, section.received_at_ms)),
     );
-    frame.render_widget(Paragraph::new(footer_line()), chunks[1]);
+    frame.render_widget(Paragraph::new(lines), chunks[0]);
+    frame.render_widget(
+        Paragraph::new(footer_line(scroll, shown, section.entries.len())),
+        chunks[1],
+    );
 }
 
-/// The rows and the section's own notes, in the order a reader wants them:
-/// why there is nothing first, then the rows, then what was cut.
-fn body_lines(section: &InboxSection) -> Vec<Line<'static>> {
+/// The section's own notes, above the rows: why there is nothing first, then
+/// what was cut.
+fn note_lines(section: &InboxSection) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(reason) = &section.absent {
         lines.push(Line::from(Span::styled(
@@ -104,42 +116,75 @@ fn body_lines(section: &InboxSection) -> Vec<Line<'static>> {
             Style::default().fg(MUTED_GRAY),
         )));
     }
-    for row in &section.entries {
-        let unread = row.read_at.is_none();
-        let (marker, marker_style, text_style) = if unread {
-            (
-                "● ",
-                Style::default().fg(GOLD),
-                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
-            )
-        } else {
-            (
-                "○ ",
-                Style::default().fg(MUTED_GRAY),
-                Style::default().fg(MUTED_GRAY),
-            )
-        };
-        lines.push(Line::from(vec![
-            Span::styled(marker, marker_style),
-            Span::styled(
-                format!("{:<8}", row.kind),
-                Style::default().fg(CORNFLOWER_BLUE),
-            ),
-            Span::styled(row.summary.clone(), text_style),
-        ]));
-    }
     lines
 }
 
-fn footer_line() -> Line<'static> {
+/// One row: its read mark, kind, age and summary.
+fn row_line(row: &ainb_hangar_proto::events::InboxEntryRow, now_ms: i64) -> Line<'static> {
+    let unread = row.read_at.is_none();
+    let (marker, marker_style, text_style) = if unread {
+        (
+            "● ",
+            Style::default().fg(GOLD),
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            "○ ",
+            Style::default().fg(MUTED_GRAY),
+            Style::default().fg(MUTED_GRAY),
+        )
+    };
+    Line::from(vec![
+        Span::styled(marker, marker_style),
+        Span::styled(
+            format!("{:<8}", row.kind),
+            Style::default().fg(CORNFLOWER_BLUE),
+        ),
+        Span::styled(
+            format!("{:>4} ", age(row.created_at, now_ms)),
+            Style::default().fg(MUTED_GRAY),
+        ),
+        Span::styled(row.summary.clone(), text_style),
+    ])
+}
+
+/// The row's age as the daemon's clock gives it: `created_at` against the
+/// clock the read landed on, both epoch milliseconds, in the largest unit
+/// that is at least one. A read that has not landed has no clock, and a
+/// stamp past it (skew) is `now`.
+fn age(created_at_ms: i64, now_ms: i64) -> String {
+    if now_ms <= 0 {
+        return "?".to_string();
+    }
+    let secs = (now_ms - created_at_ms) / 1000;
+    match secs {
+        i64::MIN..=0 => "now".to_string(),
+        1..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
+/// The keys, and which rows are on screen: `rows 3-20 of 100`.
+fn footer_line(scroll: usize, shown: usize, total: usize) -> Line<'static> {
     let key =
         |k: &'static str| Span::styled(k, Style::default().fg(GOLD).add_modifier(Modifier::BOLD));
     let desc = |d: &'static str| Span::styled(d, Style::default().fg(MUTED_GRAY));
+    let range = if total == 0 {
+        String::new()
+    } else {
+        format!("  rows {}-{shown} of {total}", scroll + 1)
+    };
     Line::from(vec![
         key("r"),
         desc(" mark all read  "),
+        key("j/k"),
+        desc(" scroll  "),
         key("esc"),
         desc(" back"),
+        Span::styled(range, Style::default().fg(MUTED_GRAY)),
     ])
 }
 
@@ -255,6 +300,59 @@ mod tests {
             ..InboxSection::default()
         };
         assert!(!text(&none).contains("not shown"));
+    }
+
+    #[test]
+    fn the_age_is_the_daemons_stamp_against_the_reads_clock() {
+        assert_eq!(age(0, 0), "?", "no read, no clock");
+        assert_eq!(age(5_000, 5_000), "now");
+        assert_eq!(age(9_000, 5_000), "now", "skew is not a negative age");
+        assert_eq!(age(5_000, 50_000), "45s");
+        assert_eq!(age(0, 90_000), "1m");
+        assert_eq!(age(0, 7_200_000), "2h");
+        assert_eq!(age(0, 3 * 86_400_000), "3d");
+        let section = InboxSection {
+            entries: vec![row(1, "New issue: one", false)],
+            received_at_ms: 1 + 120_000,
+            ..InboxSection::default()
+        };
+        let drawn = text(&section);
+        assert!(drawn.contains("issue     2m New issue: one"), "{drawn}");
+    }
+
+    #[test]
+    fn the_scroll_picks_the_first_row_and_the_footer_says_which_rows_show() {
+        let section = InboxSection {
+            entries: (1..=10).map(|n| row(n, &format!("Row {n}"), false)).collect(),
+            rows_cut: 1,
+            ..InboxSection::default()
+        };
+        // Height 8: two border rows, one footer, one counters note, four rows.
+        let at = |scroll: usize| InboxSection {
+            scroll,
+            ..section.clone()
+        };
+        let drawn = lines(&at(3), 60, 8);
+        let joined = drawn.join("\n");
+        assert!(
+            !joined.contains("Row 3 "),
+            "rows above the scroll are not drawn:\n{joined}"
+        );
+        assert!(joined.contains("Row 4"), "{joined}");
+        assert!(joined.contains("Row 7"), "{joined}");
+        assert!(
+            !joined.contains("Row 8"),
+            "rows past the screen are not drawn:\n{joined}"
+        );
+        assert!(joined.contains("rows 4-7 of 10"), "{joined}");
+        assert!(joined.contains("j/k"), "{joined}");
+        let top = lines(&at(0), 60, 8).join("\n");
+        assert!(top.contains("rows 1-4 of 10"), "{top}");
+        let past = lines(&at(99), 60, 8).join("\n");
+        assert!(
+            past.contains("Row 10"),
+            "a scroll past the end draws the last row:\n{past}"
+        );
     }
 
     #[test]

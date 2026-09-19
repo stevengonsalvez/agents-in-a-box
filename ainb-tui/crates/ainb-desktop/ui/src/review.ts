@@ -133,6 +133,68 @@ export function bodyLines(section: GitViewView_Serialize | undefined): BodyLine[
 }
 
 /**
+ * The most rows the window will draw for one page, however tall the body
+ * measures.
+ *
+ * The page size comes from the body's own box, and a box that is not bounded
+ * by its grid row measures the content it just drew: the window then asks for
+ * more rows, draws them, measures larger again, and walks back to the whole
+ * diff one frame at a time. No viewport shows two hundred rows of a diff at
+ * twelve pixels a row, so a measurement over this is a broken layout, not a
+ * tall window, and the cap holds the DOM bounded while it is.
+ */
+export const MAX_PAGE_ROWS = 200;
+
+/**
+ * Rows drawn beyond each edge of the viewport, so a wheel that moves a row or
+ * two has something already in the DOM to show while the next frame is on its
+ * way.
+ */
+export const OVERSCAN = 20;
+
+/**
+ * The lines the window actually draws: the viewport's own rows, plus
+ * `overscan` on each side.
+ *
+ * The whole body at the frame's bound is 4,000 rows and 16,122 nodes, and a
+ * real window spends fifty seconds building them (#1221). The reducer still
+ * owns the offset: this takes `first` from `review_ui.scroll` and draws
+ * outwards from it, keeping no scroll position of its own.
+ *
+ * A hunk header carries no virtual index (the reducer's flatten does not count
+ * it), so it is held until a row that is in the window needs it: a window that
+ * opens in the middle of a hunk still says which hunk it is in.
+ */
+export function windowLines(
+  lines: BodyLine[],
+  first: number,
+  rowsPerPage: number,
+  overscan: number = OVERSCAN,
+): BodyLine[] {
+  const from = Math.max(first - overscan, 0);
+  const to = first + rowsPerPage + overscan;
+  const drawn: BodyLine[] = [];
+  let header: BodyLine | undefined;
+  for (const line of lines) {
+    // A file heading ends the hunk above it: without this, a window that opens
+    // on a file's heading draws the previous file's @@ header over it.
+    if (line.kind === "file") header = undefined;
+    if (line.index === undefined) {
+      header = line;
+      continue;
+    }
+    if (line.index >= to) break;
+    if (line.index < from) continue;
+    if (header !== undefined) {
+      drawn.push(header);
+      header = undefined;
+    }
+    drawn.push(line);
+  }
+  return drawn;
+}
+
+/**
  * The height of one body row in pixels, which is what a wheel delta is
  * measured against before it becomes a row count for the reducer.
  *
@@ -289,6 +351,13 @@ export function sectionCut(section: GitViewView_Serialize | undefined): string |
   const view = gitView(section);
   if (view === undefined) return undefined;
   const parts: string[] = [];
+  // The rows the files lost, added up: every file says what it lost on its own
+  // row, but a review cut to the frame's row bound would otherwise say nothing
+  // at the top, which is the whole diff reading as a short one.
+  const rows = view.review.files.reduce((total, file) => total + file.rows_cut, 0);
+  const hunks = view.review.files.reduce((total, file) => total + file.hunks_cut, 0);
+  if (rows > 0) parts.push(`${rows} rows`);
+  if (hunks > 0) parts.push(`${hunks} hunks`);
   if (view.review.files_cut > 0) parts.push(`${view.review.files_cut} files`);
   if (view.files_cut > 0) parts.push(`${view.files_cut} changed paths`);
   if (view.diff_lines_cut > 0) parts.push(`${view.diff_lines_cut} diff lines`);

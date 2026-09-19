@@ -1,6 +1,16 @@
-import { createEffect, createSignal, For, on, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import type { AskState_Serialize } from "../../../ainb-app/bindings/AppState";
-import { drawnQuestion, phaseOf, pickIntents, typedIntents, type Question } from "./answer.ts";
+import {
+  bannerKeys,
+  drawnQuestion,
+  LATCH_GRACE_MS,
+  type Latched,
+  latchQuestion,
+  phaseOf,
+  pickIntents,
+  typedIntents,
+  type Question,
+} from "./answer.ts";
 import { label } from "./sessions.ts";
 import type { RendererIntent } from "./tabs.ts";
 
@@ -10,6 +20,53 @@ interface Props {
   ask: AskState_Serialize | undefined;
   /** Send `intents` to the reducer, one after another, in order. */
   run(intents: RendererIntent[]): Promise<void>;
+}
+
+interface SlotProps {
+  /** The frame's question, or null when the frame carries none. */
+  question: Question | null;
+  ask: AskState_Serialize | undefined;
+  run(intents: RendererIntent[]): Promise<void>;
+  /** The clock, for tests; `Date.now` in the window. */
+  now?(): number;
+  /** The grace, for tests; [`LATCH_GRACE_MS`] in the window. */
+  grace?: number;
+}
+
+/**
+ * Where the banner lives: one banner per open request, latched for a short
+ * grace after the last frame that carried the question (#1266).
+ *
+ * Keyed on the request id, so every frame that carries the same request keeps
+ * the same banner element, and a new request mounts a fresh banner with a
+ * fresh draft. A frame that carries no question does not unmount it inside
+ * the grace; when no frame comes to end the grace, a timer does.
+ */
+export function AnswerSlot(props: SlotProps) {
+  const now = () => (props.now ?? Date.now)();
+  const grace = () => props.grace ?? LATCH_GRACE_MS;
+  // Bumped by the timer so the memo re-reads the clock when no frame does.
+  const [wake, setWake] = createSignal(0);
+  const latched = createMemo<Latched | null>((kept) => {
+    wake();
+    return latchQuestion(kept, props.question, now(), grace());
+  }, null);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  createEffect(() => {
+    const held = latched();
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    if (held === null || props.question !== null) return;
+    // Kept on grace alone: wake just after it runs out.
+    const left = grace() - (now() - held.seenAt);
+    timer = setTimeout(() => setWake((n) => n + 1), Math.max(0, left) + 1);
+  });
+  onCleanup(() => clearTimeout(timer));
+  return (
+    <For each={bannerKeys(latched()?.question ?? null)}>
+      {() => <AnswerBanner question={latched()!.question} ask={props.ask} run={props.run} />}
+    </For>
+  );
 }
 
 /**
@@ -30,7 +87,8 @@ export function AnswerBanner(props: Props) {
   const question = drawnQuestion(
     () => props.question,
     (paint) => {
-      requestAnimationFrame(paint);
+      const frame = requestAnimationFrame(paint);
+      return () => cancelAnimationFrame(frame);
     },
   );
   const [draft, setDraft] = createSignal("");

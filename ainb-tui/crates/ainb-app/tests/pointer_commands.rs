@@ -264,38 +264,56 @@ fn waiting_on(options: &[&str]) -> (AppState, ainb_app::fleet::attention::Sessio
 }
 
 #[test]
-fn a_pick_by_label_sends_that_option_even_after_the_options_reordered() {
+fn a_pick_by_index_sends_that_option_as_a_pick_not_a_draft() {
     use ainb_app::fleet::answer::AnswerPhase;
     let keymap = Keymap::defaults();
-    // The frame the person clicked offered staging, production, local, and
-    // they clicked the first. Before the click lands, a refresh reorders the
-    // options under the cursor.
-    let (mut state, _) = waiting_on(&["local", "production", "staging"]);
-    let chip = state.sessions.workspaces[0].sessions[0].live_attention[0].clone();
+    let (mut state, chip) = waiting_on(&["staging", "production", "local"]);
 
     let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
-        pointer::pick_answer("att-7", "staging"),
+        pointer::pick_answer("att-7", 2, "local"),
     );
 
-    assert_eq!(
-        state.fleet.ask_state.cursor(),
-        2,
-        "the cursor is on staging, where it sits now"
-    );
+    assert_eq!(state.fleet.ask_state.cursor(), 2);
     assert_eq!(
         state.fleet.ask_state.answer_text(&chip).as_deref(),
-        Ok("staging")
+        Ok("local")
     );
     assert!(
         matches!(
             state.fleet.ask_state.phase_for(&chip),
             Some(AnswerPhase::InFlight { draft: None, .. })
         ),
-        "and the send is out, as a pick rather than a draft: {:?}",
+        "the send is out, as a pick rather than a draft: {:?}",
         state.fleet.ask_state.phase_for(&chip)
+    );
+}
+
+#[test]
+fn a_pick_against_options_that_reordered_under_it_sends_nothing_and_says_so() {
+    // The frame the person clicked offered staging, production, local, and
+    // they clicked the third. Before the click lands, a refresh reorders the
+    // options: position 2 is not what they read there, so nothing goes out.
+    let keymap = Keymap::defaults();
+    let (mut state, chip) = waiting_on(&["local", "production", "staging"]);
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        pointer::pick_answer("att-7", 2, "local"),
+    );
+
+    assert!(
+        state.fleet.ask_state.phase_for(&chip).is_none(),
+        "nothing went out"
+    );
+    assert_eq!(state.fleet.ask_state.cursor(), 0, "the cursor did not move");
+    assert_eq!(
+        state.shell.notifications.last().map(|note| note.message.as_str()),
+        Some("the options changed under the pick; read them again")
     );
 }
 
@@ -308,7 +326,7 @@ fn a_pick_of_a_label_the_question_does_not_offer_sends_nothing_and_says_so() {
         &mut state,
         &keymap,
         &mut NoRenderer,
-        pointer::pick_answer("att-7", "prod"),
+        pointer::pick_answer("att-7", 5, "prod"),
     );
 
     assert!(
@@ -336,7 +354,7 @@ fn a_pick_naming_the_question_that_moved_on_sends_nothing() {
         &mut state,
         &keymap,
         &mut NoRenderer,
-        pointer::pick_answer("att-6", "yes"),
+        pointer::pick_answer("att-6", 0, "yes"),
     );
 
     assert!(
@@ -367,7 +385,7 @@ fn a_pick_runs_only_while_the_ask_pane_is_showing() {
         &mut state,
         &keymap,
         &mut NoRenderer,
-        pointer::pick_answer("att-7", "staging"),
+        pointer::pick_answer("att-7", 0, "staging"),
     );
 
     assert!(effects.is_empty());

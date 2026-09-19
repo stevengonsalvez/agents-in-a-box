@@ -1195,6 +1195,8 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::PersistFailed { .. }
         | AppEvent::InboxMarkAllRead
         | AppEvent::InboxMarkAllReadFinished { .. }
+        | AppEvent::InboxScrollUp
+        | AppEvent::InboxScrollDown
         | AppEvent::GitReviewSelectRow { .. }
         | AppEvent::GitViewScrollBy(..)
         | AppEvent::HomeSidebarClickItem { .. }
@@ -1386,6 +1388,8 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::ConfigEditChar(..)
         | AppEvent::ConfigEditBackspace
         | AppEvent::ConfigSaveAll
+        | AppEvent::ConfigSetRow { .. }
+        | AppEvent::ConfigSelectNode { .. }
         | AppEvent::ConfigToggleExpand
         | AppEvent::ConfigSearchStart
         | AppEvent::ConfigSearchChar(..)

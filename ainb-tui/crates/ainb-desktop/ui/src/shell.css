@@ -59,8 +59,9 @@ body {
   padding: 2px 10px;
 }
 
-.header .settings:disabled {
-  color: var(--muted);
+.header .settings[aria-pressed="true"] {
+  border-color: var(--gold);
+  color: var(--gold);
 }
 
 .banner {
@@ -78,6 +79,7 @@ body {
 }
 
 .banner.degraded,
+.banner.incompatible,
 .banner.reconnecting {
   color: var(--gold);
 }
@@ -233,6 +235,11 @@ body {
 .workarea {
   flex: 1;
   min-width: 0;
+  /* A flex item's default min-height is auto, which is its content: without
+     this the work area grows with whatever the tab draws, every box inside it
+     measures the content rather than the viewport, and a windowed list asks
+     for as many rows as it just drew (#1221). */
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -761,6 +768,134 @@ body {
   font-size: 11px;
 }
 
+/* The settings page: the config section as a form, the daemons panel and the
+   Setup panel for the writes the window may not run itself (D3d). */
+.settings-page {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-head h2,
+.settings-page h3,
+.settings-page h4 {
+  margin: 0;
+  color: var(--gold);
+}
+
+.settings-page .close,
+.settings-page button {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 3px 10px;
+}
+
+.settings-body {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) 1fr;
+  gap: 12px;
+  min-height: 0;
+}
+
+.settings-search {
+  flex: 1;
+  margin: 0 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 3px 8px;
+}
+
+.settings-search.active {
+  border-color: var(--gold);
+}
+
+.settings-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-node {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.settings-node button {
+  text-align: left;
+  flex: 1;
+}
+
+.settings-node .chevron,
+.settings-node .chevron-gap {
+  flex: 0 0 22px;
+  width: 22px;
+  padding: 2px 0;
+  text-align: center;
+  border: none;
+  color: var(--muted);
+}
+
+.settings-node button.active {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+
+.settings-row.current {
+  border-color: var(--green);
+}
+
+.settings-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-row {
+  border: 1px solid var(--highlight);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.settings-row.dirty {
+  border-color: var(--gold);
+}
+
+.settings-row label {
+  display: grid;
+  grid-template-columns: 1fr minmax(160px, 320px);
+  gap: 10px;
+  align-items: center;
+}
+
+.settings-row input,
+.settings-row select,
+.otel input {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 3px 6px;
+}
+
+.settings-page .description,
+.settings-page .empty,
+.readonly-note {
+  margin: 4px 0 0;
 /* The review tab: the changed files beside the diff body. Laid out like the
    board, because it has the same job: fill the work area and let its own
    panes scroll, rather than clipping what does not fit. */
@@ -785,6 +920,19 @@ body {
   font-size: 12px;
 }
 
+.daemons-panel table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.daemons-panel th,
+.daemons-panel td {
+  text-align: left;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--highlight);
+}
+
+.daemons-panel th {
 .review-withheld {
   border-color: var(--red);
   color: var(--text);
@@ -850,6 +998,62 @@ body {
   font-size: 11px;
 }
 
+.daemons-panel tr[data-state="running"] td:nth-child(2) {
+  color: var(--green);
+}
+
+.daemons-panel tr[data-state="stopped"] td:nth-child(2),
+.daemons-panel tr[data-state="crashed"] td:nth-child(2) {
+  color: var(--red);
+}
+
+.hook-health {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dependencies {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dependencies li {
+  display: grid;
+  grid-template-columns: 200px 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.dependencies li[data-satisfied="true"] .dep-name {
+  color: var(--green);
+}
+
+.setup-actions,
+.otel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  align-items: center;
+}
+
+.otel {
+  flex-direction: column;
+  align-items: stretch;
+  max-width: 480px;
+}
+
+.otel label {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px;
+  align-items: center;
 .review-body {
   min-height: 0;
   border: 1px solid var(--border);
@@ -930,4 +1134,226 @@ body {
   color: var(--muted);
   text-align: right;
   user-select: none;
+}
+
+/* The stats tab: section 21, the daemon's usage summary. Laid out like the
+   review tab, filling the work area and scrolling its own content. */
+.stats {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+}
+
+.stats-status,
+.stats-detail,
+.stats-cut {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.stats[data-state="absent"] .stats-status,
+.stats[data-state="failed"] .stats-status {
+  border-color: var(--red);
+  color: var(--text);
+}
+
+.stats-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.stats-figure {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--panel);
+}
+
+.stats-figure dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.stats-figure dd {
+  margin: 2px 0 0;
+  color: var(--gold);
+  font-weight: 600;
+}
+
+.stats-days {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 120px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stats-day {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  height: 100%;
+  min-width: 0;
+}
+
+.stats-bar {
+  width: 100%;
+  min-height: 1px;
+  background: var(--border);
+  border-radius: 2px 2px 0 0;
+}
+
+.stats-date {
+  color: var(--muted);
+  font-size: 9px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.stats-breakdowns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.stats-breakdown {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.stats-breakdown caption {
+  color: var(--gold);
+  font-weight: 600;
+  text-align: left;
+  padding-bottom: 4px;
+}
+
+.stats-breakdown th,
+.stats-breakdown td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--highlight);
+  text-align: right;
+}
+
+.stats-breakdown th[scope="row"],
+.stats-breakdown thead th:first-child {
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.stats-repo {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: normal;
+}
+
+/* The header's inbox button, with the daemon's unread count beside it. */
+.inbox-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inbox-unread {
+  min-width: 18px;
+  border-radius: 9px;
+  padding: 0 5px;
+  background: var(--gold);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* The inbox page: section 16, newest first, over the work area. */
+.inbox {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+}
+
+.inbox-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inbox-head h2 {
+  flex: 1;
+  margin: 0;
+  color: var(--gold);
+  font-size: 15px;
+}
+
+.inbox-status,
+.inbox-cut {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.inbox[data-state="absent"] .inbox-status,
+.inbox[data-state="unreachable"] .inbox-status {
+  border-color: var(--red);
+  color: var(--text);
+}
+
+.inbox-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.inbox-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--highlight);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.inbox-row.unread {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.inbox-row.unread .inbox-label::before {
+  content: "● ";
+  color: var(--green);
+}
+
+.inbox-summary {
+  overflow-wrap: anywhere;
+}
+
+.inbox-when {
+  color: var(--muted);
+  white-space: nowrap;
 }

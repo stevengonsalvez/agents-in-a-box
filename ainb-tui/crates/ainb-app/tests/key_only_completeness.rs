@@ -373,6 +373,12 @@ const SINKS: &[(&str, Reach, &str)] = &[
         "tmux list-panes",
     ),
     (
+        "interactive/session_manager.rs::list_sessions_with",
+        Reach::ReadOnly,
+        "tmux list-sessions, and a read of the session store through the \
+         resolver (P6e); it writes nothing, inside ainb or out",
+    ),
+    (
         "otel/mod.rs::detect_host_name",
         Reach::ReadOnly,
         "hostname -s",

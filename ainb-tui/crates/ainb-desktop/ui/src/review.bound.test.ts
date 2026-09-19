@@ -25,11 +25,14 @@ import type {
 
 /** The bound the host frames to: rows across the section, characters a row. */
 const MAX_ROWS_TOTAL = 4_000;
+
+/** `review.ts`'s overscan, read here so the two cannot drift apart. */
+const { OVERSCAN } = await import("./review.ts");
 const MAX_ROWS_PER_FILE = 400;
 const MAX_LINE_CHARS = 2_000;
 
 /** A section at the bound: ten files of four hundred rows, each row full. */
-function atTheBound(): GitViewView_Serialize {
+function atTheBound(scroll = 0): GitViewView_Serialize {
   const text = "x".repeat(MAX_LINE_CHARS);
   const files: ReviewFileFrame_Serialize[] = [];
   for (let file = 0; file < MAX_ROWS_TOTAL / MAX_ROWS_PER_FILE; file += 1) {
@@ -90,13 +93,14 @@ function atTheBound(): GitViewView_Serialize {
     commits: [],
     commits_cut: 0,
     selected_commit_index: 0,
+    selected_commit_cut: false,
     review: { files, files_cut: 0 },
     review_ui: {
       selected_file: 0,
       sidebar_selected: 0,
       collapsed_dirs: [],
       collapsed_dirs_cut: 0,
-      scroll: 0,
+      scroll,
       scroll_cut: false,
       current_hunk: 0,
     },
@@ -136,11 +140,61 @@ test("the review tab at the frame's bound, measured", async () => {
       `review at the bound: ${rows} rows, ${elements} elements, ${html.length} bytes, first render ${took.toFixed(0)} ms`,
     );
 
-    assert.equal(rows, MAX_ROWS_TOTAL, "every row the frame allows is drawn");
+    // The frame carries MAX_ROWS_TOTAL rows; the window draws the viewport's
+    // own and an overscan on each side, so what the DOM costs is bounded by
+    // the viewport rather than by the diff. A render with no layout has no
+    // height to measure, so the window is the component's default page plus
+    // two overscans.
+    const bound = 40 + 2 * OVERSCAN;
     assert.ok(
-      took < 5_000,
-      `the bound rendered in ${took.toFixed(0)} ms, which is a cost per row that is no longer linear`,
+      rows > 0 && rows <= bound,
+      `the window drew ${rows} of the frame's ${MAX_ROWS_TOTAL} rows, outside the ${bound} it is bounded to`,
     );
+    assert.ok(
+      elements < 1_000,
+      `the window built ${elements} elements, which is a DOM that grows with the diff rather than the viewport`,
+    );
+    assert.ok(
+      took < 200,
+      `the bound rendered in ${took.toFixed(0)} ms, over the 200 ms line #1221 set`,
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("a window that opens on a file draws that file's rows and no hunk above it", async () => {
+  const server = await createServer({
+    configFile: false,
+    root: fileURLToPath(new URL("..", import.meta.url)),
+    plugins: [solid({ ssr: true })],
+    server: { middlewareMode: true, hmr: false },
+    appType: "custom",
+    ssr: { noExternal: ["solid-js"] },
+    logLevel: "silent",
+  });
+  try {
+    const { Review } = await server.ssrLoadModule("/src/review.tsx");
+    const { renderToString } = await server.ssrLoadModule("solid-js/web");
+    // The fixture's files are 400 rows each, so the second file's heading is
+    // virtual row 401 and its rows run from 402. An offset an overscan below
+    // that puts the window's own first line exactly on the heading, which is
+    // where a hunk header held from the file above would land on top of it.
+    const first = 401 + OVERSCAN;
+    const html: string = renderToString(() =>
+      Review({ gitView: atTheBound(first), stale: false, onChoose() {} }),
+    );
+    const body = html.slice(html.indexOf('class="review-body"'));
+    const rows = [...body.matchAll(/data-vrow="(\d+)"/g)].map((match) => Number(match[1]));
+    assert.equal(rows[0], 401, "the window opens on the second file's heading");
+    assert.deepEqual(
+      rows,
+      Array.from({ length: rows.length }, (_, n) => 401 + n),
+      "and runs unbroken from there",
+    );
+    const heading = body.indexOf('data-vrow="401"');
+    const hunk = body.indexOf("review-hunk");
+    assert.ok(hunk > heading, "the hunk header drawn is the second file's own, not the first file's");
   } finally {
     await server.close();
   }

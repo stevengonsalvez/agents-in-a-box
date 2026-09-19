@@ -4,19 +4,38 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
 import { createFrameStore } from "./store.ts";
-import { shellAgentStatus, shellFleet, shellGitView, shellSessions, SUBSCRIBED } from "./subscription.ts";
+import { Stats } from "./stats.tsx";
+import {
+  configRevision,
+  shellAgentStatus,
+  shellConfig,
+  shellFleet,
+  shellGitView,
+  shellHangar,
+  shellInbox,
+  shellSessions,
+  shellUsage,
+  SUBSCRIBED,
+} from "./subscription.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { AcpCard } from "./acp.tsx";
 import { transcriptIntent, transcriptView } from "./acp.ts";
-import { AnswerBanner } from "./answer.tsx";
+import { AnswerSlot } from "./answer.tsx";
 import { phaseOf, questionFor, type Refusal, sendInOrder } from "./answer.ts";
 import { newNotices, noticeKey } from "./notices.ts";
+import { terminal as updateDone, updateLine, type UpdatePhase } from "./update.ts";
 import { Board } from "./board.tsx";
+import { CLOSE_INBOX, OPEN_INBOX } from "./inbox.ts";
+import { Inbox } from "./inbox.tsx";
 import { Review } from "./review.tsx";
 import { boardColumns } from "./board.ts";
 import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
+import { SettingsPage } from "./settings.tsx";
+import { CLOSE_SETTINGS, OPEN_SETTINGS } from "./settings.ts";
+import { banner as sidecarBanner, retryable, type SidecarState } from "./sidecar.ts";
+import type { SetupView, SetupWrite } from "../../bindings/Desktop.ts";
 import {
   accelerator,
   openRowIntent,
@@ -47,13 +66,6 @@ const TOAST_MS = 5000;
 
 const MAC = navigator.userAgent.includes("Mac");
 
-/** `ainb_desktop::sidecar::SidecarView`: no pid and no filesystem path. */
-type SidecarState =
-  | { state: "starting" }
-  | { state: "connected"; spawned: boolean }
-  | { state: "reconnecting"; error: string }
-  | { state: "degraded"; error: string; has_log: boolean };
-
 function Shell() {
   const store = createFrameStore(SUBSCRIBED);
   const [sidecar, setSidecar] = createSignal<SidecarState>({ state: "starting" });
@@ -66,10 +78,16 @@ function Shell() {
 
   // Registered synchronously: an `onCleanup` after an `await` has left the
   // owner and never runs.
+  // The updater's framed state: one line while an update is in flight.
+  const [updatePhase, setUpdatePhase] = createSignal<UpdatePhase | null>(null);
   const listeners = [
     listen<SidecarState>("sidecar", (event) => setSidecar(event.payload)),
     listen<TabsView>("terminal_tabs", (event) => showTabs(event.payload)),
     listen<string>("toast", (event) => toast(event.payload)),
+    listen<UpdatePhase>("update", (event) => {
+      setUpdatePhase(event.payload);
+      if (updateDone(event.payload)) setTimeout(() => setUpdatePhase(null), TOAST_MS);
+    }),
     listen<HostId>("host", (event) => {
       // The host re-pinned its frames to a new id (#1066). What the old id
       // left in the store is never framed again: drop it, so it neither shows
@@ -91,13 +109,23 @@ function Shell() {
   // for one pane is three ways to be wrong and a fourth that draws nothing.
   // The transcript card is not in here; it stands in a session's place and
   // closes back to whatever was chosen.
-  const [pane, setPane] = createSignal<"board" | "review" | "terminal">("board");
+  const [pane, setPane] = createSignal<"board" | "review" | "stats" | "terminal">("board");
   // The ACP session whose transcript card holds the work area, if any. It has
   // no tmux pane, so the card stands where its terminal would.
   const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
-  /** Whether `which` holds the work area: the transcript card takes it first. */
-  const showing = (which: "board" | "review" | "terminal") =>
-    transcriptKey() === null && pane() === which;
+  /**
+   * Whether `which` holds the work area: the transcript card takes it first,
+   * and the settings page and the inbox page (the reducer on its Config or
+   * Inbox screen) take it over every pane.
+   */
+  const showing = (which: "board" | "review" | "stats" | "terminal") =>
+    transcriptKey() === null && !settings() && !inboxOpen() && pane() === which;
+  // The settings page: the config section as a form, the daemons panel and
+  // the Setup panel (D3d). Whether it is open is the reducer's: the page shows
+  // while `shell.current_screen` is the Config screen. Opening walks the
+  // reducer there, where the form's row edits are in context; closing walks
+  // it back to the session list the sidebar is. The window keeps no copy.
+  const [setup, setSetup] = createSignal<SetupView | null>(null);
   const focusers = new Map<string, () => void>();
   const tabKeys = createMemo(
     () => tabs().map((tab) => tab.key),
@@ -111,6 +139,7 @@ function Shell() {
     if (key !== null) {
       setPane("terminal");
       closeTranscript();
+      closeSettings();
     }
     if (key !== null) requestAnimationFrame(() => focusers.get(key)?.());
   };
@@ -159,6 +188,31 @@ function Shell() {
   };
   /** Select a session-list row and attach it, so the reducer marks it attached. */
   const openRow = (row: RowId) => dispatch(openRowIntent(row));
+  const refreshSetup = () => void invoke<SetupView>("setup_status").then(setSetup);
+  const openSettings = () => {
+    closeTranscript();
+    void run(OPEN_SETTINGS);
+    refreshSetup();
+  };
+  const closeSettings = () => {
+    if (!settings()) return;
+    void run(CLOSE_SETTINGS);
+  };
+  // The inbox page, the same way: open walks the reducer to its Inbox screen,
+  // where the sweep is active; close walks it back to the session list.
+  const openInbox = () => {
+    closeTranscript();
+    void run(OPEN_INBOX);
+  };
+  const closeInbox = () => {
+    if (!inboxOpen()) return;
+    void run(CLOSE_INBOX);
+  };
+  /** The shell confirms in its own dialog, runs the write, and toasts the outcome. */
+  const setupWrite = (write: SetupWrite) =>
+    void invoke<boolean>("setup_write", { write }).then((ran) => {
+      if (ran) refreshSetup();
+    });
 
   // The palette is mounted only while it is open: each opening lists the
   // commands afresh, with the host's answer for which of them run now.
@@ -282,6 +336,8 @@ function Shell() {
   const fleet = () => shellFleet(store, host());
   const agentStatus = () => shellAgentStatus(store, host());
   const gitView = () => shellGitView(store, host());
+  const usage = () => shellUsage(store, host());
+  const usageStale = createMemo(() => ROOT_SELECTORS.usageStale(store, host()));
   const counts = HEADER_COUNTS.map(([select, label]) => ({
     label,
     count: createMemo(() => select(store, host())),
@@ -292,6 +348,14 @@ function Shell() {
   const loading = createMemo(() => ROOT_SELECTORS.workspacesLoading(store, host()));
   const elsewhere = createMemo(() => ROOT_SELECTORS.attentionElsewhere(store, host()));
   const shell = () => (host() ? store.section(host()!, "shell") : undefined);
+  const config = () => shellConfig(store, host());
+  const hangar = () => shellHangar(store, host());
+  /** The reducer is on its Config screen, which is the settings page. */
+  const settings = createMemo(() => shell()?.current_screen === "config");
+  /** The reducer is on its Inbox screen, which is the inbox page (D3p-c). */
+  const inboxOpen = createMemo(() => shell()?.current_screen === "inbox");
+  const inbox = () => shellInbox(store, host());
+  const inboxUnread = createMemo(() => ROOT_SELECTORS.inboxUnread(store, host()));
   const ask = () => fleet()?.ask_state;
   const question = createMemo(() => questionFor(sessions()));
 
@@ -331,19 +395,7 @@ function Shell() {
     return label(session?.name ?? target.tmux);
   };
 
-  const banner = () => {
-    const state = sidecar();
-    switch (state.state) {
-      case "starting":
-        return "Connecting to the hangar daemon";
-      case "connected":
-        return state.spawned ? "Started the hangar daemon" : "Attached to the hangar daemon";
-      case "reconnecting":
-        return `Reconnecting: ${state.error}`;
-      case "degraded":
-        return `No hangar daemon: ${state.error}`;
-    }
-  };
+  const banner = () => sidecarBanner(sidecar());
 
   return (
     <main class="shell">
@@ -369,15 +421,32 @@ function Shell() {
             </span>
           </Show>
         </span>
-        {/* ponytail: the settings page is D3; the entry is drawn and inert until then. */}
-        <button type="button" class="settings" disabled title="Settings">
+        <button
+          type="button"
+          class="inbox-button"
+          title="Inbox"
+          aria-pressed={inboxOpen()}
+          onClick={() => (inboxOpen() ? closeInbox() : openInbox())}
+        >
+          Inbox
+          <Show when={inboxUnread() > 0}>
+            <span class="inbox-unread">{inboxUnread()}</span>
+          </Show>
+        </button>
+        <button
+          type="button"
+          class="settings"
+          title="Settings"
+          aria-pressed={settings()}
+          onClick={() => (settings() ? closeSettings() : openSettings())}
+        >
           ⚙
         </button>
       </header>
       <Show when={sidecar().state !== "connected"}>
         <div class={`banner ${sidecar().state}`} role="status">
           <span>{banner()}</span>
-          <Show when={sidecar().state === "degraded"}>
+          <Show when={retryable(sidecar())}>
             <span class="actions">
               <Show when={(sidecar() as { has_log?: boolean }).has_log}>
                 <button
@@ -441,6 +510,19 @@ function Shell() {
                 Review
               </button>
             </span>
+            <span class="tab stats-tab" classList={{ active: showing("stats") }}>
+              <button
+                type="button"
+                class="tab-title"
+                aria-current={showing("stats") ? "page" : undefined}
+                onClick={() => {
+                  closeTranscript();
+                  setPane("stats");
+                }}
+              >
+                Stats
+              </button>
+            </span>
             {/* The ACP card's own place in the strip, where the session's
                 terminal tab would be if it had a pane. */}
             <Show when={transcriptKey()}>
@@ -490,9 +572,9 @@ function Shell() {
               )}
             </For>
           </nav>
-          <Show when={question()}>
-            {(shown) => <AnswerBanner question={shown()} ask={ask()} run={run} />}
-          </Show>
+          {/* One banner per open request, latched for a short grace across
+              frames that carry none (#1266): `AnswerSlot`. */}
+          <AnswerSlot question={question()} ask={ask()} run={run} />
           <Show when={transcriptKey()}>
             {(key) => (
               <AcpCard
@@ -505,8 +587,37 @@ function Shell() {
               />
             )}
           </Show>
+          <Show when={inboxOpen()}>
+            <Inbox
+              inbox={inbox()}
+              onChoose={dispatch}
+              onClose={() => {
+                closeInbox();
+                setPane("board");
+              }}
+            />
+          </Show>
+          <Show when={settings()}>
+            <SettingsPage
+              config={config()}
+              revision={configRevision(store, host())}
+              hangar={hangar()}
+              sidecar={sidecar()}
+              setup={setup()}
+              run={(intents) => void run(intents)}
+              onSetupWrite={setupWrite}
+              onRefreshSetup={refreshSetup}
+              onClose={() => {
+                closeSettings();
+                setPane("board");
+              }}
+            />
+          </Show>
           <Show when={showing("review")}>
             <Review gitView={gitView()} stale={gitViewStale()} onChoose={dispatch} />
+          </Show>
+          <Show when={showing("stats")}>
+            <Stats usage={usage()} stale={usageStale()} />
           </Show>
           <Show when={showing("board")}>
             <Board
@@ -546,6 +657,7 @@ function Shell() {
         <Palette sessions={sessions()} onChoose={dispatch} onClose={closePalette} />
       </Show>
       <div class="toasts" aria-live="polite">
+        <Show when={updateLine(updatePhase())}>{(line) => <div class="toast update-status">{line()}</div>}</Show>
         <For each={toasts()}>{(entry) => <div class="toast">{entry.text}</div>}</For>
       </div>
     </main>

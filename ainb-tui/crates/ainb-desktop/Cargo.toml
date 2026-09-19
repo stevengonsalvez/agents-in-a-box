@@ -1,6 +1,9 @@
 [package]
 name = "ainb-desktop"
-version = "0.1.0"
+# One version per release: the release workflow's prepare job bumps this line
+# with the parent workspace's, and the bundler reads it (tauri.conf.json
+# carries no version of its own).
+version = "1.28.2"
 edition = "2021"
 publish = false
 description = "ainb desktop shell: a Tauri v2 host of the ainb-app state machine"
@@ -23,7 +26,7 @@ required-features = ["app"]
 
 [features]
 default = []
-app = ["dep:tauri", "dep:tauri-build", "dep:ainb-hangar-core", "dep:tracing-subscriber"]
+app = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:ainb-hangar-core", "dep:tracing-subscriber"]
 # The window serves `ui/dist` over its own protocol instead of the dev server
 # at `build.devUrl`. A plain `cargo build` keeps the dev server, which is what
 # `tauri dev` and the frontend's hot reload want; every build that has to run
@@ -38,22 +41,36 @@ wdio = ["bundled", "dep:tauri-plugin-wdio-webdriver"]
 # `bindings`, which renders `Desktop.ts`. Off in every normal build; the CI
 # desktop workflow builds with it and diffs the output.
 typescript-bindings = ["dep:specta", "dep:specta-serde", "dep:specta-typescript"]
+# The updater's test seams (`Updater::with_key`, the `Verify::Key` arm). On
+# only through this crate's own dev-dependency below, so `cargo test` has
+# them and no bundle or `cargo build` does; a release build that carries the
+# feature is refused by the guard at the bottom of `updater.rs`.
+test-seams = []
 
 [dependencies]
 ainb-app = { path = "../ainb-app" }
 ainb-hangar-client = { path = "../ainb-hangar-client" }
 ainb-hangar-core = { path = "../ainb-hangar-core", optional = true }
 ainb-hangar-proto = { path = "../ainb-hangar-proto" }
+anyhow = "1"
 arboard = "3.6"
 nix = { version = "0.29", features = ["fs", "process", "signal"] }
 portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The updater hashes the downloaded bundle file against the signed manifest,
+# and mounts a disk image on a temporary mount point.
+sha2 = "0.10"
+tempfile = "3"
 tokio = { version = "1.36", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", optional = true, features = ["fmt"] }
 uuid = { version = "1.5", features = ["serde"] }
 tauri = { version = "~2.11.5", optional = true }
+# The native confirmation in front of the onboarding writes (#1175): a message
+# dialog the OS draws, which the webview's script cannot click. Rust side only;
+# the webview never calls the plugin, so it needs no capability.
+tauri-plugin-dialog = { version = "2.7", optional = true }
 tauri-plugin-wdio-webdriver = { version = "1.4", optional = true }
 # Pinned to the same releases `ainb-app` renders its frame contract with, so
 # both files are produced by one version of specta.
@@ -65,6 +82,10 @@ specta-typescript = { version = "=0.0.12", optional = true }
 tauri-build = { version = "~2.6.3", optional = true }
 
 [dev-dependencies]
+# This crate, with its own test seams on, for its integration tests only.
+ainb-desktop = { path = ".", features = ["test-seams"] }
 # The shared agent status reader's fake daemon (#1188).
 ainb-app = { path = "../ainb-app", features = ["test-support"] }
-tempfile = "3"
+# The updater tests sign a manifest with a throwaway key.
+base64 = "0.22"
+ed25519-dalek = "2.1"

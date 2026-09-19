@@ -29,7 +29,7 @@
 │           │                         Enter=Select  Esc=Quit  ^R=Reset  ^F=Favorite                        │           │
 └───────────│                                                                                              │───────────┘
 ╭ ⌨ Session ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ls & views ╮
-│    new  attach  → Pane attach  1-9 quick  Space select    │                      i stats  w witr                     │
+│    new  attach  → Pane attach  1-9 quick  Space select    │                 b inbox  i stats  w witr                 │
 │            r resume  delete  ⇧D del-sel  star             │                k skills  m memory  t abtop               │
 │          o editor  $ shell  p commit  F2 rename           │                   git  claude  ⇧Expand                   │
 │             f refresh  ⇧F filter  u re-auth               │      Tab focus  ⇧M expand/collapse  ?/H help  q home     │

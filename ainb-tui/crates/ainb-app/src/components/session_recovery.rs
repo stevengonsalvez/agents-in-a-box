@@ -662,7 +662,7 @@ impl SessionRecoveryState {
         // Enrich orphaned worktrees with agent_type and label from sessions.json
         Self::enrich_worktrees(
             &mut orphaned,
-            &SessionStore::load(),
+            &crate::cli::util::load_session_store().map_err(|e| e.to_string())?,
             &crate::config::SessionLabelStore::load(),
         );
 
@@ -985,7 +985,7 @@ impl SessionRecoveryState {
 
         // Locked RMW (pu4): serialise this recovery re-register against live
         // create/kill writers so neither lost-updates the other.
-        if let Err(e) = SessionStore::mutate(|store| store.upsert(metadata)) {
+        if let Err(e) = crate::cli::util::mutate_session_store(|store| store.upsert(metadata)) {
             // Log warning but continue - session still works, just won't show as Workspace
             tracing::warn!("Failed to persist session metadata: {}", e);
         }
@@ -1422,7 +1422,7 @@ impl SessionRecoveryState {
         // removal runs inside the lock so a concurrent writer can't re-add the
         // worktree between our load and save.
         let worktree_path = worktree.path.clone();
-        let _ = SessionStore::mutate(|store| {
+        let _ = crate::cli::util::mutate_session_store(|store| {
             let keys_to_remove: Vec<String> = store
                 .sessions()
                 .iter()
