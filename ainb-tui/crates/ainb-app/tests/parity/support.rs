@@ -89,6 +89,29 @@ pub enum ScreenFixture {
     LogHistory,
     Onboarding,
     SetupMenu,
+    /// A plugin screen with nothing painted yet, which draws one of the three
+    /// fallback placeholders (D3p-f): not registered, registered with a render
+    /// error, or registered with no frame yet.
+    Plugin {
+        screen: PluginScreenFixture,
+        /// The host's runtime has the plugin registered.
+        #[serde(default)]
+        registered: bool,
+        /// The render error the host recorded for the screen.
+        #[serde(default)]
+        render_error: Option<String>,
+    },
+}
+
+/// A screen `PLUGIN_SCREENS` hands to a plugin.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginScreenFixture {
+    Analytics,
+    Witr,
+    Learnings,
+    Abtop,
+    Hangar,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +170,13 @@ impl ParityFixture {
             ScreenFixture::LogHistory => ids::LOG_HISTORY,
             ScreenFixture::Onboarding => ids::ONBOARDING,
             ScreenFixture::SetupMenu => ids::SETUP_MENU,
+            ScreenFixture::Plugin { screen, .. } => match screen {
+                PluginScreenFixture::Analytics => ids::ANALYTICS,
+                PluginScreenFixture::Witr => ids::WITR,
+                PluginScreenFixture::Learnings => ids::LEARNINGS,
+                PluginScreenFixture::Abtop => ids::ABTOP,
+                PluginScreenFixture::Hangar => ids::HANGAR,
+            },
         }
     }
 
@@ -188,6 +218,24 @@ impl ParityFixture {
             ScreenFixture::Onboarding => {
                 state.onboarding.onboarding_state =
                     Some(ainb_app::components::onboarding::OnboardingState::new());
+            }
+            ScreenFixture::Plugin {
+                registered,
+                render_error,
+                ..
+            } => {
+                let screen = self.screen_id().to_string();
+                let host = &mut state.plugins_host;
+                host.plugin_presence.insert(
+                    screen.clone(),
+                    ainb_app::app::sections::PluginPresence {
+                        registered: *registered,
+                        ..Default::default()
+                    },
+                );
+                if let Some(error) = render_error {
+                    host.plugin_render_errors.insert(screen, error.clone());
+                }
             }
             ScreenFixture::Home
             | ScreenFixture::SessionList
