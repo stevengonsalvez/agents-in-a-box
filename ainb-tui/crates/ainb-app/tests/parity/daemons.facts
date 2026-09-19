@@ -1,7 +1,9 @@
 # Expected facts of the `daemons` fixture, one per line, each a substring both
 # renderers must print: the ratatui snapshot (`daemons.snap`) and the settings
-# page's daemons panel (`ainb-desktop/ui/src/settings.ts::settingsLines`).
-# Before the collector's first pass the table is its headings only.
+# page's daemons panel (`ainb-desktop/ui/test/parity.test.ts`). The fixture
+# seeds a collected snapshot, so the facts are the collector's rows, not only
+# the table's headings: a renderer that drops a row, its state or its reason
+# fails on data.
 Daemons
 runtime health
 DAEMON
@@ -9,3 +11,10 @@ STATE
 VERSION
 ERR
 HEALTH
+notifyd
+running
+stopped
+1.28.2
+heartbeat fresh
+socket and db reachable
+clean stop
