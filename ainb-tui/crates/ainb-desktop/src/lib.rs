@@ -26,3 +26,4 @@ pub mod intent;
 pub mod shell;
 pub mod sidecar;
 pub mod terminal;
+pub mod updater;
