@@ -32,7 +32,7 @@ const MAX_ROWS_PER_FILE = 400;
 const MAX_LINE_CHARS = 2_000;
 
 /** A section at the bound: ten files of four hundred rows, each row full. */
-function atTheBound(): GitViewView_Serialize {
+function atTheBound(scroll = 0): GitViewView_Serialize {
   const text = "x".repeat(MAX_LINE_CHARS);
   const files: ReviewFileFrame_Serialize[] = [];
   for (let file = 0; file < MAX_ROWS_TOTAL / MAX_ROWS_PER_FILE; file += 1) {
@@ -100,7 +100,7 @@ function atTheBound(): GitViewView_Serialize {
       sidebar_selected: 0,
       collapsed_dirs: [],
       collapsed_dirs_cut: 0,
-      scroll: 0,
+      scroll,
       scroll_cut: false,
       current_hunk: 0,
     },
@@ -158,6 +158,43 @@ test("the review tab at the frame's bound, measured", async () => {
       took < 200,
       `the bound rendered in ${took.toFixed(0)} ms, over the 200 ms line #1221 set`,
     );
+  } finally {
+    await server.close();
+  }
+});
+
+test("a window that opens on a file draws that file's rows and no hunk above it", async () => {
+  const server = await createServer({
+    configFile: false,
+    root: fileURLToPath(new URL("..", import.meta.url)),
+    plugins: [solid({ ssr: true })],
+    server: { middlewareMode: true, hmr: false },
+    appType: "custom",
+    ssr: { noExternal: ["solid-js"] },
+    logLevel: "silent",
+  });
+  try {
+    const { Review } = await server.ssrLoadModule("/src/review.tsx");
+    const { renderToString } = await server.ssrLoadModule("solid-js/web");
+    // The fixture's files are 400 rows each, so the second file's heading is
+    // virtual row 401 and its rows run from 402. An offset an overscan below
+    // that puts the window's own first line exactly on the heading, which is
+    // where a hunk header held from the file above would land on top of it.
+    const first = 401 + OVERSCAN;
+    const html: string = renderToString(() =>
+      Review({ gitView: atTheBound(first), stale: false, onChoose() {} }),
+    );
+    const body = html.slice(html.indexOf('class="review-body"'));
+    const rows = [...body.matchAll(/data-vrow="(\d+)"/g)].map((match) => Number(match[1]));
+    assert.equal(rows[0], 401, "the window opens on the second file's heading");
+    assert.deepEqual(
+      rows,
+      Array.from({ length: rows.length }, (_, n) => 401 + n),
+      "and runs unbroken from there",
+    );
+    const heading = body.indexOf('data-vrow="401"');
+    const hunk = body.indexOf("review-hunk");
+    assert.ok(hunk > heading, "the hunk header drawn is the second file's own, not the first file's");
   } finally {
     await server.close();
   }
