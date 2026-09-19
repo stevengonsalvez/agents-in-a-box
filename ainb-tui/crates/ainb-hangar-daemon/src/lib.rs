@@ -258,8 +258,6 @@ pub mod rpc;
 /// to this daemon's runtime and walks it through the FSM via the provider
 /// [`runner`]. Driven by [`run_loop::DaemonConfig::from_env`].
 pub mod run_loop;
-/// One-time idempotent boot import of sessions.json (spec P6d, #1166).
-pub mod session_import;
 /// Agent CLI subprocess execution — the `claude` provider (P1.7).
 ///
 /// Spawns the provider binary in a task's isolated [`execenv::ExecEnv`] with a
@@ -290,6 +288,8 @@ pub mod scheduler;
 /// `hangar.db` and assert live rows render.
 #[cfg(any(test, feature = "test-support"))]
 pub mod seed;
+/// One-time idempotent boot import of sessions.json (spec P6d, #1166).
+pub mod session_import;
 /// The daemon's shutdown seam: which signal stopped it, and how far to tear
 /// down.
 ///
