@@ -122,7 +122,11 @@ async fn a_daemon_from_the_future_is_incompatible_at_once_and_nothing_is_spawned
     let world = World::new();
     let _daemon = listen(&world.home(), future_daemon());
     let config = world.config();
-    let first_backoff = config.reconnect_backoff[0];
+    // The proof that nothing was spawned is the marker file below; the clock
+    // only guards against a supervisor that waited a hello budget out before
+    // it read the refusal. Ten backoff steps, so a loaded box does not fail
+    // it on scheduling alone.
+    let budget = config.reconnect_backoff[0] * 10;
     let started = Instant::now();
     let sidecar = Sidecar::start(config);
     let mut state = sidecar.state();
@@ -138,7 +142,7 @@ async fn a_daemon_from_the_future_is_incompatible_at_once_and_nothing_is_spawned
         unreachable!("matched incompatible");
     };
     assert!(
-        started.elapsed() < first_backoff,
+        started.elapsed() < budget,
         "read on the first frame, not after {:?}",
         started.elapsed()
     );
@@ -218,4 +222,36 @@ async fn retry_after_the_operator_moved_the_daemon_attaches_to_the_new_owner() {
     };
     assert_eq!(daemon_version, None);
     assert!(!world.daemon_was_run());
+}
+
+/// A refusal that says nothing about the daemon (`"data": null`) is still a
+/// refusal: the code alone decides, nothing is spawned, and the fix offered is
+/// the stop verb, the one that holds whichever side is newer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_with_no_data_is_incompatible_and_nothing_is_spawned() {
+    let world = World::new();
+    let _daemon = listen(&world.home(), Hello::RefuseBare);
+    let sidecar = Sidecar::start(world.config());
+    let mut state = sidecar.state();
+
+    let SidecarState::Incompatible {
+        message,
+        daemon_is_newer,
+    } = wait_for(&mut state, "incompatible", |state| {
+        matches!(state, SidecarState::Incompatible { .. })
+    })
+    .await
+    else {
+        unreachable!("matched incompatible");
+    };
+    assert_eq!(message, "refused");
+    assert!(
+        !daemon_is_newer,
+        "a daemon that did not say its range is not offered an app update"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !world.daemon_was_run(),
+        "a bare refusal must never lead to a spawn"
+    );
 }
