@@ -5386,19 +5386,20 @@ impl AppState {
         }
         self.host.last_headroom_watchdog = Some(now);
 
-        let store = match crate::cli::util::load_session_store() {
-            Ok(store) => store,
-            Err(e) => {
-                debug!("headroom watchdog skipped: {e}");
+        // P6e: the store read happens inside the spawned task, never on the
+        // host's tick: through the session source a read can wait out the
+        // RPC deadline, and the tick must not.
+        tokio::spawn(async {
+            let store = match crate::cli::util::load_session_store_async().await {
+                Ok(store) => store,
+                Err(e) => {
+                    debug!("headroom watchdog skipped: {e}");
+                    return;
+                }
+            };
+            if !store.sessions.values().any(|m| m.headroom_enabled) {
                 return;
             }
-        };
-        let has_headroom_session = store.sessions.values().any(|m| m.headroom_enabled);
-        if !has_headroom_session {
-            return;
-        }
-
-        tokio::spawn(async {
             if !crate::headroom::is_healthy().await {
                 warn!("Headroom proxy down with a live session — watchdog respawning");
                 let _ = crate::headroom::ensure_proxy_running_for_live_users().await;
