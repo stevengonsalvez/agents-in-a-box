@@ -242,6 +242,19 @@ impl GitViewState {
         code_review::render::sidebar_click(&mut self.review, &mut self.review_ui, row);
     }
 
+    /// Move the commit selection by `delta` (down when positive), kept inside
+    /// the list. The one bound on it: the Commits scroll and the next/previous
+    /// commit events both come here, so the guard cannot drift (#1252).
+    pub fn move_commit_selection(&mut self, delta: i32) {
+        let last = self.commits.len().saturating_sub(1);
+        let n = delta.unsigned_abs() as usize;
+        self.selected_commit_index = if delta > 0 {
+            self.selected_commit_index.saturating_add(n).min(last)
+        } else {
+            self.selected_commit_index.min(last).saturating_sub(n)
+        };
+    }
+
     /// Scroll the active tab's content by `lines` (down when positive).
     pub fn scroll_active_tab_by(&mut self, lines: i32) {
         let n = lines.unsigned_abs() as usize;
@@ -256,15 +269,7 @@ impl GitViewState {
             // The commit list scrolls by its selection: the terminal's list
             // keeps the selected commit in view, so a separate offset would be
             // pulled back to it on the next paint (#1242).
-            GitTab::Commits if down => {
-                self.selected_commit_index = self
-                    .selected_commit_index
-                    .saturating_add(n)
-                    .min(self.commits.len().saturating_sub(1));
-            }
-            GitTab::Commits => {
-                self.selected_commit_index = self.selected_commit_index.saturating_sub(n);
-            }
+            GitTab::Commits => self.move_commit_selection(lines),
             // Retired from the tab cycle: nothing draws it to scroll.
             GitTab::Files => {}
         }
