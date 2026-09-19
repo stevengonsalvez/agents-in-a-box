@@ -13,6 +13,7 @@ import {
   shellFleet,
   shellGitView,
   shellSessions,
+  shellUsage,
   SUBSCRIBED,
 } from "./subscription.ts";
 
@@ -56,10 +57,12 @@ test("the shell chrome reads only subscribed sections, and the list names no unr
     shellAgentStatus(store, "local");
     shellFleet(store, "local");
     shellGitView(store, "local");
+    shellUsage(store, "local");
     dispose();
   });
 
   assert.ok(read.has("sessions"), "the recorder saw the chrome's reads");
+  assert.ok(read.has("usage"), "the stats tab reads section 21");
   const subscribed = new Set<string>(SUBSCRIBED);
   for (const name of read) {
     assert.ok(subscribed.has(name), `the chrome reads "${name}", which is not subscribed`);
