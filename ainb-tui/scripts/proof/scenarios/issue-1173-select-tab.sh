@@ -2,15 +2,15 @@
 # PR #1173 (D2a seams): `session_list.select_tab` is the pointer command a
 # click on the session tab strip names. The strip is the right pane's border
 # title, `preview │ ask │ err │ thread │ pal │ log`, and the active tab is the
-# one drawn bold and underlined. This node clicks the `log` label in the TUI
-# and reads the pane's own text for which tab is active before and after.
+# one drawn bold and underlined. This node clicks the `log` label, then the
+# `pal` label, in the TUI and reads the pane's own text for which tab is active.
 #
 # `tab` is the control: it cycles the same strip through the keyboard, so a
 # read that cannot see the active tab change fails there first, not on the
 # click.
 
 # shellcheck disable=SC2034  # read by write_result in lib.sh
-EXPECT="a click on the log label of the session tab strip makes log the active tab (session_list.select_tab), as tab already moves the strip off preview"
+EXPECT="a click on the log label of the session tab strip makes log the active tab, and a click on the pal label then makes pal active (session_list.select_tab), as tab already moves the strip off preview"
 
 # strip_row <session>: the 1-based screen row the tab strip is drawn on.
 strip_row() { row_of "$1" 'preview │ ask │ err │'; }
@@ -86,6 +86,21 @@ scenario() {
   check "a click on the log label makes log the active tab" wait_for 5 active_is tui "$row" log
   observe "active tab after the click: '$(active_tab tui "$row")'"
   capture tui strip-after-click
+
+  # A second label, so a select_tab that ignored the column and always picked
+  # the last tab would still fail here. `pal`, not `ask`: with no pending ASK
+  # the strip dims `ask`, and `resolve` sends a click on a dimmed tab to
+  # preview, so `ask` could not become active even with a correct click.
+  col="$(label_col tui "$row" pal)"
+  if [[ -z "$col" ]]; then
+    check "the strip names a pal tab" false
+    return
+  fi
+  observe "clicking 'pal' at column $col, row $row"
+  click tui "$col" "$row"
+  check "a click on the pal label makes pal the active tab" wait_for 5 active_is tui "$row" pal
+  observe "active tab after the second click: '$(active_tab tui "$row")'"
+  capture tui strip-after-second-click
 
   # Control: the keyboard moves the same strip, and the same read sees it, so
   # a failed click above is the click, not the read.
