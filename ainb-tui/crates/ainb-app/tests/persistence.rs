@@ -2,9 +2,9 @@
 
 // ABOUTME: A reducer that changes a store queues the write and returns: the
 // file is untouched until a host runs the effect, and a write that fails comes
-// back as a report the reducer turns into a notice. Each test runs in its own
-// process (nextest), so pointing HOME and AINB_HOME at a scratch directory
-// cannot race another test.
+// back as a report the reducer turns into a notice. Every test here writes
+// under a home directory it takes from the shared guard, which orders it
+// against every other test in this binary that needs one.
 
 use ainb_app::app::NoRenderer;
 use ainb_app::app::reports;
@@ -14,14 +14,17 @@ use ainb_app::config::AppConfig;
 use ainb_app::config::ClaudeAuthProvider;
 use ainb_app::{AppState, Effect, Keymap, dispatch};
 
-fn scratch_home() -> tempfile::TempDir {
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
-    std::env::set_var("AINB_HOME", home.path());
-    home
+#[path = "support/home.rs"]
+mod home;
+
+use home::ScopedHome;
+
+/// The home directory this test writes under, held until the test ends.
+fn scratch_home() -> ScopedHome {
+    ScopedHome::new()
 }
 
-fn config_file(home: &tempfile::TempDir) -> std::path::PathBuf {
+fn config_file(home: &ScopedHome) -> std::path::PathBuf {
     home.path().join(".agents-in-a-box").join("config").join("config.toml")
 }
 
@@ -184,7 +187,7 @@ fn a_step_that_changes_a_store_twice_writes_it_once_with_the_final_state() {
     );
 }
 
-fn write_session_store(home: &tempfile::TempDir, headroom_enabled: bool) -> std::path::PathBuf {
+fn write_session_store(home: &ScopedHome, headroom_enabled: bool) -> std::path::PathBuf {
     let path = home.path().join(".agents-in-a-box").join("sessions.json");
     std::fs::create_dir_all(path.parent().expect("dir")).expect("store dir");
     let store = serde_json::json!({
