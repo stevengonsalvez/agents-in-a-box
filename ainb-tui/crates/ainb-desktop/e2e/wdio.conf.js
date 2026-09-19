@@ -47,6 +47,29 @@ export const config = {
     cleanUpBeforeRun();
     up(2);
   },
+  /**
+   * Stop the service probing for windows before every command.
+   *
+   * `@wdio/tauri-service` recovers window focus in `beforeCommand` for `$`,
+   * `$$`, `findElement`, `findElements`, `elementClick` and `getTitle`: it asks
+   * the app for its window states through `core.invoke("plugin:wdio|
+   * get_window_states")`, which this build does not serve, and each attempt
+   * costs the service's own five-second timeout
+   * ("Failed to get window states: Tauri core.invoke not available after 5s
+   * timeout", 111 times in one spec run). That is what made a redraw measured
+   * across WebDriver read as forty-five seconds while the same redraw timed
+   * inside the page took 64 ms (#1221), and what made a three-spec suite take
+   * twenty minutes.
+   *
+   * The service skips the whole check once the session has switched windows
+   * explicitly, so this switches to the window it is already on. This app has
+   * exactly one window, which the bundle smoke asserts, so there is nothing
+   * for the recovery to recover.
+   */
+  async before() {
+    const [window] = await browser.getWindowHandles();
+    if (window !== undefined) await browser.switchToWindow(window);
+  },
   onComplete() {
     down();
   },
