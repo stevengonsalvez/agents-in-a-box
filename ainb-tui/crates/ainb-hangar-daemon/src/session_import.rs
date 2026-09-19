@@ -16,6 +16,17 @@
 //! boot. Until a marker exists, `workspace/session_list` answers
 //! `import_complete: false` and the CLI keeps reading the file, so a failed
 //! import can never make a populated file look empty.
+//!
+//! # Dark in P6d, and what P6e must reconcile
+//!
+//! P6d ships the table dark: no daemon advertises the capability, so every
+//! reader and writer stays on the file, and the table is written only by this
+//! import and by the daemon's own interactive registration (as a shadow of
+//! its file write). Sessions created after the import therefore exist in the
+//! file but not the table. Before P6e flips the capability it needs a second
+//! reconciliation: file rows missing from the table, keyed by session id,
+//! that never resurrects a row the table deleted after the flip. That is
+//! P6e's first open question; this marker alone does not answer it.
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_proto::sessions::WorkspaceSessionEntry;
