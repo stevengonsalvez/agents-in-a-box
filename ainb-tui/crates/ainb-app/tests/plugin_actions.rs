@@ -2,6 +2,9 @@
 // what it changed from the plugin's `ui.state` view, kept per plugin in the
 // plugins-host section.
 
+#[path = "support/home.rs"]
+mod home;
+
 use ainb_app::app::NoRenderer;
 use ainb_app::app::plugin_action::{self, ids};
 use ainb_app::wire::frame::HostId;
@@ -24,12 +27,7 @@ fn phone() -> HostId {
 }
 
 fn isolated_home() {
-    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| {
-        let home = tempfile::tempdir().expect("scratch home");
-        std::env::set_var("HOME", home.path());
-        home
-    });
+    home::shared();
 }
 
 #[test]
