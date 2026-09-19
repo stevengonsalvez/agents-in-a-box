@@ -1,8 +1,9 @@
 //! The updater's Tauri commands stand outside `Shell::dispatch_renderer`, so
 //! the gate they pass through is checked at the source: every `update_*`
 //! command in `main.rs` opens with `update_gate(<its own id>)`, the channel
-//! setter is not a command at all, and the previous version is removed by one
-//! command only, never on a connect.
+//! setter, the rollback and the removal of the previous are not commands at
+//! all (native menu only), and the previous version is removed from one
+//! place only, never on a connect.
 
 use std::path::Path;
 
@@ -47,7 +48,7 @@ fn update_commands(source: &str) -> Vec<(String, String)> {
 #[test]
 fn every_updater_command_opens_with_the_gate_for_its_own_id() {
     let commands = update_commands(&main_rs());
-    assert_eq!(commands.len(), 5, "{commands:?}");
+    assert_eq!(commands.len(), 3, "{commands:?}");
     for (name, first) in &commands {
         let id = format!(
             "update::{}",
@@ -61,25 +62,32 @@ fn every_updater_command_opens_with_the_gate_for_its_own_id() {
 }
 
 #[test]
-fn the_channel_setter_is_not_a_command_the_window_can_invoke() {
+fn the_setter_the_rollback_and_the_removal_are_not_commands_the_window_can_invoke() {
     let source = main_rs();
-    assert!(
-        !source.contains("update_set_settings"),
-        "the channel and the tag are set in the terminal and the config file only"
-    );
+    for name in [
+        "update_set_settings",
+        "update_rollback",
+        "update_discard_previous",
+    ] {
+        assert!(
+            !source.contains(&format!("fn {name}(")),
+            "`{name}` is a command; a page script could call it"
+        );
+    }
     let handler = source
         .split("generate_handler![")
         .nth(1)
         .and_then(|s| s.split(']').next())
         .expect("generate_handler!");
+    for name in ["update_check", "update_apply", "update_settings"] {
+        assert!(handler.contains(name), "{name} is not registered");
+    }
     for name in [
-        "update_check",
-        "update_apply",
+        "update_set_settings",
         "update_rollback",
         "update_discard_previous",
-        "update_settings",
     ] {
-        assert!(handler.contains(name), "{name} is not registered");
+        assert!(!handler.contains(name), "{name} is registered");
     }
 }
 
