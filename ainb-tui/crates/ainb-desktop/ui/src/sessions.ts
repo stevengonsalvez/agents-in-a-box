@@ -68,30 +68,15 @@ export function allSessions(view: SessionsView_Serialize | undefined): Session_S
   return view?.workspaces.flatMap((workspace) => workspace.sessions) ?? [];
 }
 
-/** A row the sidebar draws, with its place in the frame's own list. */
-export interface VisibleRow {
-  /** The index the reducer selects by, which filtering must not shift. */
-  index: number;
-  session: Session_Serialize;
-}
-
 /**
- * One workspace's rows as the sidebar draws them, in frame order.
+ * Whether `sessionId` is the session list's selected row.
  *
- * The frame says which rows the filter hides (`hidden_sessions`), so the rule
- * itself lives in the reducer and nowhere else: a window deciding for itself
- * was a second copy of a rule that grows cases (#1157). Each row keeps its
- * index in the frame's own list, because that index is what the selection is
- * expressed in.
+ * The frame carries only the rows the filter shows, and the selection by id
+ * (#1180): an index would be into the reducer's full list, which the window
+ * never sees.
  */
-export function visibleRows(
-  view: SessionsView_Serialize | undefined,
-  workspace: Workspace_Serialize,
-): VisibleRow[] {
-  const hidden = new Set(view?.hidden_sessions ?? []);
-  return workspace.sessions
-    .map((session, index) => ({ index, session }))
-    .filter((row) => !hidden.has(row.session.id));
+export function isSelected(view: SessionsView_Serialize | undefined, sessionId: string): boolean {
+  return view?.selected_session_id === sessionId;
 }
 
 /** How many rows ring with `kind`: one header count. */
