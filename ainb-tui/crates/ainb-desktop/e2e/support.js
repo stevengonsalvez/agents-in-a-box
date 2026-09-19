@@ -15,6 +15,12 @@
  *
  * Lifted from lane F's review spec (#1257) so every spec shares one.
  */
+// How a driver says the element went away between finding it and clicking it.
+// Each driver has its own words for it: WebKitGTK reports a click on a
+// detached element as "element wasn't found", which reads like a missing
+// selector but means the same as a stale reference.
+const DETACHED = /stale element|no longer attached|not interactable|element wasn't found|element not found/i;
+
 export async function click(selector, timeout = 60_000) {
   let last = null;
   try {
@@ -27,7 +33,7 @@ export async function click(selector, timeout = 60_000) {
           return true;
         } catch (error) {
           last = error;
-          if (!/stale element|no longer attached|not interactable/i.test(String(error))) throw error;
+          if (!DETACHED.test(String(error))) throw error;
           return false;
         }
       },

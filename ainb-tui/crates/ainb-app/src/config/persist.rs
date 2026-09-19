@@ -4,7 +4,6 @@
 
 use crate::app::effect::Persist;
 use crate::config::{AppConfig, OnboardingConfig};
-use crate::interactive::session_manager::SessionStore;
 
 /// Write `persist` to its store, or say why it could not be written.
 ///
@@ -35,7 +34,10 @@ pub fn write(persist: &Persist) -> Result<(), String> {
             enabled,
         } => {
             let mut moved = false;
-            SessionStore::mutate(|store| {
+            // P6e: through the process's session source. The compare-and-set
+            // runs inside the resolver's read-modify-write, against the
+            // table on the daemon, so a moved value is still never overwritten.
+            crate::cli::util::mutate_session_store(|store| {
                 if let Some(meta) = store.sessions.get_mut(tmux_session) {
                     if meta.headroom_enabled == *expected {
                         meta.headroom_enabled = *enabled;

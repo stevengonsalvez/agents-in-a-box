@@ -13574,17 +13574,20 @@ impl AppState {
 
         // --- 2 + 3. Check and flip headroom_enabled in SessionStore ---
         //
-        // Scoped block so the cross-process lock (pu4) is held ONLY across the
-        // load-inspect-mutate-save window and released before the slow tmux
-        // respawn below — never hold the sessions.json lock across async IO.
-        // The lock is best-effort: on failure we proceed unlocked rather than
-        // abort the downgrade. The early-return paths drop the guard (unlock)
-        // as they leave the block.
+        // P6e: one read through the process's session source, with no lock
+        // held here. The write is the `Persist::SessionHeadroom` effect below,
+        // a compare-and-set the resolver runs under its own lock, so a value
+        // that moved between this read and that write is never overwritten.
         let (skip_permissions, model, has_history) = {
-            let _lock = crate::interactive::SessionStore::lock()
-                .map_err(|e| warn!("Failed to lock sessions.json for Headroom flip: {e}"))
-                .ok();
-            let store = crate::interactive::SessionStore::load();
+            let store = match crate::cli::util::load_session_store_async().await {
+                Ok(store) => store,
+                Err(e) => {
+                    self.add_warning_notification(format!(
+                        "Could not read the session store for the Headroom switch: {e}"
+                    ));
+                    return Ok(());
+                }
+            };
             let launch_settings = match store.sessions.get(&tmux_session_name) {
                 None => {
                     self.add_warning_notification(
@@ -13673,11 +13676,12 @@ impl AppState {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Restore the headroom flag in the store so the next manual
             // restart picks it back up (best-effort, locked RMW — pu4).
-            let _ = crate::interactive::SessionStore::mutate(|store2| {
+            let _ = crate::cli::util::mutate_session_store_async(|store2| {
                 if let Some(meta) = store2.sessions.get_mut(&tmux_session_name) {
                     meta.headroom_enabled = true;
                 }
-            });
+            })
+            .await;
             anyhow::bail!(
                 "tmux respawn-pane failed for {}: {}",
                 tmux_session_name,

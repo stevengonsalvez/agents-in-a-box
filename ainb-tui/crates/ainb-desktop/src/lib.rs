@@ -32,3 +32,4 @@ pub mod setup;
 pub mod shell;
 pub mod sidecar;
 pub mod terminal;
+pub mod updater;

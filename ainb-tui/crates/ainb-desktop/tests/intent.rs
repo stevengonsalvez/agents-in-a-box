@@ -57,6 +57,59 @@ fn a_refusal_reads_as_the_row_and_the_reason() {
     );
 }
 
+/// The updater from the webview: the window may check, apply the update the
+/// host resolved, and read the settings. Rolling back (a forced downgrade),
+/// removing the previous (the only recovery copy) and choosing the channel
+/// or the tag are the native menu's, the terminal's and the config file's,
+/// never the window's. One list, shared with the palette gate.
+#[test]
+fn the_window_may_run_the_update_but_never_choose_where_it_comes_from() {
+    use ainb_desktop::intent::{refused_from_webview, update, update_refusal};
+    let keymap = ainb_app::Keymap::defaults();
+    assert_eq!(
+        update::FROM_WEBVIEW,
+        [update::CHECK, update::APPLY, update::SETTINGS]
+    );
+    for id in update::FROM_WEBVIEW {
+        assert!(update_refusal(id).is_none(), "{id} refused");
+        assert!(
+            !refused_from_webview(&keymap, &CommandId::new(id)),
+            "{id} refused by the one list"
+        );
+    }
+    for id in [
+        update::ROLLBACK,
+        update::DISCARD_PREVIOUS,
+        update::SET_SETTINGS,
+    ] {
+        let refusal = update_refusal(id).unwrap_or_else(|| panic!("{id} is not the window's"));
+        assert_eq!(refusal.command, CommandId::new(id));
+        assert!(refused_from_webview(&keymap, &CommandId::new(id)));
+    }
+    assert_eq!(update::ALL.len(), update::FROM_WEBVIEW.len() + 3);
+    assert!(update::ALL.iter().all(|id| id.starts_with("update.")));
+}
+
+/// A toast is scrubbed (control and format characters, paths) and then cut,
+/// in that order, so what is cut never counts toward the length.
+#[test]
+fn a_toast_is_scrubbed_then_cut() {
+    use ainb_desktop::intent::{MAX_TOAST_CHARS, toast_text};
+    let long = format!(
+        "Update not installed: \u{202E}{}",
+        "x".repeat(MAX_TOAST_CHARS * 2)
+    );
+    let shown = toast_text(&long);
+    assert!(!shown.contains('\u{202E}'));
+    assert_eq!(shown.chars().count(), MAX_TOAST_CHARS);
+    assert_eq!(
+        toast_text("removing /Users/x/Applications/A.app failed"),
+        "removing <path> failed"
+    );
+    let controlled = format!("{}ok", "\u{0007}".repeat(MAX_TOAST_CHARS));
+    assert_eq!(toast_text(&controlled), "ok");
+}
+
 /// The desktop's watchable plugin screens are `PLUGIN_SCREENS` less
 /// `analytics`: the stats tab draws burndown's counters from the daemon's
 /// projection, so a cell painting burndown beside it would show them twice

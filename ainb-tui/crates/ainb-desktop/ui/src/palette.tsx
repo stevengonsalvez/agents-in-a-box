@@ -1,6 +1,7 @@
 import { createMemo, createResource, createSelector, createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import type { SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
+import { keyedList, sameKeys } from "./keyed.ts";
 import { commandRows, rank, sessionRows, stepRow, type PaletteEntry, type PaletteRow } from "./palette.ts";
 import type { RendererIntent } from "./tabs.ts";
 
@@ -43,10 +44,12 @@ export function Palette(props: Props) {
   // could land on a button that had just been replaced. Keys are strings,
   // equal from one frame to the next, so an unchanged row keeps its node and
   // only its text is patched from `byKey`.
-  const keys = createMemo(() => shown().map((row) => row.key), [], { equals: sameKeys });
-  const byKey = createMemo(() => new Map(shown().map((row) => [row.key, row])));
+  // Through `keyedList`, so two rows that somehow name one key still draw as
+  // two rows, each with its own text.
+  const list = createMemo(() => keyedList(shown(), (row) => row.key));
+  const keys = createMemo(() => list().keys, [], { equals: sameKeys });
   // Only the row the cursor leaves and the row it reaches re-run.
-  const isAt = createSelector(() => shown()[at()]?.key);
+  const isAt = createSelector(() => list().keys[at()]);
   const choose = (row: PaletteRow | undefined) => {
     // A row the reducer would refuse now is drawn, so the list does not shift
     // under the user, but choosing it would do nothing and say nothing.
@@ -98,7 +101,7 @@ export function Palette(props: Props) {
                 // The row as the latest frame has it. Undefined only for the
                 // moment between a frame dropping this key and `For` removing
                 // the node, when nothing reads it.
-                const row = () => byKey().get(key);
+                const row = () => list().byKey.get(key);
                 const active = () => row()?.active ?? false;
                 return (
                   <li>
@@ -109,7 +112,7 @@ export function Palette(props: Props) {
                       disabled={!active()}
                       role="option"
                       aria-selected={isAt(key)}
-                      data-row={key}
+                      data-row={row()?.key}
                       // The input keeps focus, so the press must not take it away.
                       onMouseDown={(event) => event.preventDefault()}
                       // The row as it is when the click lands, not as it was
@@ -133,7 +136,3 @@ export function Palette(props: Props) {
   );
 }
 
-/** Whether two key lists name the same rows in the same order. */
-function sameKeys(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((key, index) => key === b[index]);
-}

@@ -53,9 +53,14 @@ export function removeStaleWorlds(dir = tmpdir(), now = Date.now()) {
         continue;
       }
     }
-    if (stale) {
+    if (!stale) continue;
+    try {
       rmSync(world, { recursive: true, force: true });
       removed.push(world);
+    } catch (error) {
+      // Another user's world, or one a process still holds: not this run's to
+      // clear, and not a reason to stop the suite before it starts.
+      console.warn(`e2e: left ${world}: ${error.code ?? error}`);
     }
   }
   return removed;
@@ -90,6 +95,9 @@ export function stopWorktreeDaemons(targets = worktreeTargetDirs()) {
     const match = line.trim().match(/^(\d+)\s+(\S+)/);
     if (!match) continue;
     const [, pid, executable] = match;
+    // A relative argv[0] names no location, so it cannot be matched to this
+    // worktree's target dirs: resolving it would use this process's cwd.
+    if (!executable.startsWith("/")) continue;
     if (Number(pid) === process.pid) continue;
     if (basename(executable) !== "ainb-hangar-daemon") continue;
     if (!roots.some((root) => resolve(executable).startsWith(root))) continue;
