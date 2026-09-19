@@ -234,3 +234,55 @@ fn the_status_lists_the_catalog() {
         );
     }
 }
+
+/// The telemetry write carries a token, and the shell's log is read back into
+/// the window by `show_log`: neither `Debug` nor the variant name carries it,
+/// and the dialog's body names the endpoint the token goes to, never the token.
+#[test]
+fn the_token_never_reaches_a_log_line_or_the_dialog() {
+    let write = SetupWrite::FinishOpenTelemetry {
+        otlp_endpoint: "https://otlp.example/otlp".to_string(),
+        instance_id: "12345".to_string(),
+        api_token: "glc_secret_token_value".to_string(),
+    };
+    let debug = format!("{write:?}");
+    assert!(!debug.contains("glc_secret_token_value"), "{debug}");
+    assert!(debug.contains("otlp.example"), "{debug}");
+    assert_eq!(write.kind(), "finish_open_telemetry");
+    let confirmation = write.confirmation();
+    assert!(
+        !confirmation.body.contains("glc_secret_token_value"),
+        "{confirmation:?}"
+    );
+    assert!(
+        confirmation.body.contains("Endpoint: https://otlp.example/otlp"),
+        "{confirmation:?}"
+    );
+    assert!(
+        confirmation.body.contains("Instance ID: 12345"),
+        "{confirmation:?}"
+    );
+    assert_eq!(SetupWrite::WriteTmuxConfig.kind(), "write_tmux_config");
+}
+
+/// A telemetry endpoint that is not https is refused before any dialog, as
+/// is a missing field; the other writes have nothing to validate.
+#[test]
+fn a_telemetry_endpoint_must_be_https() {
+    let plain = SetupWrite::FinishOpenTelemetry {
+        otlp_endpoint: "http://otlp.example/otlp".to_string(),
+        instance_id: "1".to_string(),
+        api_token: "t".to_string(),
+    };
+    let refused = plain.validate().expect_err("http is refused");
+    assert!(refused.contains("https://"), "{refused}");
+    assert!(plain.run().expect_err("the write refuses it too").contains("https://"));
+    let missing = SetupWrite::FinishOpenTelemetry {
+        otlp_endpoint: "https://otlp.example/otlp".to_string(),
+        instance_id: String::new(),
+        api_token: "t".to_string(),
+    };
+    assert!(missing.validate().expect_err("a field is missing").contains("all three fields"));
+    assert_eq!(SetupWrite::WriteTmuxConfig.validate(), Ok(()));
+    assert_eq!(SetupWrite::InstallAllDependencies.validate(), Ok(()));
+}
