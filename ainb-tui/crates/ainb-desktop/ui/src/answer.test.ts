@@ -162,7 +162,7 @@ test("picking option two sends one pick naming it by label, wherever the cursor 
   const question = questionFor(sessions(mark()))!;
   const intents = pickIntents(question, ask({ cursor: 2 }), 1);
   assert.deepEqual(commands(intents), ["session_list.select_row", "session_list.select_tab", "session_list.ask.pick"]);
-  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { label: "production" });
+  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-7", label: "production" });
   assert.deepEqual(commands(pickIntents(question, ask({ cursor: 0 }), 1)), commands(intents));
   assert.deepEqual(pickIntents(question, ask(), 3), [], "an index off the list picks nothing");
 });
@@ -171,7 +171,7 @@ test("a pick sends the label as the frame carried it, not as the banner trims it
   const long = "x".repeat(120);
   const question = questionFor(sessions(mark({ options: [{ label: long, description: "" }] })))!;
   const intents = pickIntents(question, ask(), 0);
-  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { label: long });
+  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-7", label: long });
 });
 
 test("a typed answer moves to the composer row, clears it in one step, types, sends", () => {
