@@ -110,7 +110,7 @@ pub struct GitViewFrame {
     pub commits_cut: usize,
     pub selected_commit_index: usize,
     pub review: ReviewFrame,
-    pub review_ui: crate::components::code_review::render::CodeReviewUi,
+    pub review_ui: ReviewUiFrame,
 }
 
 /// The review model as a frame carries it.
@@ -118,6 +118,23 @@ pub struct GitViewFrame {
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ReviewFrame {
     pub files: Vec<ReviewFileFrame>,
+    /// Changed files the frame did not carry. A file costs bytes before any of
+    /// its rows do, so twenty thousand empty ones pass the ceiling on their
+    /// own.
+    pub files_cut: usize,
+}
+
+/// What a surface has selected and scrolled to, brought inside the window the
+/// frame kept.
+#[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+pub struct ReviewUiFrame {
+    pub selected_file: usize,
+    pub sidebar_selected: usize,
+    /// Sorted, for the reason [`GitViewFrame::expanded_folders`] is.
+    pub collapsed_dirs: Vec<String>,
+    pub scroll: usize,
+    pub current_hunk: usize,
 }
 
 /// One changed file: its own fields, its hunks windowed on one row budget, and
@@ -136,6 +153,9 @@ pub struct ReviewFileFrame {
     /// Rows this file lost, to [`MAX_ROWS_PER_FILE`], to [`MAX_ROWS_TOTAL`], or
     /// to the byte budget.
     pub rows_cut: usize,
+    /// Hunks this file lost. A hunk costs bytes with no rows in it at all, and
+    /// a file rewritten line by line has one per line.
+    pub hunks_cut: usize,
 }
 
 /// One hunk, its rows already scrubbed and within the file's budget.
@@ -153,40 +173,50 @@ pub struct HunkFrame {
 
 /// Project `state` into the bounded frame.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn project(state: &GitViewState) -> GitViewFrame {
-    let mut bytes = MAX_TEXT_BYTES;
+    project_within(state, MAX_TEXT_BYTES, MAX_LIST_BYTES)
+}
+
+/// [`project`] on budgets of your own, so a test can prove what the budget does
+/// on a state small enough to build in milliseconds.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn project_within(
+    state: &GitViewState,
+    text_budget: usize,
+    list_budget: usize,
+) -> GitViewFrame {
+    let mut bytes = text_budget;
     let mut rows = MAX_ROWS_TOTAL;
 
     // The file the person has open goes first, so it never frames zero rows
     // because a diff somewhere else spent the budget.
-    let files = &state.review.files;
+    let held_files = state.review.files.len();
+    let files = &state.review.files[..MAX_LIST_ITEMS.min(held_files)];
     let mut framed: Vec<Option<ReviewFileFrame>> = vec![None; files.len()];
     let selected = state.review_ui.selected_file;
     if let Some(file) = files.get(selected) {
-        framed[selected] = Some(project_file(file, &mut rows, &mut bytes));
+        framed[selected] = project_file(file, &mut rows, &mut bytes);
     }
 
     // Scrubbed over the lines that could be framed, not over the whole diff: a
-    // key block carries forward, so the lines past the count cap cannot change
-    // what the lines before them frame as, and a 100 MB diff is not scrubbed to
+    // key block carries forward, so the lines past the cap cannot change what
+    // the lines before them frame as, and a 100 MB diff is not scrubbed to
     // throw away.
-    let (diff_head, over_count) = head_of(&state.diff_content, MAX_DIFF_LINES);
-    let (diff_content, diff_over_budget) = spend(&scrub_lines(diff_head), &mut bytes);
-    let diff_lines_cut = over_count + diff_over_budget;
+    let (diff_head, diff_over_count) = head_of(&state.diff_content, MAX_DIFF_LINES);
+    let raw_diff: Vec<&str> = diff_head.iter().map(String::as_str).collect();
+    let (diff_content, diff_over_budget) = spend(&raw_diff, &mut bytes);
+    let diff_lines_cut = diff_over_count + diff_over_budget;
 
     for (index, file) in files.iter().enumerate() {
         if framed[index].is_none() {
-            framed[index] = Some(project_file(file, &mut rows, &mut bytes));
+            framed[index] = project_file(file, &mut rows, &mut bytes);
         }
     }
 
-    // Scrubbed as one document rather than a line at a time: a credential's
-    // body is lines below its opening, and `scrub_lines` is what carries that
-    // across them.
     let (markdown_head, markdown_over_count) = head_of(&state.markdown_content, MAX_MARKDOWN_LINES);
     let markdown: Vec<&str> = markdown_head.iter().map(|line| line.content.as_str()).collect();
-    let (markdown_text, markdown_over_budget) = spend(&scrub_lines(&markdown), &mut bytes);
+    let (markdown_text, markdown_over_budget) = spend(&markdown, &mut bytes);
     let markdown_lines_cut = markdown_over_count + markdown_over_budget;
     let markdown_content: Vec<MarkdownLine> = markdown_text
         .into_iter()
@@ -197,26 +227,25 @@ pub fn project(state: &GitViewState) -> GitViewFrame {
         })
         .collect();
 
-    let mut list_bytes = MAX_LIST_BYTES;
+    let mut list_bytes = list_budget;
     let (changed_files, files_cut) = take_within(&state.changed_files, &mut list_bytes);
     let (file_tree_items, tree_items_cut) = take_within(&state.file_tree_items, &mut list_bytes);
     let (commits, commits_cut) = take_within(&state.commits, &mut list_bytes);
-    // Sorted before the cut so which folders survive is the same every frame: a
-    // set has no order of its own to take from.
-    let mut folders: Vec<String> = state.expanded_folders.iter().cloned().collect();
-    folders.sort();
-    let (folders, _) = take_within(&folders, &mut list_bytes);
+    let (folders, _) = take_within(&sorted(&state.expanded_folders), &mut list_bytes);
+    let (collapsed_dirs, _) =
+        take_within(&sorted(&state.review_ui.collapsed_dirs), &mut list_bytes);
 
+    // The file the state points at moves when a file before it is dropped, so
+    // the frame points at where it ended up rather than where it was.
+    let selected_framed = framed[..selected.min(framed.len())].iter().flatten().count();
+    let files: Vec<ReviewFileFrame> = framed.into_iter().flatten().collect();
+    let hunk_count: usize = files.iter().map(|file| file.hunks.len()).sum();
+    let row_count: usize =
+        files.iter().flat_map(|file| &file.hunks).map(|hunk| hunk.rows.len()).sum();
     let review = ReviewFrame {
-        files: framed.into_iter().flatten().collect(),
+        files_cut: held_files - files.len(),
+        files,
     };
-    let hunk_count: usize = review.files.iter().map(|file| file.hunks.len()).sum();
-    let row_count: usize = review
-        .files
-        .iter()
-        .flat_map(|file| &file.hunks)
-        .map(|hunk| hunk.rows.len())
-        .sum();
 
     GitViewFrame {
         active_tab: state.active_tab.clone(),
@@ -244,15 +273,28 @@ pub fn project(state: &GitViewState) -> GitViewFrame {
         selected_commit_index: within(state.selected_commit_index, commits.len()),
         commits_cut,
         commits,
-        review_ui: crate::components::code_review::render::CodeReviewUi {
-            selected_file: within(state.review_ui.selected_file, review.files.len()),
-            sidebar_selected: state.review_ui.sidebar_selected,
-            collapsed_dirs: state.review_ui.collapsed_dirs.clone(),
+        review_ui: ReviewUiFrame {
+            selected_file: within(selected_framed, review.files.len()),
+            // The sidebar draws a row per file and a row per directory it holds,
+            // so a cut file list shortens it too.
+            sidebar_selected: within(
+                state.review_ui.sidebar_selected,
+                review.files.len() + collapsed_dirs.len(),
+            ),
+            collapsed_dirs,
             scroll: within(state.review_ui.scroll, row_count + hunk_count),
             current_hunk: within(state.review_ui.current_hunk, hunk_count),
         },
         review,
     }
+}
+
+/// `set`, in an order a frame can repeat: a set has none of its own, so which
+/// entries a cut keeps would otherwise change run to run.
+fn sorted(set: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut entries: Vec<String> = set.iter().cloned().collect();
+    entries.sort();
+    entries
 }
 
 /// `index`, brought inside a list of `len` the frame cut, so a surface does not
@@ -264,29 +306,48 @@ fn within(index: usize, len: usize) -> usize {
 /// One file's projection: scrub every row the file has as one text, then keep
 /// what the row caps and the byte budget allow, in display order, so the hunks
 /// a person reads first keep theirs.
-fn project_file(file: &ReviewFile, total: &mut usize, bytes: &mut usize) -> ReviewFileFrame {
-    let held: Vec<DiffRow> = file.hunks.iter().flat_map(|hunk| hunk.rows.iter().cloned()).collect();
-    let keep = MAX_ROWS_PER_FILE.min(*total);
-    let framed = scrub_and_cut(&held, keep, MAX_LINE_CHARS, bytes);
-    *total -= framed.len();
-    let rows_cut = held.len() - framed.len();
+fn project_file(
+    file: &ReviewFile,
+    total: &mut usize,
+    bytes: &mut usize,
+) -> Option<ReviewFileFrame> {
+    // The file's own fields cost bytes before a single row does.
+    if !afford(FILE_BYTES + file.path.len(), bytes) {
+        return None;
+    }
 
-    let mut framed = framed.into_iter();
-    let hunks = file
-        .hunks
-        .iter()
-        .map(|hunk| HunkFrame {
+    let held: usize = file.hunks.iter().map(|hunk| hunk.rows.len()).sum();
+    let keep = MAX_ROWS_PER_FILE.min(*total);
+    // Only the rows that could be kept are scrubbed: the scrub carries its key
+    // block forward, never backward, so the rows past the cap cannot change
+    // what the rows before them frame as.
+    let candidates: Vec<DiffRow> =
+        file.hunks.iter().flat_map(|hunk| &hunk.rows).take(keep).cloned().collect();
+    let framed = scrub_and_cut(&candidates, keep, MAX_LINE_CHARS, bytes);
+    *total -= framed.len();
+    let rows_cut = held - framed.len();
+
+    // A hunk costs bytes with no rows in it, and a file rewritten line by line
+    // has one hunk per line, so the hunks are counted and afforded too.
+    let mut rows = framed.into_iter();
+    let mut hunks = Vec::new();
+    for hunk in file.hunks.iter().take(MAX_ROWS_PER_FILE) {
+        let rows: Vec<DiffRow> = rows.by_ref().take(hunk.rows.len()).collect();
+        if !afford(HUNK_BYTES, bytes) {
+            break;
+        }
+        hunks.push(HunkFrame {
             old_start: hunk.old_start,
             new_start: hunk.new_start,
             gap_before: hunk.gap_before,
             gap_after: hunk.gap_after,
             expanded_before: hunk.expanded_before,
             expanded_after: hunk.expanded_after,
-            rows: framed.by_ref().take(hunk.rows.len()).collect(),
-        })
-        .collect();
+            rows,
+        });
+    }
 
-    ReviewFileFrame {
+    Some(ReviewFileFrame {
         path: file.path.clone(),
         status: file.status.clone(),
         insertions: file.insertions,
@@ -294,9 +355,10 @@ fn project_file(file: &ReviewFile, total: &mut usize, bytes: &mut usize) -> Revi
         language: file.language.map(str::to_string),
         collapsed: file.collapsed,
         binary: file.binary,
+        hunks_cut: file.hunks.len() - hunks.len(),
         hunks,
         rows_cut,
-    }
+    })
 }
 
 /// `rows`, scrubbed as one text, each row cut to `chars`, and no more of them
@@ -314,25 +376,34 @@ pub(crate) fn scrub_and_cut(
     chars: usize,
     budget: &mut usize,
 ) -> Vec<DiffRow> {
-    let raws: Vec<&str> = rows.iter().map(|row| row.raw.as_str()).collect();
-    let scrubbed = scrub_lines(&raws);
     let mut framed = Vec::new();
-    for (row, scrubbed) in rows.iter().zip(scrubbed).take(keep) {
-        let (raw, was_cut) = crate::fleet::conversation::cut(&scrubbed, chars);
-        let emphasis = if was_cut || raw != row.raw {
-            Vec::new()
-        } else {
-            row.emphasis.clone()
-        };
-        let row = DiffRow {
-            raw,
-            emphasis,
-            ..row.clone()
-        };
-        if !afford(&row, budget) {
+    let mut in_key = false;
+    // A chunk at a time, so a budget that runs out stops the scrub as well as
+    // the frame: scrubbing text nobody will read is the projection's whole
+    // cost.
+    for chunk in rows[..keep.min(rows.len())].chunks(SCRUB_CHUNK) {
+        let raws: Vec<&str> = chunk.iter().map(|row| row.raw.as_str()).collect();
+        let scrubbed = crate::fleet::bridge::redact::scrub_lines_from(&raws, &mut in_key);
+        let before = framed.len();
+        for (row, scrubbed) in chunk.iter().zip(scrubbed) {
+            let (raw, was_cut) = crate::fleet::conversation::cut(&scrubbed, chars);
+            if !afford(row_bytes(&raw, row.emphasis.len()), budget) {
+                break;
+            }
+            let emphasis = if was_cut || raw != row.raw {
+                Vec::new()
+            } else {
+                row.emphasis.clone()
+            };
+            framed.push(DiffRow {
+                raw,
+                emphasis,
+                ..row.clone()
+            });
+        }
+        if framed.len() - before < chunk.len() {
             break;
         }
-        framed.push(row);
     }
     framed
 }
@@ -343,19 +414,27 @@ fn head_of<T>(items: &[T], keep: usize) -> (&[T], usize) {
     (&items[..kept], items.len() - kept)
 }
 
-/// `lines`, each cut to [`MAX_LINE_CHARS`], no more of them than `budget`
-/// allows, and how many of them that left behind.
+/// `lines`, scrubbed, each cut to [`MAX_LINE_CHARS`], no more of them than
+/// `budget` allows, and how many of them that left behind.
 ///
-/// The lines arrive scrubbed: the scrub runs over the text before any of it is
-/// cut.
-fn spend(lines: &[String], budget: &mut usize) -> (Vec<String>, usize) {
+/// Scrubbed here rather than by the caller, and a chunk at a time, so a budget
+/// that runs out stops the scrub too.
+fn spend(lines: &[&str], budget: &mut usize) -> (Vec<String>, usize) {
     let mut framed = Vec::new();
-    for line in lines {
-        let (text, _) = crate::fleet::conversation::cut(line, MAX_LINE_CHARS);
-        if !afford(&text, budget) {
+    let mut in_key = false;
+    for chunk in lines.chunks(SCRUB_CHUNK) {
+        let scrubbed = crate::fleet::bridge::redact::scrub_lines_from(chunk, &mut in_key);
+        let before = framed.len();
+        for line in scrubbed {
+            let (text, _) = crate::fleet::conversation::cut(&line, MAX_LINE_CHARS);
+            if !afford(text_bytes(&text), budget) {
+                break;
+            }
+            framed.push(text);
+        }
+        if framed.len() - before < chunk.len() {
             break;
         }
-        framed.push(text);
     }
     let cut = lines.len() - framed.len();
     (framed, cut)
@@ -374,7 +453,8 @@ where
 {
     let mut framed = Vec::new();
     for item in items.iter().take(MAX_LIST_ITEMS) {
-        if !afford(item, budget) {
+        let cost = serde_json::to_string(item).map_or(usize::MAX, |encoded| encoded.len());
+        if !afford(cost, budget) {
             break;
         }
         framed.push(item.clone());
@@ -383,20 +463,50 @@ where
     (framed, cut)
 }
 
-/// Whether `value` fits what is left of `budget`, and spends it if it does.
-///
-/// The cost is what the value encodes to, escaping included, because escaping
-/// is where the bytes go: a control character is one byte in the state and six
-/// on the wire. A value that cannot be encoded costs the whole budget, so a
-/// frame never grows on a field it could not measure.
-fn afford<T: serde::Serialize + ?Sized>(value: &T, budget: &mut usize) -> bool {
-    let cost = serde_json::to_string(value).map_or(usize::MAX, |encoded| encoded.len());
+/// Whether `cost` fits what is left of `budget`, and spends it if it does.
+fn afford(cost: usize, budget: &mut usize) -> bool {
     if cost > *budget {
         return false;
     }
     *budget -= cost;
     true
 }
+
+/// What `text` costs as a JSON string.
+///
+/// Encoded, not raw, because escaping is where the bytes go: a control
+/// character is one byte here and six on the wire. Counted rather than
+/// serialized, because the frame serializes every row once already and
+/// measuring by serializing would make that twice.
+fn text_bytes(text: &str) -> usize {
+    2 + text
+        .bytes()
+        .map(|byte| match byte {
+            b'"' | b'\\' | 0x08 | 0x09 | 0x0a | 0x0c | 0x0d => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+        .sum::<usize>()
+}
+
+/// What one framed row costs: its text, its emphasis ranges, and the fields
+/// around them.
+fn row_bytes(raw: &str, emphasis: usize) -> usize {
+    text_bytes(raw) + emphasis * EMPHASIS_BYTES + ROW_BYTES
+}
+
+/// The bytes a row, a file and a hunk cost with no text in them at all: their
+/// keys, their numbers and the punctuation between. Rounded up from what an
+/// empty one encodes to, so the budget is never spent past what it thinks.
+const ROW_BYTES: usize = 96;
+const EMPHASIS_BYTES: usize = 24;
+const FILE_BYTES: usize = 192;
+const HUNK_BYTES: usize = 128;
+
+/// How many lines are scrubbed between two looks at the budget. Small enough
+/// that a spent budget stops the scrub promptly, large enough that a key block
+/// crossing a boundary is the rare case rather than every line.
+const SCRUB_CHUNK: usize = 64;
 
 /// Serialize `state` as the bounded projection; the section field's own
 /// serializer.
