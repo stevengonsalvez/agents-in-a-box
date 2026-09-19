@@ -70,6 +70,15 @@ const BODY_MAX: usize = 8192;
 /// `TaskMessage`s.
 const ENTRIES_PER_LINE_MAX: usize = 512;
 
+/// How far past a cut the scrub looks, in display chars.
+///
+/// The scrub must run before every cut (#1187), but over the whole input it is
+/// ~40 linear regex passes, and a provider line can be megabytes long. So each
+/// cut first clips to its bound plus this window, scrubs that, then cuts. The
+/// window is far wider than any credential shape, so a token straddling the
+/// cut still matches whole; text past the window is never shown.
+const SCRUB_WINDOW: usize = 4096;
+
 /// Most `tool_use` ids remembered while awaiting their `tool_result`. Claude
 /// issues a handful per message; this is a leak backstop, not a working limit.
 const MAX_PENDING_TOOLS: usize = 256;
@@ -571,12 +580,13 @@ fn capped(mut out: Vec<(MessageKind, String)>) -> Vec<(MessageKind, String)> {
         // both halves.
         let dropped = out.len() - (ENTRIES_PER_LINE_MAX - 1);
         out.truncate(ENTRIES_PER_LINE_MAX - 1);
-        out.push((MessageKind::ToolResult, format!("… {dropped} more lines")));
+        out.push(more_lines(dropped));
     }
     for (_, body) in &mut out {
         // Scrub first, then cut: a cut through a credential leaves its prefix
         // and a few characters, which no shape matches downstream (#1187).
-        *body = scrub(body);
+        // Only the window the cut can show is scrubbed.
+        *body = scrub(clip_chars(body, BODY_MAX + SCRUB_WINDOW));
         if body.chars().count() > BODY_MAX {
             *body = truncate_chars(body, BODY_MAX);
         }
@@ -657,14 +667,38 @@ fn ts_of(v: &Value) -> Option<i64> {
 ///
 /// The whole text is scrubbed before the split: a private key spans lines, and
 /// each of its body lines alone matches no shape.
+///
+/// Bounded like every cut: only the first [`ENTRIES_PER_LINE_MAX`] lines, each
+/// clipped to [`BODY_MAX`] plus [`SCRUB_WINDOW`], are scrubbed. The lines past
+/// them are counted, never copied or scrubbed, and named in one closing entry
+/// the way [`capped`] names what it drops.
 fn push_lines(out: &mut Vec<(MessageKind, String)>, kind: MessageKind, text: &str) {
-    for line in scrub(text).lines() {
-        let line = line.trim_end();
-        if line.trim().is_empty() {
-            continue;
-        }
-        out.push((kind, line.to_string()));
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let shown = lines
+        .by_ref()
+        .take(ENTRIES_PER_LINE_MAX)
+        .map(|line| clip_chars(line, BODY_MAX + SCRUB_WINDOW))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut scrubbed = scrub(&shown)
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| (kind, line.to_string()))
+        .collect::<Vec<_>>();
+    let unseen = lines.count();
+    if unseen > 0 {
+        let kept = scrubbed.len().min(ENTRIES_PER_LINE_MAX - 1);
+        let dropped = scrubbed.len() - kept + unseen;
+        scrubbed.truncate(kept);
+        scrubbed.push(more_lines(dropped));
     }
+    out.extend(scrubbed);
+}
+
+/// The entry that names lines a cap dropped.
+fn more_lines(dropped: usize) -> (MessageKind, String) {
+    (MessageKind::ToolResult, format!("… {dropped} more lines"))
 }
 
 /// A compact one-line summary of a tool_use `input` object: the most telling
@@ -756,7 +790,13 @@ fn fmt_dur(ms: i64) -> String {
 /// fragment matches no shape, so no later scrub can catch it. Scrubbed before
 /// the whitespace collapse too, while a private key still has its armour lines.
 fn summary(s: &str) -> String {
-    truncate_chars(&one_line(&scrub(s)), SUMMARY_MAX)
+    truncate_chars(&one_line(&scrub(clip_chars(s, SCRUB_WINDOW))), SUMMARY_MAX)
+}
+
+/// The first `max` chars of `s`, borrowed (char-safe, no ellipsis): the window
+/// a scrub reads before a cut.
+fn clip_chars(s: &str, max: usize) -> &str {
+    s.char_indices().nth(max).map_or(s, |(end, _)| &s[..end])
 }
 
 /// Truncate to `max` display chars with a trailing ellipsis on overflow
