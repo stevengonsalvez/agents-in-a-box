@@ -931,11 +931,11 @@ mod tests {
     #[test]
     fn headroom_port_ladder_is_env_then_config_then_default() {
         // `AINB_HEADROOM_PORT` is also mutated by `headroom::tests` and
-        // `interactive::session_manager::tests`, which serialize on
-        // HEADROOM_ENV_LOCK. A second, private mutex guards nothing: both locks
-        // have to be the same one for the variable to be safe.
-        let _headroom =
-            crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `interactive::session_manager::tests`. They serialize on
+        // HEADROOM_ENV_LOCK, which is this crate's one environment lock under a
+        // second name, and `with_env` below takes it for each block. Taking it
+        // here as well would be taking it twice on one thread, and it does not
+        // nest.
         // default: nothing set anywhere
         let bare = from_toml("");
         assert_eq!(bare.usage_client.headroom_port, 8787);
