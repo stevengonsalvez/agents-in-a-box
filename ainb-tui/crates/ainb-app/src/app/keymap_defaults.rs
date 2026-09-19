@@ -1555,6 +1555,7 @@ pub fn defaults() -> Vec<Binding> {
                     marked: 0,
                     unread: 0,
                     error: None,
+                    after: None,
                 },
             },
             "Fold how a mark-all-read sweep of the inbox ended",
