@@ -272,6 +272,13 @@ pub enum AppEvent {
         store: String,
         error: String,
     },
+    /// Sweep the local human's inbox read (D3-prime): one `hangar/inbox_mark_read`,
+    /// a whole-inbox sweep, with an op id the host mints.
+    InboxMarkAllRead,
+    /// The host's "mark all read" sweep ended.
+    InboxMarkAllReadFinished {
+        outcome: crate::fleet::inbox_write::MarkAllReadOutcome,
+    },
     /// Click the code review sidebar row `target`; nothing when it is gone.
     GitReviewSelectRow {
         target: crate::components::code_review::render::ReviewRowId,
@@ -4111,6 +4118,21 @@ impl EventHandler {
                 tracing::warn!(%store, %error, "a store write failed");
                 let label = crate::app::effect::Persist::store_label(&store);
                 state.add_error_notification(format!("Could not save {label}: {error}"));
+            }
+            AppEvent::InboxMarkAllRead => {
+                // Nothing flips here: the daemon's reply is what the section
+                // folds, so a surface never shows a count the daemon did not.
+                state.emit(Effect::InboxMarkAllRead);
+            }
+            AppEvent::InboxMarkAllReadFinished { outcome } => {
+                if outcome.ok {
+                    let now = crate::fleet::daemons::heartbeat::now_ms();
+                    state.apply_inbox_mark_all_read(outcome.marked, outcome.unread, now);
+                } else {
+                    let why = outcome.error.as_deref().unwrap_or("not sent");
+                    tracing::warn!(op_id = %outcome.op_id, %why, "mark all read did not land");
+                    state.add_error_notification(format!("Could not mark the inbox read: {why}"));
+                }
             }
             AppEvent::DaemonActionFinished { report } => {
                 let Some(action) = crate::cli::daemon::Action::from_id(&report.verb) else {
