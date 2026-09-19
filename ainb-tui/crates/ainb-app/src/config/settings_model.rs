@@ -302,6 +302,23 @@ pub enum SessionFilter {
 }
 
 impl SessionFilter {
+    /// Whether the session list shows `session` under this filter.
+    ///
+    /// The one copy of the rule: the reducer's navigation and the frame's
+    /// visible rows both ask it. Only interactive sessions are filtered.
+    #[must_use]
+    pub const fn passes(self, session: &crate::models::Session) -> bool {
+        use crate::models::{SessionMode, SessionStatus};
+        if !matches!(session.mode, SessionMode::Interactive) {
+            return true;
+        }
+        match self {
+            Self::All => true,
+            Self::ActiveOnly => !matches!(session.status, SessionStatus::Stopped),
+            Self::StoppedOnly => matches!(session.status, SessionStatus::Stopped),
+        }
+    }
+
     /// Cycle order: All → ActiveOnly → StoppedOnly → All.
     pub fn next(self) -> Self {
         match self {
