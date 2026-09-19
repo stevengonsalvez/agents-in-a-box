@@ -303,6 +303,10 @@ fn get_git_credentials(url: &str) -> Option<(String, String)> {
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct CommitInfo {
     pub hash_short: String,
+    /// Git config text, as free as the message, so a frame carries it
+    /// scrubbed (#1212).
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub author: String,
     pub date: String,
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
