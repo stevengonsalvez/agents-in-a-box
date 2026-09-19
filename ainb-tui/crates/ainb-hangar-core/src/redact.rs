@@ -413,6 +413,77 @@ mod tests {
         format!("{prefix}{}", body.to_string().repeat(len))
     }
 
+    /// Scrubbing twice is scrubbing once. Load-bearing: the daemon scrubs a
+    /// transcript chunk before it ships (#1199) and the classifier scrubs the
+    /// text again before it cuts (#1187), so a second pass that rewrote the
+    /// marker or re-matched the text around it would change what renders.
+    #[test]
+    fn scrub_is_idempotent_over_every_shape() {
+        let shapes = [
+            fake("sk-ant-api03-", 'A', 40),
+            fake("sk-", 'b', 48),
+            fake("ghp_", 'C', 36),
+            fake("github_pat_", 'd', 82),
+            fake("glpat-", 'e', 20),
+            fake("AKIA", 'F', 16),
+            fake("AIza", 'g', 35),
+            format!(
+                "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+                fake("", 'h', 64)
+            ),
+            format!("-----BEGIN PRIVATE KEY-----\n{}", fake("", 'u', 64)),
+            format!(
+                "{}.{}.{}",
+                fake("eyJ", 'i', 20),
+                fake("eyJ", 'j', 20),
+                fake("", 'k', 20)
+            ),
+            format!(
+                "https://x-access-token:{}@github.com/o/r",
+                fake("", 'l', 12)
+            ),
+            fake("sk_live_", 'S', 24),
+            fake("rk_live_", 'R', 24),
+            fake("npm_", 'N', 36),
+            fake("pypi-AgEIcHlwaS5vcmc", 'P', 60),
+            fake("hf_", 'H', 34),
+            fake("dop_v1_", 'a', 64),
+            format!("{}.{}", fake("SG.", 'G', 22), fake("", 'g', 43)),
+            fake("xoxb-", '1', 40),
+            fake("xapp-", '2', 40),
+            fake("AWS_SECRET_ACCESS_KEY=", 'w', 40),
+            format!(
+                "https://api.telegram.org/{}/getUpdates",
+                fake("bot123456789:", 'T', 35)
+            ),
+            fake("123456789:", 't', 35),
+            format!(
+                "{}.{}.{}",
+                fake("", 'D', 24),
+                fake("", 'e', 7),
+                fake("", 'f', 27)
+            ),
+        ];
+        for shape in &shapes {
+            let text = format!("before {shape} after");
+            let once = scrub(&text);
+            assert_eq!(scrub(&once), once, "a second pass changed {once:?}");
+            assert_eq!(find_secret(&once), None, "the first pass left {once:?}");
+        }
+        let all = shapes.join(" | ");
+        let once = scrub(&all);
+        assert_eq!(scrub(&once), once, "a second pass changed the joined text");
+
+        let mut value = serde_json::json!({ "argv": shapes, "text": all });
+        scrub_json(&mut value);
+        let first = value.clone();
+        scrub_json(&mut value);
+        assert_eq!(
+            value, first,
+            "a second scrub_json pass changed the document"
+        );
+    }
+
     #[test]
     fn scrub_json_scrubs_every_string_value_and_keeps_the_shape() {
         let github = fake("ghp_", 'C', 36);
