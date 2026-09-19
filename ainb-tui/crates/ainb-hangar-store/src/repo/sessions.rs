@@ -44,6 +44,47 @@ pub enum ImportOutcome {
     AlreadyCompleted,
 }
 
+/// One `sessions.json` record offered to [`SessionsRepo::complete_reconcile`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSession {
+    /// The record as a table row.
+    pub row: SessionRow,
+    /// The record had no `session_id` and the reader minted one. A minted id
+    /// is new on every read, so for such a record the tmux name, not the id,
+    /// says whether the table already holds it.
+    pub id_minted: bool,
+}
+
+/// A file session not inserted because its tmux name is bound to another id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameConflict {
+    /// The file record's session id.
+    pub session_id: String,
+    /// The tmux name both claim.
+    pub tmux_session_name: String,
+    /// The session id the table binds the name to (the table wins).
+    pub holder: String,
+}
+
+/// What one [`SessionsRepo::complete_reconcile`] pass did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileOutcome {
+    /// The `<path>#reconcile` marker as this pass wrote it. `imported` counts
+    /// rows inserted, `skipped` name conflicts, `rejected` the caller's count
+    /// of records that failed validation.
+    pub marker: ImportMarker,
+    /// Every name conflict of this pass, for the caller to report.
+    pub conflicts: Vec<NameConflict>,
+}
+
+/// The `session_import` key of the repeatable reconcile of `source_path`
+/// (P6e). It sits beside the one-time import's `source_path` row in the same
+/// table, so no migration widens the primary key.
+#[must_use]
+pub fn reconcile_key(source_path: &str) -> String {
+    format!("{source_path}#reconcile")
+}
+
 /// One session row in the `sessions` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRow {
@@ -295,12 +336,95 @@ impl SessionsRepo {
         }))
     }
 
-    /// Whether ANY import has completed on this home.
-    pub async fn any_import_completed(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_import")
-            .fetch_one(pool)
-            .await?;
-        Ok(n > 0)
+    /// Whether the table is authoritative for `source_path`: its one-time
+    /// import AND at least one reconcile pass have completed.
+    ///
+    /// The P6d import row alone is not enough. Sessions created while P6d was
+    /// dark are in the file only, so until a reconcile pass has inserted them
+    /// the table is missing rows a client would otherwise stop seeing.
+    pub async fn import_complete_for(
+        pool: &SqlitePool,
+        source_path: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM session_import WHERE source_path IN (?, ?)")
+                .bind(source_path)
+                .bind(reconcile_key(source_path))
+                .fetch_one(pool)
+                .await?;
+        Ok(n == 2)
+    }
+
+    /// Insert every file session the table lacks and record the pass on the
+    /// `<path>#reconcile` marker, in one `IMMEDIATE` transaction.
+    ///
+    /// Repeatable, unlike [`Self::complete_import`]. The table wins: a file
+    /// session whose id is already a row leaves that row untouched, and one
+    /// whose tmux name the table binds to another id is skipped and returned
+    /// as a [`NameConflict`]. A record with a minted id counts as present when
+    /// its tmux name is. Deletes are never inferred: a row absent from the
+    /// file stays. On any error the transaction rolls back and the marker
+    /// keeps its previous value, or stays absent.
+    pub async fn complete_reconcile(
+        pool: &SqlitePool,
+        source_path: &str,
+        sessions: &[FileSession],
+        rejected: i64,
+        completed_at: i64,
+    ) -> Result<ReconcileOutcome, sqlx::Error> {
+        let mut tx = pool.begin_with(crate::repo::fleet::IMMEDIATE_TRANSACTION).await?;
+        let mut imported = 0_i64;
+        let mut conflicts = Vec::new();
+        for session in sessions {
+            let row = &session.row;
+            let present: Option<String> = if session.id_minted {
+                sqlx::query_scalar("SELECT session_id FROM sessions WHERE tmux_session_name = ?")
+                    .bind(&row.tmux_session_name)
+                    .fetch_optional(&mut *tx)
+                    .await?
+            } else {
+                sqlx::query_scalar("SELECT session_id FROM sessions WHERE session_id = ?")
+                    .bind(&row.session_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+            };
+            if present.is_some() {
+                continue;
+            }
+            match Self::upsert_on(&mut tx, row).await? {
+                UpsertOutcome::Written => imported += 1,
+                UpsertOutcome::TmuxNameTaken { holder } => conflicts.push(NameConflict {
+                    session_id: row.session_id.clone(),
+                    tmux_session_name: row.tmux_session_name.clone(),
+                    holder,
+                }),
+            }
+        }
+
+        let marker = ImportMarker {
+            source_path: reconcile_key(source_path),
+            completed_at,
+            imported,
+            skipped: i64::try_from(conflicts.len()).unwrap_or(i64::MAX),
+            rejected,
+        };
+        sqlx::query(
+            "INSERT INTO session_import (source_path, completed_at, imported, skipped, rejected) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT(source_path) DO UPDATE SET \
+             completed_at = excluded.completed_at, imported = excluded.imported, \
+             skipped = excluded.skipped, rejected = excluded.rejected",
+        )
+        .bind(&marker.source_path)
+        .bind(marker.completed_at)
+        .bind(marker.imported)
+        .bind(marker.skipped)
+        .bind(marker.rejected)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(ReconcileOutcome { marker, conflicts })
     }
 
     /// Write the imported `rows` and the completion marker for `source_path`

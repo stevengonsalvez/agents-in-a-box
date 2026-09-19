@@ -940,7 +940,7 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // writes no marker: the daemon keeps running, `workspace/session_list`
         // answers `import_complete: false`, and the CLI keeps reading the file,
         // so a failed import never hides a populated file behind an empty table.
-        let sessions_path = ainb_fleet_core::session_registry::sessions_json_path();
+        let sessions_path = crate::session_import::daemon_sessions_path();
         match crate::session_import::import_sessions_if_needed(store.pool(), &sessions_path).await {
             Ok(crate::session_import::ImportReport::Completed(marker)) => {
                 if marker.rejected > 0 {
@@ -965,6 +965,35 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
                     "sessions.json import failed; clients keep reading the file until it succeeds"
                 );
             }
+        }
+
+        // P6e: the repeatable reconcile runs in the background, never on the
+        // boot path. Its first tick is immediate, so the first pass starts
+        // now, but the RPC socket does not wait for it: a pass can wait up to
+        // its flock bound on a CLI holding sessions.json.lock, and boot must
+        // not. The first-pass gate armed here holds every session RPC that
+        // touches the table until that pass commits: it waits up to
+        // FIRST_PASS_WAIT, then answers not-ready, so nothing acts on a row
+        // this boot has not reconciled. The watcher then runs a pass whenever
+        // the file changes, and ends with the process.
+        crate::session_import::arm_first_pass_gate();
+        {
+            // Supervised: the watcher never returns, so its task ending means
+            // it panicked. It is logged and restarted with a fresh watch, whose
+            // first tick runs a pass, so a dead watcher never leaves the gate
+            // shut or the file unwatched for the rest of the process.
+            let (path, pool) = (sessions_path.clone(), store.pool().clone());
+            tokio::spawn(async move {
+                loop {
+                    let watch = crate::session_import::ReconcileWatch::new(&path);
+                    let ended = tokio::spawn(watch.run(pool.clone())).await;
+                    tracing::error!(
+                        ended = ?ended.err(),
+                        "sessions.json reconcile watcher stopped; restarting it"
+                    );
+                    tokio::time::sleep(crate::session_import::RECONCILE_RETRY_FIRST).await;
+                }
+            });
         }
 
         // P8.5: the in-memory health stats collector — shared between the RPC server

@@ -159,8 +159,28 @@ pub fn register_session_at(path: &Path, record: &AinbSessionRecord) -> Result<()
     let dir = path.parent().context("sessions.json has no parent directory")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
 
-    let _guard = lock_store(dir)?;
+    let guard = lock_store(dir)?;
+    register_session_locked(path, record, &guard)
+}
 
+/// [`register_session_at`] for a caller that already holds the `sessions.json`
+/// flock (from [`lock_sessions_store_at`] or [`try_lock_sessions_store_at`]).
+///
+/// P6e: the daemon's registration writes the file row and then the `sessions`
+/// table under ONE flock, so a surface's read-modify-write cannot interleave
+/// between the two. `_lock` is that held guard; it is taken by reference so the
+/// caller keeps the lock until its second write is done. Taking the flock again
+/// here would block forever: `flock` on a second descriptor conflicts even
+/// within one process.
+///
+/// # Errors
+///
+/// Returns an error if the atomic write fails.
+pub fn register_session_locked(
+    path: &Path,
+    record: &AinbSessionRecord,
+    _lock: &std::fs::File,
+) -> Result<()> {
     // Read-merge-write under the lock: load the existing store as opaque JSON so
     // foreign entries survive, replace only our tmux-named key, write atomically.
     let mut store: serde_json::Value = std::fs::read_to_string(path)
@@ -179,14 +199,19 @@ pub fn register_session_at(path: &Path, record: &AinbSessionRecord) -> Result<()
 /// Acquire an exclusive advisory lock guarding the sessions.json
 /// read-modify-write window (mirrors the `parents.json` lock pattern).
 fn lock_store(dir: &Path) -> Result<std::fs::File> {
-    let f = std::fs::OpenOptions::new()
+    let f = open_lock_file(dir)?;
+    f.lock_exclusive().context("acquiring sessions.json lock")?;
+    Ok(f)
+}
+
+/// Open (creating if needed) the `sessions.json.lock` file in `dir`.
+fn open_lock_file(dir: &Path) -> Result<std::fs::File> {
+    std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(dir.join("sessions.json.lock"))
-        .context("opening sessions.json lock file")?;
-    f.lock_exclusive().context("acquiring sessions.json lock")?;
-    Ok(f)
+        .context("opening sessions.json lock file")
 }
 
 /// Acquire the exclusive advisory lock guarding `sessions.json` in `dir`,
@@ -210,6 +235,27 @@ fn lock_store(dir: &Path) -> Result<std::fs::File> {
 pub fn lock_sessions_store_at(dir: &Path) -> Result<std::fs::File> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     lock_store(dir)
+}
+
+/// Try once to take the `sessions.json` flock in `dir`, without blocking.
+///
+/// `Ok(None)` means another descriptor holds it. This is the primitive a
+/// bounded wait is built on: a caller that must not hang (the daemon's run
+/// loop, an RPC deadline) retries it on its own schedule instead of calling
+/// the blocking [`lock_sessions_store_at`].
+///
+/// # Errors
+///
+/// Returns an error if `dir` cannot be created, the lock file cannot be
+/// opened, or `flock` fails for a reason other than contention.
+pub fn try_lock_sessions_store_at(dir: &Path) -> Result<Option<std::fs::File>> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let f = open_lock_file(dir)?;
+    match f.try_lock_exclusive() {
+        Ok(()) => Ok(Some(f)),
+        Err(e) if e.kind() == fs2::lock_contended_error().kind() => Ok(None),
+        Err(e) => Err(e).context("acquiring sessions.json lock"),
+    }
 }
 
 /// [`lock_sessions_store_at`] against the default [`sessions_json_path`]
@@ -379,5 +425,34 @@ mod tests {
                 "writer {i}'s entry was lost to a racing write"
             );
         }
+    }
+
+    /// The try-lock reports contention instead of blocking, and succeeds once
+    /// the holder drops its guard.
+    #[test]
+    fn try_lock_reports_a_held_flock() {
+        let home = TempDir::new().unwrap();
+        let held = lock_sessions_store_at(home.path()).unwrap();
+        assert!(try_lock_sessions_store_at(home.path()).unwrap().is_none());
+        drop(held);
+        assert!(try_lock_sessions_store_at(home.path()).unwrap().is_some());
+    }
+
+    /// The locked variant writes under the caller's flock, byte for byte what
+    /// the self-locking form writes.
+    #[test]
+    fn register_under_a_held_lock_matches_the_self_locking_write() {
+        let a = TempDir::new().unwrap();
+        let b = TempDir::new().unwrap();
+        let rec = AinbSessionRecord::new("tmux_held", PathBuf::from("/work/held"), "proj");
+
+        register_session_at(&a.path().join("sessions.json"), &rec).unwrap();
+        let guard = try_lock_sessions_store_at(b.path()).unwrap().expect("free lock");
+        register_session_locked(&b.path().join("sessions.json"), &rec, &guard).unwrap();
+
+        assert_eq!(
+            std::fs::read(a.path().join("sessions.json")).unwrap(),
+            std::fs::read(b.path().join("sessions.json")).unwrap()
+        );
     }
 }
