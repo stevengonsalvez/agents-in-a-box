@@ -804,13 +804,21 @@ impl Session {
     /// them at their defaults. Applying a scan without this dropped a live
     /// row's question until the next attention merge, and a frame in between
     /// showed the row with nothing to answer.
+    ///
+    /// The provider id is the one exception: the scan is its only writer
+    /// (`to_session_model`), so a scan that found one lands it, and the held
+    /// value is the fallback for a scan that found none. Carrying the held
+    /// value over the scan's would freeze it, and a thread id learned later
+    /// would never reach the row (an Approve chip would lose its broker route).
     pub fn carry_host_fields(&mut self, held: &Session) {
         self.recent_logs.clone_from(&held.recent_logs);
         self.preview_content.clone_from(&held.preview_content);
         self.is_attached = held.is_attached;
         self.live_attention.clone_from(&held.live_attention);
         self.errors.clone_from(&held.errors);
-        self.provider_session_id.clone_from(&held.provider_session_id);
+        if self.provider_session_id.is_none() {
+            self.provider_session_id.clone_from(&held.provider_session_id);
+        }
     }
 }
 
