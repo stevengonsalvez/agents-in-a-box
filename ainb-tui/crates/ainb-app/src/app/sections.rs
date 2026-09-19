@@ -772,8 +772,14 @@ pub const MAX_INBOX_SUMMARY_CHARS: usize = 256;
 pub const INBOX_SUMMARY_CUT_MARKER: &str = " [cut]";
 /// Longest id-shaped field (`id`, `subject_id`, `kind`, `event`, `recipient`)
 /// a row may carry. A ULID is 26 characters; anything past this is not an id,
-/// and the row is dropped and counted rather than trusted.
+/// and the row is dropped and counted rather than trusted. The content is
+/// checked too: an id is ASCII letters, digits, `-`, `_`, `:` and `.`, and a
+/// row carrying anything else in an id field is dropped the same way.
 pub const MAX_INBOX_ID_CHARS: usize = 128;
+/// Characters kept of a host's own reason (`absent`, `unreachable`). A daemon
+/// error message can be as long as the client accepts, and a reason that
+/// blanked the section would be the failure the budget exists to stop.
+pub const MAX_INBOX_REASON_CHARS: usize = 512;
 /// The section's encoded byte budget, well under `MAX_FRAME_BYTES`, because a
 /// section past the ceiling is withheld whole and a withheld inbox is a blank
 /// inbox with no counter to explain it. Held by construction: the caps above
@@ -834,7 +840,7 @@ impl InboxSection {
             .into_iter()
             .filter(|row| {
                 let ids = [&row.id, &row.subject_id, &row.kind, &row.event, &row.recipient];
-                ids.iter().all(|id| id.chars().count() <= MAX_INBOX_ID_CHARS)
+                ids.iter().all(|id| id_like(id))
             })
             .collect();
         kept.truncate(MAX_INBOX_ROWS);
@@ -878,7 +884,7 @@ impl InboxSection {
     /// The host's read failed: the rows stay, and the surface says why they
     /// may be stale. Without rows the section is absent for `reason`.
     pub fn mark_read_failed(&mut self, reason: impl Into<String>) -> bool {
-        let reason = reason.into();
+        let reason = bound_reason(&reason.into());
         if self.entries.is_empty() && self.absent.is_none() && self.received_at_ms == 0 {
             return self.mark_absent(reason);
         }
@@ -889,7 +895,7 @@ impl InboxSection {
 
     /// The daemon cannot serve the read at all: no rows, and why.
     pub fn mark_absent(&mut self, reason: impl Into<String>) -> bool {
-        let reason = reason.into();
+        let reason = bound_reason(&reason.into());
         let changed = !self.entries.is_empty()
             || self.unread != 0
             || self.absent.as_deref() != Some(reason.as_str());
@@ -932,6 +938,33 @@ impl InboxSection {
 fn cut_chars(text: &str, max: usize) -> Option<&str> {
     let end = text.char_indices().nth(max).map(|(index, _)| index)?;
     Some(&text[..end])
+}
+
+/// A host's reason as the section keeps it: scrubbed, then cut to
+/// [`MAX_INBOX_REASON_CHARS`] with the marker, the row summary's recipe.
+fn bound_reason(reason: &str) -> String {
+    let scrubbed = crate::fleet::bridge::redact::scrub(reason);
+    match cut_chars(&scrubbed, MAX_INBOX_REASON_CHARS) {
+        Some(head) => format!("{head}{INBOX_SUMMARY_CUT_MARKER}"),
+        None => scrubbed,
+    }
+}
+
+/// Whether `value` is shaped like an id the daemon mints or names: no longer
+/// than [`MAX_INBOX_ID_CHARS`], and only the id alphabet. Free text in an id
+/// field is not scrubbed into place; the row is dropped and counted.
+pub fn id_like(value: &str) -> bool {
+    let mut count = 0;
+    for c in value.chars() {
+        count += 1;
+        if count > MAX_INBOX_ID_CHARS {
+            return false;
+        }
+        if !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')) {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -994,6 +1027,29 @@ mod inbox_section_tests {
         );
         assert_eq!(section.summaries_cut, 1);
         assert!(section.entries[0].summary.ends_with(INBOX_SUMMARY_CUT_MARKER));
+    }
+
+    #[test]
+    fn a_reason_is_scrubbed_then_cut() {
+        let mut section = InboxSection::default();
+        let long = format!("connect failed sk-{} {}", "k".repeat(48), "z".repeat(2000));
+        section.mark_absent(long);
+        let reason = section.absent.as_deref().unwrap();
+        assert!(!reason.contains(&"k".repeat(48)));
+        assert!(reason.ends_with(INBOX_SUMMARY_CUT_MARKER));
+        assert!(reason.chars().count() <= super::MAX_INBOX_REASON_CHARS + INBOX_SUMMARY_CUT_MARKER.len());
+    }
+
+    #[test]
+    fn id_like_takes_the_id_alphabet_only() {
+        assert!(super::id_like("01J0ABCDEFGHJKMNPQRSTVWXYZ"));
+        assert!(super::id_like("member:me"));
+        assert!(super::id_like("issue_created"));
+        assert!(super::id_like("v1.2-rc"));
+        assert!(!super::id_like("has space"));
+        assert!(!super::id_like("ctl\u{1}"));
+        assert!(!super::id_like("é"));
+        assert!(!super::id_like(&"a".repeat(super::MAX_INBOX_ID_CHARS + 1)));
     }
 
     #[test]
