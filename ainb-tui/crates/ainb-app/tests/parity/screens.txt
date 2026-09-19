@@ -1,0 +1,43 @@
+# The parity enumeration (spec 2026-09-04, D3-prime amendment "what full
+# parity suite means"): one row per screen id in `ainb-app/src/app/screens/mod.rs`
+# `ids`, walked by `ainb-app/tests/parity_registry.rs` (every constant has a
+# row, every row names a constant, every ratatui-covered row has its fixture,
+# snapshot and facts) and by `ainb-core/tests/parity_registry.rs` (every
+# screen the terminal registers has a row). Columns, tab separated:
+#
+#   screen    coverage    detail
+#
+# coverage is one of:
+#   both      drawn by the ratatui half (`<name>.snap`) and carried to the
+#             DOM half (`frames/<name>.json`) from one fixture; detail lists
+#             the fixture names (`tests/parity/<name>.json`)
+#   dom       drawn by the DOM half only, from the frames; detail names the
+#             fixture, which has no `.snap`
+#   excluded  no fixture; detail is the reason
+home	both	home
+config	both	config
+daemons	both	daemons
+git_view	both	git_view git_review
+log_history	both	log_history
+new_session	both	new_session_pick_repo
+onboarding	both	onboarding
+session_list	both	session_list session_list_help
+session_recovery	both	session_recovery
+setup_menu	both	setup_menu
+skill_manager	both	skill_manager
+inbox	both	inbox
+analytics	dom	stats
+witr	both	plugins_host
+learnings	both	plugin_not_registered
+abtop	both	plugin_connecting
+hangar	excluded	plugin paint; its placeholder states are the plugins_host, plugin_connecting and plugin_not_registered fixtures on the sibling plugin screens
+attached_terminal	excluded	live bytes: a PTY's output no fixture carries; the wdio journeys cover it
+terminal	excluded	live bytes: a PTY's output no fixture carries; the wdio journeys cover it
+logs	excluded	a live stream
+claude_chat	excluded	host-only state: the ChatHost handles live in HostOnlyState; acp.test.ts pins the card
+help	excluded	drawn from the keymap rows keymap_parity.rs pins
+search_workspace	excluded	transient overlay over session_list
+non_git_notification	excluded	transient overlay over session_list
+auth_setup	excluded	its fields are deny-listed secrets
+changelog	excluded	static text with no section state to diff
+skills	excluded	static text with no section state to diff
