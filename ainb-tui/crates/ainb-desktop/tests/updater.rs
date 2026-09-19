@@ -433,6 +433,141 @@ fn an_interrupted_swap_is_finished_on_the_next_start() {
     assert!(!repair_interrupted_swap(&app).unwrap());
 }
 
+/// The whole apply path on a real disk image: a `.dmg` made with `hdiutil`
+/// around a fixture app whose `Info.plist` names its version, served by the
+/// fake source and hashed by the manifest; the app is mounted, copied out,
+/// its version read back as data, and swapped in with the previous kept.
+/// Checks 4, 5 and 7 accepted in one run.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_disk_image_is_mounted_copied_checked_and_swapped_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let apps = tmp.path().join("Applications");
+    let installed = bundle_dir(&apps, "Agents in a Box.app", "v1");
+    // The new version, as the release would ship it.
+    let src = tmp.path().join("src");
+    let new_app = bundle_dir(&src, "Agents in a Box.app", "v2");
+    std::fs::write(
+        new_app.join("Contents/Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleShortVersionString</key><string>1.29.0</string>
+<key>CFBundleIdentifier</key><string>dev.agentsinabox.desktop</string>
+</dict></plist>
+"#,
+    )
+    .unwrap();
+    let dmg = tmp.path().join("ainb-desktop-1.29.0-x.dmg");
+    let made = std::process::Command::new("hdiutil")
+        .args([
+            "create",
+            "-quiet",
+            "-volname",
+            "Agents in a Box",
+            "-format",
+            "UDZO",
+            "-srcfolder",
+        ])
+        .arg(&src)
+        .arg(&dmg)
+        .status()
+        .unwrap();
+    assert!(made.success(), "hdiutil create failed");
+    let bytes = std::fs::read(&dmg).unwrap();
+
+    let mut source = FakeSource::default();
+    let archive = "ainb-desktop-1.29.0-x.dmg";
+    source.manifests.insert(
+        ROOT.into(),
+        signed(&key(), &manifest("1.29.0", archive, &sha(&bytes), "")),
+    );
+    source.files.insert(format!("{ROOT}/{archive}"), bytes);
+    let u = updater(Arc::new(source), Channel::Stable, &home);
+    let check = u.check("1.28.2");
+    assert!(matches!(check, Check::Available { .. }), "{check:?}");
+    let install = Install::Bundle {
+        app: installed.clone(),
+        previous: apps.join("Agents in a Box.app.previous"),
+    };
+    let swapped = u.apply(&check, &install).unwrap();
+    assert_eq!(swapped, installed);
+    assert_eq!(read_marker(&installed), "v2");
+    assert_eq!(
+        read_marker(&apps.join("Agents in a Box.app.previous")),
+        "v1"
+    );
+    // Nothing is left beside the install but the app and its previous.
+    let mut left: Vec<String> = std::fs::read_dir(&apps)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        vec!["Agents in a Box.app", "Agents in a Box.app.previous"]
+    );
+}
+
+/// Check 5 declined: a disk image whose app says another version than the
+/// manifest is refused and the install untouched.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_bundle_whose_own_version_disagrees_with_the_manifest_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let apps = tmp.path().join("Applications");
+    let installed = bundle_dir(&apps, "Agents in a Box.app", "v1");
+    let src = tmp.path().join("src");
+    let new_app = bundle_dir(&src, "Agents in a Box.app", "v2");
+    std::fs::write(
+        new_app.join("Contents/Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleShortVersionString</key><string>1.28.9</string>
+</dict></plist>
+"#,
+    )
+    .unwrap();
+    let dmg = tmp.path().join("wrong.dmg");
+    let made = std::process::Command::new("hdiutil")
+        .args([
+            "create",
+            "-quiet",
+            "-volname",
+            "Agents in a Box",
+            "-format",
+            "UDZO",
+            "-srcfolder",
+        ])
+        .arg(&src)
+        .arg(&dmg)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let bytes = std::fs::read(&dmg).unwrap();
+    let mut source = FakeSource::default();
+    let archive = "ainb-desktop-1.29.0-x.dmg";
+    source.manifests.insert(
+        ROOT.into(),
+        signed(&key(), &manifest("1.29.0", archive, &sha(&bytes), "")),
+    );
+    source.files.insert(format!("{ROOT}/{archive}"), bytes);
+    let u = updater(Arc::new(source), Channel::Stable, &home);
+    let check = u.check("1.28.2");
+    let install = Install::Bundle {
+        app: installed.clone(),
+        previous: apps.join("Agents in a Box.app.previous"),
+    };
+    let err = u.apply(&check, &install).unwrap_err();
+    assert!(err.to_string().contains("1.28.9"), "{err}");
+    assert_eq!(read_marker(&installed), "v1");
+    assert!(!apps.join("Agents in a Box.app.previous").exists());
+    assert!(!apps.join("Agents in a Box.app.next").exists());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_staged_bundle_loses_its_quarantine_attribute_before_the_swap() {
