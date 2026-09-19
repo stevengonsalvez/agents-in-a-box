@@ -13,7 +13,7 @@
 //! store itself and is not matched. The runtime proof is the resolver's
 //! tests; this list backs it, it does not replace it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const COMMITTED: &str = include_str!("fixtures/session_store_call_sites.txt");
@@ -71,9 +71,12 @@ fn call_text(line: &str, start: usize) -> String {
     line[start..end].trim().to_string()
 }
 
+/// Each direct call as `file | call | N`, N being how many times that exact
+/// call appears in that file, so a second copy of a triaged call is a change
+/// and fails like a new one.
 fn current_call_sites() -> BTreeSet<String> {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let mut sites = BTreeSet::new();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for root in ROOTS {
         let mut files = Vec::new();
         rust_files(&crates.join(root), &mut files);
@@ -113,14 +116,16 @@ fn current_call_sites() -> BTreeSet<String> {
                     let mut from = 0;
                     while let Some(found) = line[from..].find(call) {
                         let start = from + found;
-                        sites.insert(format!("{rel} | {}", call_text(line, start)));
+                        *counts
+                            .entry(format!("{rel} | {}", call_text(line, start)))
+                            .or_default() += 1;
                         from = start + call.len();
                     }
                 }
             }
         }
     }
-    sites
+    counts.into_iter().map(|(site, n)| format!("{site} | {n}")).collect()
 }
 
 #[test]
