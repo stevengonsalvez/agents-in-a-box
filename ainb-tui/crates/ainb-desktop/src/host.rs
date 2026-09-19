@@ -9,8 +9,9 @@ use ainb_app::app::keymap::{HostAction, active_contexts};
 use ainb_app::app::state::WorkspaceRescan;
 use ainb_app::config::AppConfig;
 use ainb_app::fleet::agent_status_reader::{AgentStatusReader, Dialer};
+use ainb_app::fleet::inbox_reader::{Dialer as InboxDialer, InboxReader};
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
-use ainb_app::{AppState, CommandId, Effect, Intent, Keymap};
+use ainb_app::{AppState, CommandId, Effect, Intent, Keymap, SectionId};
 use ainb_hangar_proto::connections::SurfaceKind;
 use serde::Serialize;
 
@@ -100,6 +101,14 @@ pub fn legacy_panel(config: &AppConfig) -> bool {
     resolved_bool(LEGACY_PANEL_ENV, config.fleet.status.legacy_panel)
 }
 
+/// The dialer the desktop's inbox reader uses: the daemon client from the
+/// environment, announced as the desktop, so its reads are recorded as this
+/// surface's.
+#[must_use]
+pub fn inbox_dialer() -> InboxDialer {
+    Box::new(|| ainb_app::fleet::bridge::daemon::surface_client(SurfaceKind::Desktop))
+}
+
 /// The home sidebar's `select` row, the one Enter runs on a focused item.
 const HOME_SIDEBAR_SELECT: &str = "home.sidebar.select";
 
@@ -116,10 +125,23 @@ pub struct DesktopHost<S: FrameSink> {
     /// The agent status reader both hosts share (#1188), once
     /// [`Self::start_agent_status`] has started it.
     agent_status: Option<AgentStatusReader>,
+    /// How the inbox reader dials the daemon. The reader itself runs only
+    /// while a renderer subscribes to `inbox`, so no read is issued for a
+    /// screen nobody has open.
+    inbox_dialer: std::sync::Arc<InboxDialer>,
+    /// The inbox reader, while `inbox` is subscribed.
+    inbox: Option<InboxReader>,
+    /// The runtime the inbox reader runs on. The window's `subscribe` is a
+    /// synchronous command on the main thread, outside any runtime, so the
+    /// host is handed one at construction rather than asking the thread.
+    runtime: Option<tokio::runtime::Handle>,
     /// Whether the tick starts the daemon attention poller. A test that is
     /// about the reducer turns it off: the poller is a thread on a real
     /// socket, and its first publish is news whenever it lands.
     poll_attention: bool,
+    /// The daemons panel the settings page draws: keeps the collector alive
+    /// while the reducer is on the Config screen.
+    daemons_panel: crate::daemons_panel::DaemonsPanel,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -170,7 +192,58 @@ impl<S: FrameSink> DesktopHost<S> {
             sink,
             rescan: WorkspaceRescan::default(),
             agent_status: None,
+            daemons_panel: crate::daemons_panel::DaemonsPanel::default(),
+            inbox_dialer: std::sync::Arc::new(inbox_dialer()),
+            inbox: None,
+            runtime: tokio::runtime::Handle::try_current().ok(),
             poll_attention: true,
+        }
+    }
+
+    /// Dial the inbox reads through `dialer` instead of the daemon client from
+    /// the environment. For tests, which count the dials.
+    #[must_use]
+    pub fn reading_inbox_with(mut self, dialer: InboxDialer) -> Self {
+        self.inbox_dialer = std::sync::Arc::new(dialer);
+        self
+    }
+
+    /// Run the inbox reader on `runtime`. The app's main thread has none of
+    /// its own, so the shell hands the host the app runtime's handle.
+    #[must_use]
+    pub fn on_runtime(mut self, runtime: tokio::runtime::Handle) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// Whether the inbox reader is running, which it is exactly while a
+    /// renderer subscribes to `inbox`.
+    #[must_use]
+    pub const fn inbox_reader_running(&self) -> bool {
+        self.inbox.is_some()
+    }
+
+    /// Start or stop the inbox reader to match `subscription`: a renderer
+    /// that reads `inbox` gets a reader, one that stops reading it stops the
+    /// reads. Must be called inside a tokio runtime to start one.
+    fn sync_inbox_reader(&mut self, subscription: &Subscription) {
+        let wanted = subscription.contains(SectionId::Inbox);
+        match (wanted, self.inbox.is_some()) {
+            (true, false) => {
+                let Some(runtime) = &self.runtime else {
+                    tracing::warn!("inbox: no runtime to start the reader on");
+                    self.state.inbox_absent("this window has no runtime to read the inbox on");
+                    return;
+                };
+                let dialer = std::sync::Arc::clone(&self.inbox_dialer);
+                let _entered = runtime.enter();
+                self.inbox = Some(InboxReader::spawn(Box::new(move || dialer())));
+            }
+            (false, true) => {
+                self.inbox = None;
+                self.state.inbox_reset();
+            }
+            _ => {}
         }
     }
 
@@ -264,6 +337,13 @@ impl<S: FrameSink> DesktopHost<S> {
         if let Some(reader) = &mut self.agent_status {
             reader.drain_into(&mut self.state);
         }
+        // The daemons panel on the settings page (D3d): the collector the
+        // terminal's Daemons screen arms, kept alive while Config is open.
+        self.daemons_panel.tick(&mut self.state);
+        // Section 16, while a renderer reads it.
+        if let Some(reader) = &mut self.inbox {
+            reader.drain_into(&mut self.state);
+        }
         let effects = self.state.take_effects();
         self.pump();
         effects
@@ -349,25 +429,54 @@ impl<S: FrameSink> DesktopHost<S> {
     /// up.
     #[must_use]
     pub fn refused_from_renderer(&self, intent: &Intent) -> Option<Refusal> {
-        let (id, row) = match intent {
+        let (id, action) = match intent {
             Intent::Key(chord) => {
                 let (ctx, _) =
                     self.keymap.resolve_with_context(&active_contexts(&self.state), chord)?;
-                self.keymap
+                // A chord that resolves but names no row is a synthesised
+                // action: a printable key typed into a field the host owns.
+                // The window types with `Text`, which the host bounds and
+                // cleans; a key it cannot name is refused, closed, rather
+                // than let through unjudged.
+                let Some((id, row)) = self
+                    .keymap
                     .commands()
-                    .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))?
+                    .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))
+                else {
+                    return Some(Refusal {
+                        command: CommandId::new(format!("{}.text", ctx.name())),
+                        reason: "it types into a field the host owns; the window sends text instead",
+                    });
+                };
+                (id, row.action.clone())
             }
-            Intent::Command(id, _) => (id.clone(), self.keymap.command(id)?),
+            // Judged with its payload: a pointer row's action is what the
+            // arguments name (the settings row a `config.set_row` edits,
+            // #1224), not the placeholder the table wrote. A payload the row
+            // cannot parse is refused here, closed, rather than judged on the
+            // placeholder and left for the reducer to drop.
+            Intent::Command(id, args) => {
+                let row = self.keymap.command(id)?;
+                let Some(action) = row.action.with_args(args) else {
+                    return Some(Refusal {
+                        command: id.clone(),
+                        reason: "its payload does not fit the row",
+                    });
+                };
+                (id.clone(), action)
+            }
             _ => return None,
         };
         let why = if self.keymap.is_key_only(&id) {
             Some("it writes outside ainb, so it runs only from its key")
         } else {
-            self.state.remote_command_refusal(&row.action)
+            self.state.remote_command_refusal(&action)
         };
+        // An onboarding write has a path of its own in this shell (#1175):
+        // the refusal points at it rather than at a key the window cannot use.
         why.map(|reason| Refusal {
+            reason: crate::setup::desktop_path(&id).unwrap_or(reason),
             command: id,
-            reason,
         })
     }
 
@@ -379,6 +488,7 @@ impl<S: FrameSink> DesktopHost<S> {
     /// Change the sections the renderer wants. A newly added one is framed in
     /// full now.
     pub fn resubscribe(&mut self, subscription: Subscription) {
+        self.sync_inbox_reader(&subscription);
         self.mirror.resubscribe(subscription);
         self.pump();
     }
@@ -410,6 +520,7 @@ impl<S: FrameSink> DesktopHost<S> {
     /// Take a renderer that just attached (or reloaded) wanting
     /// `subscription`: every section in it is framed in full, in one batch.
     pub fn subscribe(&mut self, subscription: Subscription) {
+        self.sync_inbox_reader(&subscription);
         self.mirror.resubscribe(subscription);
         self.mirror.reframe();
         self.pump();

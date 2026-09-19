@@ -154,6 +154,7 @@ home.skills|home|c|false
 home.stats|home|i|false
 home.toggle_focus|home|tab|false
 home.witr|home|w|false
+inbox.mark_all_read|inbox|-|false
 log_history.back|log_history|esc|false
 log_history.cleanup_upper|log_history|C|false
 log_history.cleanup|log_history|c|false

@@ -14,6 +14,7 @@ use crate::components::code_review::render::ReviewRowId;
 use crate::components::session_tabs::SessionTab;
 use crate::components::sidebar::SidebarItem;
 use crate::components::skill_manager_screen::FocusedSkillPane;
+use crate::config::settings_model::ConfigRowEdit;
 
 /// Command ids of the pointer rows, `<context>.<row id>` like every keymap
 /// command. Each row is unbound: its payload only a hit-test can supply.
@@ -28,6 +29,9 @@ pub mod ids {
     pub const SESSION_LIST_SELECT_TAB: &str = "session_list.select_tab";
     /// `{"session_key": String | null}`: null closes.
     pub const SESSION_LIST_OPEN_TRANSCRIPT: &str = "session_list.open_transcript";
+    /// `{"request": String, "label": String}`: the request id the frame named
+    /// (`fleet.ask_state.request`) and one of its option labels.
+    pub const SESSION_LIST_ASK_PICK: &str = "session_list.ask.pick";
     /// `{"width": u16, "collapsed": bool}`
     pub const SESSION_LIST_SAVE_PANE_LAYOUT: &str = "session_list.save_pane_layout";
     /// No arguments.
@@ -48,6 +52,13 @@ pub mod ids {
     pub const GIT_VIEW_SELECT_REVIEW_ROW: &str = "git_view.select_review_row";
     /// `{"lines": i32}`, down when positive.
     pub const GIT_VIEW_SCROLL: &str = "git_view.scroll";
+    /// `{"key": String, "value": ConfigRowEdit, "revision": u64}`, the row by
+    /// its registry key and the config section version the form drew.
+    pub const CONFIG_SET_ROW: &str = "config.set_row";
+    /// `{"id": String}`, a `ConfigTreeNode::id`.
+    pub const CONFIG_SELECT_NODE: &str = "config.select_node";
+    /// No arguments: the inbox's one write is a whole-inbox sweep (D3-prime).
+    pub const INBOX_MARK_ALL_READ: &str = "inbox.mark_all_read";
 
     /// Every pointer command id.
     pub const ALL: &[&str] = &[
@@ -56,6 +67,7 @@ pub mod ids {
         SESSION_LIST_FOCUS_PANE,
         SESSION_LIST_SELECT_TAB,
         SESSION_LIST_OPEN_TRANSCRIPT,
+        SESSION_LIST_ASK_PICK,
         SESSION_LIST_SAVE_PANE_LAYOUT,
         SKILL_MANAGER_ALL_SOURCES,
         SKILL_MANAGER_SELECT_SOURCE,
@@ -66,6 +78,9 @@ pub mod ids {
         HOME_CLICK_SIDEBAR_ITEM,
         GIT_VIEW_SELECT_REVIEW_ROW,
         GIT_VIEW_SCROLL,
+        CONFIG_SET_ROW,
+        CONFIG_SELECT_NODE,
+        INBOX_MARK_ALL_READ,
     ];
 }
 
@@ -120,6 +135,23 @@ pub fn open_transcript(session_key: Option<&str>) -> Intent {
     command(
         ids::SESSION_LIST_OPEN_TRANSCRIPT,
         json!({ "session_key": session_key }),
+    )
+}
+
+/// Answer the question `request` names with the option labelled `label`.
+///
+/// One intent, resolved by the reducer against the options it holds when it
+/// runs. A banner that counted cursor moves off its frame and then sent Enter
+/// picked a different option when a frame landed mid-sequence and reordered
+/// them; here nothing sits between the pick and the send (#1191). `request`
+/// is the id the frame carried for the question the person read: the reducer
+/// refuses the pick when the question it would answer is another one, so a
+/// label both questions offer (yes, no, approve) cannot answer the new one.
+#[must_use]
+pub fn pick_answer(request: &str, label: &str) -> Intent {
+    command(
+        ids::SESSION_LIST_ASK_PICK,
+        json!({ "request": request, "label": label }),
     )
 }
 
@@ -208,6 +240,33 @@ pub fn scroll_git_view(lines: i32) -> Intent {
     command(ids::GIT_VIEW_SCROLL, json!({ "lines": lines }))
 }
 
+/// Set the settings row `key` to what a form chose, and write that one key.
+///
+/// The row is named by its registry key, so a form resolved against one frame
+/// edits the same row after the rows were reordered or filtered. `revision`
+/// is the config section version that frame carried: an edit of a frame the
+/// section has moved past (another surface saved, the tree changed) is
+/// refused rather than applied to rows the form never saw.
+#[must_use]
+pub fn set_config_row(key: &str, edit: ConfigRowEdit, revision: u64) -> Intent {
+    command(
+        ids::CONFIG_SET_ROW,
+        json!({ "key": key, "value": edit, "revision": revision }),
+    )
+}
+
+/// Select the settings tree node `id` a click names.
+#[must_use]
+pub fn select_config_node(id: &str) -> Intent {
+    command(ids::CONFIG_SELECT_NODE, json!({ "id": id }))
+}
+
+/// Mark every entry in the inbox read: the daemon's sweep, sent with one op id.
+#[must_use]
+pub fn mark_inbox_all_read() -> Intent {
+    command(ids::INBOX_MARK_ALL_READ, Args::Null)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewRowArgs {
@@ -218,6 +277,20 @@ struct ReviewRowArgs {
 #[serde(deny_unknown_fields)]
 struct LinesArgs {
     lines: i32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RowEditArgs {
+    key: String,
+    value: ConfigRowEdit,
+    revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeArgs {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -258,6 +331,13 @@ struct TabArgs {
 #[serde(deny_unknown_fields)]
 struct TranscriptArgs {
     session_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PickArgs {
+    request: String,
+    label: String,
 }
 
 #[derive(Deserialize)]
@@ -320,6 +400,12 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
         }
         AppEvent::SessionListOpenTranscript(_) => parse::<TranscriptArgs>(args)
             .map(|args| AppEvent::SessionListOpenTranscript(args.session_key)),
+        AppEvent::SessionAskPick { .. } => {
+            parse::<PickArgs>(args).map(|args| AppEvent::SessionAskPick {
+                request: args.request,
+                label: args.label,
+            })
+        }
         AppEvent::SaveSessionsPaneLayout { .. } => parse::<LayoutArgs>(args)
             .filter(|args| (0.0..=1.0).contains(&args.fraction))
             .map(|args| AppEvent::SaveSessionsPaneLayout {
@@ -356,6 +442,16 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
         AppEvent::GitViewScrollBy(_) => parse::<LinesArgs>(args)
             .filter(|args| args.lines != 0)
             .map(|args| AppEvent::GitViewScrollBy(args.lines)),
+        AppEvent::ConfigSetRow { .. } => parse::<RowEditArgs>(args)
+            .filter(|args| !args.key.is_empty())
+            .map(|args| AppEvent::ConfigSetRow {
+                key: args.key,
+                edit: args.value,
+                revision: args.revision,
+            }),
+        AppEvent::ConfigSelectNode { .. } => parse::<NodeArgs>(args)
+            .filter(|args| !args.id.is_empty())
+            .map(|args| AppEvent::ConfigSelectNode { id: args.id }),
         _ => return None,
     })
 }

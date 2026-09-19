@@ -591,3 +591,78 @@ async fn inbox_list_without_recipient_defaults_to_the_local_human() {
     assert_eq!(entries[0]["recipient"], LOCAL_HUMAN, "{entries:?}");
     assert_eq!(resp["result"]["unread"], 1, "{resp}");
 }
+
+/// The D18 half a client has to supply (D3-prime): one op id sent twice is one
+/// sweep. The first send is `created` and flips the rows; the second is
+/// `replayed` and answers the first reply verbatim without running the sweep,
+/// which the `marked` count proves (a second sweep would say `0`).
+#[tokio::test]
+async fn mark_read_with_one_op_id_twice_runs_the_sweep_once_and_replays() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store, sink) = start_server_with_aggregator(dir.path()).await;
+    sink.emit(WS_ID, issue_event());
+    wait_for_inbox_count(&store, WS_ID, 1).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+    let params = serde_json::json!({
+        "workspace_id": WS_SLUG,
+        "recipient": OWNER,
+        "op_id": "0123456789abcdef0123456789abcdef",
+    });
+    let first = c.call(methods::HANGAR_INBOX_MARK_READ, params.clone()).await;
+    assert!(first["error"].is_null(), "first send must ack: {first}");
+    assert_eq!(
+        first["result"]["marked"], 1,
+        "the first send sweeps: {first}"
+    );
+    assert_eq!(first["result"]["mutation"]["outcome"], "created", "{first}");
+
+    let second = c.call(methods::HANGAR_INBOX_MARK_READ, params).await;
+    assert!(second["error"].is_null(), "the retry must ack: {second}");
+    assert_eq!(
+        second["result"]["mutation"]["outcome"], "replayed",
+        "the same op id and body is answered from the ledger: {second}"
+    );
+    assert_eq!(
+        second["result"]["marked"], 1,
+        "a replay returns the FIRST reply, not a fresh sweep's zero: {second}"
+    );
+}
+
+/// Two surfaces sweeping is two op ids and two sweeps: the second runs the
+/// handler and answers `marked: 0`, which is NOT the replay path, so nobody
+/// reads a zero as a ledger hit.
+#[tokio::test]
+async fn mark_read_with_two_op_ids_is_two_sweeps_and_the_second_marks_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store, sink) = start_server_with_aggregator(dir.path()).await;
+    sink.emit(WS_ID, issue_event());
+    wait_for_inbox_count(&store, WS_ID, 1).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+    let send = |op_id: &str| serde_json::json!({ "workspace_id": WS_SLUG, "recipient": OWNER, "op_id": op_id });
+    let first = c
+        .call(
+            methods::HANGAR_INBOX_MARK_READ,
+            send("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .await;
+    assert_eq!(first["result"]["marked"], 1, "{first}");
+    let second = c
+        .call(
+            methods::HANGAR_INBOX_MARK_READ,
+            send("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        )
+        .await;
+    assert!(second["error"].is_null(), "{second}");
+    assert_eq!(
+        second["result"]["marked"], 0,
+        "the second sweep finds nothing unread: {second}"
+    );
+    assert_eq!(
+        second["result"]["mutation"]["outcome"], "created",
+        "not a replay: {second}"
+    );
+}

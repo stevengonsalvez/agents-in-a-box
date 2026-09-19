@@ -124,3 +124,27 @@ fn a_renderer_that_loses_a_file_fails_the_facts() {
         "a renderer missing a whole file still showed every expected fact, so the list proves nothing"
     );
 }
+
+/// The same, for the screens the settings page draws (D3d): the daemons
+/// fixture seeds collected rows, and a renderer that loses one of them fails
+/// the facts, so the daemons half cannot pass on the table's headings alone.
+#[test]
+fn a_renderer_that_loses_a_daemon_fails_the_facts() {
+    let home = tempfile::tempdir().expect("scratch home");
+    std::env::set_var("HOME", home.path());
+
+    let dir = fixture_dir();
+    let fixture = ParityFixture::load(&dir.join("daemons.json")).expect("the daemons fixture");
+    let list = std::fs::read_to_string(dir.join("facts/daemons.txt")).expect("the facts list");
+    assert_eq!(missing(&render(&fixture), &list), Vec::<&str>::new());
+
+    let lost = draw(&fixture, |state| {
+        let shared = state.hangar.daemons_state.shared.clone().expect("the seeded snapshot");
+        let mut snapshot = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshot.rows.remove(0);
+    });
+    assert!(
+        !missing(&lost, &list).is_empty(),
+        "a renderer missing a daemon row still showed every expected fact, so the list proves nothing"
+    );
+}
