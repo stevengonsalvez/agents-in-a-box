@@ -133,7 +133,7 @@ fn a_long_reason_is_scrubbed_and_cut_and_the_frame_stays_inside_the_budget() {
     assert!(encoded_len(&frame) < MAX_INBOX_BYTES);
     // The same for a failure after rows landed.
     let mut state = state_with(vec![row(0, "a")]);
-    assert!(state.inbox_read_failed(reason, NOW + 1));
+    assert!(state.inbox_read_failed(reason));
     let frame = view_of(&state);
     assert!(frame["unreachable"].as_str().unwrap().ends_with(INBOX_SUMMARY_CUT_MARKER));
     assert!(encoded_len(&frame) < MAX_INBOX_BYTES);
@@ -229,7 +229,7 @@ fn the_read_folds_unread_and_a_repeat_read_changes_nothing() {
 #[test]
 fn a_failed_read_keeps_the_rows_and_says_the_host_is_unreachable() {
     let mut state = state_with(vec![row(0, "a")]);
-    assert!(state.inbox_read_failed("daemon io: broken pipe", NOW + 5));
+    assert!(state.inbox_read_failed("daemon io: broken pipe"));
     let frame = view_of(&state);
     assert_eq!(frame["entries"].as_array().map(Vec::len), Some(1));
     assert_eq!(frame["unreachable"], "daemon io: broken pipe");
@@ -250,16 +250,25 @@ fn an_absent_daemon_frames_the_reason_and_no_rows() {
 }
 
 #[test]
-fn mark_all_read_folds_the_daemons_count_and_stamps_the_rows() {
+fn mark_all_read_folds_the_daemons_count_and_never_stamps_a_local_clock() {
     let mut state = state_with(vec![row(1, "a"), row(3, "b"), row(0, "c")]);
     assert_eq!(view_of(&state)["unread"], 2);
-    assert!(state.apply_inbox_mark_all_read(2, 0, NOW + 9));
+    assert!(state.apply_inbox_mark_all_read(0));
     let frame = view_of(&state);
     assert_eq!(frame["unread"], 0);
-    assert!(
-        frame["entries"].as_array().unwrap().iter().all(|e| e["read_at"].is_i64()),
-        "every row carries read_at after the sweep: {frame}"
+    // The stamps are the daemon's: they arrive with the read after the sweep.
+    assert_eq!(
+        frame["entries"].as_array().unwrap().iter().filter(|e| e["read_at"].is_i64()).count(),
+        1,
+        "no row was stamped locally: {frame}"
     );
+    let mut after = vec![row(1, "a"), row(3, "b"), row(0, "c")];
+    for r in &mut after {
+        r.read_at = Some(NOW + 9);
+    }
+    assert!(state.apply_inbox_read(read(after), NOW + 10));
+    let frame = view_of(&state);
+    assert!(frame["entries"].as_array().unwrap().iter().all(|e| e["read_at"] == NOW + 9));
 }
 
 #[test]
