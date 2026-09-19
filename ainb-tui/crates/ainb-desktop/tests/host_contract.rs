@@ -509,28 +509,22 @@ fn the_ask_commands_send_an_answer_and_the_frame_follows_it() {
     host.state().host.attention_poll_running.store(true, Ordering::Release);
 
     // What the banner sends to pick the second option, in its order: the row
-    // selected without attaching it, the ask pane shown, the cursor moved,
-    // then Enter.
+    // selected without attaching it, the ask pane shown, then the pick by its
+    // label in one command. No cursor move rides between them, so a frame
+    // landing mid-sequence cannot put Enter on another option (#1191).
     let _ = host.dispatch(ainb_app::app::pointer::select_session_row(
         &ainb_app::app::state::SessionListRowId::Session(session_id),
         false,
     ));
     let _ = host.dispatch(select_session_tab(SessionTab::Ask));
     let _ = host.tick();
-    let _ = host.dispatch(Intent::Command(
-        CommandId::new("session_list.ask.next"),
-        serde_json::Value::Null,
-    ));
+    log.borrow_mut().clear();
+    let _ = host.dispatch(ainb_app::app::pointer::pick_answer("production"));
     assert_eq!(
         host.state().fleet.ask_state.cursor(),
         1,
         "the cursor is on option two"
     );
-    log.borrow_mut().clear();
-    let _ = host.dispatch(Intent::Command(
-        CommandId::new("session_list.ask.enter"),
-        serde_json::Value::Null,
-    ));
     assert!(
         matches!(
             host.state().fleet.ask_state.phase_for(&chip),
