@@ -18,7 +18,7 @@
 use std::sync::{Arc, Mutex};
 
 use ainb_hangar_proto::fleet::{FleetTranscriptListParams, FleetTranscriptListResult};
-use ainb_hangar_proto::transcript::AcpClassifier;
+use ainb_hangar_proto::transcript::{AcpClassifier, acp_card_text};
 
 use crate::fleet::bridge::redact::scrub;
 
@@ -205,13 +205,21 @@ impl TranscriptHost {
                     if self.after.is_some_and(|after| chunk.ingest_order <= after) {
                         continue;
                     }
-                    let text = self
+                    let classified = self
                         .classifier
                         .classify_value(&chunk.event_type, &chunk.payload)
                         .into_iter()
                         .map(|(_, body)| body)
                         .collect::<Vec<_>>()
                         .join("\n");
+                    // The classifier is silent on the prompt echo and the
+                    // usage report, which the card still labels, so it asks
+                    // for their card text rather than drawing an empty row.
+                    let text = if classified.is_empty() {
+                        acp_card_text(&chunk.event_type, &chunk.payload).unwrap_or_default()
+                    } else {
+                        classified
+                    };
                     self.after = Some(chunk.ingest_order);
                     // Scrubbed before the cut, so a credential straddling the
                     // bound is redacted whole rather than cut in half.
@@ -440,6 +448,53 @@ mod tests {
             ]
         );
         assert_eq!(projected.status, TranscriptStatus::Live);
+    }
+
+    /// #1200: the card labels the prompt echo and the usage report, so they
+    /// arrive with text rather than as labelled empty rows. The classifier is
+    /// silent on both; the host asks `acp_card_text` for them.
+    #[test]
+    fn the_prompt_echo_and_the_usage_report_carry_text() {
+        let token = format!("npm_{}", "a1B2".repeat(9));
+        let mut host = TranscriptHost::new("acp:s-1".to_string());
+        host.fold(page(vec![
+            chunk(
+                1,
+                "acp.user_message",
+                serde_json::json!({ "kind": "acp.user_message", "text": format!("use {token}") }),
+            ),
+            chunk(
+                2,
+                "acp.usage",
+                serde_json::json!({
+                    "sessionUpdate": "usage_update",
+                    "used": 1200,
+                    "size": 200_000,
+                    "cost": { "amount": 0.4, "currency": "USD" },
+                }),
+            ),
+            chunk(
+                3,
+                "acp.turn_started",
+                serde_json::json!({ "turnId": "m-1" }),
+            ),
+        ]));
+
+        let projected = project(&host);
+        let bodies: Vec<_> =
+            projected.chunks.iter().map(|chunk| (chunk.kind, chunk.body.as_str())).collect();
+        assert_eq!(
+            bodies,
+            vec![
+                (ChunkKind::UserMessage, "use <redacted>"),
+                (
+                    ChunkKind::Usage,
+                    "1200 of 200000 tokens in context · 0.40 USD"
+                ),
+                (ChunkKind::Lifecycle, ""),
+            ],
+            "the echo is scrubbed, the cost has two decimals, bookkeeping stays empty"
+        );
     }
 
     #[test]

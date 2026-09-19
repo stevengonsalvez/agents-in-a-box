@@ -105,6 +105,44 @@ fn an_answer_from_this_window_is_recorded_as_the_desktops() {
 }
 
 #[test]
+fn the_window_shows_every_session_whatever_filter_the_terminal_persisted() {
+    // The terminal's Shift+F filter is persisted in the config this host is
+    // given. The window draws no filter indicator and offers no control, so
+    // it starts on All and refuses to cycle or persist a filter (#1208).
+    use ainb_app::app::state::SessionFilter;
+
+    let mut config = AppConfig::default();
+    config.ui_preferences.session_filter = SessionFilter::ActiveOnly;
+    let log = Log::default();
+    let mut host = host_on(config, &[SectionId::Sessions], &log);
+    host.open_sessions(&mut Recorder(Rc::clone(&log)));
+    assert_eq!(host.state().sessions.session_filter, SessionFilter::All);
+
+    let effects = host.dispatch(Intent::Command(
+        CommandId::new("session_list.cycle_filter"),
+        serde_json::Value::Null,
+    ));
+    assert_eq!(host.state().sessions.session_filter, SessionFilter::All);
+    assert!(
+        !effects.iter().any(|effect| matches!(effect, Effect::Persist(_))),
+        "nothing is written: {effects:?}"
+    );
+    assert_eq!(
+        host.state().config.app_config.ui_preferences.session_filter,
+        SessionFilter::ActiveOnly,
+        "the terminal's persisted filter is left as it was"
+    );
+    assert!(
+        host.state()
+            .shell
+            .notifications
+            .last()
+            .is_some_and(|note| note.message.contains("every session")),
+        "and the window is told why"
+    );
+}
+
+#[test]
 fn the_first_batch_frames_every_subscribed_section_and_nothing_else() {
     let log = Log::default();
     let mut host = host(&[SectionId::Sessions, SectionId::Shell], &log);
@@ -509,28 +547,22 @@ fn the_ask_commands_send_an_answer_and_the_frame_follows_it() {
     host.state().host.attention_poll_running.store(true, Ordering::Release);
 
     // What the banner sends to pick the second option, in its order: the row
-    // selected without attaching it, the ask pane shown, the cursor moved,
-    // then Enter.
+    // selected without attaching it, the ask pane shown, then the pick by its
+    // label in one command. No cursor move rides between them, so a frame
+    // landing mid-sequence cannot put Enter on another option (#1191).
     let _ = host.dispatch(ainb_app::app::pointer::select_session_row(
         &ainb_app::app::state::SessionListRowId::Session(session_id),
         false,
     ));
     let _ = host.dispatch(select_session_tab(SessionTab::Ask));
     let _ = host.tick();
-    let _ = host.dispatch(Intent::Command(
-        CommandId::new("session_list.ask.next"),
-        serde_json::Value::Null,
-    ));
+    log.borrow_mut().clear();
+    let _ = host.dispatch(ainb_app::app::pointer::pick_answer("att-7", "production"));
     assert_eq!(
         host.state().fleet.ask_state.cursor(),
         1,
         "the cursor is on option two"
     );
-    log.borrow_mut().clear();
-    let _ = host.dispatch(Intent::Command(
-        CommandId::new("session_list.ask.enter"),
-        serde_json::Value::Null,
-    ));
     assert!(
         matches!(
             host.state().fleet.ask_state.phase_for(&chip),
@@ -724,7 +756,11 @@ mod transcript {
         )
         // Folding a large page takes a while in a debug build; no rescan may
         // come due inside it, since a scan needs the runtime this test lacks.
-        .rescanning_every(std::time::Duration::from_secs(600));
+        .rescanning_every(std::time::Duration::from_secs(600))
+        // These tests count Fleet frames, and the attention poller's first
+        // publish is news that frames Fleet on whichever tick it lands: on a
+        // loaded runner that was the tick asserted to frame nothing.
+        .without_attention_poll();
         host.open_sessions(&mut Recorder(Log::default()));
         host
     }

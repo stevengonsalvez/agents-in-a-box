@@ -86,7 +86,13 @@ pub struct GitViewFrame {
     /// not read as the same thing.
     pub diff_lines_cut: usize,
     pub diff_scroll_offset: usize,
-    pub worktree_path: std::path::PathBuf,
+    /// The worktree's directory name, scrubbed, or `worktree` when that name
+    /// would be the operator's username (a worktree at home) or empty (`/`,
+    /// a path ending in `..`). Never the absolute path: the seam denies paths
+    /// on the wire for remote surfaces, and nothing that draws this view
+    /// reads more than the name (the #1097 rule for the web rows, #1212
+    /// here).
+    pub worktree_name: String,
     pub is_dirty: bool,
     pub can_push: bool,
     /// The draft crosses as its length, as it did before the bound.
@@ -137,7 +143,13 @@ pub struct ReviewUiFrame {
     pub collapsed_dirs: Vec<String>,
     /// Collapsed directories the frame did not carry.
     pub collapsed_dirs_cut: usize,
+    /// The first row to draw, in the FRAME's rows rather than the reducer's:
+    /// the frame carries a cut of the model, so the same number would
+    /// otherwise name different content on each side.
     pub scroll: usize,
+    /// The row the reducer is on was not sent, so `scroll` is the nearest one
+    /// that was.
+    pub scroll_cut: bool,
     pub current_hunk: usize,
 }
 
@@ -251,9 +263,15 @@ pub fn project_within(
     let selected_place = carried.iter().position(|index| *index == selected).unwrap_or(0);
     let selected_framed = framed[..selected_place.min(framed.len())].iter().flatten().count();
     let files: Vec<ReviewFileFrame> = framed.into_iter().flatten().collect();
-    let hunk_count: usize = files.iter().map(|file| file.hunks.len()).sum();
-    let row_count: usize =
-        files.iter().flat_map(|file| &file.hunks).map(|hunk| hunk.rows.len()).sum();
+    // The reducer's offsets index ITS virtual rows, over the whole model; the
+    // frame carries a cut of that model, so the same number names different
+    // content on each side of the wire. The frame therefore carries the
+    // offsets in ITS OWN row space, and says when the row the terminal is on
+    // was not sent.
+    let place = Place::of(&state.review.files, &carried, &files);
+    let (scroll, scroll_cut) = place.row(state.review_ui.scroll);
+    let (current_hunk, _) = place.hunk(state.review_ui.current_hunk);
+
     let review = ReviewFrame {
         files_cut: held_files - files.len(),
         files,
@@ -267,7 +285,7 @@ pub fn project_within(
         diff_scroll_offset: within(state.diff_scroll_offset, diff_content.len()),
         diff_content,
         diff_lines_cut,
-        worktree_path: state.worktree_path.clone(),
+        worktree_name: worktree_name(&state.worktree_path),
         is_dirty: state.is_dirty,
         can_push: state.can_push,
         commit_message_len: state
@@ -299,12 +317,284 @@ pub fn project_within(
             sidebar_selected: state.review_ui.sidebar_selected,
             collapsed_dirs,
             collapsed_dirs_cut,
-            scroll: within(state.review_ui.scroll, row_count + hunk_count),
-            current_hunk: within(state.review_ui.current_hunk, hunk_count),
+            scroll,
+            scroll_cut,
+            current_hunk,
         },
         review,
     }
 }
+
+/// Where the model's virtual rows and hunks ended up in the frame's.
+///
+/// The reducer counts rows the way `flatten`
+/// (`components/code_review/render.rs:112`) does: a row per file heading, a
+/// row per hidden gap, a row per code line, and nothing past the heading for a
+/// collapsed or binary file. The frame carries a cut of that, so an offset
+/// means one thing on each side until it is translated here, once, where both
+/// shapes are in hand.
+struct Place<'a> {
+    /// Per file, its first row in the model and in the frame, how many rows
+    /// and hunks each side carries, and both sides themselves, because a row
+    /// inside a file is placed hunk by hunk.
+    files: Vec<PlacedFile<'a>>,
+}
+
+struct PlacedFile<'a> {
+    model: &'a ReviewFile,
+    frame: Option<&'a ReviewFileFrame>,
+    model_row: usize,
+    frame_row: usize,
+    model_rows: usize,
+    frame_rows: usize,
+    model_hunk: usize,
+    frame_hunk: usize,
+    model_hunks: usize,
+    frame_hunks: usize,
+}
+
+impl<'a> Place<'a> {
+    /// Walk the model's files beside the frame's, in the order the frame kept
+    /// them: `carried` says which model file each framed slot came from.
+    fn of(model: &'a [ReviewFile], carried: &[usize], framed: &'a [ReviewFileFrame]) -> Self {
+        let mut files = Vec::with_capacity(model.len());
+        let mut model_row = 0;
+        let mut frame_row = 0;
+        let mut model_hunk = 0;
+        let mut frame_hunk = 0;
+        // A framed file keeps its place in `framed` in model order, so the two
+        // walks advance together and a file the budget dropped simply has no
+        // frame rows of its own.
+        let mut next_framed = 0;
+        for (index, file) in model.iter().enumerate() {
+            let frame = carried
+                .iter()
+                .position(|carried| *carried == index)
+                .and_then(|_| framed.get(next_framed))
+                .filter(|frame| frame.path == file.path);
+            let model_rows = model_file_rows(file);
+            let frame_rows = frame.map_or(0, frame_file_rows);
+            let model_hunks = if file.collapsed || file.binary {
+                0
+            } else {
+                file.hunks.len()
+            };
+            // Zeroed for a collapsed or binary file exactly as the model side
+            // is: `flatten` gives such a file its heading and nothing else, so
+            // counting its hunks here would shift every later file's hunk base
+            // and put the cursor on another file's line.
+            let frame_hunks = frame.map_or(0, |frame| {
+                if frame.collapsed || frame.binary {
+                    0
+                } else {
+                    frame.hunks.len()
+                }
+            });
+            files.push(PlacedFile {
+                model: file,
+                frame,
+                model_row,
+                frame_row,
+                model_rows,
+                frame_rows,
+                model_hunk,
+                frame_hunk,
+                model_hunks,
+                frame_hunks,
+            });
+            model_row += model_rows;
+            model_hunk += model_hunks;
+            if frame.is_some() {
+                frame_row += frame_rows;
+                frame_hunk += frame_hunks;
+                next_framed += 1;
+            }
+        }
+        Self { files }
+    }
+
+    /// The framed row nearest the model's `row`, and whether that exact row is
+    /// missing from the frame.
+    fn row(&self, row: usize) -> (usize, bool) {
+        let Some(file) = self.files.iter().find(|file| row < file.model_row + file.model_rows)
+        else {
+            // Past the last row the model has. A review with no rows at all is
+            // not a cut one: there was nothing to leave out.
+            let last = self.files.last().map_or(0, |file| file.frame_row + file.frame_rows);
+            return (last.saturating_sub(1), last > 0);
+        };
+        let local = row - file.model_row;
+        let Some(frame) = file.frame else {
+            // The file itself was not framed: the top of whatever follows it.
+            return (file.frame_row, true);
+        };
+        let (inside, cut) = row_in_file(file.model, frame, local);
+        (file.frame_row + inside, cut)
+    }
+
+    /// The framed hunk nearest the model's `hunk`, and whether that hunk is
+    /// missing from the frame.
+    fn hunk(&self, hunk: usize) -> (usize, bool) {
+        let Some(file) = self.files.iter().find(|file| hunk < file.model_hunk + file.model_hunks)
+        else {
+            let last = self.files.last().map_or(0, |file| file.frame_hunk + file.frame_hunks);
+            return (last.saturating_sub(1), last > 0);
+        };
+        let local = hunk - file.model_hunk;
+        if file.frame_hunks == 0 {
+            return (file.frame_hunk, true);
+        }
+        if local < file.frame_hunks {
+            (file.frame_hunk + local, false)
+        } else {
+            (file.frame_hunk + file.frame_hunks - 1, true)
+        }
+    }
+}
+
+/// How many virtual rows `file` has in the model, as `flatten` counts them.
+fn model_file_rows(file: &ReviewFile) -> usize {
+    if file.collapsed || file.binary {
+        return 1;
+    }
+    1 + file
+        .hunks
+        .iter()
+        .map(|hunk| {
+            hunk_rows(
+                hunk.gap_before,
+                hunk.expanded_before,
+                hunk.rows.len(),
+                hunk.gap_after,
+                hunk.expanded_after,
+            )
+        })
+        .sum::<usize>()
+}
+
+/// The same count over a framed file, which is what a surface draws.
+fn frame_file_rows(file: &ReviewFileFrame) -> usize {
+    if file.collapsed || file.binary {
+        return 1;
+    }
+    1 + file
+        .hunks
+        .iter()
+        .map(|hunk| {
+            hunk_rows(
+                hunk.gap_before,
+                hunk.expanded_before,
+                hunk.rows.len(),
+                hunk.gap_after,
+                hunk.expanded_after,
+            )
+        })
+        .sum::<usize>()
+}
+
+/// Where `local`, a row inside one file's own rows, sits in the framed file,
+/// and whether that exact row is missing from it.
+///
+/// Walked hunk by hunk rather than by totals, because a hunk truncated part
+/// way still frames the gap below it: counting rows alone, the first row past
+/// the cut would land on that gap row and be reported as present, a row off
+/// and reading as though nothing had been left out.
+fn row_in_file(model: &ReviewFile, frame: &ReviewFileFrame, local: usize) -> (usize, bool) {
+    // The heading, which a framed file always has.
+    if local == 0 {
+        return (0, false);
+    }
+    let mut at_model = 1;
+    let mut at_frame = 1;
+    for (index, hunk) in model.hunks.iter().enumerate() {
+        let framed = frame.hunks.get(index);
+        let model_before = hunk.gap_before > hunk.expanded_before;
+        let frame_before = framed.is_some_and(|hunk| hunk.gap_before > hunk.expanded_before);
+        if model_before {
+            if local == at_model {
+                return if frame_before {
+                    (at_frame, false)
+                } else {
+                    (at_frame.saturating_sub(1), true)
+                };
+            }
+            at_model += 1;
+        }
+        if frame_before {
+            at_frame += 1;
+        }
+
+        let model_rows = hunk.rows.len();
+        let frame_rows = framed.map_or(0, |hunk| hunk.rows.len());
+        if local < at_model + model_rows {
+            let row = local - at_model;
+            return if row < frame_rows {
+                (at_frame + row, false)
+            } else {
+                // Past what this hunk kept: the last row that was sent, which
+                // is the row before this hunk when the hunk was dropped whole.
+                // Saturating on the SUM, not on the count: `at_frame + (0 - 1)`
+                // is `at_frame`, one past the file's last framed row.
+                ((at_frame + frame_rows).saturating_sub(1), true)
+            };
+        }
+        at_model += model_rows;
+        at_frame += frame_rows;
+
+        let model_after = hunk.gap_after > hunk.expanded_after;
+        let frame_after = framed.is_some_and(|hunk| hunk.gap_after > hunk.expanded_after);
+        if model_after {
+            if local == at_model {
+                // The gap below a hunk is the same gap however many of the
+                // hunk's rows were sent: hidden context does not change with
+                // them. So when the frame drew it, this row was sent.
+                return if frame_after {
+                    (at_frame, false)
+                } else {
+                    (at_frame.saturating_sub(1), true)
+                };
+            }
+            at_model += 1;
+        }
+        if frame_after {
+            at_frame += 1;
+        }
+    }
+    (at_frame.saturating_sub(1), true)
+}
+
+/// The virtual rows one hunk contributes, as `flatten` counts them: an expand
+/// affordance for each gap still hidden, and a row per code line.
+///
+/// The gaps do NOT depend on the rows. `flatten`
+/// (`components/code_review/render.rs:121-145`) pushes `ExpandBefore` before
+/// it walks the rows and `ExpandAfter` after, each on its own `hidden > 0`,
+/// so a hunk with no rows left still shows the two affordances around where
+/// they were.
+const fn hunk_rows(
+    gap_before: usize,
+    expanded_before: usize,
+    rows: usize,
+    gap_after: usize,
+    expanded_after: usize,
+) -> usize {
+    (gap_before > expanded_before) as usize + rows + (gap_after > expanded_after) as usize
+}
+
+/// What a frame calls the worktree: its directory name, scrubbed, or
+/// [`NEUTRAL_WORKTREE_NAME`] when that name would say something else. At the
+/// home directory the name is the operator's username, and at `/` or a path
+/// ending in `..` there is no name at all.
+fn worktree_name(path: &std::path::Path) -> String {
+    let at_home = dirs::home_dir().is_some_and(|home| home == path);
+    match path.file_name() {
+        Some(name) if !at_home => crate::fleet::bridge::redact::scrub(&name.to_string_lossy()),
+        _ => NEUTRAL_WORKTREE_NAME.to_string(),
+    }
+}
+
+/// The worktree's name on a frame when its directory name is not a project's.
+pub const NEUTRAL_WORKTREE_NAME: &str = "worktree";
 
 /// `set`, in an order a frame can repeat: a set has none of its own, so which
 /// entries a cut keeps would otherwise change run to run.

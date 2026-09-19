@@ -1291,6 +1291,15 @@ pub fn defaults() -> Vec<Binding> {
             "Open the ACP transcript a board card names",
         ),
         unbound(
+            Context::Screen("session_list", super::keymap::SubContext::Named("ask")),
+            "pick",
+            AppEvent::SessionAskPick {
+                request: String::new(),
+                label: String::new(),
+            },
+            "Answer with the option a click names",
+        ),
+        unbound(
             Context::screen("session_list"),
             "save_pane_layout",
             AppEvent::SaveSessionsPaneLayout {

@@ -1163,6 +1163,7 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::SessionTabNext
         | AppEvent::SessionTabPrev
         | AppEvent::SessionAskSend
+        | AppEvent::SessionAskPick { .. }
         | AppEvent::SessionTabComposerSend
         | AppEvent::SessionStartHangarDaemon
         | AppEvent::SessionListSelectRow { .. }

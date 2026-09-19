@@ -204,3 +204,74 @@ fn a_confirmation_dialog_blocks_the_review_scroll_but_not_its_own_commands() {
         "with the dialog gone the wheel scrolls again"
     );
 }
+
+/// The git view on its Commits tab over `count` commits.
+fn on_commits(count: usize) -> AppState {
+    let mut state = reviewing(&["a.rs"]);
+    let git = state.git_view.git_view_state.as_mut().expect("git view");
+    git.active_tab = GitTab::Commits;
+    git.commits = (0..count)
+        .map(|n| ainb_app::git::operations::CommitInfo {
+            hash_short: format!("c{n:04}"),
+            author: "Sample Dev".to_string(),
+            date: "2026-09-19".to_string(),
+            message: format!("commit {n}"),
+        })
+        .collect();
+    state
+}
+
+fn scroll(state: &mut AppState, lines: i32) {
+    let _ = dispatch(
+        state,
+        &Keymap::defaults(),
+        &mut NoRenderer,
+        pointer::scroll_git_view(lines),
+    );
+}
+
+/// #1242: the wheel on the Commits tab moves through the commit list, bounded
+/// by it, and the frame a webview draws from moves with it. Both the terminal's
+/// wheel and the desktop's `git_view.scroll` arrive through this command; it
+/// used to be accepted and do nothing on this tab.
+#[test]
+fn the_wheel_moves_through_the_commit_list() {
+    let mut state = on_commits(10);
+    let before = state.versions();
+
+    scroll(&mut state, 3);
+    let commit = |state: &AppState| {
+        state.git_view.git_view_state.as_ref().expect("git view").selected_commit_index
+    };
+    assert_eq!(commit(&state), 3);
+    assert_eq!(bumped(&before, &state.versions()), vec![SectionId::GitView]);
+    let frame = ainb_app::wire::section_json(
+        &state,
+        SectionId::GitView,
+        &ainb_app::wire::frame::HostId::local(),
+    );
+    assert_eq!(
+        frame["git_view_state"]["selected_commit_index"], 3,
+        "the frame moves too"
+    );
+
+    scroll(&mut state, -2);
+    assert_eq!(commit(&state), 1);
+    scroll(&mut state, 100);
+    assert_eq!(commit(&state), 9, "bounded by the last commit");
+    scroll(&mut state, -100);
+    assert_eq!(commit(&state), 0, "bounded by the first");
+}
+
+/// An empty commit list has nothing to move through: the wheel leaves the
+/// position at the start rather than past the end of an empty list.
+#[test]
+fn the_wheel_on_an_empty_commit_list_stays_at_the_start() {
+    let mut state = on_commits(0);
+    scroll(&mut state, 3);
+    scroll(&mut state, -5);
+    assert_eq!(
+        state.git_view.git_view_state.as_ref().expect("git view").selected_commit_index,
+        0
+    );
+}

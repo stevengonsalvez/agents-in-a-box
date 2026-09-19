@@ -4,7 +4,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
 import { createFrameStore } from "./store.ts";
-import { shellAgentStatus, shellFleet, shellSessions, SUBSCRIBED } from "./subscription.ts";
+import { shellAgentStatus, shellFleet, shellGitView, shellSessions, SUBSCRIBED } from "./subscription.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { AcpCard } from "./acp.tsx";
@@ -13,6 +13,7 @@ import { AnswerBanner } from "./answer.tsx";
 import { phaseOf, questionFor, type Refusal, sendInOrder } from "./answer.ts";
 import { newNotices, noticeKey } from "./notices.ts";
 import { Board } from "./board.tsx";
+import { Review } from "./review.tsx";
 import { boardColumns } from "./board.ts";
 import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
@@ -86,10 +87,17 @@ function Shell() {
   // The board is the window's landing surface: what every agent is doing, and
   // what is waiting on a human. A terminal takes the work area while it is
   // chosen, and the board is one click back.
-  const [board, setBoard] = createSignal(true);
+  // What holds the work area. One choice rather than a flag each: two booleans
+  // for one pane is three ways to be wrong and a fourth that draws nothing.
+  // The transcript card is not in here; it stands in a session's place and
+  // closes back to whatever was chosen.
+  const [pane, setPane] = createSignal<"board" | "review" | "terminal">("board");
   // The ACP session whose transcript card holds the work area, if any. It has
   // no tmux pane, so the card stands where its terminal would.
   const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
+  /** Whether `which` holds the work area: the transcript card takes it first. */
+  const showing = (which: "board" | "review" | "terminal") =>
+    transcriptKey() === null && pane() === which;
   const focusers = new Map<string, () => void>();
   const tabKeys = createMemo(
     () => tabs().map((tab) => tab.key),
@@ -101,7 +109,7 @@ function Shell() {
   const activate = (key: string | null) => {
     setActive(key);
     if (key !== null) {
-      setBoard(false);
+      setPane("terminal");
       closeTranscript();
     }
     if (key !== null) requestAnimationFrame(() => focusers.get(key)?.());
@@ -118,7 +126,7 @@ function Shell() {
       // a terminal; this is the strip tidying up after itself.
       const next = view.tabs[0]?.key ?? null;
       setActive(next);
-      if (next !== null && !board()) requestAnimationFrame(() => focusers.get(next)?.());
+      if (next !== null && pane() === "terminal") requestAnimationFrame(() => focusers.get(next)?.());
     }
   };
   // A refused intent comes back with the row and the reason: say so, or a
@@ -130,7 +138,7 @@ function Shell() {
   const openTranscript = (sessionKey: string) => {
     dispatch(transcriptIntent(sessionKey));
     setTranscriptKey(sessionKey);
-    setBoard(false);
+    setPane("terminal");
   };
   /** Close the card; the host drops the transcript and frames the default. */
   function closeTranscript() {
@@ -273,12 +281,14 @@ function Shell() {
   const sessions = () => shellSessions(store, host());
   const fleet = () => shellFleet(store, host());
   const agentStatus = () => shellAgentStatus(store, host());
+  const gitView = () => shellGitView(store, host());
   const counts = HEADER_COUNTS.map(([select, label]) => ({
     label,
     count: createMemo(() => select(store, host())),
   }));
   const idle = createMemo(() => ROOT_SELECTORS.idleCount(store, host()));
   const sessionsStale = createMemo(() => ROOT_SELECTORS.sessionsStale(store, host()));
+  const gitViewStale = createMemo(() => ROOT_SELECTORS.gitViewStale(store, host()));
   const loading = createMemo(() => ROOT_SELECTORS.workspacesLoading(store, host()));
   const elsewhere = createMemo(() => ROOT_SELECTORS.attentionElsewhere(store, host()));
   const shell = () => (host() ? store.section(host()!, "shell") : undefined);
@@ -405,17 +415,30 @@ function Shell() {
         />
         <section class="workarea">
           <nav class="tabs" aria-label="Board and terminals">
-            <span class="tab board-tab" classList={{ active: board() && transcriptKey() === null }}>
+            <span class="tab board-tab" classList={{ active: showing("board") }}>
               <button
                 type="button"
                 class="tab-title"
-                aria-current={board() && transcriptKey() === null ? "page" : undefined}
+                aria-current={showing("board") ? "page" : undefined}
                 onClick={() => {
                   closeTranscript();
-                  setBoard(true);
+                  setPane("board");
                 }}
               >
                 Board
+              </button>
+            </span>
+            <span class="tab review-tab" classList={{ active: showing("review") }}>
+              <button
+                type="button"
+                class="tab-title"
+                aria-current={showing("review") ? "page" : undefined}
+                onClick={() => {
+                  closeTranscript();
+                  setPane("review");
+                }}
+              >
+                Review
               </button>
             </span>
             {/* The ACP card's own place in the strip, where the session's
@@ -432,7 +455,7 @@ function Shell() {
                     aria-label={`Close ${key()}`}
                     onClick={() => {
                       closeTranscript();
-                      setBoard(true);
+                      setPane("board");
                     }}
                   >
                     ×
@@ -444,13 +467,13 @@ function Shell() {
               {(tab) => (
                 <span
                   class="tab"
-                  classList={{ active: !board() && transcriptKey() === null && tab.key === active() }}
+                  classList={{ active: showing("terminal") && tab.key === active() }}
                   data-state={tab.state}
                 >
                   <button
                     type="button"
                     class="tab-title"
-                    aria-current={!board() && transcriptKey() === null && tab.key === active() ? "page" : undefined}
+                    aria-current={showing("terminal") && tab.key === active() ? "page" : undefined}
                     onClick={() => choose(tab)}
                   >
                     {title(tab)}
@@ -477,12 +500,15 @@ function Shell() {
                 view={transcriptView(fleet(), key())}
                 onClose={() => {
                   closeTranscript();
-                  setBoard(true);
+                  setPane("board");
                 }}
               />
             )}
           </Show>
-          <Show when={board() && transcriptKey() === null}>
+          <Show when={showing("review")}>
+            <Review gitView={gitView()} stale={gitViewStale()} onChoose={dispatch} />
+          </Show>
+          <Show when={showing("board")}>
             <Board
               agentStatus={agentStatus()}
               fleet={fleet()}
@@ -492,7 +518,7 @@ function Shell() {
               onOpenTranscript={openTranscript}
             />
           </Show>
-          <Show when={!board() && transcriptKey() === null && tabs().length === 0}>
+          <Show when={showing("terminal") && tabs().length === 0}>
             <p class="empty">Choose a session to open its terminal</p>
           </Show>
           {/* Keyed by tab key, not by the tab object each event replaces: a
@@ -504,7 +530,7 @@ function Shell() {
                   <TerminalView
                     tab={tab()}
                     title={title(tab())}
-                    active={!board() && transcriptKey() === null && key === active()}
+                    active={showing("terminal") && key === active()}
                     mac={MAC}
                     onAccelerator={onAccelerator}
                     onLeave={() => sidebar?.focus()}

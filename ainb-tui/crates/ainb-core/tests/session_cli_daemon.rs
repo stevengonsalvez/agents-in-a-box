@@ -117,13 +117,17 @@ impl Homes {
     }
 }
 
-/// Mark the boot import finished, as `import_sessions_if_needed` does.
+/// Bring the table up to date as a daemon boot does: the one-time import,
+/// then a reconcile pass. P6e: `import_complete` needs both.
 fn complete_import(hangar: &FleetHangar, homes: &Homes) {
     let path = homes.sessions_json();
     hangar.block_on(async {
         ainb_hangar_daemon::session_import::import_sessions_if_needed(hangar.pool(), &path)
             .await
             .expect("boot import");
+        ainb_hangar_daemon::session_import::reconcile_sessions(hangar.pool(), &path)
+            .await
+            .expect("boot reconcile");
     });
 }
 
@@ -464,6 +468,57 @@ fn hello_then_a_failed_write_is_returned_to_the_caller() {
         .block_on(source.mutate(|s| s.upsert(make_session("sess-new", "new-ws"))))
         .expect_err("a refused write must not read as success");
     assert!(err.to_string().contains("disk I/O error"), "{err}");
+    assert_eq!(homes.file_bytes(), Some(file_before));
+}
+
+/// Lists the restart test's fake daemon has answered.
+static RESTART_LISTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Whether the restart test's fake daemon was sent any upsert or delete.
+static RESTART_WROTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// P6e: a daemon that restarts answers not-ready (no rows,
+/// `import_complete: false`) until its first reconcile pass commits. A
+/// process already on the daemon must read that as an error, not as zero
+/// sessions: `mutate` would otherwise diff against an empty view. Here the
+/// source was resolved while ready, then every later list is not-ready; the
+/// mutation fails, sends no write, and leaves the file alone.
+#[test]
+fn a_not_ready_list_after_resolve_is_an_error_not_an_empty_store() {
+    use std::sync::atomic::Ordering;
+
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    RESTART_LISTS.store(0, Ordering::SeqCst);
+    RESTART_WROTE.store(false, Ordering::SeqCst);
+    let homes = Homes::new();
+    let kept = make_session("sess-kept", "kept-ws");
+    let file_before = homes.write_file_store(&[&kept]);
+
+    let rt = rt();
+    let socket = fake_daemon(&rt, &homes.hangar, |method| match method {
+        "workspace/session_list" if RESTART_LISTS.fetch_add(1, Ordering::SeqCst) == 0 => {
+            empty_imported_list()
+        }
+        "workspace/session_list" => serde_json::json!({
+            "result": { "sessions": [], "truncated": false, "import_complete": false }
+        }),
+        _ => {
+            RESTART_WROTE.store(true, Ordering::SeqCst);
+            serde_json::json!({ "result": { "ok": true, "deleted": true } })
+        }
+    });
+    let source = rt.block_on(SessionSource::resolve_at(socket, "t".to_string()));
+    assert!(matches!(source, SessionSource::Daemon(_)), "{source:?}");
+
+    let err = rt.block_on(source.load()).expect_err("a not-ready list is not zero sessions");
+    assert!(err.to_string().contains("not ready"), "{err}");
+    let err = rt
+        .block_on(source.mutate(|s| s.upsert(make_session("sess-new", "new-ws"))))
+        .expect_err("a mutation over a not-ready list must fail");
+    assert!(err.to_string().contains("still reconciling"), "{err}");
+    assert!(
+        !RESTART_WROTE.load(Ordering::SeqCst),
+        "a write was sent from an empty view"
+    );
     assert_eq!(homes.file_bytes(), Some(file_before));
 }
 
