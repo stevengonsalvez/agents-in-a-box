@@ -58,8 +58,6 @@ pub mod ids {
     pub const CONFIG_SET_ROW: &str = "config.set_row";
     /// `{"id": String}`, a `ConfigTreeNode::id`.
     pub const CONFIG_SELECT_NODE: &str = "config.select_node";
-    /// No arguments: the inbox's one write is a whole-inbox sweep (D3-prime).
-    pub const INBOX_MARK_ALL_READ: &str = "inbox.mark_all_read";
 
     /// Every pointer command id.
     pub const ALL: &[&str] = &[
@@ -81,7 +79,6 @@ pub mod ids {
         GIT_VIEW_SCROLL,
         CONFIG_SET_ROW,
         CONFIG_SELECT_NODE,
-        INBOX_MARK_ALL_READ,
     ];
 }
 
@@ -263,12 +260,6 @@ pub fn set_config_row(key: &str, edit: ConfigRowEdit, revision: u64) -> Intent {
 #[must_use]
 pub fn select_config_node(id: &str) -> Intent {
     command(ids::CONFIG_SELECT_NODE, json!({ "id": id }))
-}
-
-/// Mark every entry in the inbox read: the daemon's sweep, sent with one op id.
-#[must_use]
-pub fn mark_inbox_all_read() -> Intent {
-    command(ids::INBOX_MARK_ALL_READ, Args::Null)
 }
 
 #[derive(Deserialize)]

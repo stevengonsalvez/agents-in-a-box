@@ -801,7 +801,7 @@ pub const INBOX_WORKSPACE_ID: &str = "default";
 /// Populated by a host-owned reader (the host owns the socket); this crate
 /// only reduces. The section kept its place, empty, from the extraction
 /// until the screen came back, so nothing renumbered.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct InboxSection {
     /// The rows a surface draws, newest first, already bounded and scrubbed.
     pub entries: Vec<ainb_hangar_proto::events::InboxEntryRow>,
@@ -822,9 +822,28 @@ pub struct InboxSection {
     pub summaries_cut: usize,
     /// The local clock when the last read landed, epoch milliseconds.
     pub received_at_ms: i64,
+    /// The first row a screen draws, an index into `entries`, moved by the
+    /// reducer one row at a time and bounded by it: a read that shrinks the
+    /// list pulls it back, so no screen draws from past the end. Framed like
+    /// the review tab's scroll, so a mirrored surface draws the same window.
+    pub scroll: usize,
 }
 
 impl InboxSection {
+    /// Move `scroll` by `delta` rows, bounded at the top and the last row.
+    /// True when it moved.
+    pub fn scroll_by(&mut self, delta: i32) -> bool {
+        let before = self.scroll;
+        self.scroll = self.scroll.saturating_add_signed(delta as isize);
+        self.clamp_scroll();
+        self.scroll != before
+    }
+
+    /// Keep `scroll` inside `entries`.
+    fn clamp_scroll(&mut self) {
+        self.scroll = self.scroll.min(self.entries.len().saturating_sub(1));
+    }
+
     /// Fold one read: bound it, scrub it, count what went. True when anything
     /// a surface renders changed; the same rows again is not a change.
     pub fn apply_read(
@@ -869,13 +888,15 @@ impl InboxSection {
                 row
             })
             .collect();
+        let scroll = self.scroll.min(entries.len().saturating_sub(1));
         let changed = self.entries != entries
             || self.unread != read.unread
             || self.recipient != recipient
             || self.absent.is_some()
             || self.unreachable.is_some()
             || self.rows_cut != rows_cut
-            || self.summaries_cut != summaries_cut;
+            || self.summaries_cut != summaries_cut
+            || self.scroll != scroll;
         self.entries = entries;
         self.unread = read.unread;
         self.recipient = recipient.to_string();
@@ -884,6 +905,7 @@ impl InboxSection {
         self.rows_cut = rows_cut;
         self.summaries_cut = summaries_cut;
         self.received_at_ms = received_at_ms;
+        self.scroll = scroll;
         changed
     }
 
@@ -891,9 +913,10 @@ impl InboxSection {
     /// may be stale. Without rows the section is absent for `reason`.
     pub fn mark_read_failed(&mut self, reason: impl Into<String>) -> bool {
         let reason = bound_reason(&reason.into());
-        // Before any read lands the section is absent, and a repeated failure
-        // replaces that one reason rather than adding a second.
-        if self.entries.is_empty() && self.received_at_ms == 0 {
+        // With no rows to keep there is nothing to be unreachable from: the
+        // section is absent, and a repeated failure replaces that one reason
+        // rather than adding a second beside it.
+        if self.entries.is_empty() {
             return self.mark_absent(reason);
         }
         let changed = self.unreachable.as_deref() != Some(reason.as_str());
@@ -908,9 +931,12 @@ impl InboxSection {
             || self.unread != 0
             || self.absent.as_deref() != Some(reason.as_str());
         self.entries.clear();
+        self.scroll = 0;
         self.unread = 0;
         self.rows_cut = 0;
         self.summaries_cut = 0;
+        // No read is on screen once the section is absent, so no stamp either.
+        self.received_at_ms = 0;
         self.unreachable = None;
         self.absent = Some(reason);
         changed
@@ -1070,6 +1096,28 @@ mod inbox_section_tests {
         assert!(!super::id_like("ctl\u{1}"));
         assert!(!super::id_like("é"));
         assert!(!super::id_like(&"a".repeat(super::MAX_INBOX_ID_CHARS + 1)));
+    }
+
+    #[test]
+    fn absent_after_a_read_then_a_failure_carries_one_reason_and_no_rows() {
+        let mut section = InboxSection::default();
+        section.apply_read(
+            InboxListResult {
+                entries: vec![row("a")],
+                unread: 1,
+            },
+            "member:me",
+            5,
+        );
+        assert!(section.mark_absent("daemon has no inbox_list"));
+        assert!(section.mark_read_failed("connect: refused"));
+        assert_eq!(section.absent.as_deref(), Some("connect: refused"));
+        assert!(
+            section.unreachable.is_none(),
+            "never both reasons with zero rows"
+        );
+        assert!(section.entries.is_empty());
+        assert_eq!(section.received_at_ms, 0);
     }
 
     #[test]

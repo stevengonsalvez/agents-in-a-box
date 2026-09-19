@@ -41,6 +41,8 @@ pub struct InboxView {
     pub summaries_cut: usize,
     /// The local clock when the last read landed, epoch milliseconds.
     pub received_at_ms: i64,
+    /// The first row a screen draws, the reducer's bounded scroll.
+    pub scroll: usize,
 }
 
 /// One inbox row on the wire: `InboxEntryRow` as the fold bounded it.
@@ -106,6 +108,7 @@ impl From<&InboxSection> for InboxView {
             rows_cut,
             summaries_cut: section.summaries_cut,
             received_at_ms: section.received_at_ms,
+            scroll: section.scroll,
         }
     }
 }

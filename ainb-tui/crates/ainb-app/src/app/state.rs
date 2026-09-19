@@ -345,6 +345,12 @@ impl AppState {
             .update(|section| section.apply_read(read, INBOX_RECIPIENT, received_at_ms))
     }
 
+    /// Move the inbox screen's first row by `delta`, bounded at both ends.
+    /// The section's version moves only when the row did.
+    pub fn scroll_inbox_by(&mut self, delta: i32) {
+        self.inbox.update(|section| section.scroll_by(delta));
+    }
+
     /// The host's inbox read failed: the rows shown stay and say the host is
     /// unreachable, or the section is absent if it never had rows.
     pub fn inbox_read_failed(&mut self, reason: impl Into<String>) -> bool {
