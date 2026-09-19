@@ -319,9 +319,16 @@ fn the_open_file_keeps_its_rows_when_the_others_spend_the_budget() {
         .find(|file| file["path"] == "src/file11.rs")
         .unwrap_or_else(|| panic!("the open file is framed at all: {files:?}"));
     assert!(rows(open) > 0, "the open file frames rows: {open}");
+    // What the budget cost the others shows one of two ways: a file framed
+    // with no rows under it, or a file not framed at all and counted in
+    // review.files_cut. Either is the frame saying so; neither is silence.
+    let empty = files.iter().any(|file| file["path"] != "src/file11.rs" && rows(file) == 0);
+    let dropped = body["review"]["files_cut"].as_u64().expect("a cut count") > 0;
     assert!(
-        files.iter().any(|file| file["path"] != "src/file11.rs" && rows(file) == 0),
-        "and the files it spent the budget on say they carry nothing: {files:?}"
+        empty || dropped,
+        "the budget the open file spent is accounted for: {} framed, files_cut {}",
+        files.len(),
+        body["review"]["files_cut"]
     );
     assert_eq!(
         body["review_ui"]["selected_file"].as_u64().expect("the selection"),
@@ -375,12 +382,115 @@ fn fifty_thousand_hunks_in_one_file_do_not_pass_the_budget_on_their_headers() {
         encoded(&body)
     );
     let file = &body["review"]["files"][0];
-    let hunks = file["hunks"].as_array().expect("hunks").len();
-    assert!(hunks > 0, "the file keeps hunks");
+    let hunks = file["hunks"].as_array().expect("hunks");
+    assert!(!hunks.is_empty(), "the file keeps hunks");
     assert_eq!(
-        hunks as u64 + file["hunks_cut"].as_u64().expect("a cut count"),
+        hunks.len() as u64 + file["hunks_cut"].as_u64().expect("a cut count"),
         50_000,
         "and the hunks it dropped are counted"
+    );
+
+    // Every hunk here holds one row, so the rows kept are the hunks kept, to
+    // the row: a hunk whose header could not be afforded keeps none of its
+    // rows, and a row counted as framed for a hunk that was never pushed is a
+    // row the counter would have lied about.
+    let rows: usize = hunks.iter().map(|hunk| hunk["rows"].as_array().expect("rows").len()).sum();
+    assert_eq!(
+        rows,
+        hunks.len(),
+        "one row a hunk, as the fixture built them"
+    );
+    assert_eq!(
+        file["rows_cut"].as_u64().expect("a row cut count"),
+        50_000 - rows as u64,
+        "the rows dropped with their hunks are counted as dropped"
+    );
+}
+
+/// The file a person has open is framed wherever it sits, even past the list
+/// cap: a frame that sent a thousand other files and named the last of them as
+/// the open one would be pointing at a file nobody chose.
+#[test]
+fn the_open_file_is_framed_even_past_the_file_cap() {
+    let mut state = state_with(1_200, 1, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.selected_file = 1_150;
+    }
+
+    let body = framed(&state);
+    let review = &body["git_view_state"]["review"];
+    let files = review["files"].as_array().expect("files");
+    let selected = usize::try_from(
+        body["git_view_state"]["review_ui"]["selected_file"]
+            .as_u64()
+            .expect("the selection"),
+    )
+    .expect("a selection that fits an index");
+
+    assert_eq!(
+        files[selected]["path"], "src/file1150.rs",
+        "the frame names the file the person has open"
+    );
+    assert!(
+        review["files_cut"].as_u64().expect("a cut count") > 0,
+        "and it still says how many it left out"
+    );
+}
+
+/// The sidebar's row count is `build_sidebar`'s, not the file count, so the
+/// frame does not guess at it: a selection past the files crosses as it is.
+#[test]
+fn a_sidebar_selection_past_the_file_count_crosses_untouched() {
+    let mut state = state_with(2, 4, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.sidebar_selected = 5;
+    }
+
+    let body = framed(&state);
+
+    assert_eq!(
+        body["git_view_state"]["review_ui"]["sidebar_selected"].as_u64(),
+        Some(5),
+        "a tree row is not a file row: clamping to the files moved a valid selection"
+    );
+}
+
+/// The projection runs on the UI's thread every time the section's version
+/// moves, so its cost is a bound like any other. Generous, because this is a
+/// debug build on whatever CI gave us: what it catches is a scrub that went
+/// back to costing milliseconds a line, which took this same state to 34.7
+/// seconds in RELEASE before the shapes were fixed.
+#[test]
+fn the_worst_case_projects_in_a_bounded_time() {
+    use ainb_app::components::git_view::{MarkdownLine, MarkdownStyle};
+
+    let wide = "z".repeat(4_000);
+    let mut state = state_with(3, 2_000, &wide);
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.diff_content = (0..2_000).map(|_| wide.clone()).collect();
+        git.markdown_content = (0..2_000)
+            .map(|_| MarkdownLine {
+                content: wide.clone(),
+                style: MarkdownStyle::Paragraph,
+            })
+            .collect();
+    }
+    let git = state.git_view.get().git_view_state.clone().expect("the git view");
+
+    let start = std::time::Instant::now();
+    let frame = ainb_app::wire::git_view::project(&git);
+    let took = start.elapsed();
+
+    assert!(
+        !frame.review.files.is_empty(),
+        "the worst case still frames something"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(25),
+        "the worst case projected in {took:?}, which is a scrub charging by the character again"
     );
 }
 
