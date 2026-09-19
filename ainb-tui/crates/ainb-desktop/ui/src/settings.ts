@@ -274,6 +274,9 @@ export function rowEdit(row: SettingsRow, input: string | number | boolean): Ren
       break;
     }
     case "number": {
+      // A cleared `<input type="number">` reports "", and so does one holding
+      // text it could not parse; `Number("")` is 0, which would persist.
+      if (typeof input === "string" && input.trim() === "") return null;
       const number = typeof input === "number" ? input : Number(input);
       if (!Number.isSafeInteger(number)) return null;
       value = { Number: number };
