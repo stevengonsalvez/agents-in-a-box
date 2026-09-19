@@ -310,6 +310,42 @@ impl AppState {
         self.agent_status.update(|section| section.observe_head(head_revision))
     }
 
+    /// Fold one `hangar/inbox_list` read for the local human into the inbox
+    /// section (D3-prime), bounded and scrubbed there; bumps its version only
+    /// when a rendered fact changed.
+    pub fn apply_inbox_read(
+        &mut self,
+        read: ainb_hangar_proto::snapshots::InboxListResult,
+        received_at_ms: i64,
+    ) -> bool {
+        self.inbox
+            .update(|section| section.apply_read(read, INBOX_RECIPIENT, received_at_ms))
+    }
+
+    /// The host's inbox read failed: the rows shown stay and say the host is
+    /// unreachable, or the section is absent if it never had rows.
+    pub fn inbox_read_failed(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        self.inbox.update(|section| section.mark_read_failed(reason))
+    }
+
+    /// The daemon cannot serve `hangar/inbox_list`: the section is absent, and why.
+    pub fn inbox_absent(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        self.inbox.update(|section| section.mark_absent(reason))
+    }
+
+    /// The inbox reader reconnected: drop the rows so the next read is fresh.
+    pub fn inbox_reset(&mut self) -> bool {
+        self.inbox.update(InboxSection::reset)
+    }
+
+    /// The daemon answered a "mark all read" sweep with the unread count
+    /// after it. The rows' stamps come with the host's follow-up read.
+    pub fn apply_inbox_mark_all_read(&mut self, unread: i64) -> bool {
+        self.inbox.update(|section| section.apply_mark_all_read(unread))
+    }
+
     /// Every section's current version, indexed by [`SectionId::index`].
     ///
     /// A surface keeps the array it last saw and compares; that is 20 integer
@@ -837,6 +873,34 @@ impl AppState {
             {
                 Some("it could finish onboarding with telemetry set up outside ainb")
             }
+            // A settings row a renderer may not edit (#1224), by name and by
+            // the key sequence: Enter on the row opens its popup, and Enter in
+            // the popup writes it. The judgement is the same at each step, so
+            // a script that sends the keys one by one is stopped at the first.
+            KeyAction::App(AppEvent::ConfigSetRow { key, .. }) => {
+                crate::config::renderer_edit::refusal(key)
+            }
+            KeyAction::App(AppEvent::ConfigEditSetting)
+                if self.shell.current_screen == crate::app::screens::ids::CONFIG =>
+            {
+                self.config
+                    .config_screen_state
+                    .current_setting()
+                    .and_then(|row| crate::config::renderer_edit::refusal(&row.key))
+            }
+            KeyAction::App(AppEvent::ConfigPopupConfirm)
+                if self.config.config_popup_state.show_popup =>
+            {
+                crate::config::renderer_edit::refusal(&self.config.config_popup_state.setting_key)
+            }
+            // The secret write paths: the keychain prompt on a row and the API
+            // key prompt. Not renderer-settable in this slice, whatever row
+            // is under the cursor.
+            KeyAction::App(
+                AppEvent::ConfigSecretToKeychain
+                | AppEvent::ConfigApiKeyStart
+                | AppEvent::ConfigApiKeySave,
+            ) => Some(crate::config::renderer_edit::SECRET_REASON),
             _ => None,
         }
     }
@@ -1923,6 +1987,29 @@ impl ConfigScreenState {
     }
 
     // --- navigation ---------------------------------------------------------
+
+    /// Where the tree node with `id` sits among the visible nodes, if it does.
+    #[must_use]
+    pub fn visible_node_position(&self, id: &str) -> Option<usize> {
+        self.visible_nodes
+            .iter()
+            .position(|index| self.tree.get(*index).is_some_and(|node| node.id() == id))
+    }
+
+    /// Select the tree node with `id` (`ConfigTreeNode::id`) when it is on
+    /// screen, as a click on it does; `false` when no visible node has it, and
+    /// nothing moves. Selection is the reducer's: a renderer names the node,
+    /// never keeps its own.
+    pub fn select_node_by_id(&mut self, id: &str) -> bool {
+        let Some(position) = self.visible_node_position(id) else {
+            return false;
+        };
+        self.selected_node = position;
+        self.selected_setting = 0;
+        self.focused_pane = ConfigPane::Categories;
+        self.refresh_visible_rows();
+        true
+    }
 
     pub fn select_next_category(&mut self) {
         if self.visible_nodes.is_empty() {
@@ -3550,7 +3637,15 @@ impl AppState {
             fleet: Versioned::default(),
             tmux: Versioned::default(),
             log_streams: Versioned::default(),
-            sessions: Versioned::default(),
+            // The filter Shift+F persisted, so the next process starts on it
+            // rather than on `All` (#1208). The terminal's rows and a frame's
+            // Sessions view read it; the web rows and `ainb list --frame` list
+            // every session (#1180), and the desktop host resets it to `All`
+            // as it has no filter chip yet (`DesktopHost::hosting`).
+            sessions: Versioned::new(SessionsSection {
+                session_filter,
+                ..SessionsSection::default()
+            }),
             new_session: Versioned::default(),
             workspace_load: Versioned::default(),
             session_labels: Versioned::default(),

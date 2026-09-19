@@ -193,9 +193,27 @@ async fn within_deadline<T, E: std::fmt::Display>(
     )
 }
 
-/// Take the `sessions.json` lock, waiting at most [`SESSION_RPC_DEADLINE`].
+/// How long any write through the resolver waits for the `sessions.json`
+/// lock, on every source.
+///
+/// Longer than the RPC deadline on purpose: the daemon's reconcile pass holds
+/// this lock on every boot, whatever the capability says, for up to its flock
+/// wait (`SESSIONS_FLOCK_BOUND`, 2 s) plus its store write
+/// (`RECONCILE_STORE_BOUND`, 5 s). A writer that gave up sooner would fail,
+/// and `ainb run` roll back, a live session only because a daemon happened to
+/// be reconciling. A test in `ainb-core` pins this above the daemon's sum.
+pub const SESSIONS_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// The bound on all of one `mutate`'s table writes together.
+///
+/// On [`SessionSource::Daemon`] each RPC is also under
+/// [`SESSION_RPC_DEADLINE`]; this caps a run of slow ones, so a write of many
+/// rows cannot hold the lock for many deadlines.
+pub const MUTATE_WRITES_DEADLINE: Duration = SESSION_RPC_DEADLINE;
+
+/// Take the `sessions.json` lock, waiting at most [`SESSIONS_LOCK_WAIT`].
 async fn lock_within_deadline() -> std::io::Result<SessionStoreGuard> {
-    let deadline = tokio::time::Instant::now() + SESSION_RPC_DEADLINE;
+    let deadline = tokio::time::Instant::now() + SESSIONS_LOCK_WAIT;
     loop {
         if let Some(guard) = SessionStore::try_lock()? {
             return Ok(guard);
@@ -205,7 +223,7 @@ async fn lock_within_deadline() -> std::io::Result<SessionStoreGuard> {
                 std::io::ErrorKind::TimedOut,
                 format!(
                     "sessions.json lock still held after {} ms",
-                    SESSION_RPC_DEADLINE.as_millis()
+                    SESSIONS_LOCK_WAIT.as_millis()
                 ),
             ));
         }
@@ -463,17 +481,34 @@ impl SessionSource {
         let after = entries_by_id(&store);
         let removed: Vec<Uuid> =
             before.keys().filter(|id| !after.contains_key(*id)).copied().collect();
-        let written: Vec<&WorkspaceSessionEntry> = after
+        // Sorted by tmux name, so a multi-row write happens in the same
+        // order every time, whatever the map's order.
+        let mut written: Vec<&WorkspaceSessionEntry> = after
             .iter()
             .filter(|(id, entry)| before.get(*id) != Some(*entry))
             .map(|(_, entry)| entry)
             .collect();
+        written.sort_by(|a, b| a.tmux_session_name.cmp(&b.tmux_session_name));
         if removed.is_empty() && written.is_empty() {
             return Ok(());
         }
 
         let file_before = write_file_rows(&removed, &written)?;
-        if let Err(e) = write_table_rows(client, &removed, &written).await {
+        let table = tokio::time::timeout(
+            MUTATE_WRITES_DEADLINE,
+            write_table_rows(client, &removed, &written),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "daemon session writes did not finish within {} ms",
+                    MUTATE_WRITES_DEADLINE.as_millis()
+                ),
+            ))
+        });
+        if let Err(e) = table {
             if let Err(revert) = restore_file(file_before.as_deref()) {
                 return Err(std::io::Error::other(format!(
                     "{e}; and sessions.json could not be put back: {revert}"
@@ -501,6 +536,17 @@ fn write_file_rows(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
+    // `SessionStore::load` answers an empty store for a file it cannot parse,
+    // and saving that would cut a corrupt file down to the touched rows. Such
+    // a file is refused, untouched, before anything is written.
+    if let Some(bytes) = &before {
+        if let Err(e) = serde_json::from_slice::<SessionStore>(bytes) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("sessions.json does not parse ({e}); refusing to rewrite it"),
+            ));
+        }
+    }
     let mut file = SessionStore::load();
     for id in removed {
         file.remove_by_session_id(*id);

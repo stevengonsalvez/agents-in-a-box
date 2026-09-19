@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc --noEmit --strict && vite build",
     "check": "tsc --noEmit --strict",
-    "test": "node --conditions=browser --experimental-strip-types --no-warnings=ExperimentalWarning --test src/*.test.ts"
+    "test": "npm run test:unit && npm run test:parity",
+    "test:unit": "node --conditions=browser --experimental-strip-types --no-warnings=ExperimentalWarning --test src/*.test.ts",
+    "test:parity": "node --import ./test/register-solid-ssr.mjs --experimental-strip-types --no-warnings=ExperimentalWarning --test test/*.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
@@ -17,7 +19,9 @@
     "solid-js": "1.9.15"
   },
   "devDependencies": {
+    "@babel/core": "7.29.7",
     "@types/node": "22.20.2",
+    "babel-preset-solid": "1.9.15",
     "typescript": "5.6.3",
     "vite": "6.4.3",
     "vite-plugin-solid": "2.11.14"

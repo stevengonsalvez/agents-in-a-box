@@ -31,6 +31,10 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 static ACCEPTED: AtomicUsize = AtomicUsize::new(0);
 /// Session requests (past hello) the fake daemon has read.
 static REQUESTS: AtomicUsize = AtomicUsize::new(0);
+/// Upserts the fake daemon has been sent.
+static UPSERTS: AtomicUsize = AtomicUsize::new(0);
+/// How long the fake daemon takes over each upsert it answers, in ms.
+static UPSERT_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
 
 fn make_session(name: &str) -> SessionMetadata {
     SessionMetadata {
@@ -109,6 +113,7 @@ fn fake_daemon(
 ) -> PathBuf {
     ACCEPTED.store(0, Ordering::SeqCst);
     REQUESTS.store(0, Ordering::SeqCst);
+    UPSERTS.store(0, Ordering::SeqCst);
     fs::write(ainb_hangar_proto::auth::token_file_in(home), "t\n").unwrap();
     let socket = home.join("hangar.sock");
     let listener = rt.block_on(async { UnixListener::bind(&socket) }).unwrap();
@@ -134,7 +139,13 @@ fn fake_daemon(
                     return;
                 };
                 let n = REQUESTS.fetch_add(1, Ordering::SeqCst);
-                let Some(mut resp) = reply(req["method"].as_str().unwrap_or_default(), n) else {
+                let method = req["method"].as_str().unwrap_or_default();
+                if method == "workspace/session_upsert" {
+                    UPSERTS.fetch_add(1, Ordering::SeqCst);
+                    let delay = UPSERT_DELAY_MS.load(Ordering::SeqCst) as u64;
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                let Some(mut resp) = reply(method, n) else {
                     // Never answer: hold the connection open.
                     let _ = read_frame(&mut reader).await;
                     std::future::pending::<()>().await;
@@ -353,4 +364,235 @@ fn the_rpc_deadline_outlasts_the_daemons_first_pass_wait() {
         "SESSION_RPC_DEADLINE {SESSION_RPC_DEADLINE:?} must exceed FIRST_PASS_WAIT {:?}",
         ainb_hangar_daemon::session_import::FIRST_PASS_WAIT
     );
+}
+
+/// The daemon's reconcile pass holds the `sessions.json` lock for up to its
+/// flock wait plus its store write, on every boot. A writer's lock wait must
+/// outlast that, or `ainb run` rolls back a live session because a daemon was
+/// reconciling.
+#[test]
+fn the_lock_wait_outlasts_the_daemons_longest_pass() {
+    let pass = ainb_hangar_daemon::session_import::SESSIONS_FLOCK_BOUND
+        + ainb_hangar_daemon::session_import::RECONCILE_STORE_BOUND;
+    assert!(
+        util::SESSIONS_LOCK_WAIT > pass,
+        "SESSIONS_LOCK_WAIT {:?} must exceed the pass's {pass:?}",
+        util::SESSIONS_LOCK_WAIT
+    );
+}
+
+fn upsert_ok() -> serde_json::Value {
+    serde_json::json!({ "result": { "ok": true } })
+}
+
+/// A write of two sessions whose second upsert never answers fails within
+/// the writes' one deadline, and the file is put back as it was.
+#[test]
+fn a_later_write_that_hangs_fails_the_mutate_and_restores_the_file() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let homes = Homes::new();
+    homes.write_file_store(&[&make_session("sess-kept")]);
+    let before = fs::read(homes.sessions_json()).unwrap();
+    UPSERT_DELAY_MS.store(0, Ordering::SeqCst);
+    let rt = rt();
+    let socket = fake_daemon(&rt, &homes.hangar, |method, _| match method {
+        "workspace/session_upsert" if UPSERTS.load(Ordering::SeqCst) >= 2 => None,
+        "workspace/session_upsert" => Some(upsert_ok()),
+        _ => Some(ready_list()),
+    });
+    let source = rt.block_on(SessionSource::resolve_at(socket, "t".to_string()));
+    assert!(matches!(source, SessionSource::Daemon(_)), "{source:?}");
+
+    let started = Instant::now();
+    let err = rt
+        .block_on(async {
+            tokio::time::timeout(
+                util::MUTATE_WRITES_DEADLINE + Duration::from_secs(3),
+                source.mutate(|s| {
+                    s.upsert(make_session("sess-one"));
+                    s.upsert(make_session("sess-two"));
+                }),
+            )
+            .await
+        })
+        .expect("the mutate hung")
+        .expect_err("a hung second write must fail the mutate");
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "{err}");
+    assert!(
+        started.elapsed() < util::MUTATE_WRITES_DEADLINE + Duration::from_millis(500),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        fs::read(homes.sessions_json()).unwrap(),
+        before,
+        "the file was not put back"
+    );
+}
+
+/// Writes that each answer inside the per-RPC deadline but together run past
+/// the writes' one deadline fail at that deadline, not at the sum.
+#[test]
+fn a_run_of_slow_writes_hits_one_overall_deadline() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let homes = Homes::new();
+    homes.write_file_store(&[&make_session("sess-kept")]);
+    let before = fs::read(homes.sessions_json()).unwrap();
+    // Each write takes 40 percent of the deadline: four take 160 percent.
+    let each = util::MUTATE_WRITES_DEADLINE * 2 / 5;
+    UPSERT_DELAY_MS.store(each.as_millis() as usize, Ordering::SeqCst);
+    let rt = rt();
+    let socket = fake_daemon(&rt, &homes.hangar, |method, _| match method {
+        "workspace/session_upsert" => Some(upsert_ok()),
+        _ => Some(ready_list()),
+    });
+    let source = rt.block_on(SessionSource::resolve_at(socket, "t".to_string()));
+
+    let started = Instant::now();
+    let err = rt
+        .block_on(source.mutate(|s| {
+            for name in ["sess-a", "sess-b", "sess-c", "sess-d"] {
+                s.upsert(make_session(name));
+            }
+        }))
+        .expect_err("four slow writes must run past the one deadline");
+    UPSERT_DELAY_MS.store(0, Ordering::SeqCst);
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "{err}");
+    assert!(
+        started.elapsed() < util::MUTATE_WRITES_DEADLINE + Duration::from_millis(500),
+        "it waited for the sum, {:?}",
+        started.elapsed()
+    );
+    assert_eq!(fs::read(homes.sessions_json()).unwrap(), before);
+}
+
+/// A `sessions.json` that does not parse is refused, never cut down to the
+/// rows a write touches: the write fails, sends nothing to the table, and the
+/// file's bytes are unchanged.
+#[test]
+fn a_corrupt_file_is_refused_not_rewritten() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let homes = Homes::new();
+    fs::write(homes.sessions_json(), b"{ \"sessions\": { not json").unwrap();
+    let before = fs::read(homes.sessions_json()).unwrap();
+    UPSERT_DELAY_MS.store(0, Ordering::SeqCst);
+    let rt = rt();
+    let socket = fake_daemon(&rt, &homes.hangar, |method, _| match method {
+        "workspace/session_upsert" => Some(upsert_ok()),
+        _ => Some(ready_list()),
+    });
+    let source = rt.block_on(SessionSource::resolve_at(socket, "t".to_string()));
+
+    let err = rt
+        .block_on(source.mutate(|s| s.upsert(make_session("sess-new"))))
+        .expect_err("a corrupt file must refuse the write");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
+    assert_eq!(UPSERTS.load(Ordering::SeqCst), 0, "a table write was sent");
+    assert_eq!(fs::read(homes.sessions_json()).unwrap(), before);
+}
+
+fn daemon_source(rt: &tokio::runtime::Runtime, homes: &Homes) -> (FleetHangar, SessionSource) {
+    ainb_hangar_daemon::rpc::auth::advertise_workspace_sessions_for_tests(true);
+    let hangar = FleetHangar::start(&homes.hangar);
+    reconcile(&hangar, homes);
+    let token = fs::read_to_string(ainb_hangar_proto::auth::token_file_in(&homes.hangar))
+        .unwrap()
+        .trim()
+        .to_string();
+    let source = rt.block_on(SessionSource::resolve_at(
+        ainb_hangar_daemon::rpc::socket_path_in(&homes.hangar),
+        token,
+    ));
+    (hangar, source)
+}
+
+/// The boot import and a reconcile pass of `homes`' file, as a daemon runs.
+fn reconcile(hangar: &FleetHangar, homes: &Homes) -> usize {
+    let path = homes.sessions_json();
+    hangar.block_on(async {
+        ainb_hangar_daemon::session_import::import_sessions_if_needed(hangar.pool(), &path)
+            .await
+            .unwrap();
+        ainb_hangar_daemon::session_import::reconcile_sessions(hangar.pool(), &path)
+            .await
+            .unwrap()
+            .deleted
+            .len()
+    })
+}
+
+fn table_names(hangar: &FleetHangar) -> Vec<String> {
+    let mut names: Vec<String> = hangar.block_on(async {
+        SessionsRepo::list(hangar.pool(), None, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.tmux_session_name)
+            .collect()
+    });
+    names.sort_unstable();
+    names
+}
+
+/// A delete made while degraded reaches the file only. It is not undone: the
+/// next pass removes the table row, the file being the authority on which
+/// sessions exist until the flip.
+#[test]
+fn a_delete_made_while_degraded_is_not_undone_by_the_daemon() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let homes = Homes::new();
+    homes.write_file_store(&[&make_session("sess-gone"), &make_session("sess-kept")]);
+    let rt = rt();
+    let (hangar, _) = daemon_source(&rt, &homes);
+    assert_eq!(table_names(&hangar), vec!["sess-gone", "sess-kept"]);
+
+    let degraded = rt.block_on(SessionSource::resolve_at(
+        homes.hangar.join("no-daemon.sock"),
+        "t".to_string(),
+    ));
+    assert!(degraded.is_degraded(), "{degraded:?}");
+    rt.block_on(degraded.mutate(|s| {
+        s.sessions.remove("sess-gone");
+    }))
+    .expect("a degraded delete goes to the file");
+
+    assert_eq!(reconcile(&hangar, &homes), 1);
+    assert_eq!(table_names(&hangar), vec!["sess-kept"]);
+}
+
+/// A multi-row write whose later row the daemon refuses is reverted in the
+/// file, but the earlier row already reached the table. The next pass
+/// deletes that row, because the file does not have it.
+#[test]
+fn a_reverted_multi_row_write_leaves_nothing_after_the_next_pass() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let homes = Homes::new();
+    homes.write_file_store(&[&make_session("sess-kept")]);
+    let before = fs::read(homes.sessions_json()).unwrap();
+    let rt = rt();
+    let (hangar, source) = daemon_source(&rt, &homes);
+    assert!(matches!(source, SessionSource::Daemon(_)), "{source:?}");
+
+    // Written in tmux-name order: "sess-a1" lands, then the daemon refuses
+    // "sess-z9" (a relative worktree path fails validation).
+    let mut refused = make_session("sess-z9");
+    refused.worktree_path = PathBuf::from("relative/z9");
+    rt.block_on(source.mutate(|s| {
+        s.upsert(make_session("sess-a1"));
+        s.upsert(refused.clone());
+    }))
+    .expect_err("the refused row fails the write");
+    assert_eq!(
+        fs::read(homes.sessions_json()).unwrap(),
+        before,
+        "the file was not put back"
+    );
+    assert_eq!(
+        table_names(&hangar),
+        vec!["sess-a1", "sess-kept"],
+        "the first row reached the table before the refusal"
+    );
+
+    assert_eq!(reconcile(&hangar, &homes), 1);
+    assert_eq!(table_names(&hangar), vec!["sess-kept"]);
 }

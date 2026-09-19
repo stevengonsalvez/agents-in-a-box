@@ -541,8 +541,9 @@ async fn an_old_binary_append_is_inserted_by_the_next_tick() {
     assert_eq!(ids(&table(pool).await), want);
 }
 
-/// A file session whose tmux name the table binds to another id is skipped,
-/// counted on the marker, and the table row is unchanged.
+/// A file session whose tmux name the table binds to another id the file also
+/// has (renamed there; the table wins on contents) is skipped, counted on the
+/// marker, and the table row is unchanged.
 #[tokio::test]
 async fn a_tmux_name_conflict_is_skipped_counted_and_the_table_wins() {
     let dir = tempfile::tempdir().unwrap();
@@ -555,8 +556,15 @@ async fn a_tmux_name_conflict_is_skipped_counted_and_the_table_wins() {
     let before = table(pool).await;
 
     let rival = "00000000-0000-0000-0000-0000000000f2";
-    sessions_file(&sessions_path, &[(rival, "ainb-shared", "file-ws")]);
+    sessions_file(
+        &sessions_path,
+        &[
+            (holder, "ainb-shared-renamed", "table-ws"),
+            (rival, "ainb-shared", "file-ws"),
+        ],
+    );
     let outcome = reconcile_sessions(pool, &sessions_path).await.unwrap();
+    assert!(outcome.deleted.is_empty(), "{:?}", outcome.deleted);
 
     assert_eq!((outcome.marker.imported, outcome.marker.skipped), (0, 1));
     assert_eq!(outcome.conflicts.len(), 1);
@@ -767,4 +775,33 @@ async fn a_rewrite_that_keeps_the_mtime_still_runs_a_pass() {
 
     let outcome = watch.tick(pool).await.expect("a same-mtime rewrite runs a pass").unwrap();
     assert_eq!(outcome.marker.imported, 1);
+}
+
+// ─── P6e: the file is the authority on which sessions exist (#1250) ────────
+
+/// A delete that reached the file but not the table (a client that removed
+/// the file row and then crashed, or whose table delete failed) is finished
+/// by the next pass: the table row goes too, and the pass says so.
+#[tokio::test]
+async fn a_delete_that_reached_only_the_file_is_finished_by_the_next_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    let (gone, kept) = (
+        "00000000-0000-0000-0000-0000000000a1",
+        "00000000-0000-0000-0000-0000000000a2",
+    );
+    sessions_file(
+        &sessions_path,
+        &[(gone, "ainb-gone", "ws"), (kept, "ainb-kept", "ws")],
+    );
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+    reconcile_sessions(pool, &sessions_path).await.unwrap();
+
+    // The file row went; the crash came before the table delete.
+    sessions_file(&sessions_path, &[(kept, "ainb-kept", "ws")]);
+    let outcome = reconcile_sessions(pool, &sessions_path).await.unwrap();
+    assert_eq!(outcome.deleted, vec![gone.to_string()]);
+    assert_eq!(ids(&table(pool).await), vec![kept]);
 }
