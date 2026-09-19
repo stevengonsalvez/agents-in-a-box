@@ -328,8 +328,13 @@ async fn tokio_main() -> Result<()> {
                 tracing::warn!("could not register as a headroom proxy user: {e}");
             }
 
-            let tui_result =
-                run_tui(&mut app_state, &mut layout, &mut agent_status, &mut inbox_host).await;
+            let tui_result = run_tui(
+                &mut app_state,
+                &mut layout,
+                &mut agent_status,
+                &mut inbox_host,
+            )
+            .await;
             drop(inbox_host);
             drop(agent_status);
 
