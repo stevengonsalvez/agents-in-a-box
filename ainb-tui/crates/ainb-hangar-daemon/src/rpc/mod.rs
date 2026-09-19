@@ -1133,6 +1133,11 @@ fn spawn_transcript_forwarder(
         async move {
             let span = tracing::Span::current();
             loop {
+                // Bounded by rows only, unlike `fleet/transcript_list`. A push
+                // is one chunk per notification frame, so no single frame
+                // grows with the batch the way a list reply does. The batch is
+                // still held in memory while it drains, up to `REPLAY_BATCH`
+                // rows, the same exposure the chat forwarder has.
                 let rows = match FleetProviderEventRepo::list_by_session_after(
                     &pool,
                     &session_key,
@@ -2896,10 +2901,12 @@ async fn handle_fleet_transcript_list(
             limit,
         )
         .await
-        // A cursored walk is bounded by rows alone and answers "what came after
-        // this row", so it has nothing to admit: `next_after_order` already
-        // tells the caller more may follow.
-        .map(|rows| (rows, false)),
+        // A cursored walk takes the tail's byte budget too, for the same
+        // reason: a row cap alone lets one page carry a hundred verbatim tool
+        // updates. It answers "what came after this row", so stopping early
+        // has nothing to admit: `next_after_order` already tells the caller
+        // where to resume.
+        .map(|rows| (within_bytes(rows, FLEET_TRANSCRIPT_LIST_MAX_BYTES), false)),
         None => {
             FleetProviderEventRepo::list_by_session_tail(
                 pool,
@@ -2917,6 +2924,27 @@ async fn handle_fleet_transcript_list(
         chunks,
         truncated,
     })
+}
+
+/// The longest oldest-first prefix of `rows` whose stored payloads fit in
+/// `max_bytes`, and never less than the first row: one payload over the whole
+/// budget is returned alone rather than stalling a cursored walk on an empty
+/// page. The same rule `list_by_session_tail` applies walking back.
+fn within_bytes(
+    rows: Vec<ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRow>,
+    max_bytes: usize,
+) -> Vec<ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRow> {
+    let mut budget = max_bytes;
+    let mut kept = Vec::new();
+    for row in rows {
+        let cost = row.raw_payload.len();
+        if !kept.is_empty() && cost > budget {
+            break;
+        }
+        budget = budget.saturating_sub(cost);
+        kept.push(row);
+    }
+    kept
 }
 
 /// Acknowledge one session's transcript head; the forwarder is wired in
