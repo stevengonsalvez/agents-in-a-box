@@ -588,19 +588,29 @@ jobs:
         run: |
           echo "desktop bundles on ${{ matrix.target }}: ad-hoc signed, not notarised (desktop_signed is false; #530)" | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # The bundler codesigns, notarises and staples by itself when the Apple
-      # variables are set; with them empty it ad-hoc signs. They are passed
-      # only when `desktop_signed` asked for them, so an unsigned run never
-      # reads the secrets at all. `--locked` reaches cargo through the CLI.
-      - name: Bundle the desktop shell
+      # Two bundle steps rather than one with conditional variables: the
+      # bundler treats a DEFINED but empty APPLE_CERTIFICATE as a certificate
+      # to import and a defined APPLE_SIGNING_IDENTITY as the identity, so an
+      # unsigned run must not have the names in its environment at all. The
+      # ad-hoc identity `-` is the config's default (tauri.conf.json,
+      # bundle.macOS.signingIdentity); the signed step overrides it through
+      # the environment, and the bundler then codesigns, notarises and
+      # staples by itself. `--locked` reaches cargo through the CLI.
+      - name: Bundle the desktop shell (ad-hoc signed)
+        if: ${{ !(runner.os == 'macOS' && github.event.inputs.desktop_signed == 'true') }}
+        working-directory: ${{ env.DESKTOP_DIR }}
+        run: cargo tauri build --target ${{ matrix.target }} --features bundled --bundles ${{ matrix.bundles }} -- --locked
+
+      - name: Bundle the desktop shell (Developer ID, notarised)
+        if: ${{ runner.os == 'macOS' && github.event.inputs.desktop_signed == 'true' }}
         working-directory: ${{ env.DESKTOP_DIR }}
         env:
-          APPLE_CERTIFICATE: ${{ github.event.inputs.desktop_signed == 'true' && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ github.event.inputs.desktop_signed == 'true' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_SIGNING_IDENTITY: ${{ github.event.inputs.desktop_signed == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
-          APPLE_ID: ${{ github.event.inputs.desktop_signed == 'true' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ github.event.inputs.desktop_signed == 'true' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ github.event.inputs.desktop_signed == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: cargo tauri build --target ${{ matrix.target }} --features bundled --bundles ${{ matrix.bundles }} -- --locked
 
       # What was bundled is read, never launched: a hosted runner is not a
