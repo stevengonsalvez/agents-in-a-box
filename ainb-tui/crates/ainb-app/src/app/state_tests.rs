@@ -3938,7 +3938,7 @@ mod tests {
 
     struct RestoreAinbHome {
         previous: Option<String>,
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: crate::env_lock::EnvGuard,
         _dir: tempfile::TempDir,
     }
 
