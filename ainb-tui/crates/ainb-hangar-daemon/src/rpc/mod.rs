@@ -13538,9 +13538,11 @@ async fn handle_session_list(
 /// pass has committed, waited for up to
 /// [`FIRST_PASS_WAIT`](crate::session_import::FIRST_PASS_WAIT).
 ///
-/// P6e: every session RPC that reads or writes the table waits on this, so
-/// none acts on rows the boot has not reconciled. The list answers not-ready
-/// in its own shape; a mutation answers [`sessions_not_ready`].
+/// P6e: `session_list`, `session_upsert` and `session_delete` wait on this,
+/// so none acts on rows the boot has not reconciled. The list answers
+/// not-ready in its own shape; a mutation answers [`sessions_not_ready`].
+/// `session_reconcile` is exempt by design: it runs a pass, and a committed
+/// pass is what opens the gate, so gating it would lock the gate shut.
 async fn sessions_table_ready() -> bool {
     crate::session_import::first_pass_done_within(crate::session_import::FIRST_PASS_WAIT).await
 }
