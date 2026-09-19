@@ -1,4 +1,4 @@
-# /goal D3 closes the desktop's parity gap: the review tab paints the hunks the reducer already frames, an inbox screen comes back on both surfaces over one framed source, settings carries the config section plus the daemons panel and a native path for the onboarding writes a webview may not run, the stats tab and the plugin fallback cell give a plugin somewhere to draw, and the palette's rows become the reducer's for every surface, proved by the full parity suite and a wdio review journey
+# /goal D3 closes the desktop's review and settings gap: the review tab paints the hunks the reducer already frames, from a `git_view` section bounded so one large diff cannot withhold the tree with it, settings carries the config section and the daemons panel plus a native path for the onboarding writes a webview may not run, and the palette's rows become the reducer's for every surface, proved by a parity suite that can fail, a wdio review journey and a `d3-review` proof scenario, with the inbox, the stats tab and the plugin fallback cell carried to D3-prime
 
 ─ CONTEXT ─
 
@@ -54,8 +54,8 @@
 
 ```
 ┌────────────────────────────────┐   ┌──────────────────────────────────┐
-│ 1 inbox section frames nothing │──▶│ give it fields from one source,  │
-│   wire/mod.rs:163, :608        │   │ read by the host, framed bounded │
+│ 1 inbox section frames nothing │──▶│ D3-prime's, not this node's      │
+│   wire/mod.rs:163, :608        │   │ (kept here as the seam it is)    │
 └────────────────────────────────┘   └──────────────────────────────────┘
 ┌────────────────────────────────┐   ┌──────────────────────────────────┐
 │ 2 palette rows built in the    │──▶│ the reducer owns the row set;    │
@@ -233,10 +233,8 @@ Begin by outputting your plan. Then execute end-to-end without checking in until
 
 ─ PROGRESS LOG ─
 
-Plan, staged as the six PRs:
-1. D3·spec: the amendment (#1162's wording, the inbox's source, how a plugin view reaches a surface, what the parity gate means).
-2. D3a: the seams (the inbox section's fields, #1161's palette rows in the reducer, the parity harness both renderers share).
-3. D3b: the review tab over the framed `git_view` section.
-4. D3c: the inbox screen, on the TUI and the desktop, from one source.
-5. D3d: settings, the daemons panel, and #1175's native path for the onboarding writes.
-6. D3e: the stats tab and the fallback cell, the wdio review journey, the `d3-review` proof scenario, the CI wiring and the programme row.
+Plan, staged as the four PRs:
+1. D3·spec: the amendment (#1162's wording, the `git_view` bound, the row split into D3 and D3-prime, what the parity gate means).
+2. D3a: the seams (the `git_view` bound and its oversize signal, #1161's palette rows in the reducer behind a golden row set, the parity harness both renderers share with its mutation check).
+3. D3b: the review tab over the bounded `git_view` section.
+4. D3d: settings, the daemons panel and #1175's native path for the onboarding writes, with the wdio review journey, the `d3-review` proof scenario, the CI wiring and the programme row split folded in.
