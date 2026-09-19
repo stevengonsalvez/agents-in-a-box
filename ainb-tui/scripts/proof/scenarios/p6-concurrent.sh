@@ -52,6 +52,11 @@ p6_cli_lacks() { ! p6_cli_has "$1"; }
 # own daemon path (the capability is on, so this is a table read).
 p6_table_rows() { p6_cli_sessions | sort; }
 
+# p6_row_needle <tmux name>: what the TUI's session list actually shows for a
+# session: not the tmux name, but the 8-hex suffix its branch carries
+# (`tmux_repo-7d755792` runs on `agents/7d755792`).
+p6_row_needle() { printf '%s' "${1##*-}"; }
+
 # p6_tui_has <session> <needle>: the TUI's session list shows it.
 p6_tui_has() { pane_text "$1" | grep -qF -- "$2"; }
 p6_tui_lacks() { ! p6_tui_has "$1" "$2"; }
@@ -69,6 +74,16 @@ p6_combination() {
   say "combination $name"
   observe "=== $name ==="
 
+  # One daemon for this combination, started before any surface, so {web}
+  # (which autostarts nothing) has the same daemon the TUIs would have.
+  "$AINB_BIN" hangar daemon start >"$PROOF_WORLD/p6-daemon-$name.txt" 2>&1 || true
+  if ! wait_for 45 daemon_running; then
+    observe "$name: daemon start said $(tail -2 "$PROOF_WORLD/p6-daemon-$name.txt" | tr '\n' ' ')"
+    check "$name: one daemon is up for every surface" false
+    return 1
+  fi
+  check "$name: one daemon is up for every surface" true
+
   local sessions=()
   for ((i = 1; i <= tuis; i++)); do
     if ! start_tui "tui$i"; then
@@ -81,22 +96,16 @@ p6_combination() {
   if [[ "$web" == "1" ]]; then
     start_web || { check "$name: ainb web answers" false; return 1; }
   fi
-  # Every combination has a CLI leg: the daemon the TUI autostarted, or, for
-  # {web}, the one `ainb web` needs anyway.
-  if ! wait_for 30 daemon_running; then
-    check "$name: one daemon is up for every surface" false
-    return 1
-  fi
-  check "$name: one daemon is up for every surface" true
 
   # 1. The CLI creates a session; every surface that is up sees it.
   fixture_session || { check "$name: the CLI created a session" false; return 1; }
-  local created="$FIXTURE_ID" tmux_name="$FIXTURE_TMUX"
-  observe "$name: the CLI created $tmux_name ($created)"
+  local created="$FIXTURE_ID" tmux_name="$FIXTURE_TMUX" row
+  row="$(p6_row_needle "$FIXTURE_TMUX")"
+  observe "$name: the CLI created $tmux_name ($created), listed as $row"
   check "$name: the CLI lists the session it created" p6_cli_has "$created"
   for i in "${sessions[@]}"; do
     check "$name: the session the CLI created reached $i" \
-      wait_for 60 p6_tui_has "$i" "$tmux_name"
+      wait_for 60 p6_tui_has "$i" "$row"
   done
   if [[ "$web" == "1" ]]; then
     check "$name: the session the CLI created reached ainb web" \
@@ -125,7 +134,7 @@ p6_combination() {
     || observe "$name: ainb kill said $(tail -1 "$PROOF_WORLD/p6-kill-$name.txt")"
   check "$name: the CLI no longer lists the killed session" wait_for 30 p6_cli_lacks "$created"
   for i in "${sessions[@]}"; do
-    check "$name: the killed session left $i" wait_for 90 p6_tui_lacks "$i" "$tmux_name"
+    check "$name: the killed session left $i" wait_for 90 p6_tui_lacks "$i" "$row"
   done
   if [[ "$web" == "1" ]]; then
     check "$name: the killed session left ainb web" wait_for 180 p6_web_lacks "$tmux_name"
@@ -140,13 +149,15 @@ p6_combination() {
   check "$name: the killed session is in neither store" \
     bash -c "! grep -qF '$tmux_name' <<<'$file'"
 
-  # Close the surfaces this combination started.
+  # Close the surfaces this combination started, and its daemon, so the next
+  # combination starts from the same place.
   for i in "${sessions[@]}"; do
     quit_tui "$i" 2>/dev/null || ptmux kill-session -t "=$i:" 2>/dev/null || true
   done
   if [[ "$web" == "1" ]]; then
     ptmux kill-session -t "=web:" 2>/dev/null || true
   fi
+  "$AINB_BIN" hangar daemon stop >/dev/null 2>&1 || true
   return 0
 }
 
@@ -154,8 +165,8 @@ scenario() {
   p6_capability_on
   p6_binaries_ready || return
 
-  # The daemon the first combination starts serves the rest: one daemon for
-  # every surface in this world, which is the point of the node.
+  # Each combination brings up one daemon and every surface it names against
+  # it, which is the point of the node.
   p6_combination tui 1 0 || return
   p6_combination web 0 1 || return
   p6_combination tui-web 1 1 || return
