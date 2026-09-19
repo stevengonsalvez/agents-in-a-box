@@ -1040,7 +1040,8 @@ fn a_commit_selection_past_the_list_frames_as_the_last_and_says_so() {
         let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
         git.selected_commit_index = 0;
     }
-    let view = &framed_within(&state, 64 * 1024, 0)["git_view_state"];
+    // `framed_within` is the git view frame itself, not the section body.
+    let view = &framed_within(&state, 64 * 1024, 0);
     assert_eq!(view["commits"].as_array().map(Vec::len), Some(0));
     assert_eq!(view["commits_cut"].as_u64(), Some(3));
     assert_eq!(view["selected_commit_index"].as_u64(), Some(0));
