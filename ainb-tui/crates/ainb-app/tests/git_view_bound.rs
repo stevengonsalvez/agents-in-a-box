@@ -777,3 +777,51 @@ fn a_collapsed_file_ahead_of_an_open_one_does_not_shift_the_hunk_cursor() {
         "the cursor is the open file's hunk, not one counted inside the collapsed file"
     );
 }
+
+/// A hunk truncated part way still frames the gap below it, so a row past the
+/// cut must not be placed on that gap row: counting rows alone it would be, a
+/// row off and reporting that nothing was left out.
+#[test]
+fn a_row_past_a_part_way_cut_says_it_was_cut() {
+    use ainb_app::components::code_review::render::flatten;
+
+    // One file of 500 rows with a gap below it, cut to MAX_ROWS_PER_FILE 400.
+    let mut state = state_with(1, 500, "a changed line");
+    let (first_cut, last_kept) = {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review.files[0].hunks[0].gap_after = 9;
+        let rows = flatten(&git.review);
+        // Heading, then the rows: the model's row 401 is the 401st code line,
+        // the first the frame does not carry.
+        assert!(rows.len() > 402, "the fixture has rows past the cap");
+        (401, 400)
+    };
+
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.scroll = last_kept;
+    }
+    let kept = &framed(&state)["git_view_state"]["review_ui"];
+    assert_eq!(kept["scroll"].as_u64(), Some(400));
+    assert_eq!(
+        kept["scroll_cut"].as_bool(),
+        Some(false),
+        "the last row that was sent"
+    );
+
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.scroll = first_cut;
+    }
+    let cut = &framed(&state)["git_view_state"]["review_ui"];
+    assert_eq!(
+        cut["scroll"].as_u64(),
+        Some(400),
+        "the nearest row that was sent, not the gap row below the cut"
+    );
+    assert_eq!(
+        cut["scroll_cut"].as_bool(),
+        Some(true),
+        "and it says the row the terminal is on is not in the frame"
+    );
+}
