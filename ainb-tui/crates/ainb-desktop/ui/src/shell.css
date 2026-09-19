@@ -761,7 +761,11 @@ body {
   font-size: 11px;
 }
 
+/* The review tab: the changed files beside the diff body. Laid out like the
+   board, because it has the same job: fill the work area and let its own
+   panes scroll, rather than clipping what does not fit. */
 .review {
+  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -788,8 +792,10 @@ body {
 
 .review-panes {
   display: grid;
-  grid-template-columns: minmax(180px, 280px) 1fr;
+  grid-template-columns: minmax(180px, 280px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 12px;
+  flex: 1;
   min-height: 0;
 }
 
