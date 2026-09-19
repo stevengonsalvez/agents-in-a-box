@@ -6,9 +6,10 @@
 //
 // This is a server render, so it is the component tree's own work without a
 // browser's layout or paint: a floor for what the window does, not a ceiling.
-// The numbers it prints go in the PR body. The assertion is deliberately
-// generous; what it catches is the tab growing a cost per row that is not
-// linear, not a slow runner.
+// The number a real window takes, on these 16,094 nodes and 8.7 MB of text, is
+// #1221, and windowing the rows against `review_ui.scroll` is its call to
+// make. The assertion here is deliberately generous; what it catches is the
+// tab growing a cost per row that is not linear, not a slow runner.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
