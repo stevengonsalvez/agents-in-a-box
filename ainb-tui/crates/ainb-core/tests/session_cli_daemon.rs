@@ -10,7 +10,7 @@ use ainb::cli::list::list_sessions;
 use ainb::cli::util::mutate_session_store;
 use ainb::interactive::session_manager::{ModelSource, SessionMetadata, SessionStore};
 use ainb::models::session::SessionAgentType;
-use ainb_hangar_store::repo::sessions::{NewWorkspaceSession, SessionsRepo};
+use ainb_hangar_store::repo::sessions::{SessionRow, SessionsRepo};
 
 #[path = "support/fleet_hangar.rs"]
 mod fleet_hangar;
@@ -35,6 +35,15 @@ fn make_session(name: &str, ws: &str) -> SessionMetadata {
     }
 }
 
+/// `ListArgs` with no filter: every session, any status.
+fn all_sessions() -> ListArgs {
+    ListArgs {
+        running: false,
+        workspace: None,
+        frame: false,
+    }
+}
+
 /// Test that a CLI read works with the daemon stopped.
 #[tokio::test]
 async fn test_cli_read_works_with_daemon_stopped() {
@@ -56,7 +65,7 @@ async fn test_cli_read_works_with_daemon_stopped() {
     )
     .expect("write sessions.json");
 
-    let sessions = list_sessions(&ListArgs::default())
+    let sessions = list_sessions(&all_sessions())
         .await
         .expect("list_sessions should succeed with daemon stopped");
 
@@ -81,23 +90,23 @@ async fn test_session_created_by_daemon_and_by_run_both_appear_once_in_list() {
 
     // 1. Session created by daemon directly in the repo
     let daemon_sid = Uuid::new_v4().to_string();
-    let daemon_sess = NewWorkspaceSession {
-        session_id: &daemon_sid,
-        tmux_session_name: "sess-daemon-1",
-        worktree_path: "/tmp/work/daemon-ws",
-        workspace_name: "daemon-ws",
+    let daemon_sess = SessionRow {
+        session_id: daemon_sid.clone(),
+        tmux_session_name: "sess-daemon-1".to_string(),
+        worktree_path: "/tmp/work/daemon-ws".to_string(),
+        workspace_name: "daemon-ws".to_string(),
         created_at: Utc::now().timestamp_millis(),
-        agent_type: "Claude",
+        agent_type: "Claude".to_string(),
         headroom_enabled: false,
         rtk_enabled: false,
         skip_permissions: Some(false),
-        model: Some("claude-3-5-haiku"),
-        model_source: "Raw",
+        model: Some("claude-3-5-haiku".to_string()),
+        model_source: "Raw".to_string(),
         codex_model: None,
         codex_thread_id: None,
     };
     hangar.block_on(async {
-        SessionsRepo::upsert(hangar.pool(), daemon_sess)
+        SessionsRepo::upsert(hangar.pool(), &daemon_sess)
             .await
             .expect("daemon upsert session");
     });
@@ -108,9 +117,7 @@ async fn test_session_created_by_daemon_and_by_run_both_appear_once_in_list() {
     mutate_session_store(|s| s.upsert(run_meta)).expect("mutate session store");
 
     // Act: list sessions
-    let sessions = list_sessions(&ListArgs::default())
-        .await
-        .expect("list_sessions with daemon running");
+    let sessions = list_sessions(&all_sessions()).await.expect("list_sessions with daemon running");
 
     // Assert: both appear once, no duplicates
     assert_eq!(sessions.len(), 2, "must have exactly 2 sessions");
