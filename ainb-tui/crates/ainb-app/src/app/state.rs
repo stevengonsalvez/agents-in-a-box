@@ -1952,16 +1952,20 @@ impl ConfigScreenState {
 
     // --- navigation ---------------------------------------------------------
 
+    /// Where the tree node with `id` sits among the visible nodes, if it does.
+    #[must_use]
+    pub fn visible_node_position(&self, id: &str) -> Option<usize> {
+        self.visible_nodes
+            .iter()
+            .position(|index| self.tree.get(*index).is_some_and(|node| node.id() == id))
+    }
+
     /// Select the tree node with `id` (`ConfigTreeNode::id`) when it is on
     /// screen, as a click on it does; `false` when no visible node has it, and
     /// nothing moves. Selection is the reducer's: a renderer names the node,
     /// never keeps its own.
     pub fn select_node_by_id(&mut self, id: &str) -> bool {
-        let Some(position) = self
-            .visible_nodes
-            .iter()
-            .position(|index| self.tree.get(*index).is_some_and(|node| node.id() == id))
-        else {
+        let Some(position) = self.visible_node_position(id) else {
             return false;
         };
         self.selected_node = position;
