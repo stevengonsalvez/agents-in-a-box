@@ -134,7 +134,7 @@ export function Review(props: Props) {
             role="region"
             aria-label="Diff"
             onKeyDown={(event) => {
-              const rows = keyRows(event.key, rowsPerPage(), scroll(), body().length);
+              const rows = keyRows(event.key, rowsPerPage());
               if (rows === null) return;
               event.preventDefault();
               move(rows);
