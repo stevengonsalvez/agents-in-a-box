@@ -11,8 +11,9 @@ Since run 27 (`9342a492a`), v2 gained #1215, #1217 (D3a), #1226, #1222 (P6e-1, d
 | 28a | `scripts/proof/run.sh`, all 21 nodes, box without webkit | **19 of 21 pass, 2 skipped** (`d1-shell`, `d2-board`), none failed, exit 0 |
 | 28b | the same 21 nodes after installing webkit and building the desktop shell | **21 of 21 pass**, exit 0 |
 | journey 1 | `xvfb-run -a npm test` in `crates/ainb-desktop/e2e` (`journey.e2e.js`, `answer.e2e.js`) | **2 of 2 spec files pass** (3 tests), 9 min 15 s |
+| journey 2 | the same command, same build | **1 of 2 spec files pass**: `answer.e2e.js` fails at line 156, 9 min 5 s |
 
-No scenario failed, so there is no first failing assertion to report. `d1-shell` and `d2-board` pass in 28b, which is also their second run: both passed first in a `--only d1-shell --only d2-board` run at 17:37 UTC.
+No harness scenario failed, so no harness node has a first failing assertion to report. The one failure in run 28 is in the desktop journey, below. `d1-shell` and `d2-board` pass in 28b, which is also their second run: both passed first in a `--only d1-shell --only d2-board` run at 17:37 UTC.
 
 ## Build
 
@@ -53,7 +54,9 @@ Expected and observed, line by line, are in `summary-28a-no-webkit.md` and `summ
 
 ## The desktop answer journey
 
-In CI, `answer.e2e.js` timed out after #1226, and the log showed `Tauri core.invoke not available`. Locally it **passes**:
+In CI, `answer.e2e.js` timed out after #1226, and the log showed `Tauri core.invoke not available`. Locally it is **flaky**: it passed in journey 1 and failed in journey 2, against the same build.
+
+Journey 1:
 
 ```
 » specs/journey.e2e.js
@@ -70,6 +73,29 @@ answering from the window
 Spec Files:  2 passed, 2 total (100% completed) in 00:09:15
 ```
 
+Journey 2:
+
+```
+» specs/answer.e2e.js
+answering from the window
+   ✖ answers a daemon question from the banner and the daemon records the desktop
+1 failing (3m 22.2s)
+
+option two is on the banner
+      actual expected
+      falsetrue
+AssertionError [ERR_ASSERTION]: option two is on the banner
+    at Context.<anonymous> (file:///.../e2e/specs/answer.e2e.js:156:12)
+
+Spec Files:  1 passed, 1 failed, 2 total (100% completed) in 00:09:05
+```
+
+**First failing assertion:** `answer.e2e.js:156`, `assert.ok(clicked, "option two is on the banner")`. The `browser.execute` just before it looked up `.answer-banner .answer-option[data-option="1"]` in the page and found none. Lines 134 to 140, which read the banner's question and its three options in order, had just passed, so the banner and its options were on screen a moment earlier.
+
+**It is not the same failure as CI.** CI timed out; journey 2 failed on an assertion after 3 m 22 s, well inside every limit.
+
+Hypothesis, not confirmed: the option was gone for the moment the page script ran. The spec's own comment (lines 146 to 149) says the frames arriving every second redraw the banner. `@wdio/tauri-service` also wraps the script in a wait of up to 5 s for `__wdio_original_core__` (see below), which gives a redraw more time to land between the label read and the click. A desktop log line showing the banner's phase or options changing between the two reads would confirm it. The click finding the option on every run would rule it out.
+
 The `core.invoke` message **does reproduce locally**: 106 `WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout` lines in journey 1, starting with the first spec. It is a warning, not the failure:
 
 - The message comes from `@wdio/tauri-service` 1.4.0. Before `getTitle`, `findElement`, `findElements`, `$`, `$$` and `elementClick`, `ensureActiveWindowFocus` runs a script that waits up to 5 s for `window.__wdio_original_core__.invoke`, then throws. The throw is caught and logged as a WARN, and the command goes ahead (`e2e/node_modules/@wdio/tauri-service/dist/esm/index.js`, around lines 3091 and 3196).
@@ -78,7 +104,7 @@ The `core.invoke` message **does reproduce locally**: 106 `WARN tauri-service:wi
 
 Hypothesis, not confirmed: the CI timeout is those 5 s delays added to a slower runner, pushing a wait past its limit. The limits are `mochaOpts.timeout` 600 s per test and the 60 s and 30 s `waitUntil`s in the spec. The CI job's own log would confirm it (which wait timed out, and after how long) or rule it out, as would a local failure with the same message. Wiring `window.__wdio_original_core__` so the focus check stops waiting would remove the delay in both places.
 
-The journey log, with stack frames removed and the home directory and host name masked, is `journey-run-1.txt`.
+The journey logs, with stack frames removed and the home directory and host name masked, are `journey-run-1.txt` and `journey-run-2.txt`. A third run was in progress when this was written.
 
 ## Leftovers
 
