@@ -98,6 +98,28 @@ function desktopLog() {
   }
 }
 
+/**
+ * Click `selector` as a person does: through the driver, so the click passes
+ * WebDriver's own actionability checks (displayed, enabled, not covered),
+ * which a click the page runs on itself never proves. The banner's buttons
+ * are reconciled by label across frames, so the element the driver found is
+ * the one it clicks; should a frame replace it in between, the driver says
+ * so as a stale element and the click is looked up again, a few times.
+ */
+async function clickAsPerson(selector, attempts = 5) {
+  let last = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await $(selector).click();
+      return;
+    } catch (error) {
+      if (!/stale element/i.test(String(error))) throw error;
+      last = error;
+    }
+  }
+  throw last;
+}
+
 /** Wait for `condition`, failing with what `explain` says at the deadline. */
 async function settle(condition, timeout, explain) {
   try {
@@ -158,21 +180,12 @@ describe("answering from the window", () => {
       "the banner offers the three options in order",
     );
 
-    // Option two. The click sends the reducer's own commands and nothing the
-    // window authored; the phase the banner reads is the frame's
-    // `fleet.ask_state.phases` entry for this request.
-    //
-    // Clicked in the page, by selector, in one step: the frames arriving every
-    // second redraw the banner, so a button looked up by the driver can be
-    // replaced before its click lands. The click event is the page's own, so
-    // the button's handler runs exactly as it does for a person.
+    // Option two, clicked through the driver (#1192). The click sends the
+    // reducer's own commands and nothing the window authored; the phase the
+    // banner reads is the frame's `fleet.ask_state.phases` entry for this
+    // request.
     const sentBefore = intentsSent().length;
-    const clicked = await browser.execute((index) => {
-      const option = document.querySelector(`.answer-banner .answer-option[data-option="${index}"]`);
-      option?.click();
-      return option !== null;
-    }, PICK);
-    assert.ok(clicked, "option two is on the banner");
+    await clickAsPerson(`.answer-banner .answer-option[data-option="${PICK}"]`);
     let phase = "";
     await settle(
       async () => {
