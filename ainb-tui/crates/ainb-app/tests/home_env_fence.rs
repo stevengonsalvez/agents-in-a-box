@@ -86,6 +86,10 @@ fn rust_files(dir: &Path) -> Box<dyn Iterator<Item = PathBuf>> {
 /// A module that declares its own `Mutex` around `setenv` orders its own tests
 /// and nothing else: two locks around one environment still let two threads
 /// write it at the same time, which is the race both were written to stop.
+///
+/// The check is on the type and on the environment calls in the same file, not
+/// on the name: a private lock called `GUARD`, or `SETTINGS_LOCK`, or nothing in
+/// particular guards exactly as little as one called `ENV_LOCK`.
 #[test]
 fn no_module_declares_an_environment_lock_of_its_own() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -97,13 +101,19 @@ fn no_module_declares_an_environment_lock_of_its_own() {
             .expect("every walked file sits under the crate")
             .to_string_lossy()
             .replace('\\', "/");
-        if relative == "src/env_lock.rs" || relative == "tests/home_env_fence.rs" {
+        // The lock itself, and this fence, which has to write the shapes it
+        // forbids in order to look for them.
+        if relative == "src/env_lock.rs" || ALLOWED.contains(&relative.as_str()) {
             continue;
         }
         let source = std::fs::read_to_string(&file).expect("a readable source file");
+        // Only a file that writes the environment can be racing on it. A
+        // `Mutex<()>` anywhere else is somebody ordering something of their own.
+        if !writes_the_environment(&source) {
+            continue;
+        }
         for (number, line) in source.lines().enumerate() {
-            let declares = line.contains("static") && line.contains("Mutex<()>");
-            if declares && line.contains("ENV_LOCK") {
+            if declares_a_std_mutex_of_unit(line) {
                 declarations.push(format!("{relative}:{}: {}", number + 1, line.trim()));
             }
         }
@@ -111,8 +121,26 @@ fn no_module_declares_an_environment_lock_of_its_own() {
 
     assert!(
         declarations.is_empty(),
-        "these declare an environment lock beside the crate's one lock in \
-         src/env_lock.rs, which orders their own tests and no others:\n{}",
+        "these files write the environment and declare a lock of their own \
+         beside the crate's one lock in src/env_lock.rs, which orders their own \
+         tests and no others:\n{}",
         declarations.join("\n")
     );
+}
+
+/// Whether `source` calls the two functions that write the process environment.
+fn writes_the_environment(source: &str) -> bool {
+    source.contains("env::set_var") || source.contains("env::remove_var")
+}
+
+/// Whether `line` declares a `std::sync::Mutex<()>`, which is the shape of a
+/// lock that guards a thing rather than holding data.
+///
+/// An async mutex is not one of these: `headroom`'s `SPAWN_LOCK` is a
+/// `tokio::sync::Mutex<()>` and orders spawns, not `setenv`.
+fn declares_a_std_mutex_of_unit(line: &str) -> bool {
+    let declares = line.contains("static ") || line.contains("const ") || line.contains("let ");
+    let unit_mutex = line.contains("Mutex<()>") || line.contains("Mutex::new(())");
+    let asynchronous = line.contains("tokio::sync::Mutex") || line.contains("const_new");
+    declares && unit_mutex && !asynchronous
 }
