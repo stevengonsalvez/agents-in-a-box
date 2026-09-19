@@ -1287,6 +1287,7 @@ pub fn defaults() -> Vec<Binding> {
             "pick",
             AppEvent::SessionAskPick {
                 request: String::new(),
+                index: 0,
                 label: String::new(),
             },
             "Answer with the option a click names",
