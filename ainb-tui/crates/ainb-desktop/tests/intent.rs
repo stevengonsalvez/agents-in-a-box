@@ -56,3 +56,47 @@ fn a_refusal_reads_as_the_row_and_the_reason() {
         serde_json::json!({ "command": id, "reason": refusal.reason })
     );
 }
+
+/// The desktop's watchable plugin screens are `PLUGIN_SCREENS` less
+/// `analytics`: the stats tab draws burndown's counters from the daemon's
+/// projection, so a cell painting burndown beside it would show them twice
+/// (D3p-f).
+#[test]
+fn the_desktop_watches_every_plugin_screen_but_analytics() {
+    let all: Vec<&str> = ainb_app::app::screens::builtin::PLUGIN_SCREENS
+        .iter()
+        .map(|(screen, _)| *screen)
+        .filter(|screen| *screen != ainb_app::app::screens::ids::ANALYTICS)
+        .collect();
+    assert_eq!(
+        ainb_desktop::intent::DESKTOP_WATCHABLE_SCREENS,
+        all.as_slice()
+    );
+    assert_eq!(all, ["witr", "learnings", "abtop", "hangar"]);
+}
+
+/// A watch for `analytics` is refused at the seam with its own reason, ahead
+/// of the host-authored refusal every plugin action gets from the window.
+#[test]
+fn a_watch_for_analytics_is_refused_with_its_reason() {
+    let watch = |screen: &str| {
+        let Intent::Command(id, args) = ainb_app::app::plugin_action::watch_screen(
+            screen,
+            &ainb_app::wire::frame::HostId::local(),
+            true,
+            80,
+            24,
+        ) else {
+            panic!("a watch is a command");
+        };
+        Intent::try_from(RendererIntent::Command(id, args)).expect_err("a watch is refused")
+    };
+
+    let analytics = watch("analytics");
+    assert!(
+        analytics.reason.contains("stats tab"),
+        "{:?}",
+        analytics.reason
+    );
+    assert_eq!(watch("witr").reason, "a host sends it, not the window");
+}

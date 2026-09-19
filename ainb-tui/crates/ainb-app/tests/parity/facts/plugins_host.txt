@@ -1,0 +1,10 @@
+# What both renderers must show for the plugins_host fixture (D3p-f): a
+# registered plugin screen with no frame and a recorded render error. Checked
+# against the ratatui snapshot (tests/parity.rs) and against the webview's own
+# render of the same frame (ainb-desktop/ui/src/parity.test.ts), which draws
+# the placeholder from PluginsHostView alone.
+#
+# Facts are renderer-neutral: what is shown, not how it is spaced or framed.
+Witr unavailable
+The `witr` plugin could not render this screen.
+plugin spawn failed: witr exited with status 127
