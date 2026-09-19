@@ -204,8 +204,9 @@ async fn within_deadline<T, E: std::fmt::Display>(
 /// be reconciling. A test in `ainb-core` pins this above the daemon's sum.
 pub const SESSIONS_LOCK_WAIT: Duration = Duration::from_secs(10);
 
-/// The bound on all of one `mutate`'s table writes together, on
-/// [`SessionSource::Daemon`]. Each RPC is also under
+/// The bound on all of one `mutate`'s table writes together.
+///
+/// On [`SessionSource::Daemon`] each RPC is also under
 /// [`SESSION_RPC_DEADLINE`]; this caps a run of slow ones, so a write of many
 /// rows cannot hold the lock for many deadlines.
 pub const MUTATE_WRITES_DEADLINE: Duration = SESSION_RPC_DEADLINE;
