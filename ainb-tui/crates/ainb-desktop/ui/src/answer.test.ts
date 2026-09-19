@@ -290,8 +290,14 @@ test("a question that changes under the same request repaints", () => {
     paints.splice(0).forEach((paint) => paint());
     assert.equal(drawn().answerable, false);
 
+    const painted = drawn();
     setCurrent(questionFor(sessions(mark({ options: [{ label: "canary", description: "" }], route: "None" })))!);
     assert.equal(paints.length, 0, "the same question again schedules nothing");
+    // Identity, not just equality: the banner's option rows are keyed off
+    // this object's `options`, so a frame that changes only the object must
+    // leave the very same array in place, and with it the option elements.
+    assert.equal(drawn(), painted, "and the drawn question is the same object");
+    assert.equal(drawn().options, painted.options, "with the same options array");
   } finally {
     dispose();
   }
