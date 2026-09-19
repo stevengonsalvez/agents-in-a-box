@@ -78,20 +78,17 @@ pub struct Hunk {
 }
 
 fn scrub_rows<S: serde::Serializer>(rows: &[DiffRow], serializer: S) -> Result<S::Ok, S::Error> {
-    let raws: Vec<&str> = rows.iter().map(|row| row.raw.as_str()).collect();
-    let scrubbed = crate::fleet::bridge::redact::scrub_lines(&raws);
-    serializer.collect_seq(rows.iter().zip(scrubbed).map(|(row, raw)| {
-        let emphasis = if raw == row.raw {
-            row.emphasis.clone()
-        } else {
-            Vec::new()
-        };
-        DiffRow {
-            raw,
-            emphasis,
-            ..row.clone()
-        }
-    }))
+    // The state's own serializer keeps the row-level guard: no cut, no budget,
+    // only the scrub. The frame's projection spends a budget through the same
+    // helper, so the scrub and what it costs the emphasis ranges cannot drift
+    // between the two.
+    let mut unbounded = usize::MAX;
+    serializer.collect_seq(crate::wire::git_view::scrub_and_cut(
+        rows,
+        rows.len(),
+        usize::MAX,
+        &mut unbounded,
+    ))
 }
 
 /// Whether a row is unchanged context, an addition, or a removal.
