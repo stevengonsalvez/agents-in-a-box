@@ -56,22 +56,6 @@ pub fn refused_from_webview(keymap: &Keymap, id: &CommandId) -> bool {
     is_host_authored(id) || keymap.is_key_only(id)
 }
 
-/// Whether a palette may offer `row`, which is [`refused_from_webview`] plus
-/// the rows that cannot run from a name alone.
-///
-/// A row a palette names carries no payload, so a row whose action refuses
-/// `Args::Null` (a pointer row parsing a position, a step or a character) has
-/// nothing to run with and is not offered. Both halves live here, so what a
-/// surface may offer and what it may send are one list.
-#[must_use]
-pub fn palette_offers(
-    keymap: &Keymap,
-    id: &CommandId,
-    row: &ainb_app::app::keymap::Binding,
-) -> bool {
-    !refused_from_webview(keymap, id) && ainb_app::app::palette::nameable(row)
-}
-
 impl TryFrom<RendererIntent> for Intent {
     /// The host-authored command the webview tried to send. A key-only id
     /// passes here and is refused by the shell, which holds the keymap.
