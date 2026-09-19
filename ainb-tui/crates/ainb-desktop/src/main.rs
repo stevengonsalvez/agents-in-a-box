@@ -11,6 +11,7 @@
 mod menu;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -285,6 +286,9 @@ async fn setup_status() -> ainb_desktop::setup::SetupView {
         })
 }
 
+/// Whether a setup confirmation dialog is on screen.
+static SETUP_DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
+
 /// Ask the shell to run one of the onboarding writes that the window may
 /// not run itself (#1175). The write runs only after the person answers a
 /// native dialog the shell owns; a script in the page can call this command
@@ -294,6 +298,28 @@ async fn setup_status() -> ainb_desktop::setup::SetupView {
 #[tauri::command]
 async fn setup_write(app: tauri::AppHandle, write: ainb_desktop::setup::SetupWrite) -> bool {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    // The variant only: the telemetry write carries a token, and this log is
+    // what `show_log` reads back into the window.
+    let kind = write.kind();
+    if let Err(message) = write.validate() {
+        tracing::info!(write = kind, "setup write refused before the dialog");
+        if let Err(error) = app.emit("toast", &message) {
+            tracing::warn!(%error, "setup refusal not delivered to the webview");
+        }
+        return false;
+    }
+    // One dialog at a time: a script that calls this in a loop must not
+    // stack native dialogs on the person.
+    if SETUP_DIALOG_OPEN
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        tracing::info!(write = kind, "setup write refused: a dialog is open");
+        if let Err(error) = app.emit("toast", "a setup dialog is already open") {
+            tracing::warn!(%error, "setup refusal not delivered to the webview");
+        }
+        return false;
+    }
     let confirmation = write.confirmation();
     let confirmed = app
         .dialog()
@@ -305,7 +331,8 @@ async fn setup_write(app: tauri::AppHandle, write: ainb_desktop::setup::SetupWri
             "Cancel".to_string(),
         ))
         .blocking_show();
-    tracing::info!(write = ?write, confirmed, "setup write");
+    SETUP_DIALOG_OPEN.store(false, Ordering::Release);
+    tracing::info!(write = kind, confirmed, "setup write");
     if !confirmed {
         return false;
     }
