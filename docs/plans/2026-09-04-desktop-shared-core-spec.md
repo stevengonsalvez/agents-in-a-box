@@ -253,7 +253,7 @@ Sections: the frames dump (`parity_frames.rs`) writes every section of every fix
 | code review | review tab | 1:1 hunks, CM6 paint | yes |
 | inbox | inbox | D3-prime, rebuilt on both surfaces: the screen's state was deleted before the extraction | yes |
 | stats / burndown (plugin) | stats tab | D3-prime: section 21 `usage`, a fold of the daemon's `fleet/usage_summary`, not the plugin's view; DOM-half fixture | yes |
-| abtop, witr, learnings, hangar (plugins) | WireBuffer painted in a plain cell grid | D3-prime: a plugin host the Tauri shell owns, cells on a channel of their own; `analytics` excluded, the stats tab draws it | yes, fallback |
+| abtop, witr, learnings, hangar (plugins) | placeholder states now; live cells per the runtime amendment | D3-prime: the three placeholders from `PluginsHostView`; the live cell (a shell-owned runtime, cells on a channel of their own) waits on its own amendment; `analytics` excluded, the stats tab draws it | yes, placeholders |
 | daemons overlay | daemons panel in settings | 1:1 | yes |
 | config | settings page | 1:1 + desktop extras | yes |
 | MCP pool overlay | settings panel | 1:1 | yes |
