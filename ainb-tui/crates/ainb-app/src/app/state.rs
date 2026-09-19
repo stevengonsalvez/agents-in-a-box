@@ -837,6 +837,26 @@ impl AppState {
             {
                 Some("it could finish onboarding with telemetry set up outside ainb")
             }
+            // A settings row a renderer may not edit (#1224), by name and by
+            // the key sequence: Enter on the row opens its popup, and Enter in
+            // the popup writes it. The judgement is the same at each step, so
+            // a script that sends the keys one by one is stopped at the first.
+            KeyAction::App(AppEvent::ConfigSetRow { key, .. }) => {
+                crate::config::renderer_edit::refusal(key)
+            }
+            KeyAction::App(AppEvent::ConfigEditSetting)
+                if self.shell.current_screen == crate::app::screens::ids::CONFIG =>
+            {
+                self.config
+                    .config_screen_state
+                    .current_setting()
+                    .and_then(|row| crate::config::renderer_edit::refusal(&row.key))
+            }
+            KeyAction::App(AppEvent::ConfigPopupConfirm)
+                if self.config.config_popup_state.show_popup =>
+            {
+                crate::config::renderer_edit::refusal(&self.config.config_popup_state.setting_key)
+            }
             _ => None,
         }
     }
