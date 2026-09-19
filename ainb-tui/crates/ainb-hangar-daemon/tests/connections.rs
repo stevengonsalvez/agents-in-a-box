@@ -258,10 +258,13 @@ async fn web_server_presence_lives_for_server_task() {
     observer.hello(home.path(), Some("tui")).await;
 
     let deadline = Instant::now() + Duration::from_secs(5);
+    let this_pid = u64::from(std::process::id());
     loop {
         let listed = observer.connections().await;
         let count = listed["connections"].as_array().map_or(0, |rows| {
-            rows.iter().filter(|row| row["surface"]["kind"] == "web").count()
+            rows.iter()
+                .filter(|row| row["surface"]["pid"].as_u64() == Some(this_pid))
+                .count()
         });
         assert!(
             count <= 1,
@@ -278,12 +281,20 @@ async fn web_server_presence_lives_for_server_task() {
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
     let settled = observer.connections().await;
-    let settled_count = settled["connections"].as_array().map_or(0, |rows| {
-        rows.iter().filter(|row| row["surface"]["kind"] == "web").count()
-    });
+    let this_process_rows: Vec<_> =
+        settled["connections"].as_array().map_or_else(Vec::new, |rows| {
+            rows.iter()
+                .filter(|row| row["surface"]["pid"].as_u64() == Some(this_pid))
+                .collect()
+        });
     assert_eq!(
-        settled_count, 1,
+        this_process_rows.len(),
+        1,
         "web presence remains exactly one row after settle: {settled}"
+    );
+    assert_eq!(
+        this_process_rows[0]["surface"]["kind"], "web",
+        "settled surface for this process is web: {settled}"
     );
 
     // Aborting the web server drops its server-owned guard and actual socket.
@@ -293,10 +304,9 @@ async fn web_server_presence_lives_for_server_task() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let listed = observer.connections().await;
-        if listed["connections"]
-            .as_array()
-            .is_some_and(|rows| rows.iter().all(|row| row["surface"]["kind"] != "web"))
-        {
+        if listed["connections"].as_array().is_some_and(|rows| {
+            rows.iter().all(|row| row["surface"]["pid"].as_u64() != Some(this_pid))
+        }) {
             break;
         }
         assert!(
@@ -762,6 +772,7 @@ async fn presence_lease_registers_once_a_late_daemon_comes_up() {
 /// saw as flicker.
 #[tokio::test]
 async fn web_one_shot_calls_beside_its_presence_never_list_a_second_row() {
+    ainb_hangar_client::reset_process_as_surface_for_test();
     let _env_lock = WEB_HOME_ENV_LOCK.lock().await;
     let home = tempfile::tempdir().expect("temporary Hangar home");
     let (socket, _store) = start_server(home.path()).await;
