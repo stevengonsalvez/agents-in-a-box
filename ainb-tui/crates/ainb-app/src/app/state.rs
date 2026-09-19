@@ -310,6 +310,43 @@ impl AppState {
         self.agent_status.update(|section| section.observe_head(head_revision))
     }
 
+    /// Fold one `hangar/inbox_list` read for the local human into the inbox
+    /// section (D3-prime), bounded and scrubbed there; bumps its version only
+    /// when a rendered fact changed.
+    pub fn apply_inbox_read(
+        &mut self,
+        read: ainb_hangar_proto::snapshots::InboxListResult,
+        received_at_ms: i64,
+    ) -> bool {
+        self.inbox
+            .update(|section| section.apply_read(read, INBOX_RECIPIENT, received_at_ms))
+    }
+
+    /// The host's inbox read failed: the rows shown stay and say the host is
+    /// unreachable, or the section is absent if it never had rows.
+    pub fn inbox_read_failed(&mut self, reason: impl Into<String>, _now_ms: i64) -> bool {
+        let reason = reason.into();
+        self.inbox.update(|section| section.mark_read_failed(reason))
+    }
+
+    /// The daemon cannot serve `hangar/inbox_list`: the section is absent, and why.
+    pub fn inbox_absent(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        self.inbox.update(|section| section.mark_absent(reason))
+    }
+
+    /// The inbox reader reconnected: drop the rows so the next read is fresh.
+    pub fn inbox_reset(&mut self) -> bool {
+        self.inbox.update(InboxSection::reset)
+    }
+
+    /// The daemon answered a "mark all read" sweep with how many rows it
+    /// flipped and the unread count after.
+    pub fn apply_inbox_mark_all_read(&mut self, marked: i64, unread: i64, now_ms: i64) -> bool {
+        self.inbox
+            .update(|section| section.apply_mark_all_read(marked, unread, now_ms))
+    }
+
     /// Every section's current version, indexed by [`SectionId::index`].
     ///
     /// A surface keeps the array it last saw and compares; that is 20 integer
