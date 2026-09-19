@@ -57,7 +57,7 @@ flowchart TD
   T0d --> T0s
 
   subgraph S3[slice 3: desktop crate]
-    D1[D1 shell, sidecar, terminal]:::plan --> D2[D2 board, answer, ACP card]:::plan --> D3[D3 review, inbox, settings]:::plan --> D4p[D4' updater, release matrix]:::plan
+    D1[D1 shell, sidecar, terminal]:::plan --> D2[D2 board, answer, ACP card]:::plan --> D3[D3 review, settings]:::plan --> D3p[D3' inbox, stats, fallback cell]:::plan --> D4p[D4' updater, release matrix]:::plan
   end
   P2 --> D1
   P3 --> D2
@@ -99,6 +99,7 @@ Same DAG, terminal view:
               │                              T0-section  ◀── T0-daemon    │      │
               │                                                           │      │
  slice 3      │                        D1 ◀── P2   D2 ◀── P3   D3 ◀── P5  ◀──────┘      │
+              │                        D3' inbox + stats + fallback cell ◀── D3         │
               │                        D4' updater + release matrix                     │
               ▼                                                                         ▼
  slice 5  R1 hosts + WS  ◀── W0-wire, P6, spike 3 ✓ ─▶  R2 emulator + floor ◀── spikes 2 ✓, 7 ✓
