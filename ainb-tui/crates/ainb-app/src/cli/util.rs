@@ -264,22 +264,27 @@ pub async fn session_source() -> &'static SessionSource {
     SESSION_SOURCE.get_or_init(SessionSource::resolve).await
 }
 
+/// Drive `fut` to completion from sync code, wherever it is called from.
+///
+/// On a multi-thread runtime the current worker blocks in place. On a
+/// current-thread runtime the only thread that can drive IO and timers is the
+/// one calling us, so the future runs on a scoped thread with a fresh
+/// current-thread runtime of its own: reusing the caller's handle there would
+/// wait on a driver that is blocked waiting on us.
 fn run_async<F: std::future::Future<Output = T> + Send, T: Send>(fut: F) -> T {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        match handle.runtime_flavor() {
-            tokio::runtime::RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(|| handle.block_on(fut))
-            }
-            _ => std::thread::scope(|s| {
-                s.spawn(|| handle.block_on(fut)).join().expect("thread join")
-            }),
-        }
-    } else {
+    let fresh = |fut: F| {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("create tokio runtime")
             .block_on(fut)
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(fut))
+        }
+        Ok(_) => std::thread::scope(|s| s.spawn(|| fresh(fut)).join().expect("thread join")),
+        Err(_) => fresh(fut),
     }
 }
 
@@ -589,6 +594,28 @@ mod tests {
         ] {
             assert_eq!(back::<CodexModel>(format!("{v:?}")), v);
         }
+    }
+
+    /// Called from inside a current-thread runtime, `run_async` must finish a
+    /// future that needs the timer driver. Reusing the caller's handle
+    /// deadlocked here, so the test fails on a timeout rather than hanging.
+    #[test]
+    fn run_async_completes_inside_a_current_thread_runtime() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let got = rt.block_on(async {
+                run_async(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    7
+                })
+            });
+            let _ = tx.send(got);
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("run_async deadlocked inside a current-thread runtime");
+        assert_eq!(got, 7);
     }
 
     #[test]
