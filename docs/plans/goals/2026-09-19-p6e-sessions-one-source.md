@@ -34,7 +34,7 @@
 · Locked decisions. A node PR does not reopen one.
   - The daemon owns durable session state (base spec `:71`, `:286`, `:318`). After this node the table is the only store every surface reads and writes.
   - One source per process, decided once (P6d, `SessionSource` in a `OnceCell`), and a daemon failure after the decision is an error, never a silent switch to the file.
-  - The import is one-time per file, keyed by the marker row; a failed import writes no marker and keeps clients on the file (P6d `session_import.rs`).
+  - The import is one-time per file, keyed by the marker row; a failed import writes no marker and keeps clients on the file (P6d `session_import.rs`). The reconcile that follows it is repeatable ("Mixed versions"); only the first import is one-time.
   - The RPC boundary validates every entry and never evicts a session that holds a tmux name (P6d `sessions.rs:174`, `repo/sessions.rs:186`).
   - No destructive migration: the import only reads `sessions.json`; a user who downgrades still has their sessions (parent goal `:121`).
   - The concurrency gate is a scripted scenario under `ainb-tui/scripts/proof/scenarios/` registered in `ALL_NODES`, never a hand test (parent goal constraints).
@@ -55,13 +55,20 @@
 
 · The whole seam is `SessionSource`. P6e does not add a second resolver: every `SessionStore::load`, `lock` and `mutate` call in the list above becomes `load_session_store` / `mutate_session_store` (or their async forms), so the TUI, the desktop, the CLI and, through `ainb list --frame`, the web read one decision per process.
 · The flip is a one-line change: append `CAP_WORKSPACE_SESSIONS` to `CAPABILITY_CATALOGUE` and to `capabilities.catalogue`. It is the LAST commit of the node, after every reader and writer has moved and the reconciliation has landed, so no intermediate commit on `v2` has a surface on the table while another is on the file.
-· Reconciliation happens in the daemon, at boot, before the capability can matter to a client, in the same shape as the P6d import: a marker row, one transaction, and clients stay on the file until it is complete.
+· Reconciliation happens in the daemon, in the same shape as the P6d import (a marker row, one transaction, clients on the file until the first pass completes), but it is repeatable, not one-time: see "Mixed versions" below.
+
+─ MIXED VERSIONS, AND WHY THE FILE STAYS WRITTEN ─
+
+· `advertises` reads the client's OWN compiled catalogue (P6d `protocol.rs:342`), so a pre-P6e binary (a CLI, TUI or `ainb web` left running from the previous release, or a second install) always resolves to the file, whatever the daemon advertises. A pre-P6e daemon never advertises, so a post-P6e client beside it stays on the file too. Both cases must be safe, not just rare.
+· The file stays written after the flip, so a downgrade sees current sessions. Every write through `SessionSource::Daemon` takes the `sessions.json` flock and changes the file row by row (upsert or remove by tmux key, the `register_session_at` shape), never a whole-file replace, and changes the table inside the same flock. Order: the file row first, then the table; if the table write fails, the file change is reverted before the flock is released and the error is returned. So after every successful new-binary write, the file and the table agree on that session.
+· The reconcile is repeatable. It runs on every daemon boot, on a surface's move out of the degraded state (see "Daemon down at startup"), and whenever `sessions.json`'s mtime has changed since the last pass, checked at most every 30 s. Each pass inserts every file session whose id is absent from the table; the table wins on everything else. Because every new-binary delete removes the file row first, a session that is in the file and not in the table can only have come from a writer that bypassed the table (an old binary, or a surface while degraded), so inserting it is correct and never resurrects a row the new stack deleted.
+· Old-binary deletes are the stated limitation: a previous release's `ainb kill` removes the file row only, the table keeps the session, and no reconcile deletes. The new stack goes on listing that session until it is killed from a new binary. A test pins this so a change to the rule is deliberate.
 
 ─ WHAT P6E MUST NOT DO ─
 
 · No partial flip. No commit on `v2` may advertise the capability while any reader or writer in the blast-radius list is still on the file. The desktop journey failure on `1cf133981` is what that looks like.
 · No resurrection. The reconciliation never re-inserts a session the table deleted, and never overwrites a table row with an older file row.
-· No whole-file mirror. Nothing writes the daemon's snapshot over `sessions.json` (the P6d review removed exactly that); if the file is kept for downgrades, it is written row by row under its flock, never replaced wholesale.
+· No whole-file mirror. Nothing writes the daemon's snapshot over `sessions.json` (the P6d review removed exactly that); the file is kept current row by row under its flock, as "Mixed versions" describes.
 · No second resolver, no per-call source decision, and no fallback to the file after the process chose the daemon.
 · No edits to `ainb-tui/crates/ainb-core/src/app/*`, the standing lane rule. `ainb-app/src/app/state.rs` is not under that rule.
 · No new wire field without the key-path fixture and bindings regenerated in the same PR (parent goal constraints), and `tests/serialize_guard.rs` with its fixture stays untouched: convert enums by name, as P6d's `metadata_to_entry` does.
@@ -72,7 +79,7 @@
 
 2. The TUI sees what the CLI writes and the reverse. With a real daemon in a private hangar home (capability on, import complete): a session created by `ainb run` appears in the TUI's workspace list read (`state.rs:3110` path) without a restart; a session the TUI creates (`session_manager.rs:1575` path) appears in `ainb list --format json`; `ainb kill` of a TUI-created session removes it from the TUI's next read; `Persist::SessionHeadroom` keeps its compare-and-set semantics through the daemon (a test where the expected value moved leaves the row unchanged). Each is an integration test that fails when the corresponding site is reverted to the file.
 
-3. Reconciliation without resurrection. A daemon boot on a home whose P6d import marker exists reconciles `sessions.json` once more, behind its own marker row (`<path>#reconcile`, open question 3): every file session whose id is absent from the table is inserted; a table row is never overwritten by its file row; a failed reconciliation writes no marker and keeps `session_list.import_complete` false even though the P6d import row exists (the kind-aware check of open question 3). Three tests, one per clause, each red when its guard is removed. No tombstones: see open question 1.
+3. Reconciliation without resurrection, repeatable. Daemon state: capability on (test switch before the flip), P6d import row present. Each pass (boot, degraded exit, mtime change) inserts every file session whose id is absent from the table; a table row is never overwritten by its file row; a session deleted through the new stack is gone from the file too, so a later pass does not bring it back; a session an older binary appended to the file after the previous pass is inserted by the next one; a failed pass writes no marker and keeps `session_list.import_complete` false even though the P6d import row exists (the kind-aware check of open question 3). Five tests, one per clause, each red when its guard is removed. No tombstones: see open question 1.
 
 4. The flip is last and alone. The final commit of the implementation PR touches only `protocol.rs` (the catalogue entry), `capabilities.catalogue`, and the test that pinned the capability off (now pinning it on). `hello` advertises `hangar.workspace.sessions` in a test against a real daemon, and `SessionSource::resolve` answers `Daemon` with no test-only switch.
 
@@ -80,7 +87,7 @@
 
 6. The concurrent proof passes. `ainb-tui/scripts/proof/scenarios/p6-concurrent.sh`, registered in `run.sh`'s `ALL_NODES`, starts a TUI, an `ainb web` and a CLI against one daemon in every combination the scenario defines, creates a session from each surface and asserts the other two see it, kills one from each surface and asserts the other two drop it, answers an ASK from one surface and asserts the other two fold it, and writes `result.json` with `pass: true`. `bash ainb-tui/scripts/proof/run.sh --only p6-concurrent` passes on the PR's head, and a full harness run reports every other node passing.
 
-7. No downgrade loss. A session created after the flip is still listed by the previous release (`ainb list` built from the P6d merge commit, no daemon) run against the same home, or the PR body states the decision that it is not and the orchestrator has accepted it on the PR (open question 2).
+7. Mixed versions, both directions. Daemon state: a post-flip daemon up with import and reconcile complete, and a previous-release `ainb` built from the P6d merge commit. (a) New writer, old reader: a session created through the new CLI and one killed through it are, respectively, listed and not listed by the previous release's `ainb list` against the same home, and a new write whose table step is made to fail leaves the file unchanged. (b) Old writer, new reader: a session the previous release's `ainb run` creates appears in the new `ainb list` after at most one reconcile interval, and a session the previous release kills stays listed by the new stack, pinning the stated limitation.
 
 8. The programme row `docs/plans/2026-09-12-desktop-programme.md:126` is flipped to done with the PR numbers and the proof run id, in the implementation PR.
 
@@ -119,7 +126,7 @@
 
 1. **Tombstones: decided, no.** While P6d is dark the only table deletes are the daemon's own retried-pane replacements (`shadow_write_session`), whose file entry is replaced under the same key, so there is nothing a reconcile could resurrect. A tombstone table would add an obligation at every delete site, forever, for an empty hazard set. Resurrection is prevented instead by keeping the file current, deletes included (see "Mixed versions").
 
-2. **Does a session created after the flip survive a downgrade?** Recommended: yes for one release. The daemon writes each changed table row into `sessions.json` through `register_session_at`'s flock (row-level upsert or remove, never a whole-file replace), best-effort and bounded like P6d's shadow write, and a later node removes it with a spec note. Rejected alternative: accept the loss, because the parent goal's constraint (`:121`) reads "a user who downgrades still has their sessions" without a date.
+2. **Does a session created after the flip survive a downgrade?** Decided: yes. The file stays written, row by row under its flock, with the table ("Mixed versions"). Writes from an older binary are picked up by the repeatable reconcile; deletes from an older binary are not, and that is stated and tested (criterion 7b). Removing the file write is a later node with its own spec note.
 
 3. **Where does the reconciliation marker live?** Decided: a second row in `session_import` keyed `<path>#reconcile`, written by the first successful reconcile pass in the same transaction as its rows. No migration: widening the primary key would rebuild the table in SQLite and drag `migration_upgrade_full_chain`. `import_complete` becomes kind-aware: `SessionsRepo::any_import_completed` (P6d `repo/sessions.rs:299`, today `COUNT(*) > 0`) is replaced by a check that BOTH the `<path>` import row and the `<path>#reconcile` row exist for the file the daemon resolves, so the P6d row alone never reports the table authoritative.
 
