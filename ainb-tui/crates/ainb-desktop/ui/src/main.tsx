@@ -12,6 +12,7 @@ import { transcriptIntent, transcriptView } from "./acp.ts";
 import { AnswerBanner } from "./answer.tsx";
 import { phaseOf, questionFor, type Refusal, sendInOrder } from "./answer.ts";
 import { newNotices, noticeKey } from "./notices.ts";
+import { terminal as updateDone, updateLine, type UpdatePhase } from "./update.ts";
 import { Board } from "./board.tsx";
 import { Review } from "./review.tsx";
 import { boardColumns } from "./board.ts";
@@ -66,10 +67,16 @@ function Shell() {
 
   // Registered synchronously: an `onCleanup` after an `await` has left the
   // owner and never runs.
+  // The updater's framed state: one line while an update is in flight.
+  const [updatePhase, setUpdatePhase] = createSignal<UpdatePhase | null>(null);
   const listeners = [
     listen<SidecarState>("sidecar", (event) => setSidecar(event.payload)),
     listen<TabsView>("terminal_tabs", (event) => showTabs(event.payload)),
     listen<string>("toast", (event) => toast(event.payload)),
+    listen<UpdatePhase>("update", (event) => {
+      setUpdatePhase(event.payload);
+      if (updateDone(event.payload)) setTimeout(() => setUpdatePhase(null), TOAST_MS);
+    }),
     listen<HostId>("host", (event) => {
       // The host re-pinned its frames to a new id (#1066). What the old id
       // left in the store is never framed again: drop it, so it neither shows
@@ -546,6 +553,7 @@ function Shell() {
         <Palette sessions={sessions()} onChoose={dispatch} onClose={closePalette} />
       </Show>
       <div class="toasts" aria-live="polite">
+        <Show when={updateLine(updatePhase())}>{(line) => <div class="toast update-status">{line()}</div>}</Show>
         <For each={toasts()}>{(entry) => <div class="toast">{entry.text}</div>}</For>
       </div>
     </main>
