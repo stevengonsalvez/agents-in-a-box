@@ -1,0 +1,273 @@
+# /goal D4-prime ships the desktop as a release the operator can install and keep current: a release job that bundles the shell with its sidecar for macOS arm64, macOS x64 and Linux x64 under the one version the CLI, the daemon and the Fleet app already share, signed and notarised only from secrets the human supplies; an updater that reads the signed manifest the CLI already verifies, verifies a bundle before it swaps it in, keeps the previous bundle for a rollback and never applies on a channel the operator turned off; and a sidecar that meets a daemon of another version by reading what hello answered rather than spawning a second one, proved by a desktop leg in the skew harness, a bundle smoke that runs the produced bundles, and a release-branch rehearsal the human drives
+
+─ CONTEXT ─
+
+· First act in the worktree: the lane runs on this laptop under `~/orca/workspaces/agents-in-a-box/d4-updater`, three other lanes share it. Run `git fetch origin v2 && git switch -c docs/d4-goal origin/v2` before any edit, commit this file as the first signed commit, push, and open a draft PR against `v2`. The code PRs start only after the orchestrator approves this goal on that PR; until then, read. Every later file change is its own signed commit, and never `git add -A`. Build with `-j 3` and `CARGO_INCREMENTAL=0`. Message the orchestrator with the head sha at each PR; never poll CI, the orchestrator brings the verdict.
+
+· Project: agents-in-a-box (ainb) desktop programme, slice 3 node D4-prime.
+  - Programme row: `docs/plans/2026-09-12-desktop-programme.md:136`, "D4' updater, release matrix (host switcher moved to R1) | 3 | planned | D3' | release-branch human-driver run | spec v1.3 amendment 26". Gate to start: D3-prime, **not met**: D3 is started on lane F (programme `:134`) and D3-prime is not written. Gate to finish: "release-branch human-driver run", which stays a human step; the section "THE HUMAN-DRIVER RUN" says what the human runs.
+  - The node this one extends: D3, programme `:134`, goal `docs/plans/goals/2026-09-19-d3-desktop-review.md`, whose D3d lands the settings page and the daemons panel this node adds rows to. D3's follow-ups that touch this node are the renumbered section set (`:217`) and the drain cost (`:157`).
+  - Base spec `docs/plans/2026-09-04-desktop-shared-core-spec.md`: the D4 row (`:119`), the "D4 after P6 + S" rule (`:121`), the local transport row (`:299`), the singleton note (`:303`), the two error rows this node owns (`:360` "sidecar binary missing", `:361` "updater signature mismatch"), the human driver row (`:373`), and the packaging table (`:379-389`) which this node amends.
+  - Multi-surface spec `docs/plans/2026-09-11-multi-surface-decisions-spec.md`: D17 (`:60`, `:134-139`), the paint-into-corner row "D4 rescope" (`:193`), and the edge row this node is built around, `:267`: "desktop sidecar daemon older than the installed `ainb` | flock winner serves; loser's clients negotiate down; a client that cannot negotiate shows 'daemon protocol too old, restart from the newer binary' and never spawns a second daemon".
+  - Amendment 26: `research/2026-09-11_multi-surface_CRITIQUE-amendments.md:36`, "R1 absorbs D4's host switcher and transport; D4 keeps the updater and release matrix in the desktop track and lands after D3". Folded into the base spec at `:8` and the multi-surface spec at `:8`. So the host switcher, `ssh -L` and the WS transport are R1's and nothing here touches them.
+  - Sibling goals whose format and voice this one matches: `docs/plans/goals/2026-09-19-d3-desktop-review.md` and `docs/plans/goals/2026-09-16-d2-desktop-board.md`.
+
+· What is on `v2` that D4-prime builds on, seam by seam. Every path and line below exists on `origin/v2` at `175a421ff`. D3a, D3b and D3d are not merged yet; re-read this section against the tip the lane actually starts from, and the settings page in particular.
+
+  The updater that already exists, for the CLI.
+  - `ainb-app/src/cli/update.rs` is a whole signed-update path: `RELEASE_DOWNLOAD_ROOT` (`:16-17`) is `releases/latest/download` on this repository, `RELEASE_SIGNING_PUBLIC_KEY_B64` (`:18`) pins the Ed25519 public key, `ReleaseManifest { version, assets[] }` (`:24-30`) with `ReleaseAsset { target, archive, sha256 }` (`:34-41`), archive-name and checksum validation (`:43-60`), `verify_manifest` and its test seam `verify_manifest_with_key` (`:92-121`), `UpdateAvailability` (`:127-132`), `ReleaseState` written atomically (`:136-183`), the prerelease refusal in `stable_version` (`:73-80`), the fetch of `release-manifest.json` and `release-manifest.sig` (`:334-341`), `apply_command` (`:303-323`), the install owner classification `Homebrew | Cargo | Direct` by canonical path (`:719-742`), and the direct swap that stages a replacement beside the binary, re-signs it on macOS, and renames it into place with a plugin swap that rolls back on failure (`:553-575`, `:667-684`). `ainb update` is registered at `ainb-core/src/cli/registry.rs:3015-3036` with `check`, `status` and `schedule`. `ainb-core/tests/update_domain.rs` pins the signature, the prerelease refusal, the unsafe-asset refusal and the no-downgrade rule; `update_cli.rs` pins the verbs.
+  - The desktop already depends on `ainb-app` (`ainb-desktop/Cargo.toml:43`), so this path is in its build. **The desktop updater is a second consumer of one manifest, one key and one verify function, not a second updater.**
+  - The daemons panel's probe already reads the cached release state (`ainb-app/src/fleet/daemons/probe.rs:1301-1320`), and `ainb daemon` enables the daily check timer (`cli/daemon.rs:193-197`). The desktop shows whatever the TUI shows there for free once D3d frames the panel.
+
+  The release matrix that already exists.
+  - `.github/workflows/release.yml` runs on `workflow_dispatch` with `version` and `prerelease` (`:3-14`), validates the version as `x.y.z` or `x.y.z-suffix` (`:46-54`), refuses a stable release without the Fleet app's feed secrets (`:56-71`), bumps `Cargo.toml` (`:137`), tags a `chore/release-v<X>` side branch (`:206`, the mechanism behind #733), and builds three CLI targets (`:263-282`): `aarch64-apple-darwin` and `x86_64-apple-darwin` both on `macos-latest`, the x64 one cross-compiled because Intel runners queue indefinitely in this org (`:270-273`), and `x86_64-unknown-linux-gnu` on `ubuntu-latest`. The Fleet app job archives a universal app, ad-hoc signs it (`codesign --force --deep --sign -`, `:394-395`) and signs its own update feed (`:401-406`). The release job signs `release-manifest.json` with `AINB_RELEASE_SIGNING_KEY` through `openssl pkeyutl` and base64-encodes the detached signature (`:435-467`), then publishes everything under `artifacts/**` with `softprops/action-gh-release` (`:500-507`). The tap job rewrites the formula and the Fleet cask (`:559-571`).
+  - The secrets the repository has today are exactly `AINB_RELEASE_SIGNING_KEY`, `HOMEBREW_TAP_TOKEN`, `SPARKLE_PRIVATE_ED_KEY`, `SPARKLE_PUBLIC_ED_KEY` and `GITHUB_TOKEN`; `docs/contributing/release-process.md:35-44` is their table. **There is no Apple Developer ID, no notarisation credential and no team id: #530 records that as an external gate, unchanged since 2026-07-29.** Nothing on `v2` notarises anything, and the Fleet app ships with a documented Gatekeeper override (`release.yml:529-537`).
+  - One version per release: the workflow's `version` input names the tag, the CLI, the daemon and the Fleet app (`release-process.md:18-20`). The desktop is not in that set yet: `ainb-desktop/Cargo.toml:3` and `tauri.conf.json:4` both read `0.1.0` while the workspace reads `1.28.2` (`ainb-tui/Cargo.toml:53`), and the prepare job's bump step (`release.yml:137`) does not know the excluded workspace.
+
+  The desktop CI and the bundle smoke.
+  - `.github/workflows/desktop.yml` has three jobs on `ubuntu-latest` and `macos-latest`: `desktop` (`:45-107`: frontend build and tests, `cargo xtask stage-desktop-sidecar`, fmt, clippy, the host contract and sidecar tests, the `Desktop.ts` freshness test), `e2e` (`:113-222`: the wdio journey under `xvfb-run` on Linux, the declared substitute on macOS, the recorded throughput figure), and `bundle` (`:226-324`: `cargo build --release --features bundled`, then a smoke that proves the release binary exports no WebDriver symbol, names no driver plugin, and, on Linux, runs under xvfb for 20 s alive and binds no port).
+  - **The bundle smoke never runs the bundler.** It builds the binary. No `.app`, `.dmg`, AppImage or `.deb` has ever been produced in CI, and `bundle.targets: "all"` in `tauri.conf.json:29` has never been exercised.
+  - The Tauri config is small: `tauri.conf.json` names the product, the identifier `dev.agentsinabox.desktop`, one window, a CSP, and `bundle.externalBin: ["binaries/ainb-hangar-daemon"]` (`:27-32`); `capabilities/default.json:6` grants `core:default` only; `Cargo.toml:24-40` has the features `app`, `bundled`, `wdio`, `typescript-bindings`, `tauri` pinned `~2.11.5` (`:56`) and `tauri-build` `~2.6.3` (`:65`); `main.rs:358-365` refuses at compile time a release binary carrying the WebDriver or lacking `bundled`. The frontend pins SolidJS 1.9.15, TypeScript 5.6.3 and `@tauri-apps/api` 2.11.1 (`ui/package.json`).
+  - `ainb-tui/xtask/src/desktop_sidecar.rs` builds the daemon and copies it to `crates/ainb-desktop/binaries/ainb-hangar-daemon-<triple>` (`:54-58`), where the triple is the **host's** from `rustc -vV` (`:42`, `:64-72`). A cross-compiled x64 macOS bundle needs a `--target` the xtask does not take.
+
+  The sidecar and what hello answers.
+  - `ainb-desktop/src/sidecar.rs` is the supervisor: probe, spawn, attach to the flock winner, reconnect with 1 s, 4 s, 16 s backoff, degrade (`:4-15`). `find_or_start` (`:331-385`) calls `hello` (`:444-446`), and **any** error means "no daemon", so it spawns the bundled binary; a child that loses the flock exits 0 and the supervisor waits on hello for the whole `hello_budget` of 180 s (`:57-65`, `:450-477`). `spawn_daemon` (`:403-439`) runs the daemon in its own session and never kills it; `daemon_pid` (`:481-487`) reads `<home>/hangar/daemon.lock`. `SidecarState` (`:96-112`) has `Starting`, `Connected { daemon_pid, spawned }`, `Reconnecting`, `Degraded`; `SidecarView` (`:119-124`) is the webview's copy with no pid and no path. **The result of hello is discarded** (`:445`, `.map(|_| ())`): the daemon's protocol range, its capability catalogue and its `daemon_version` are read and thrown away.
+  - `main.rs:284-304` resolves the bundled daemon beside the executable and a release build never takes it from the environment or `PATH`; `main.rs:306-321` resolves the `ainb` on `PATH` that daemon lifecycle verbs run through (`executor.rs:217-226`, `ainb daemon <daemon> <verb>`), which is a **third** binary whose version nothing checks. `main.rs:465-475` reads the host id once Connected.
+  - `ainb-desktop/tests/sidecar.rs` pins cold start, attach to the winner, reconnect, crash loop, backoff exhaustion, path scrubbing, the slow-booting owner never killed (`:334`) and the non-owner child stopped (`:359`).
+  - The daemon side of hello: `ainb-hangar-proto/src/protocol.rs` has `PROTOCOL_VERSION = 1` (`:46`), `PROTOCOL_MIN_SUPPORTED = 1` (`:52`), the bump rule (`:16-28`), `PROTOCOL_INCOMPATIBLE = -32007` (`:60`, "must retry with a different BUILD, never with a different credential") and `negotiate` (`:123-138`). `HelloResult` (`auth.rs:133-157`) carries `protocol`, `selected`, `capabilities`, `daemon_version` ("for diagnostics only. Never branched on", `:146-147`) and `host_id`. The daemon answers `ack` with all of them (`ainb-hangar-daemon/src/rpc/auth.rs:430-444`) and refuses a non-overlapping range with `incompatible` (`:450-474`), whose message names both ranges and the fix, "restart from the newer binary", and whose `data` carries a `HelloResult` with `daemon_version`. The daemon binary answers `--version` (`ainb-hangar-daemon/src/main.rs:16`).
+  - The client: `ainb-hangar-client/src/lib.rs:888-891` `hello()` returns the decoded `HelloResult`; `dial_with` (`:895-923`) turns an error reply into `DaemonError::Rpc { code, message }` (`:908-913`) and drops `data`. `socket_path_in` (`:231-233`) dials the versioned alias only when `ainb-hangar-core/src/socket.rs:50-57` finds it a trustworthy symlink; the daemon links `hangar-v<N>.sock` at bind (`rpc/mod.rs:243-263`, `:282`).
+  - A stale daemon over a newer store is already detected: `ainb-hangar-store/tests/schema_drift.rs:1-8` is the tripwire for "applied schema AHEAD of this binary", the red banner in the daemon-health pane. A rollback of the app to an older bundled daemon is exactly that case.
+
+  The skew harness, which is this node's model.
+  - `ainb-hangar-daemon/tests/skew_harness.rs` runs {daemon N, daemon N-1 as committed frames} x {hangar-client, ainb-web, Swift fixture} plus the local socket leg (`:1-25`): `hangar_client_talks_to_both_daemon_versions` (`:154`), `ainb_web_talks_to_both_daemon_versions` (`:173`), `the_n_minus_1_client_frame_is_accepted_by_daemon_n` (`:243`), `a_client_from_the_future_is_refused_as_incompatible` (`:282`), `the_versioned_alias_and_the_plain_socket_are_one_daemon` (`:314`), `a_squatted_versioned_alias_is_not_dialled` (`:344`). Daemon N-1 is `tests/fixtures/skew_frames.json`, a contract rather than an old binary (`:16-20`).
+  - The matrix D17 asks for includes the local leg "{sidecar daemon, installed daemon} x {TUI, desktop, web, CLI, Swift app} at N and N-1" (multi-surface `:139`). **The desktop leg does not exist**: no test drives `Sidecar` against daemon N-1's frames, and none drives it against a daemon that refuses it. Since the desktop dials through `DaemonClient`, its hello frame is the hangar-client's, so the "desktop N-1 against daemon N" half is already `:154` and `:243`; the missing half is the supervisor's behaviour on what comes back.
+
+  The proof harness.
+  - `ainb-tui/scripts/proof/run.sh:86-93` lists twenty nodes ending `d1-shell d2-board`; D3 adds `d3-review`. A scenario is a bash file in `scenarios/` with `EXPECT`, a `scenario()` that checks the shell is built and skips without `xvfb-run` (`scenarios/d2-board.sh:42-50`), and a `result.json`.
+
+─ WHAT D4-PRIME MAY NOT REOPEN ─
+
+· D17's bump rule and its one integer (`protocol.rs:16-28`). Nothing in this node branches on `daemon_version` (`auth.rs:146-147`); a reader that needs a method asks `HelloResult::advertises`. The version string is shown to the operator and compared to nothing.
+· A release build takes its daemon from beside its own executable and from nowhere else (`main.rs:284-287`). The updater does not add a path, an environment variable or a `PATH` lookup for the daemon; the cure for a stale sidecar is a newer bundle.
+· The sidecar never kills a daemon on the app's exit and never spawns a second (`sidecar.rs:17-19`, multi-surface `:267`). An operator's explicit "restart the daemon from this bundle" is a confirmed action that stops the incumbent through the daemon's own supported stop path first; it is not a change to those two rules.
+· A release bundle carries no WebDriver and binds no port (`desktop.yml:224-324`, `main.rs:358-365`). Every bundle the release job produces goes through the same smoke, not only the binary.
+· The pinned public key (`update.rs:18`), the manifest's file names (`:340-341`) and its shape. New rows for the desktop are additive and default, so a CLI built before this node decodes the new manifest and finds its own row; `update_domain.rs` stays green unchanged.
+· Secrets are named, never minted. The Apple identity, the notarisation credential and the team are #530's, supplied by the human as repository secrets; the lane writes the steps that read them and the gate that says when they are absent. No signing is ever attempted with an identity that is not this product's (#530's last line).
+· One version per release (`release-process.md:18-20`). The desktop joins that version; it does not keep `0.1.0` or a line of its own.
+· Locked decisions D10 to D18 stand; the host switcher and every transport question are R1's (amendment 26). `ainb-tui/crates/ainb-core/src/app/*` is untouched, the standing lane rule.
+
+─ THE SEAMS D4-PRIME HAS TO OPEN ─
+
+```
+┌────────────────────────────────┐   ┌──────────────────────────────────┐
+│ 1 every hello error means      │──▶│ PROTOCOL_INCOMPATIBLE is its own │
+│   "no daemon", sidecar.rs:332  │   │ state: no spawn, both ranges     │
+│   spawns, waits 180 s, degrades│   │ named, the fix named             │
+└────────────────────────────────┘   └──────────────────────────────────┘
+┌────────────────────────────────┐   ┌──────────────────────────────────┐
+│ 2 hello's answer is discarded  │──▶│ Connected carries the daemon's   │
+│   sidecar.rs:445               │   │ version and range; the daemons   │
+│                                │   │ panel draws them                 │
+└────────────────────────────────┘   └──────────────────────────────────┘
+┌────────────────────────────────┐   ┌──────────────────────────────────┐
+│ 3 no desktop leg in the skew   │──▶│ Sidecar vs daemon N-1 frames and │
+│   harness, multi-surface :139  │   │ vs a daemon from the future      │
+└────────────────────────────────┘   └──────────────────────────────────┘
+┌────────────────────────────────┐   ┌──────────────────────────────────┐
+│ 4 one manifest, one product,   │──▶│ desktop rows in the same signed  │
+│   one owner set, update.rs     │   │ manifest; a bundle swap with a   │
+│                                │   │ kept previous; a channel         │
+└────────────────────────────────┘   └──────────────────────────────────┘
+┌────────────────────────────────┐   ┌──────────────────────────────────┐
+│ 5 release.yml builds the CLI   │──▶│ a desktop job per target, the    │
+│   and the Fleet app only       │   │ bundler pinned, signing by       │
+│                                │   │ secret presence, one version     │
+└────────────────────────────────┘   └──────────────────────────────────┘
+┌────────────────────────────────┐   ┌──────────────────────────────────┐
+│ 6 the xtask stages the host    │──▶│ --target for the cross-compiled  │
+│   triple only, xtask :42       │   │ x64 macOS leg                    │
+└────────────────────────────────┘   └──────────────────────────────────┘
+┌────────────────────────────────┐   ┌──────────────────────────────────┐
+│ 7 the bundle smoke runs a      │──▶│ it runs the AppImage and opens   │
+│   binary, never a bundle       │   │ the .app, and checks the sidecar │
+│                                │   │ inside answers the same version  │
+└────────────────────────────────┘   └──────────────────────────────────┘
+```
+
+The first seam is the one the multi-surface spec wrote a row for (`:267`) and nobody built. Today a daemon from a newer `ainb` that refuses the desktop's range is answered by a spawn: the child loses the flock, exits 0, and the supervisor polls hello for three minutes against a daemon that keeps saying "restart from the newer binary" before it degrades with "no daemon answered", which is the wrong sentence. After D4a the refusal is read on the first frame, nothing is spawned, and the banner says which of the two binaries to move. The fourth seam is where the node's size is: the CLI's updater owns the network, the key and the verify, and the desktop owns only what differs, the target rows it looks for and the swap of a bundle rather than a file.
+
+The skew table this node has to make true, with the desktop at version D and the daemon that owns the home at version M:
+
+| daemon that owns the home | today | after D4a |
+|---|---|---|
+| none | the bundled daemon is spawned | same |
+| older than D, ranges overlap | hello negotiates the highest common version; readers take their older path by capability | same; the daemons panel shows `M`, the range, and "this bundle carries a newer daemon: restart it" behind a confirm |
+| older than D, no overlap | spawn, child loses the flock, 180 s of polling, `Degraded { "no daemon answered" }` | `Incompatible` on the first frame, no spawn, banner names both ranges and offers the same restart |
+| newer than D, ranges overlap | negotiates down; the newer daemon serves | same; the panel says the daemon is newer than this app, and the update check runs at once |
+| newer than D, no overlap | as the third row | `Incompatible`, no spawn, banner says "this app is older than the daemon; update the app", the update check runs at once |
+
+The restart the second and third rows offer stops the incumbent by the pid its lock names (`sidecar.rs:481-487`) with the signal the daemon's `shutdown` module handles (`ainb-hangar-daemon/src/lib.rs:300-302`), then runs the probe again, which spawns the bundled daemon. It does not run through the `ainb` on `PATH` (`executor.rs:217-226`), because that binary is a third version and may be the very one whose daemon is being replaced.
+
+─ SCOPE, STAGED AS PRs ─
+
+Four PRs: the amendment, the sidecar seam with the skew leg, the updater, and the release matrix with the bundle smoke, the rehearsal script and the programme row folded in. Each is mergeable alone, targets `v2`, and carries its own proof. The amendment goes first, as D3·spec did, because the packaging table this node builds against says "universal" and "`latest.json`" and neither survives contact with what is on `v2`.
+
+**D4·spec, the amendment (docs only).**
+· Touches: `docs/plans/2026-09-04-desktop-shared-core-spec.md`.
+· Says five things, one paragraph each, under the packaging table (`:379-389`): that the desktop ships per-arch macOS bundles rather than a universal one, because the sidecar is a target-triple-named external binary the xtask stages one at a time and the CLI already ships per-arch through the same cross-compile (`release.yml:270-277`), and the "universal dmg sidecar pickup" spike (`:389`) is closed by that choice; that the updater reads `release-manifest.json` and `release-manifest.sig` verified with the key at `update.rs:18`, not a `latest.json` with a second key, so one release has one signature; that the channel is `stable` (the `releases/latest` manifest, prerelease versions refused as today), `prerelease` (the newest prerelease tag's manifest, for the rehearsal in this node's gate) or `off` (no request leaves the app); that Linux arm64 is deferred with its cost; and that "release-branch human-driver run" means the script in "THE HUMAN-DRIVER RUN" below, performed by a human on a prerelease cut by the release workflow, with the recording linked from the programme row. The error rows `:360-361` gain the sentences that name the banner each shows.
+· Gate: docs jobs only. Merged before D4a opens.
+
+**D4a, the sidecar seam and the desktop skew leg.**
+· Touches: `ainb-tui/crates/ainb-hangar-client/src/lib.rs` (shared: name it in the PR body, merge `origin/v2` first), `ainb-tui/crates/ainb-desktop/src/sidecar.rs`, `src/main.rs`, `tests/sidecar.rs`, a new `tests/skew.rs`, `bindings/Desktop.ts` if `SidecarView` is among the generated shapes, `ainb-tui/xtask/src/desktop_sidecar.rs`, `ainb-tui/crates/ainb-hangar-daemon/tests/skew_harness.rs` (the future-client test at `:282` asserts the new variant).
+· Builds: `DaemonError::Incompatible { daemon: ProtocolRange, client: ProtocolRange, daemon_version: Option<String> }` decoded in `dial_with` from the `data` the daemon already sends (`rpc/auth.rs:463-471`), one new arm at `client/lib.rs:908-913`, no widening of `Rpc`; `SidecarState::Incompatible { message, daemon_is_newer: bool }` and its view, reached on the first hello that returns the variant, with no spawn; `SidecarState::Connected` carrying `daemon_version: Option<String>` and `protocol: ProtocolRange` from the hello the presence lease completed, and `SidecarView::Connected` carrying the same two (no pid, no path); a `restart_daemon` command in `main.rs` beside `retry_sidecar` (`:280-282`) that the webview may call only from the banner or the daemons panel and that stops the incumbent by lock pid then retries; `cargo xtask stage-desktop-sidecar --target <triple>` that passes `--target` to `cargo build` and reads the binary from `target/<triple>/<profile>/`.
+· Order inside the PR: the test that pins today's wrong behaviour (a refusing daemon leads to a spawn and a `Degraded` with "no daemon answered") is committed first and then changed in the commit that fixes it, so the diff shows what moved.
+· Proof: `tests/skew.rs` drives `Sidecar` against a raw-frame listener the way `skew_harness.rs:110` does, with `include_str!` of the daemon crate's `tests/fixtures/skew_frames.json` so the N-1 contract has one copy: against daemon N-1's bare `{}` ack the state reaches `Connected { daemon_version: None, protocol: legacy }`; against a listener answering `-32007` with a `HelloResult` in `data`, the state reaches `Incompatible` within one backoff step, the `daemon_bin` (a script that touches a file) was never run, and `daemon_is_newer` is true when the listener's range sits above `ProtocolRange::supported()` and false when below; `tests/sidecar.rs` stays green unchanged except the one test rewritten in its own commit.
+· Gate: `cargo test` in the excluded workspace, `cargo test -p ainb-hangar-client -p ainb-hangar-daemon --test skew_harness`, the three `desktop.yml` jobs, "TypeScript bindings freshness".
+
+**D4b, the updater.**
+· Touches: `ainb-tui/crates/ainb-app/src/cli/update.rs` (a `Channel` and a `Product` on the manifest rows, a `fetch_release_manifest_for(channel)`, `stable_version` lifted only under `prerelease`; nothing else in the CLI's behaviour changes), `ainb-tui/crates/ainb-desktop/src/updater.rs` (new), `src/main.rs`, `ui/src/settings.ts` and `settings.tsx` (over D3d's page: an "Updates" section with the channel, "check now", "restart to update", "roll back to <version>"), `ui/src/*.test.ts`, `ainb-core/tests/update_domain.rs` (new cases only).
+· Builds: the check on launch and daily while the window is open, on the operator's channel, defaulting to `stable`, never when `off`; the verification list below, in that order, each refusal a logged entry the settings section shows; the download of the row's archive to a staging directory beside the bundle; the swap on the operator's "restart to update", never while the app runs on: `<Name>.app` moves to `<Name>.app.previous` beside itself and the verified one moves in, an AppImage is replaced the way `update.rs:557-572` replaces the CLI binary with the previous kept beside it, and a `.deb`-owned install declines and names `apt`; the relaunch; the clearing of `.previous` only after the new app's sidecar reaches `Connected`; "roll back" while `.previous` exists, which swaps back and relaunches, with the banner saying the daemon that outlived the app may be newer than the bundle it now runs from and that a stale daemon over the store shows red in the daemons panel (`schema_drift.rs:1-8`).
+· What is verified before apply, in order, each its own test: (1) the manifest's signature with the pinned key, `verify_manifest` (`update.rs:92-94`); (2) the version parses, is strictly newer than the running one (`:150-170`), and is a prerelease only on the `prerelease` channel; (3) a row exists for `product = desktop` and this target, with a safe archive name and a well-formed checksum (`:43-60`); (4) the downloaded bytes hash to the row's `sha256`, computed on the file, not on a stream that was already unpacked; (5) on macOS the extracted bundle's `Info.plist` `CFBundleShortVersionString` equals the manifest version, read as data, never by running the download; (6) the running install is one the updater may replace: a bundle under a directory this user can write that has no `Cellar` or `Caskroom` ancestor (`:719-725` is the rule), not a read-only `.dmg` mount (declines with "copy to Applications first"), not a `.deb` path under `/usr`; (7) the staging directory is on the same filesystem as the bundle, so the swap is a rename and not a copy. A failure at any step deletes the staging directory and records the reason; nothing partial is left beside the bundle.
+· Proof: `updater.rs` tests over a local HTTP listener and a throwaway Ed25519 key through `verify_manifest_with_key` (`:97-101`): a manifest signed by another key is declined; a checksum mismatch is declined and the staging directory is gone; a prerelease under `stable` is declined and the same manifest under `prerelease` is accepted; an equal or older version reports current; `off` makes zero requests (the listener counts them); a fixture bundle directory is swapped, `.previous` is byte-identical to the original, and roll back restores it; the `Cellar` and `.dmg` mount cases decline. `update_domain.rs` gains: a manifest with desktop rows decodes on the CLI's struct and `asset_for_current_platform` still finds the CLI row. `ui/` tests for the section's states (current, available, staged, declined with reason, rolled back).
+· Gate: as D4a, plus `tsc --noEmit --strict`, the frontend tests, `cargo test -p ainb-core --test update_domain --test update_cli`.
+
+**D4c, the release matrix, the bundle smoke, the rehearsal script and the programme row.**
+· Touches: `.github/workflows/release.yml`, `.github/workflows/desktop.yml`, `ainb-tui/crates/ainb-desktop/tauri.conf.json` (drop `version`, so the bundler reads `Cargo.toml`'s), `ainb-tui/crates/ainb-desktop/Cargo.toml` and `Cargo.lock` (the version joins the release's), `docs/contributing/release-process.md`, `docs/plans/2026-09-12-desktop-programme.md`.
+· Builds: a `desktop` job in `release.yml` after `prepare`, matrix `aarch64-apple-darwin` and `x86_64-apple-darwin` on `macos-latest` (the x64 leg cross-compiled exactly as `:270-277`) and `x86_64-unknown-linux-gnu` on `ubuntu-22.04` (the packaging table's runner, `:382`, so the AppImage links the oldest glibc the programme supports), each staging the sidecar with `--target`, asserting `binaries/ainb-hangar-daemon-<triple> --version` prints the release version, then bundling with `tauri-cli` pinned to the exact version the workflow names (the 2.11 line that `Cargo.toml:56` pins the crate to), `--bundles app,dmg` on macOS and `appimage,deb` on Linux; a "Require Apple signing secrets" step shaped like `:56-71` that runs only when `desktop_signed` (a new `workflow_dispatch` input, default `false`) is true, and otherwise records in the job summary and the release body that the macOS bundles are ad-hoc signed, with the same Gatekeeper sentence the Fleet app carries (`:529-537`); when the secrets are present the bundler signs with the Developer ID, submits for notarisation and staples, and the job asserts `spctl --assess --type execute` accepts the app; the prepare job's bump covering the excluded workspace's `Cargo.toml` and `Cargo.lock`; desktop rows in the signed manifest (`:454-458`) with `product: "desktop"`, the archive name, and the sha256; the `bundle` job in `desktop.yml` extended to run the bundler on both runners and to smoke what it produced: the AppImage runs under xvfb alive for 20 s and binds no port (the block at `:288-323` pointed at the AppImage), the `.app`'s `Contents/MacOS/ainb-hangar-daemon --version` equals the app's `CFBundleShortVersionString`, and the WebDriver checks at `:265-286` run against the bundled binary; the rehearsal script in `release-process.md` with the secrets table (`:35-44`) extended by the six Apple names, each marked "supplied by the human, #530"; the programme row `:136` edited to `started`, then to `done` in the PR that carries the run ids and the recording link.
+· Proof: one `workflow_dispatch` of `release.yml` with `prerelease: true` whose run id is on the PR, with a bundle asset per target and a manifest carrying three desktop rows whose signature verifies with the pinned key from a clean checkout (`ainb update check` against that tag on a machine is enough); the `desktop.yml` bundle job green on both runners with the produced bundles; `actionlint` green.
+· Gate: the success criteria below, all green, and the human's rehearsal recorded.
+
+─ WHAT D4-PRIME DEFERS, WITH ITS COST ─
+
+None of these is dropped; each is filed with what it would take.
+· **Linux arm64.** The packaging table names "native ARM runner" (`:383`). The org's Intel macOS runners queue indefinitely (`release.yml:270-273`), and whether an arm64 Linux runner is available to this repository is not known from the tree. Cost to record: one matrix row and one runner label; the lane files it with the outcome of a single probe workflow run on the label, so the next node starts from a fact.
+· **A universal macOS bundle.** Two per-arch bundles ship instead. Cost: a `lipo` of the app binary and of both sidecars into one `externalBin`, plus a spike the packaging table already lists (`:389`). Filed, with per-arch as the shipped shape.
+· **A Homebrew cask for the desktop.** The tap job writes the formula and the Fleet cask (`release.yml:559-571`). A desktop cask is one more block there and one more `InstallOwner` the updater declines for. Cost: the block and the decline; filed after the first stable desktop release, because a cask needs a stable `.dmg` URL to point at.
+· **Automatic rollback.** A bundle that fails to relaunch after a swap is not rolled back by anything: the old app is gone and the new one never ran. Cost: a relauncher process that outlives the swap and restores `.previous` when the new app does not reach `Connected` within a budget. Filed; the manual "roll back" and the kept `.previous` are this node's floor.
+· **Windows.** Out of scope for v1 (`:394`); nothing here is shaped for it and nothing here refuses it.
+
+─ THE HUMAN-DRIVER RUN, WHAT THE HUMAN RUNS ─
+
+The gate "release-branch human-driver run" is a human step and stays one. The lane writes this script into `docs/contributing/release-process.md` in D4c; the human performs it on a macOS machine with the ability to record the screen, on a prerelease the workflow cut, and links the recording from the programme row.
+
+1. Cut the first rehearsal prerelease from the release workflow. In the repository, Actions, Release, run with `version` set to the next version with an `-rc1` suffix (the validator at `release.yml:46-54` accepts one suffix segment) and `prerelease` checked. The workflow tags `v<X>-rc1` on `chore/release-v<X>-rc1`, which is the release branch the gate's name refers to.
+2. Download the macOS `.dmg` for this machine's architecture from the release page. Open it, drag the app to Applications, eject. Launch it. When the bundle is ad-hoc signed, macOS refuses the first launch; use right-click, Open, or Open Anyway in System Settings, Privacy and Security, which is the same override the Fleet app documents.
+3. In the window: the sidebar lists the tmux sessions the machine has, the sidecar banner reads connected, and the daemons panel in settings shows the hangar daemon with the release version and protocol range. Record whether the daemon was spawned by this app or attached to one an installed `ainb` already ran, and which version that one reports.
+4. Set the update channel to `prerelease` in settings. Check now. It reports current.
+5. Cut `-rc2` the same way. Check now. It reports `<X>-rc2` available and the archive verified. Restart to update. The window relaunches; About shows `-rc2`; the daemons panel shows the sidecar at `-rc2` when this app spawned it, or the older attached daemon with the "this bundle carries a newer daemon" offer when it did not; take the offer once and confirm the panel shows `-rc2`.
+6. Roll back from settings. The window relaunches as `-rc1`. The daemons panel shows the `-rc2` daemon still serving, marked newer than this app, and the update check reports `-rc2` available again. Restart the daemon from this bundle: the panel now shows an `-rc1` daemon and, if the `-rc2` daemon migrated the store forward, the red stale-daemon banner (`schema_drift`), which is the expected reading and is recorded as such.
+7. Walk the screen script from the spec's human driver row (`:373`): open a session's terminal tab, create a session, open the board, answer an attention card, open the review tab, open settings. Recorded end to end; the recording is reviewed and linked from the programme row.
+8. On a Linux desktop when one is at hand: run the AppImage, confirm the sidebar and the daemons panel as in step 3, and one update from `-rc1` to `-rc2`. When none is at hand, record "Linux leg: bundle smoke only".
+
+The rehearsal proves the swap, the rollback, the skew rows and the channel on real bundles; the machine gates prove them on fixtures. Neither replaces the other.
+
+─ WHICH EXISTING TESTS MUST STAY GREEN ─
+
+Unchanged on every PR of this node, or changed only in their own commit with the reason in the message:
+· `ainb-desktop/tests/`: `host_contract.rs`, `sidecar.rs` (one test rewritten in D4a, in its own commit), `terminal.rs`, `shell.rs`, `intent.rs`, `workspace_load.rs`, `bindings.rs`.
+· `ainb-desktop/ui/src/*.test.ts`, including `subscription.test.ts`.
+· `ainb-hangar-daemon/tests/skew_harness.rs`, every leg, with `tests/fixtures/skew_frames.json` unchanged.
+· `ainb-hangar-store/tests/schema_drift.rs`.
+· `ainb-core/tests/update_domain.rs` and `update_cli.rs`: this node adds cases and changes none.
+· `ainb-app/tests/host_side_effects.rs`, `serialize_guard.rs`, `state_serde.rs` with `section_key_paths.txt` (this node adds no section and no field), `bindings.rs` and the CI job "TypeScript bindings freshness".
+· The three jobs of `.github/workflows/desktop.yml`, `actionlint.yml`, the workspace jobs of `ci.yml`, and a full `bash ainb-tui/scripts/proof/run.sh` reporting every node passing.
+· `release.yml`'s existing jobs produce the same CLI archives, the same Fleet artifacts and the same tap edits: a prerelease run before and after D4c is diffed on its asset list, and only desktop assets and manifest rows are new.
+
+─ SUCCESS CRITERIA (ALL MUST BE TRUE) ─
+
+1. **A release run produces the desktop for three targets under the release's version, and the manifest signs them.** A `workflow_dispatch` of `release.yml` with `prerelease: true` publishes, per target, a bundle asset (`.dmg` for the two macOS targets, AppImage and `.deb` for Linux) and a `release-manifest.json` with a desktop row per bundle, whose `release-manifest.sig` verifies with the key pinned at `update.rs:18`; the sidecar inside each bundle answers `--version` with that version, asserted in the job. The run id is on the PR. A run that skips a target or ships a `0.1.0` desktop is a failed criterion.
+2. **The updater declines everything it must, and it can fail.** The `updater.rs` tests over a local listener and a throwaway key cover each of the seven checks in D4b's list with a case that is declined and, for the first five, a sibling that is accepted; the fixture swap and roll back are byte-identical; `off` makes zero requests. A test that passes with `verify_manifest_with_key` stubbed to `Ok` is a failed criterion, so one test signs with the wrong key and asserts the decline.
+3. **The sidecar reads the refusal and never spawns on it.** `tests/skew.rs` reaches `Incompatible` against a listener answering `PROTOCOL_INCOMPATIBLE` with the daemon binary never run, reaches `Connected { daemon_version: None }` against daemon N-1's committed frames, and `skew_harness.rs:282` asserts `DaemonError::Incompatible` with both ranges decoded from `data`. The first commit of D4a pins today's spawn-then-degrade so the fix is a visible diff.
+4. **The bundle smoke runs bundles.** The `desktop.yml` bundle job on both runners produces the bundle the release job would, runs the AppImage under xvfb alive for 20 s with no listener, opens the `.app` on macOS and confirms its sidecar's version equals its `CFBundleShortVersionString`, and applies the WebDriver checks to the bundled binary. Green on the PR head.
+5. **Signing and notarisation run only from named secrets the human supplies, and their absence is loud.** `release.yml` names the Apple inputs as repository secrets, the step that requires them is gated on `desktop_signed`, an unsigned run says "ad-hoc signed" in the summary and the release body, and no run ever signs with an identity that is not this product's. The names are in `release-process.md`'s table, each marked as #530's. A signed run is not a criterion of this node, because the secrets do not exist; the criterion is that the day they do, nothing in the workflow changes but the input.
+6. **The daemons panel shows the daemon's version and range, and every skew row draws the banner the table names.** `SidecarView::Connected` carries `daemon_version` and `protocol`, `Desktop.ts` is fresh, and a `ui/` test draws each `SidecarView` variant to its text, including `Incompatible` with `daemon_is_newer` true and false.
+7. **The human-driver rehearsal ran on a prerelease and is linked.** Steps 1 to 7 of the script above, on real `-rc1` and `-rc2` bundles, recorded, with the programme row carrying the run ids, the recording, and step 3's answer to which daemon owned the home. Step 8's Linux leg is recorded as run or as "bundle smoke only".
+8. Final deliverable runs without errors, with the test output and the CI run ids on the PR.
+
+The softer ones, measured and recorded rather than gated:
+· The size of each bundle and of the sidecar inside it, per target.
+· The wall time of the desktop release job per target, next to the CLI's, so the next release knows what it costs.
+· How long the first swap and relaunch took in the rehearsal, and whether `.previous` was cleared on the first `Connected`.
+
+─ CONSTRAINTS ─
+
+· PRs target `v2`, never `main`. Staged as the four above, each reviewable alone, every one a draft; never flip one ready, never merge, never close an issue: the orchestrator does.
+· Every file change is its own signed commit: `git -c gpg.format=openpgp -c user.signingkey=907EC78C72C6AFF6 commit -S`. Never `git add -A`, never `git add .`; stage by named path.
+· Conventional commit messages written as a human developer. No attribution trailers, no `Co-Authored-By`, and no mention of Claude, Anthropic, an AI or an assistant in a commit message, a PR title, a PR body or a comment.
+· No em dashes on any line you author, in code, docs, commit messages or PR bodies.
+· Never name another product as inspiration.
+· Tests first. `cargo fmt --all -- --check` from `ainb-tui/` and `cargo test --no-run` on every touched crate before every push; the desktop is an excluded workspace at `ainb-tui/crates/ainb-desktop` with its own `cargo fmt -- --check` and `cargo test`, and its webview at `ui/` with `npm test` and `npx tsc --noEmit`.
+· Build with `-j 3` and `CARGO_INCREMENTAL=0`; three other lanes share this laptop.
+· Never poll CI. The orchestrator brings the verdict; keep working on anything that does not depend on it.
+· Never touch `ainb-tui/crates/ainb-core/src/app/*`. Merge `origin/v2` before touching a file another lane is on, and name shared files in the PR body: `ainb-hangar-client/src/lib.rs` in D4a, `ui/src/settings.tsx` in D4b (D3d's).
+· Tauri 2.11, SolidJS 1.9.15, TypeScript 5.6.3 and Node 22 stay pinned; no new frontend dependency; `tauri-cli` is pinned to an exact version in the workflow and nowhere else.
+· Secrets are named, never created, never printed. The lane never adds a key, a certificate or a credential to the repository or to a workflow, and never signs with an identity that is not this product's.
+· Disk ceiling 92 percent; `cargo clean` of the desktop target is allowed when it nears that.
+· Never kill a tmux server, never a bulk or wildcard kill; kill a session by exact name only.
+· Record every decision in this goal file's progress log as you take it.
+
+─ OPERATING RULES, NON-NEGOTIABLE ─
+
+1. PLAN FIRST. Output a numbered task list before writing any code.
+2. WORK AUTONOMOUSLY. Don't ask clarifying Qs unless genuinely blocked; a decision goes on the PR as a comment with a recommendation, and the work that does not depend on it continues.
+3. SELF-VERIFY. After every step: run tests, inspect output, confirm it worked.
+4. DEBUG YOURSELF. If it fails, diagnose and fix. Don't hand it back.
+5. USE EVERY TOOL. MCPs · terminal · web · code exec · pull real data.
+6. NO PLACEHOLDERS. No TODOs · no stubs · real components and real states.
+7. PROGRESS LOG. Track completed · in-flight · decisions · blockers.
+8. STAY ON GOAL. Discoveries off-spec? Note and keep moving.
+9. IF BLOCKED. Log the wall · continue everything parallelizable.
+10. CHECK SUCCESS BEFORE STOPPING. Re-read criteria · confirm each is met.
+
+─ QUALITY BAR ─
+
+· Code: clean, typed, follows project conventions
+· Design: looks like a well-funded startup shipped it
+· Output: survives a senior code review
+· Docs: every new pattern, env var and decision logged
+
+─ WHICH CARRIES THIS NODE TAKES ─
+
+| issue | title | where | why |
+|---|---|---|---|
+| #530 | Release blocker: configure AINB Developer ID notarization | D4c, partly | the workflow steps, the secret names and the gate are this node's; the identity, the credential and the team are the human's, and the issue stays open until they exist |
+| #733 | Release workflow opens a sync PR nobody merges | **not this node** | D4c edits `release.yml` and must not make it worse: the desktop's version bump rides the same prepare commit, so one more file drifts the same way; the fix is the issue's own PR |
+| D1 goal `:159` | the throughput gap "filed for D4'" | closed | the D3 amendment on #1162 (`spec:219`) settled which number each path proves; nothing is left for this node |
+| #1188 | desktop and terminal read agent status through two different hosts | **not this node** | lane C's, on #1166 |
+| D3 goal `:217` | what a surface does when it meets a section set it does not know | **not this node**, but named | an updated desktop meeting an older daemon's sections is the same question; the skew rows above answer the hello half, the section half stays that follow-up's |
+
+─ FOLLOW-UPS TO FILE, NOT TO SOLVE ─
+
+File each as an issue with its evidence. Do not fix it in this node.
+· Linux arm64, a universal macOS bundle, a desktop cask and automatic rollback, each with the cost recorded under "WHAT D4-PRIME DEFERS".
+· The `ainb` on `PATH` that the desktop's daemon verbs run through (`main.rs:306-321`, `executor.rs:217-226`) is a third version nothing checks; after D4a the sidecar's own restart bypasses it, but `ainb daemon <other daemon> <verb>` still runs whatever `PATH` holds. File the question of whether the desktop should run those verbs through its own bundle.
+· The daily release check the CLI installs as an OS timer (`update.rs:186-240`) and the desktop's own check are two checks against one manifest; file whether the desktop should read the CLI's cached `ReleaseState` (`:857`) when it is fresh.
+· A Homebrew-installed CLI and a downloaded desktop can be at different versions on one machine; the daemons panel now shows it, and nothing reconciles it. File with the rehearsal's step 3 answer as evidence.
+· The release workflow's `prepare` job bumps versions on a side branch (#733); the desktop's `Cargo.toml` joins that drift.
+
+─ OPEN QUESTIONS THE LANE ANSWERS ON A PR BODY ─
+
+· **Which key signs desktop updates.** Answered, and on D4·spec: the existing release key, `AINB_RELEASE_SIGNING_KEY`, whose public half is pinned at `update.rs:18` and whose manifest the CLI already verifies. The alternative is the Tauri updater plugin with its own key format and a third repository secret, which would give one release two signatures over two manifests and give the human a second key to keep. What would flip it: a bundle swap proving unsafe on macOS in the rehearsal, in which case the plugin's apply path is adopted and the manifest question is reopened, not the key's.
+· **Which bundler runs in CI.** Recommended, on D4c: `tauri-cli`, pinned to an exact version, invoked as `cargo tauri build --target <triple> --bundles ...` from the workflow, because the same command runs on a laptop and every signing step is a visible workflow step reading a named secret. The alternative is the Tauri GitHub action, which wraps the same CLI and reads the same variables; take it only if the pinned CLI install proves slower than the job budget allows.
+· **Whether the macOS bundles are per-arch or universal.** Answered, on D4·spec: per-arch, because the sidecar is a target-triple-named external binary the xtask stages one at a time and the CLI already ships per-arch through the same cross-compile. Universal is filed with its cost.
+· **What the channel is.** Answered, on D4·spec: `stable`, `prerelease`, `off`, defaulting to `stable`; `prerelease` exists because the rehearsal in the gate needs an update between two builds neither of which is a stable release, and the CLI's `stable_version` refuses prereleases by design (`update.rs:73-80`). What the lane verifies before D4b: that a prerelease run of `release.yml` produces and signs the manifest at all (the signing step is not gated on `prerelease`, `:435-467`, but a run proves it).
+· **How the sidecar learns the daemon is incompatible without parsing a sentence.** Answered, on D4a: a new `DaemonError::Incompatible` variant decoded in `dial_with` from the `data` member the daemon already fills with a `HelloResult` (`rpc/auth.rs:463-471`), rather than widening `DaemonError::Rpc` with `data` at every constructor, and rather than parsing the message. The message is still what the banner shows, verbatim, because it already names the fix.
+· **Whether the desktop's restart of an older daemon goes through `ainb` on `PATH`.** Answered, on D4a: no. It stops the incumbent by the pid its lock names with the signal the daemon's `shutdown` module handles, then probes again and spawns the bundled daemon. `PATH`'s `ainb` is a third version and may be the one whose daemon is being replaced.
+· **When this node may start against D3-prime's gate.** Recommendation for the orchestrator, on this goal's PR: D4·spec and D4a touch no D3 file and can open once this goal is approved; D4b's settings section needs D3d's page and opens after D3d merges; D4c needs D4b. The programme row's "D3'" gate is then read as D4c's, and the row says so when it flips to started.
+· **Whether `ubuntu-22.04` still exists as a hosted runner label when D4c opens.** The lane checks on the day and, if not, builds the Linux leg in a container on the oldest supported image and records the glibc it links.
+
+─ FINAL DELIVERABLE ─
+
+Confirmation each criterion is satisfied. Every file created or modified. How to run, test and deploy. Proof (screenshot, test output, URL). Decisions made and anything to know. Known limitations and follow-ups.
+
+Begin by outputting your plan. Then execute end-to-end without checking in until done or genuinely blocked.
+
+─ PROGRESS LOG ─
+
+Plan, staged as the four PRs:
+1. D4·spec: the amendment (per-arch macOS, the existing manifest and key, the three channels, Linux arm64 deferred, what the human-driver gate means).
+2. D4a: the sidecar seam (`Incompatible` decoded from hello's `data`, no spawn on refusal, the daemon's version and range on `Connected`, the operator's restart by lock pid, `--target` on the xtask) with the desktop leg of the skew harness.
+3. D4b: the updater over the CLI's manifest, key and verify (the channel, the seven checks, the bundle swap with a kept previous, roll back, the settings section).
+4. D4c: the release matrix (three targets, pinned bundler, signing by named secrets, one version), the bundle smoke over real bundles, the rehearsal script and the programme row.
+
+2026-09-19: goal written on `docs/d4-goal` against `origin/v2` at `175a421ff`; waiting on the orchestrator's approval before any code PR.
