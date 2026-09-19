@@ -189,7 +189,7 @@ fn ready_list() -> serde_json::Value {
 /// not read.
 #[test]
 fn the_kill_switch_answers_file_before_any_dial() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let homes = Homes::new();
     util::advertise_workspace_sessions_for_tests(true);
     let rt = rt();
@@ -217,7 +217,7 @@ fn the_kill_switch_answers_file_before_any_dial() {
 /// within `SESSION_RPC_DEADLINE` plus 250 ms instead of hanging.
 #[test]
 fn a_daemon_that_stops_answering_is_an_error_within_the_deadline() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let homes = Homes::new();
     let rt = rt();
     let socket = fake_daemon(&rt, &homes.hangar, |_, n| (n == 0).then(ready_list));
@@ -264,7 +264,7 @@ fn a_daemon_that_stops_answering_is_an_error_within_the_deadline() {
 /// second `flock`.
 #[test]
 fn a_nested_lock_is_an_error_not_a_hang() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let _homes = Homes::new();
     // On a thread of its own, so a nested call that hangs on the second
     // `flock` fails the test at the channel's deadline instead of hanging CI.
@@ -291,7 +291,7 @@ fn a_nested_lock_is_an_error_not_a_hang() {
 /// reconcile pass has nothing to bring back (P6e, "Mixed versions").
 #[test]
 fn a_delete_through_the_daemon_is_not_brought_back_by_the_next_pass() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let homes = Homes::new();
     let gone = make_session("sess-gone");
     let kept = make_session("sess-kept");
