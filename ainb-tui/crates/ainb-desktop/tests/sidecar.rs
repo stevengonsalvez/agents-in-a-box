@@ -141,6 +141,7 @@ async fn a_cold_start_spawns_the_daemon_which_outlives_the_app() {
     let SidecarState::Connected {
         daemon_pid: Some(pid),
         spawned,
+        ..
     } = wait_for(&mut state, "connected", connected).await
     else {
         panic!("connected without a daemon pid");
@@ -177,10 +178,12 @@ async fn a_second_host_attaches_to_the_winner_instead_of_spawning_another() {
         SidecarState::Connected {
             daemon_pid: pid_a,
             spawned: spawned_a,
+            ..
         },
         SidecarState::Connected {
             daemon_pid: pid_b,
             spawned: spawned_b,
+            ..
         },
     ) = (a, b)
     else {
