@@ -857,6 +857,14 @@ impl AppState {
             {
                 crate::config::renderer_edit::refusal(&self.config.config_popup_state.setting_key)
             }
+            // The secret write paths: the keychain prompt on a row and the API
+            // key prompt. Not renderer-settable in this slice, whatever row
+            // is under the cursor.
+            KeyAction::App(
+                AppEvent::ConfigSecretToKeychain
+                | AppEvent::ConfigApiKeyStart
+                | AppEvent::ConfigApiKeySave,
+            ) => Some(crate::config::renderer_edit::SECRET_REASON),
             _ => None,
         }
     }
@@ -1943,6 +1951,25 @@ impl ConfigScreenState {
     }
 
     // --- navigation ---------------------------------------------------------
+
+    /// Select the tree node with `id` (`ConfigTreeNode::id`) when it is on
+    /// screen, as a click on it does; `false` when no visible node has it, and
+    /// nothing moves. Selection is the reducer's: a renderer names the node,
+    /// never keeps its own.
+    pub fn select_node_by_id(&mut self, id: &str) -> bool {
+        let Some(position) = self
+            .visible_nodes
+            .iter()
+            .position(|index| self.tree.get(*index).is_some_and(|node| node.id() == id))
+        else {
+            return false;
+        };
+        self.selected_node = position;
+        self.selected_setting = 0;
+        self.focused_pane = ConfigPane::Categories;
+        self.refresh_visible_rows();
+        true
+    }
 
     pub fn select_next_category(&mut self) {
         if self.visible_nodes.is_empty() {
