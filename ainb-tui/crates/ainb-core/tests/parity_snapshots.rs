@@ -59,6 +59,10 @@ fn every_fixture_renders_its_committed_snapshot() {
     let mut mismatched = Vec::new();
     for (name, path) in ParityFixture::all_in(&fixture_dir()) {
         let fixture = ParityFixture::load(&path).unwrap_or_else(|error| panic!("{error}"));
+        // No ratatui half: the terminal's stats is burndown's plugin paint.
+        if fixture.dom_only.is_some() {
+            continue;
+        }
         let frame = render(&fixture);
         let snap = path.with_extension("snap");
         if update {
