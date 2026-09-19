@@ -8,7 +8,7 @@ use super::{ListArgs, OutputFormat};
 use crate::config::SessionLabelStore;
 use crate::interactive::session_manager::SessionMetadata;
 use crate::tmux::ClaudeProcessDetector;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
@@ -105,7 +105,7 @@ pub async fn execute(args: ListArgs, format: OutputFormat) -> Result<()> {
 /// List sessions with filtering applied
 #[allow(clippy::unused_async)] // Async for consistency with other CLI commands
 pub async fn list_sessions(args: &ListArgs) -> Result<Vec<SessionInfo>> {
-    let store = load_session_store();
+    let store = load_session_store().context("Failed to load session store")?;
     let labels = SessionLabelStore::load();
     let detector = ClaudeProcessDetector::new();
 
