@@ -1,0 +1,291 @@
+start 22:43:59 (cec002468)
+
+> ainb-desktop-e2e@0.1.0 test
+> wdio run wdio.conf.js
+
+2026-09-19T22:44:00.394Z WARN tauri-service:utils: WebKitWebDriver not found. Please install it with: sudo apt-get install webkit2gtk-driver (or equivalent for your Linux distribution)
+
+Execution of 3 workers started at 2026-09-19T22:44:02.366Z
+
+2026-09-19T22:44:02.479Z WARN diagnostics: ⚠️ WebKitWebDriver: Not found
+2026-09-19T22:44:02.479Z WARN diagnostics:    sudo apt-get install -y webkit2gtk-driver
+[0-0] RUNNING in undefined - file:///specs/journey.e2e.js
+[0-0] 2026-09-19T22:44:09.558Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:44:14.654Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:44:19.709Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:44:24.772Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:44:29.895Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:44:34.948Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:44:39.983Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:44:45.032Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:44:50.099Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:44:55.142Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:45:00.198Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:45:05.238Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:45:10.278Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:45:15.310Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:45:20.358Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:45:25.390Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:45:30.430Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:45:35.466Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:45:40.505Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:45:45.541Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:45:50.574Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:45:55.990Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:46:01.022Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:46:06.061Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:46:11.094Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:46:16.142Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:46:21.173Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:46:26.213Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:46:31.222Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:46:36.290Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:46:41.321Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:46:46.361Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:46:51.398Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:46:56.442Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:47:01.541Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:47:06.581Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:47:11.618Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:47:16.650Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:47:21.689Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:47:26.726Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:47:31.757Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:47:36.801Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:47:41.834Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:47:46.979Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:47:52.026Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:47:57.074Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:48:02.111Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:48:07.178Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:48:12.214Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:48:17.254Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:48:22.286Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:48:27.354Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:48:32.411Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:48:37.465Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:48:42.505Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:48:47.694Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:48:52.738Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:48:57.798Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:49:02.834Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:49:07.941Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:49:12.986Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:49:18.046Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:49:23.090Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:49:28.199Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:49:33.258Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:49:38.534Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:49:43.570Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:49:48.642Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:49:53.706Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:49:58.739Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:50:03.750Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:50:20.133Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 2026-09-19T22:50:25.166Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-0] 50 MiB read: {"platform":"linux","read_bytes":52428800,"finished":true,"seconds":11.023,"painted_bytes":5787014,"mib_per_second":4.54,"note":"an attached tmux client is sent rendered screen updates, not a replay of the pane's bytes"}
+[0-0] 2026-09-19T22:50:25.205Z WARN tauri-service:service: Failed to clear mock store: Error: A sessionId is required for this command
+[0-0] PASSED in undefined - file:///specs/journey.e2e.js
+2026-09-19T22:50:25.365Z WARN diagnostics: ⚠️ WebKitWebDriver: Not found
+2026-09-19T22:50:25.365Z WARN diagnostics:    sudo apt-get install -y webkit2gtk-driver
+[0-1] RUNNING in undefined - file:///specs/answer.e2e.js
+[0-1] 2026-09-19T22:50:31.900Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:50:37.001Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:50:42.107Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:50:47.160Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:50:52.242Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:50:57.278Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:51:02.340Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:51:07.374Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:51:12.419Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:51:17.454Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:51:22.494Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:51:27.530Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:51:32.591Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:51:37.646Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:51:42.686Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:51:47.734Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:51:52.770Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:51:57.804Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:52:02.846Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:52:07.877Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:52:12.950Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:52:18.003Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:52:23.062Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:52:28.130Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:52:33.183Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:52:38.234Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:52:43.271Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:52:48.323Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:52:53.366Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:52:58.422Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:53:03.498Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:53:08.539Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:53:13.582Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:53:18.635Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:53:23.690Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:53:28.751Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:53:33.858Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:53:38.914Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:53:43.980Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:53:49.034Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:53:54.094Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:53:59.126Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:54:04.158Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:54:10.169Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:54:15.214Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:54:20.262Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:54:25.298Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:54:30.342Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:54:35.378Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:54:40.430Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:54:45.485Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:54:50.517Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:54:55.553Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:55:00.586Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-1] 2026-09-19T22:55:00.603Z WARN tauri-service:service: Failed to clear mock store: Error: A sessionId is required for this command
+[0-1] PASSED in undefined - file:///specs/answer.e2e.js
+2026-09-19T22:55:00.762Z WARN diagnostics: ⚠️ WebKitWebDriver: Not found
+2026-09-19T22:55:00.762Z WARN diagnostics:    sudo apt-get install -y webkit2gtk-driver
+[0-2] RUNNING in undefined - file:///specs/review.e2e.js
+[0-2] 2026-09-19T22:55:07.969Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:55:13.062Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:55:18.120Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:55:23.171Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:55:28.235Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:55:33.281Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:55:38.331Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:55:43.378Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:55:48.443Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:55:53.486Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:55:58.530Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:56:03.574Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:56:08.638Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:56:13.679Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:56:18.734Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:56:23.778Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:56:28.818Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:56:33.854Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:56:38.898Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:56:43.931Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:56:48.984Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:56:54.112Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:56:59.150Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:57:04.190Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:57:09.226Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:57:14.322Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:57:19.374Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:57:24.418Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:57:29.452Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:57:34.514Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:57:39.554Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:57:44.626Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:57:50.061Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:57:55.094Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:58:00.137Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:58:05.174Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:58:10.214Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:58:15.254Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:58:20.290Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:58:25.386Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:58:30.430Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:58:39.438Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:58:44.474Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:58:49.553Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:58:54.586Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:59:05.018Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:59:10.050Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:59:15.090Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:59:20.122Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:59:25.162Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:59:30.202Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:59:35.251Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:59:40.266Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:59:45.310Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:59:50.342Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T22:59:55.378Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:00:00.605Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:00:05.638Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:00:10.678Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:00:15.730Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:00:20.789Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:00:25.822Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:00:30.874Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:00:35.914Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:00:40.958Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:00:45.998Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:00:51.034Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:00:56.137Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:01:01.194Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:01:06.234Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:01:11.278Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:01:16.355Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:01:21.402Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:01:26.459Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:01:31.494Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:01:36.534Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:01:41.590Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:01:46.626Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:01:51.697Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:01:56.738Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:02:08.002Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:02:13.042Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:02:18.078Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:02:23.110Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:02:28.130Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:02:33.170Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:02:38.206Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:02:43.294Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:02:48.332Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:02:53.450Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:02:58.506Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:03:03.600Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:03:08.649Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:03:13.694Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:03:18.724Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:03:23.811Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] 2026-09-19T23:03:28.845Z WARN tauri-service:window: Failed to get window states: Error: Tauri core.invoke not available after 5s timeout
+[0-2] ReferenceError in "reviewing from the window.draws the reducer's diff, takes a selection, and records what it costs"
+ReferenceError: selectedNode is not defined
+[0-2] 2026-09-19T23:03:29.147Z WARN tauri-service:service: Failed to clear mock store: Error: A sessionId is required for this command
+[0-2] FAILED in undefined - file:///specs/review.e2e.js
+
+ "spec" Reporter:
+------------------------------------------------------------------
+[WebKitGTK 605.1.15 linux #0-0] Running: WebKitGTK (v605.1.15) on linux
+[WebKitGTK 605.1.15 linux #0-0] Session ID: ada12dbf-66fd-4e9f-96f6-541ece95316d
+[WebKitGTK 605.1.15 linux #0-0]
+[WebKitGTK 605.1.15 linux #0-0] » specs/journey.e2e.js
+[WebKitGTK 605.1.15 linux #0-0] the desktop shell
+[WebKitGTK 605.1.15 linux #0-0]    ✓ opens a seeded session, runs a palette command and sees a new one arrive
+[WebKitGTK 605.1.15 linux #0-0]    ✓ records what a 50 MiB read costs the window
+[WebKitGTK 605.1.15 linux #0-0]
+[WebKitGTK 605.1.15 linux #0-0] 2 passing (6m 20.7s)
+------------------------------------------------------------------
+[WebKitGTK 605.1.15 linux #0-1] Running: WebKitGTK (v605.1.15) on linux
+[WebKitGTK 605.1.15 linux #0-1] Session ID: d1dd9a5b-2384-4fad-bf08-14185a58faa6
+[WebKitGTK 605.1.15 linux #0-1]
+[WebKitGTK 605.1.15 linux #0-1] » specs/answer.e2e.js
+[WebKitGTK 605.1.15 linux #0-1] answering from the window
+[WebKitGTK 605.1.15 linux #0-1]    ✓ answers a daemon question from the banner and the daemon records the desktop
+[WebKitGTK 605.1.15 linux #0-1]
+[WebKitGTK 605.1.15 linux #0-1] 1 passing (4m 33.7s)
+------------------------------------------------------------------
+[WebKitGTK 605.1.15 linux #0-2] Running: WebKitGTK (v605.1.15) on linux
+[WebKitGTK 605.1.15 linux #0-2] Session ID: e9007f1c-878d-4edb-8d3e-af54d9700f49
+[WebKitGTK 605.1.15 linux #0-2]
+[WebKitGTK 605.1.15 linux #0-2] » specs/review.e2e.js
+[WebKitGTK 605.1.15 linux #0-2] reviewing from the window
+[WebKitGTK 605.1.15 linux #0-2]    ✖ draws the reducer's diff, takes a selection, and records what it costs
+[WebKitGTK 605.1.15 linux #0-2]
+[WebKitGTK 605.1.15 linux #0-2] 1 failing (8m 26.2s)
+[WebKitGTK 605.1.15 linux #0-2]
+[WebKitGTK 605.1.15 linux #0-2] 1) reviewing from the window draws the reducer's diff, takes a selection, and records what it costs
+[WebKitGTK 605.1.15 linux #0-2] selectedNode is not defined
+[WebKitGTK 605.1.15 linux #0-2] ReferenceError: selectedNode is not defined
+[WebKitGTK 605.1.15 linux #0-2]     at Context.<anonymous> (file://~/orca/workspaces/agents-in-a-box/proof-v2/ainb-tui/crates/ainb-desktop/e2e/specs/review.e2e.js:185:22)
+
+
+Spec Files:	 2 passed, 1 failed, 3 total (100% completed) in 00:19:26  
+
+end 23:03:30 exit=1
