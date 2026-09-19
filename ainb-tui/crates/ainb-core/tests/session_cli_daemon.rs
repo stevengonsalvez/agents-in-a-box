@@ -514,7 +514,7 @@ fn a_not_ready_list_after_resolve_is_an_error_not_an_empty_store() {
     let err = rt
         .block_on(source.mutate(|s| s.upsert(make_session("sess-new", "new-ws"))))
         .expect_err("a mutation over a not-ready list must fail");
-    assert!(err.to_string().contains("not ready"), "{err}");
+    assert!(err.to_string().contains("still reconciling"), "{err}");
     assert!(
         !RESTART_WROTE.load(Ordering::SeqCst),
         "a write was sent from an empty view"
