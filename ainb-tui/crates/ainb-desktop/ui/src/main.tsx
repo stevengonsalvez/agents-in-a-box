@@ -4,7 +4,8 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
 import { createFrameStore } from "./store.ts";
-import { shellAgentStatus, shellFleet, shellGitView, shellSessions, SUBSCRIBED } from "./subscription.ts";
+import { Stats } from "./stats.tsx";
+import { shellAgentStatus, shellFleet, shellGitView, shellSessions, shellUsage, SUBSCRIBED } from "./subscription.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { AcpCard } from "./acp.tsx";
@@ -91,12 +92,12 @@ function Shell() {
   // for one pane is three ways to be wrong and a fourth that draws nothing.
   // The transcript card is not in here; it stands in a session's place and
   // closes back to whatever was chosen.
-  const [pane, setPane] = createSignal<"board" | "review" | "terminal">("board");
+  const [pane, setPane] = createSignal<"board" | "review" | "stats" | "terminal">("board");
   // The ACP session whose transcript card holds the work area, if any. It has
   // no tmux pane, so the card stands where its terminal would.
   const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
   /** Whether `which` holds the work area: the transcript card takes it first. */
-  const showing = (which: "board" | "review" | "terminal") =>
+  const showing = (which: "board" | "review" | "stats" | "terminal") =>
     transcriptKey() === null && pane() === which;
   const focusers = new Map<string, () => void>();
   const tabKeys = createMemo(
@@ -282,6 +283,7 @@ function Shell() {
   const fleet = () => shellFleet(store, host());
   const agentStatus = () => shellAgentStatus(store, host());
   const gitView = () => shellGitView(store, host());
+  const usage = () => shellUsage(store, host());
   const counts = HEADER_COUNTS.map(([select, label]) => ({
     label,
     count: createMemo(() => select(store, host())),
@@ -441,6 +443,19 @@ function Shell() {
                 Review
               </button>
             </span>
+            <span class="tab stats-tab" classList={{ active: showing("stats") }}>
+              <button
+                type="button"
+                class="tab-title"
+                aria-current={showing("stats") ? "page" : undefined}
+                onClick={() => {
+                  closeTranscript();
+                  setPane("stats");
+                }}
+              >
+                Stats
+              </button>
+            </span>
             {/* The ACP card's own place in the strip, where the session's
                 terminal tab would be if it had a pane. */}
             <Show when={transcriptKey()}>
@@ -507,6 +522,9 @@ function Shell() {
           </Show>
           <Show when={showing("review")}>
             <Review gitView={gitView()} stale={gitViewStale()} onChoose={dispatch} />
+          </Show>
+          <Show when={showing("stats")}>
+            <Stats usage={usage()} />
           </Show>
           <Show when={showing("board")}>
             <Board
