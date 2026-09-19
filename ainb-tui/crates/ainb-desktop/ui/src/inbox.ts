@@ -31,6 +31,8 @@ export interface InboxRow {
 
 /** The inbox page's picture of section 16. */
 export interface InboxPage {
+  /** Whether the window starts below the first entry the frame carries. */
+  scrolled: boolean;
   state: InboxState;
   /** One line on where the read stands, or `null` while it is live. */
   status: string | null;
@@ -59,6 +61,27 @@ export const CLOSE_INBOX: RendererIntent[] = [
   { Command: ["inbox.back", null] },
   { Command: ["home.sessions", null] },
 ];
+
+/** Pixels a row is worth to the wheel, as the review tab counts them. */
+export const ROW_PX = 24;
+
+/** The most rows one wheel event asks the reducer for. */
+export const MAX_WHEEL_ROWS = 10;
+
+/**
+ * The commands a scroll of `rows` sends, down when positive.
+ *
+ * The reducer moves one row per command (`InboxScrollUp` / `InboxScrollDown`,
+ * the terminal's `j` and `k`), so a wheel of n rows is n commands. Capped, so
+ * one flick of a trackpad cannot queue hundreds of them at the host.
+ */
+export function scrollIntents(rows: number): RendererIntent[] {
+  const count = Math.min(Math.abs(rows), MAX_WHEEL_ROWS);
+  const command: RendererIntent = rows > 0
+    ? { Command: ["inbox.scroll_down", null] }
+    : { Command: ["inbox.scroll_up", null] };
+  return Array.from({ length: count }, () => command);
+}
 
 /** The inbox's one write: every entry read, as the daemon's sweep. */
 export const MARK_ALL_READ: RendererIntent = { Command: ["inbox.mark_all_read", null] };
@@ -93,12 +116,23 @@ function plural(n: number, one: string, many: string): string {
 /** Section 16 as the inbox page draws it. */
 export function inboxView(inbox: InboxView_Serialize | undefined): InboxPage {
   if (inbox === undefined) {
-    return { state: "waiting", status: "Reading the inbox from the daemon", rows: [], cut: undefined, canMarkAllRead: false };
+    return {
+      state: "waiting",
+      status: "Reading the inbox from the daemon",
+      rows: [],
+      cut: undefined,
+      canMarkAllRead: false,
+      scrolled: false,
+    };
   }
   const lost: string[] = [];
   if (inbox.rows_cut > 0) lost.push(`${plural(inbox.rows_cut, "older entry", "older entries")} not sent`);
   if (inbox.summaries_cut > 0) lost.push(`${plural(inbox.summaries_cut, "summary", "summaries")} shortened`);
-  const rows = inbox.entries.map((entry) => ({
+  // The window the terminal draws: `scroll` is an index into `entries`,
+  // bounded by the reducer, and at least one row always draws.
+  const scroll = Math.min(inbox.scroll, Math.max(inbox.entries.length - 1, 0));
+  const scrolled = scroll > 0;
+  const rows = inbox.entries.slice(scroll).map((entry) => ({
     id: entry.id,
     label: `${entry.kind} · ${entry.event}`,
     summary: entry.summary,
@@ -107,7 +141,7 @@ export function inboxView(inbox: InboxView_Serialize | undefined): InboxPage {
   }));
   const cut = lost.length === 0 ? undefined : lost.join(", ");
   if (inbox.absent !== null) {
-    return { state: "absent", status: inbox.absent, rows, cut, canMarkAllRead: false };
+    return { state: "absent", status: inbox.absent, rows, cut, canMarkAllRead: false, scrolled };
   }
   if (inbox.unreachable !== null) {
     return {
@@ -116,6 +150,7 @@ export function inboxView(inbox: InboxView_Serialize | undefined): InboxPage {
       rows,
       cut,
       canMarkAllRead: inbox.unread > 0,
+      scrolled,
     };
   }
   return {
@@ -124,5 +159,6 @@ export function inboxView(inbox: InboxView_Serialize | undefined): InboxPage {
     rows,
     cut,
     canMarkAllRead: inbox.unread > 0,
+    scrolled,
   };
 }
