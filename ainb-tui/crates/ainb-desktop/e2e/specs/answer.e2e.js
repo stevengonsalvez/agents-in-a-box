@@ -24,7 +24,6 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { join } from "node:path";
 import { AINB_BIN, env, hook, paneText, run, seeded } from "../world.js";
 
 const QUESTION = "Ship to which environment?";
@@ -49,11 +48,6 @@ function askLine(eventId, sessionId, cwd) {
   };
 }
 
-/** `value` as an SQL string literal, its quotes doubled. */
-function sqlText(value) {
-  return `'${value.replaceAll("'", "''")}'`;
-}
-
 /**
  * What the window asked the host to do and what became of it, in order: each
  * `renderer intent` line the desktop logged, as `{ command, outcome }`. A key
@@ -74,19 +68,6 @@ function intentsSent() {
       command: line.match(/command="?([^"\s]+)/)?.[1] ?? "unknown",
       outcome: line.match(/outcome="?(\w+)/)?.[1] ?? "unknown",
     }));
-}
-
-/** The daemon's own record of one attention row, read by a separate process. */
-function attentionRow(id) {
-  const db = join(env().AINB_HANGAR_HOME, "hangar.db");
-  try {
-    return run("sqlite3", [
-      db,
-      `SELECT state || '|' || COALESCE(answered_by, '') || '|' || COALESCE(answer, '') FROM attention WHERE id = ${sqlText(id)};`,
-    ]).trim();
-  } catch {
-    return "";
-  }
 }
 
 /** The desktop's own log lines about answering, for a failure to show. */
@@ -183,7 +164,7 @@ describe("answering from the window", () => {
         return phase === "delivered";
       },
       60_000,
-      () => `the banner never read delivered (last phase: ${phase || "none"}; row: ${attentionRow(request)}; pane: ${paneText(target.tmux).trim().split("\n").slice(-3).join(" / ")})\n${desktopLog()}`,
+      () => `the banner never read delivered (last phase: ${phase || "none"}; pane: ${paneText(target.tmux).trim().split("\n").slice(-3).join(" / ")})\n${desktopLog()}`,
     );
 
     // What the window sent for that pick, from the host's own log: the
@@ -210,18 +191,10 @@ describe("answering from the window", () => {
       timeoutMsg: `the answer never reached the agent in ${target.tmux}`,
     });
 
-    // The daemon's record, read by a separate process: answered, by the desktop.
-    await browser.waitUntil(() => attentionRow(request).startsWith("answered|"), {
-      timeout: 30_000,
-      timeoutMsg: () => `the row never read answered: ${attentionRow(request)}`,
-    });
-    const [, answeredBy, answer] = attentionRow(request).split("|");
-    // `<surface>@<host>`: the surface is what the person sat at.
-    assert.match(answeredBy, /^desktop@/, "the desktop answered, not the terminal");
-    assert.equal(answer, OPTIONS[PICK]);
-
-    // A second surface on the same daemon reads the same winner: the web
-    // dashboard's answer to the same question loses to the desktop's.
+    // The daemon's record, read through its own RPC by a second surface on
+    // the same daemon (#1193): the web dashboard's answer to the same question
+    // loses to the desktop's, and the refusal names the winner. The answer
+    // text itself is the pane's business, proven above.
     const port = 20_000 + (stamp % 20_000);
     const token = `e2e-${stamp}`;
     web = spawn(AINB_BIN, ["web", "--listen", `127.0.0.1:${port}`, "--token", token], {
@@ -245,7 +218,9 @@ describe("answering from the window", () => {
       },
       { timeout: 60_000, interval: 500, timeoutMsg: "the web dashboard never answered" },
     );
-    assert.deepEqual(second, { outcome: "already_answered", by: answeredBy }, JSON.stringify(second));
+    assert.equal(second?.outcome, "already_answered", JSON.stringify(second));
+    // `<surface>@<host>`: the surface is what the person sat at.
+    assert.match(second.by, /^desktop@/, `the desktop answered, not the terminal: ${JSON.stringify(second)}`);
 
     // The board's card is the row raised with the provider id, which no one
     // answered, so it is still waiting. With #1049 closed, one question would
