@@ -93,7 +93,7 @@ fn tmux_session_exists(name: &str) -> bool {
 
 /// Scan for orphaned sessions from all sources
 pub fn find_orphaned_sessions() -> Result<Vec<OrphanedSession>> {
-    let store = load_session_store();
+    let store = load_session_store().context("Failed to load session store")?;
     let tracked_tmux: Vec<&str> = store.tracked_tmux_names();
 
     let mut orphans = Vec::new();
@@ -515,8 +515,9 @@ fn cleanup_single_orphan(orphan: &OrphanedSession) -> Result<()> {
         }
     }
 
-    // 4. Remove from session store if present.
-    let _ = mutate_session_store(|store| {
+    // 4. Remove from session store if present, under the process's one
+    // session source (pu4 lock on the file path, RPC on the daemon path).
+    mutate_session_store(|store| {
         if let Ok(uuid) = Uuid::parse_str(&orphan.id) {
             store.remove_by_session_id(uuid);
         }
@@ -524,7 +525,8 @@ fn cleanup_single_orphan(orphan: &OrphanedSession) -> Result<()> {
         if let Some(ref tmux_name) = orphan.tmux_session_name {
             store.sessions.remove(tmux_name);
         }
-    });
+    })
+    .context("Failed to save session store")?;
 
     Ok(())
 }
