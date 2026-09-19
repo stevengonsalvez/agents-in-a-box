@@ -89,6 +89,24 @@ pub enum ScreenFixture {
     LogHistory,
     Onboarding,
     SetupMenu,
+    /// The inbox screen over the `inbox` section (D3-prime), folded through
+    /// the section's own `apply_read` so the fixture carries what a daemon
+    /// read would: `filler` unread rows are appended after `entries` so a
+    /// fixture can sit past the fold's row cap without listing 100 rows.
+    Inbox {
+        entries: Vec<InboxRowFixture>,
+        #[serde(default)]
+        filler: usize,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboxRowFixture {
+    pub kind: String,
+    pub summary: String,
+    #[serde(default)]
+    pub read: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +165,7 @@ impl ParityFixture {
             ScreenFixture::LogHistory => ids::LOG_HISTORY,
             ScreenFixture::Onboarding => ids::ONBOARDING,
             ScreenFixture::SetupMenu => ids::SETUP_MENU,
+            ScreenFixture::Inbox { .. } => ids::INBOX,
         }
     }
 
@@ -197,6 +216,33 @@ impl ParityFixture {
             | ScreenFixture::SkillManager
             | ScreenFixture::LogHistory
             | ScreenFixture::SetupMenu => {}
+            ScreenFixture::Inbox { entries, filler } => {
+                let row = |n: usize, kind: &str, summary: &str, read: bool| {
+                    ainb_hangar_proto::events::InboxEntryRow {
+                        id: format!("01J0PARITYINBOX{n:011}"),
+                        kind: kind.to_string(),
+                        event: format!("{kind}_created"),
+                        subject_id: format!("{kind}-{n}"),
+                        summary: summary.to_string(),
+                        recipient: "member:me".to_string(),
+                        created_at: 1_700_000_000_000 - n as i64,
+                        read_at: read.then_some(1_700_000_000_500),
+                    }
+                };
+                let mut rows: Vec<_> = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(n, e)| row(n, &e.kind, &e.summary, e.read))
+                    .collect();
+                for n in 0..*filler {
+                    rows.push(row(entries.len() + n, "task", &format!("Task queued: filler-{n}"), false));
+                }
+                let unread = rows.iter().filter(|r| r.read_at.is_none()).count() as i64;
+                state.apply_inbox_read(
+                    ainb_hangar_proto::snapshots::InboxListResult { entries: rows, unread },
+                    1_700_000_001_000,
+                );
+            }
         }
         state
     }
