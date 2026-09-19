@@ -90,9 +90,10 @@ pub const FIRST_PASS_WAIT: Duration = Duration::from_secs(2);
 static FIRST_PASS: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> =
     std::sync::OnceLock::new();
 
-/// Arm the first-pass gate: from now until a pass commits, session reads wait
-/// for it (P6e, amended: the socket opens at once, the first read waits for
-/// the first pass). The boot pass runs in the background, and the table may
+/// Arm the first-pass gate: session reads wait until a pass commits.
+///
+/// P6e, amended: the socket opens at once, the first read waits for the
+/// first pass. The boot pass runs in the background, and the table may
 /// still hold rows from a previous boot that this boot's file no longer
 /// matches, so no read may be served from it before this process has
 /// reconciled once.
