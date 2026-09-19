@@ -1062,6 +1062,15 @@ impl EventHandler {
         {
             state.release_interactive_pane();
         }
+        // On the desktop this opens the session's terminal tab, or brings it
+        // forward: the pane is now in front of the person, which is what a
+        // full-screen attach means on the terminal. The terminal's clear point
+        // moves through the scan's `is_attached` instead, never from here.
+        if state.host.surface == ainb_hangar_proto::connections::SurfaceKind::Desktop {
+            if let TerminalTarget::Session { id, .. } = &target {
+                state.host.attention_focus_pending.insert(*id);
+            }
+        }
         state.emit(Effect::AttachTerminal(target));
     }
 
