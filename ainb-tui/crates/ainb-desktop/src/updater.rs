@@ -365,6 +365,126 @@ impl Updater {
     }
 }
 
+impl Updater {
+    /// Checks 4 to 7 and the swap, from an [`Check::Available`]: download
+    /// beside the install (one filesystem, so the swap is a rename), hash the
+    /// file, unpack the bundle, read its version back as data, drop any
+    /// quarantine attribute, and move it into place with the previous kept.
+    /// Returns the path now holding the new version.
+    ///
+    /// # Errors
+    ///
+    /// Any check that failed, with the staging removed.
+    pub fn apply(&self, check: &Check, install: &Install) -> Result<PathBuf> {
+        let Check::Available {
+            version,
+            bundle,
+            root,
+        } = check
+        else {
+            bail!("nothing to install: the last check found no update");
+        };
+        let next = next_path(install);
+        let staging = next.with_extension("staging");
+        let _ = std::fs::remove_dir_all(&staging);
+        let _ = remove_path(&next);
+        let result = (|| {
+            let archive = self.download_and_verify(bundle, root, &staging)?;
+            match bundle.format.as_str() {
+                "dmg" => extract_dmg(&archive, &next)?,
+                "appimage" => {
+                    std::fs::rename(&archive, &next)?;
+                    make_executable(&next)?;
+                }
+                other => bail!("no installer for a {other} bundle"),
+            }
+            if cfg!(target_os = "macos") {
+                let found = bundle_version(&next)?;
+                if found != *version {
+                    bail!("the downloaded bundle says it is {found}, the manifest said {version}");
+                }
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(&staging);
+        if let Err(error) = result {
+            let _ = remove_path(&next);
+            return Err(error);
+        }
+        swap(install, &next)?;
+        Ok(install.current().to_path_buf())
+    }
+}
+
+/// Check 5, as data: `CFBundleShortVersionString` from the bundle's own
+/// `Info.plist`, read with `plutil`, never by running the download.
+fn bundle_version(app: &Path) -> Result<String> {
+    let output = std::process::Command::new("plutil")
+        .args(["-extract", "CFBundleShortVersionString", "raw"])
+        .arg(app.join("Contents/Info.plist"))
+        .output()
+        .context("running plutil")?;
+    if !output.status.success() {
+        bail!("the downloaded bundle has no readable Info.plist");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Mount `dmg` read-only, copy the one `.app` inside it to `dest`, unmount.
+fn extract_dmg(dmg: &Path, dest: &Path) -> Result<()> {
+    let mount = tempfile::tempdir().context("creating a mount point")?;
+    let attached = std::process::Command::new("hdiutil")
+        .args([
+            "attach",
+            "-nobrowse",
+            "-readonly",
+            "-noautoopen",
+            "-mountpoint",
+        ])
+        .arg(mount.path())
+        .arg(dmg)
+        .output()
+        .context("running hdiutil attach")?;
+    if !attached.status.success() {
+        bail!(
+            "the disk image did not mount: {}",
+            String::from_utf8_lossy(&attached.stderr).trim()
+        );
+    }
+    let copied = (|| {
+        let app = std::fs::read_dir(mount.path())?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|e| e == "app"))
+            .ok_or_else(|| anyhow!("the disk image carries no .app"))?;
+        let status = std::process::Command::new("ditto")
+            .arg(&app)
+            .arg(dest)
+            .status()
+            .context("running ditto")?;
+        if !status.success() {
+            bail!("copying the app out of the disk image failed");
+        }
+        Ok(())
+    })();
+    let _ = std::process::Command::new("hdiutil")
+        .args(["detach", "-quiet"])
+        .arg(mount.path())
+        .status();
+    copied
+}
+
+fn make_executable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -559,6 +679,32 @@ pub fn repair_interrupted_swap(current: &Path) -> Result<bool> {
     }
     std::fs::rename(&next, current).context("finishing an interrupted update")?;
     Ok(true)
+}
+
+/// The startup half of the repair: when this process runs from a
+/// `<name>.previous` or `<name>.next` bundle (the only things left to launch
+/// after a crash between the swap's two renames), finish the move-in of
+/// `<name>.next` so the next launch is the new version. `Ok(true)` when
+/// something moved.
+///
+/// # Errors
+///
+/// The rename failed.
+pub fn repair_at_startup() -> Result<bool> {
+    let exe = std::env::current_exe().context("resolving the desktop executable")?;
+    let Some(parked) = exe.ancestors().find(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".app.previous") || n.ends_with(".app.next"))
+    }) else {
+        return Ok(false);
+    };
+    let name = parked
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(".previous").or_else(|| n.strip_suffix(".next")))
+        .ok_or_else(|| anyhow!("no bundle name"))?;
+    repair_interrupted_swap(&parked.with_file_name(name))
 }
 
 /// The staging name a swap uses beside the install, so a crash leaves a
