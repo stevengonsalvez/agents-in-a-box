@@ -1228,8 +1228,8 @@ impl HeldUsage {
         reply.daily.iter_mut().for_each(|day| clip(&mut day.date, name));
         reply.providers.iter_mut().for_each(|row| clip(&mut row.provider, name));
         reply.models.iter_mut().for_each(|row| clip(&mut row.model, name));
+        reply.projects = merge_projects(std::mem::take(&mut reply.projects));
         for row in &mut reply.projects {
-            row.project = project_label(&row.project);
             clip(&mut row.project, name);
             if let Some(repo) = &mut row.repo {
                 clip(repo, name);
@@ -1248,45 +1248,53 @@ impl HeldUsage {
     }
 }
 
-/// A project's aggregation key as a label that names no home.
+/// A project's aggregation key as the label a frame carries: its leaf segment.
 ///
 /// The producer keys a provider that records a working directory by that path
-/// with its separators dashed (`-home-<user>-src-app`, `parsers/codex.rs`), so
-/// the raw key carries the operator's home. This host's home is stripped
-/// whole; another user's `home` or `Users` prefix is dropped with the one
-/// segment after it (a username with a dash in it leaves its tail, which is a
-/// word, not a path); a slash path keeps only its leaf. A key that is nothing
-/// but a home reads `home`.
+/// with its separators dashed (`-home-<user>-src-app`, `-Volumes-Work-<user>-
+/// src-app`, `parsers/codex.rs`), so any segment before the leaf can be a root,
+/// a volume, a user or a parent directory. Every key keeps only its last
+/// segment split on `/`, `\\` and `-`, whatever its root; a hyphenated project
+/// name shortens to its last word, which is the price of naming no path (the
+/// #1260 review's call). An empty leaf reads `project`.
 fn project_label(key: &str) -> String {
-    if key.contains('/') {
-        return key
-            .rsplit('/')
-            .find(|segment| !segment.is_empty())
-            .unwrap_or("home")
-            .to_string();
-    }
-    if let Some(home) = dirs::home_dir() {
-        let dashed = home.to_string_lossy().replace('/', "-");
-        for prefix in [dashed.as_str(), dashed.trim_start_matches('-')] {
-            if key == prefix {
-                return "home".to_string();
-            }
-            if let Some(rest) = key.strip_prefix(prefix).and_then(|rest| rest.strip_prefix('-')) {
-                if !rest.is_empty() {
-                    return rest.to_string();
-                }
-            }
+    key.rsplit(['/', '\\', '-'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("project")
+        .to_string()
+}
+
+/// Fold each project to its label and merge the rows that fold to one: the
+/// counts added, a cost only when every merged row was priced, a repo only when
+/// every merged row named the same one, in the place the first of them held.
+fn merge_projects(
+    projects: Vec<ainb_hangar_proto::fleet::FleetUsageProjectBucket>,
+) -> Vec<ainb_hangar_proto::fleet::FleetUsageProjectBucket> {
+    let mut merged: Vec<ainb_hangar_proto::fleet::FleetUsageProjectBucket> = Vec::new();
+    for mut row in projects {
+        row.project = project_label(&row.project);
+        let Some(held) = merged.iter_mut().find(|held| held.project == row.project) else {
+            merged.push(row);
+            continue;
+        };
+        let (a, b) = (&mut held.bucket, &row.bucket);
+        a.input_tokens = a.input_tokens.saturating_add(b.input_tokens);
+        a.cache_creation_tokens = a.cache_creation_tokens.saturating_add(b.cache_creation_tokens);
+        a.cache_read_tokens = a.cache_read_tokens.saturating_add(b.cache_read_tokens);
+        a.output_tokens = a.output_tokens.saturating_add(b.output_tokens);
+        a.reasoning_tokens = a.reasoning_tokens.saturating_add(b.reasoning_tokens);
+        a.call_count = a.call_count.saturating_add(b.call_count);
+        a.session_count = a.session_count.saturating_add(b.session_count);
+        a.project_count = a.project_count.saturating_add(b.project_count);
+        a.cost_usd = match (a.cost_usd, b.cost_usd) {
+            (Some(x), Some(y)) => Some(x + y),
+            _ => None,
+        };
+        if held.repo != row.repo {
+            held.repo = None;
         }
     }
-    for root in ["-home-", "home-", "-Users-", "Users-"] {
-        if let Some(rest) = key.strip_prefix(root) {
-            return match rest.split_once('-') {
-                Some((_, tail)) if !tail.is_empty() => tail.to_string(),
-                _ => "home".to_string(),
-            };
-        }
-    }
-    key.to_string()
+    merged
 }
 
 impl UsageSection {
