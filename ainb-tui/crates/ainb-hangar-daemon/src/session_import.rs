@@ -108,10 +108,8 @@ pub async fn first_pass_done_within(wait: Duration) -> bool {
         return true;
     };
     let mut done = gate.subscribe();
-    let ready = tokio::time::timeout(wait, done.wait_for(|done| *done))
-        .await
-        .is_ok_and(|waited| waited.is_ok());
-    ready
+    let waited = tokio::time::timeout(wait, done.wait_for(|done| *done)).await;
+    waited.is_ok_and(|seen| seen.is_ok())
 }
 
 /// Serialises passes within this process. Two passes would otherwise take the
