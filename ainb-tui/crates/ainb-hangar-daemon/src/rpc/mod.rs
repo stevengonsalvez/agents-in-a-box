@@ -13448,57 +13448,89 @@ fn session_entry_to_row(
     }
 }
 
-/// List persistent sessions matching the optional workspace filter.
+/// List sessions, newest first, at most `limit` (capped at
+/// [`SESSION_LIST_MAX`](ainb_hangar_proto::sessions::SESSION_LIST_MAX)).
+///
+/// The answer carries `import_complete`: until the boot import of
+/// `sessions.json` has finished, an empty table does not mean "no sessions",
+/// and the client reads the file instead.
 async fn handle_session_list(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::sessions::{SESSION_LIST_MAX, WorkspaceSessionListResult};
+    use ainb_hangar_store::repo::sessions::SessionsRepo;
+
     let params: ainb_hangar_proto::sessions::WorkspaceSessionListParams = if req.params.is_null() {
         Default::default()
     } else {
-        parse_params(req, "{ workspace_name? }")?
+        parse_params(req, "{ workspace_name?, limit? }")?
     };
-    let rows = ainb_hangar_store::repo::sessions::SessionsRepo::list(
-        pool,
-        params.workspace_name.as_deref(),
-    )
-    .await
-    .map_err(|e| store_err(&e))?;
+    let limit = params.limit.unwrap_or(SESSION_LIST_MAX).min(SESSION_LIST_MAX);
+    let mut rows = SessionsRepo::list(pool, params.workspace_name.as_deref(), limit + 1)
+        .await
+        .map_err(|e| store_err(&e))?;
+    let truncated = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    let import_complete =
+        SessionsRepo::any_import_completed(pool).await.map_err(|e| store_err(&e))?;
 
     let sessions = rows.into_iter().map(session_row_to_entry).collect();
-    to_value(&ainb_hangar_proto::sessions::WorkspaceSessionListResult { sessions })
+    to_value(&WorkspaceSessionListResult {
+        sessions,
+        truncated,
+        import_complete,
+    })
 }
 
-/// Upsert a session into the persistent store.
+/// Upsert a session. The entry is validated first (canonical UUID id, tmux
+/// name charset, absolute path, byte caps), and a tmux name already bound to
+/// another session id is refused rather than taken over.
 async fn handle_session_upsert(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::sessions::{SessionsRepo, UpsertOutcome};
+
     let params: ainb_hangar_proto::sessions::WorkspaceSessionUpsertParams =
         parse_params(req, "{ session }")?;
+    params.session.validate().map_err(|why| invalid_params(&why))?;
     let row = session_entry_to_row(params.session);
-    ainb_hangar_store::repo::sessions::SessionsRepo::upsert(pool, &row)
-        .await
-        .map_err(|e| store_err(&e))?;
+    match SessionsRepo::upsert(pool, &row).await.map_err(|e| store_err(&e))? {
+        UpsertOutcome::Written => {}
+        UpsertOutcome::TmuxNameTaken { holder } => {
+            return Err(invalid_params(&format!(
+                "tmux_session_name is bound to session {holder}; delete that session first"
+            )));
+        }
+    }
 
     to_value(&ainb_hangar_proto::sessions::WorkspaceSessionUpsertResult { ok: true })
 }
 
-/// Delete a session by ID or tmux name.
+/// Delete a session by id or tmux name, each checked the way an upsert
+/// checks it.
 async fn handle_session_delete(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::sessions::{is_canonical_uuid, is_valid_tmux_name};
+    use ainb_hangar_store::repo::sessions::SessionsRepo;
+
     let params: ainb_hangar_proto::sessions::WorkspaceSessionDeleteParams =
         parse_params(req, "{ session_id?, tmux_session_name? }")?;
     let deleted = if let Some(id) = params.session_id.as_deref() {
-        ainb_hangar_store::repo::sessions::SessionsRepo::delete_by_id(pool, id)
-            .await
-            .map_err(|e| store_err(&e))?
+        if !is_canonical_uuid(id) {
+            return Err(invalid_params("session_id must be a canonical UUID"));
+        }
+        SessionsRepo::delete_by_id(pool, id).await.map_err(|e| store_err(&e))?
     } else if let Some(tmux) = params.tmux_session_name.as_deref() {
-        ainb_hangar_store::repo::sessions::SessionsRepo::delete_by_tmux_name(pool, tmux)
-            .await
-            .map_err(|e| store_err(&e))?
+        if !is_valid_tmux_name(tmux) {
+            return Err(invalid_params(
+                "tmux_session_name is not a valid tmux session name",
+            ));
+        }
+        SessionsRepo::delete_by_tmux_name(pool, tmux).await.map_err(|e| store_err(&e))?
     } else {
         return Err(invalid_params(
             "either session_id or tmux_session_name is required",
@@ -16586,7 +16618,7 @@ mod tests {
                 methods::WORKSPACE_SESSION_UPSERT,
                 serde_json::json!({
                     "session": {
-                        "session_id": "sess-test-uuid-1",
+                        "session_id": "0b5f7a1e-3c2d-4e6f-8a9b-1c2d3e4f5a6b",
                         "tmux_session_name": "ainb-test-sess-1",
                         "worktree_path": "/path/to/worktree",
                         "workspace_name": "ws-test",
@@ -16623,7 +16655,10 @@ mod tests {
         assert!(list_res.error.is_none(), "{list_res:?}");
         let sessions = list_res.result.unwrap()["sessions"].as_array().unwrap().clone();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0]["session_id"], "sess-test-uuid-1");
+        assert_eq!(
+            sessions[0]["session_id"],
+            "0b5f7a1e-3c2d-4e6f-8a9b-1c2d3e4f5a6b"
+        );
         assert_eq!(sessions[0]["tmux_session_name"], "ainb-test-sess-1");
         assert_eq!(sessions[0]["headroom_enabled"], true);
         assert_eq!(sessions[0]["rtk_enabled"], false);
@@ -16653,6 +16688,178 @@ mod tests {
         .await;
         let sessions2 = list_res2.result.unwrap()["sessions"].as_array().unwrap().clone();
         assert!(sessions2.is_empty());
+    }
+
+    fn session_json(id: &str, tmux: &str) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": id,
+            "tmux_session_name": tmux,
+            "worktree_path": "/home/u/worktrees/repo",
+            "workspace_name": "repo",
+            "created_at": 1_700_000_000_000_i64,
+            "agent_type": "Codex",
+            "model_source": "Raw"
+        })
+    }
+
+    async fn session_rpc(
+        pool: &SqlitePool,
+        method: &str,
+        params: serde_json::Value,
+    ) -> RpcResponse {
+        dispatch(pool, &req(method, params), &health(), &sink()).await
+    }
+
+    /// Every malformed entry is refused with `INVALID_PARAMS` and writes
+    /// nothing: a ULID id, a tmux name with a separator or a newline, a
+    /// relative path, an oversized workspace name.
+    #[tokio::test]
+    async fn workspace_session_upsert_refuses_malformed_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let good = "0b5f7a1e-3c2d-4e6f-8a9b-1c2d3e4f5a6b";
+
+        let mut bad = vec![
+            session_json("01J8Z3K6Q2N4T5V7W9X0Y1Z2A3", "tmux_a"),
+            session_json(good, "tmux:a"),
+            session_json(good, "tmux\na"),
+        ];
+        let mut relative = session_json(good, "tmux_a");
+        relative["worktree_path"] = serde_json::json!("worktrees/repo");
+        bad.push(relative);
+        let mut huge = session_json(good, "tmux_a");
+        huge["workspace_name"] = serde_json::json!("w".repeat(257));
+        bad.push(huge);
+
+        for session in bad {
+            let res = session_rpc(
+                pool,
+                methods::WORKSPACE_SESSION_UPSERT,
+                serde_json::json!({ "session": session.clone() }),
+            )
+            .await;
+            let err = res.error.unwrap_or_else(|| panic!("{session} was accepted"));
+            assert_eq!(err.code, INVALID_PARAMS, "{session}: {}", err.message);
+        }
+        let rows = ainb_hangar_store::repo::sessions::SessionsRepo::list(pool, None, 10)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "a refused upsert wrote {rows:?}");
+    }
+
+    /// An upsert naming a tmux session held by another id is refused, and
+    /// the holder keeps the name.
+    #[tokio::test]
+    async fn workspace_session_upsert_refuses_a_name_held_by_another_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let holder = "0b5f7a1e-3c2d-4e6f-8a9b-1c2d3e4f5a6b";
+        let intruder = "1c6f8b2f-4d3e-4f70-9b0c-2d3e4f5a6b7c";
+
+        let ok = session_rpc(
+            pool,
+            methods::WORKSPACE_SESSION_UPSERT,
+            serde_json::json!({ "session": session_json(holder, "tmux_shared") }),
+        )
+        .await;
+        assert!(ok.error.is_none(), "{ok:?}");
+
+        let clash = session_rpc(
+            pool,
+            methods::WORKSPACE_SESSION_UPSERT,
+            serde_json::json!({ "session": session_json(intruder, "tmux_shared") }),
+        )
+        .await;
+        let err = clash.error.expect("name clash accepted");
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert!(err.message.contains(holder), "{}", err.message);
+
+        let row =
+            ainb_hangar_store::repo::sessions::SessionsRepo::get_by_tmux_name(pool, "tmux_shared")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(row.session_id, holder);
+        assert_eq!(row.agent_type, "Codex");
+    }
+
+    /// `session_list` says whether the boot import finished, honours the
+    /// limit, and flags a truncated answer.
+    #[tokio::test]
+    async fn workspace_session_list_reports_import_state_and_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        let fresh = session_rpc(pool, methods::WORKSPACE_SESSION_LIST, serde_json::json!({})).await;
+        let fresh = fresh.result.unwrap();
+        assert_eq!(fresh["import_complete"], false);
+        assert_eq!(fresh["truncated"], false);
+
+        for (id, name) in [
+            ("0b5f7a1e-3c2d-4e6f-8a9b-1c2d3e4f5a6b", "tmux_a"),
+            ("1c6f8b2f-4d3e-4f70-9b0c-2d3e4f5a6b7c", "tmux_b"),
+        ] {
+            let res = session_rpc(
+                pool,
+                methods::WORKSPACE_SESSION_UPSERT,
+                serde_json::json!({ "session": session_json(id, name) }),
+            )
+            .await;
+            assert!(res.error.is_none(), "{res:?}");
+        }
+        ainb_hangar_store::repo::sessions::SessionsRepo::complete_import(
+            pool,
+            "/home/u/.agents-in-a-box/sessions.json",
+            &[],
+            0,
+            1,
+        )
+        .await
+        .unwrap();
+
+        let one = session_rpc(
+            pool,
+            methods::WORKSPACE_SESSION_LIST,
+            serde_json::json!({ "limit": 1 }),
+        )
+        .await
+        .result
+        .unwrap();
+        assert_eq!(one["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(one["truncated"], true);
+        assert_eq!(one["import_complete"], true);
+
+        let all = session_rpc(
+            pool,
+            methods::WORKSPACE_SESSION_LIST,
+            serde_json::Value::Null,
+        )
+        .await
+        .result
+        .unwrap();
+        assert_eq!(all["sessions"].as_array().unwrap().len(), 2);
+        assert_eq!(all["truncated"], false);
+    }
+
+    /// Deleting by a malformed id or name is refused rather than matching
+    /// nothing quietly.
+    #[tokio::test]
+    async fn workspace_session_delete_refuses_malformed_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        for params in [
+            serde_json::json!({ "session_id": "not-a-uuid" }),
+            serde_json::json!({ "tmux_session_name": "a\nb" }),
+            serde_json::json!({}),
+        ] {
+            let res = session_rpc(pool, methods::WORKSPACE_SESSION_DELETE, params.clone()).await;
+            assert_eq!(res.error.map(|e| e.code), Some(INVALID_PARAMS), "{params}");
+        }
     }
 
     /// The set RPC and the CLI are meant to be ONE gate, so they must agree on
