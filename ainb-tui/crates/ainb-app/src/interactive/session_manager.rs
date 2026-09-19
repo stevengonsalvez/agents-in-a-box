@@ -4929,9 +4929,10 @@ trust_level = "trusted"
         assert_eq!(metadata.launch_model().as_deref(), Some("Opus"));
     }
 
-    /// pu4: `SessionStore::mutate` must serialise concurrent load-modify-save
+    /// pu4, on the P6e write path: `cli::util::mutate_session_store` (every
+    /// writer's path since P6e-4) must serialise concurrent load-modify-save
     /// through the cross-process lock so racing writers never lost-update the
-    /// store. Two thread pools each upsert a disjoint set of keys into the SAME
+    /// store. In this test process the source is the file. Two thread pools each upsert a disjoint set of keys into the SAME
     /// `sessions.json`; with the naked (pre-fix) RMW the interleaving where both
     /// threads load the same base and write back only their own entry would drop
     /// updates. Under the lock every key survives.
@@ -4974,7 +4975,7 @@ trust_level = "trusted"
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    SessionStore::mutate(|store| store.upsert(mk(i)))
+                    crate::cli::util::mutate_session_store(|store| store.upsert(mk(i)))
                         .expect("locked mutate must succeed");
                 })
             })
