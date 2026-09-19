@@ -745,8 +745,9 @@ const TYPE_ALLOW: &[(&str, &str)] = &[
     ),
     ("AgentDef.tools", "tool names an agent definition allows"),
     (
-        "CodeReviewUi.collapsed_dirs",
-        "repo-relative folders collapsed in the review tree",
+        "ReviewUiFrame.collapsed_dirs",
+        "repo-relative folders collapsed in the review tree, sorted and counted \
+         against the frame's list budget",
     ),
     (
         "ConfigScreenState.dirty",
