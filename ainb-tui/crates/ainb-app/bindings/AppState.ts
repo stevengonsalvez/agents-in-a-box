@@ -3766,7 +3766,7 @@ export type PluginsHostView = PluginsHostView_Serialize;
 export type PluginsHostView_Serialize = {
 	plugin_captures_text: { [key in string]: boolean },
 	plugin_presence: { [key in string]: PluginPresence },
-	plugin_render_errors: { [key in string]: string },
+	plugin_render_errors: { [key in string]: RenderErrorFrame },
 };
 
 /**
@@ -3836,6 +3836,15 @@ export type RecoveryViewMode =
 
 export type RecoveryView_Serialize = {
 	session_recovery_state: SessionRecoveryState_Serialize,
+};
+
+/**
+ *  One plugin's render error as a frame carries it: scrubbed, then cut to
+ *  [`RENDER_ERROR_MAX_CHARS`], with `cut` saying whether it was.
+ */
+export type RenderErrorFrame = {
+	text: string,
+	cut: boolean,
 };
 
 /**
