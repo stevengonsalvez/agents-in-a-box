@@ -8,7 +8,7 @@ import type {
   AttentionMark_Serialize,
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
-import { phaseOf, pickIntents, questionFor, type Refusal, sendInOrder, typedIntents } from "./answer.ts";
+import { phaseOf, pickIntents, questionFor, type Refusal, selectedSession, sendInOrder, typedIntents } from "./answer.ts";
 
 function mark(over: Partial<AttentionMark_Serialize> = {}): AttentionMark_Serialize {
   return {
@@ -29,7 +29,7 @@ function sessions(...attention: AttentionMark_Serialize[]): SessionsView_Seriali
   return {
     workspaces: [{ name: "repo", sessions: [{ id: "u-1", name: "api", attention }] }],
     selected_workspace_index: 0,
-    selected_session_index: 0,
+    selected_session_id: "u-1",
     shell_selected: false,
   } as unknown as SessionsView_Serialize;
 }
@@ -95,8 +95,30 @@ test("an approve nothing can deliver offers no send at all", () => {
 
 test("nothing blocking, nothing selected: no banner", () => {
   assert.equal(questionFor(sessions(mark({ kind: "Done" }))), null);
-  const none = { ...sessions(mark()), selected_session_index: null } as unknown as SessionsView_Serialize;
+  const none = { ...sessions(mark()), selected_session_id: null } as unknown as SessionsView_Serialize;
   assert.equal(questionFor(none), null);
+});
+
+test("the selection is the row the frame names by id, not a position in its list", () => {
+  // A frame carries only the rows its filter shows (#1180): the selected row
+  // is found by id wherever it sits, and an id the frame does not carry names
+  // nothing, never whatever row sits at the old position.
+  const view = {
+    workspaces: [
+      { name: "other", sessions: [{ id: "u-0", name: "web", attention: [mark({ request: "att-0" })] }] },
+      { name: "repo", sessions: [{ id: "u-1", name: "api", attention: [mark()] }] },
+    ],
+    selected_workspace_index: 1,
+    selected_session_id: "u-1",
+    shell_selected: false,
+  } as unknown as SessionsView_Serialize;
+  assert.equal(selectedSession(view)?.id, "u-1");
+  assert.equal(questionFor(view)?.request, "att-7");
+  const gone = { ...view, selected_session_id: "u-hidden" } as unknown as SessionsView_Serialize;
+  assert.equal(selectedSession(gone), undefined);
+  assert.equal(questionFor(gone), null);
+  const shell = { ...view, shell_selected: true } as unknown as SessionsView_Serialize;
+  assert.equal(selectedSession(shell), undefined);
 });
 
 test("with two open questions on one session, the banner refuses when the reducer is on the other", () => {
