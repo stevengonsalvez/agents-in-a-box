@@ -75,26 +75,33 @@
                     "kind": "Context",
                     "new_lineno": 1,
                     "old_lineno": 1,
-                    "raw": "fn main() {"
+                    "raw": "fn token(header: &str) -> Option<&str> {"
                   },
                   {
                     "emphasis": [],
                     "kind": "Removed",
                     "new_lineno": null,
                     "old_lineno": 2,
-                    "raw": "    println!(\"old\");"
+                    "raw": "    header.strip_prefix(\"Bearer \")"
                   },
                   {
                     "emphasis": [],
                     "kind": "Added",
                     "new_lineno": 2,
                     "old_lineno": null,
-                    "raw": "    println!(\"new\");"
+                    "raw": "    let token = header.strip_prefix(\"Bearer \")?;"
+                  },
+                  {
+                    "emphasis": [],
+                    "kind": "Added",
+                    "new_lineno": 3,
+                    "old_lineno": null,
+                    "raw": "    (!token.is_empty()).then_some(token)"
                   },
                   {
                     "emphasis": [],
                     "kind": "Context",
-                    "new_lineno": 3,
+                    "new_lineno": 4,
                     "old_lineno": 3,
                     "raw": "}"
                   }
@@ -102,9 +109,9 @@
               }
             ],
             "hunks_cut": 0,
-            "insertions": 1,
+            "insertions": 2,
             "language": null,
-            "path": "src/lib.rs",
+            "path": "src/auth/session.rs",
             "rows_cut": 0,
             "status": "Modified"
           },
@@ -126,38 +133,75 @@
                     "kind": "Added",
                     "new_lineno": 1,
                     "old_lineno": null,
-                    "raw": "# Parity"
+                    "raw": "pub mod session;"
                   },
                   {
                     "emphasis": [],
                     "kind": "Added",
                     "new_lineno": 2,
                     "old_lineno": null,
-                    "raw": ""
-                  },
-                  {
-                    "emphasis": [],
-                    "kind": "Added",
-                    "new_lineno": 3,
-                    "old_lineno": null,
-                    "raw": "A fixture repo."
+                    "raw": "pub mod refresh;"
                   }
                 ]
               }
             ],
             "hunks_cut": 0,
-            "insertions": 3,
+            "insertions": 2,
             "language": null,
-            "path": "README.md",
+            "path": "src/auth/mod.rs",
             "rows_cut": 0,
             "status": "Added"
+          },
+          {
+            "binary": false,
+            "collapsed": false,
+            "deletions": 1,
+            "hunks": [
+              {
+                "expanded_after": 0,
+                "expanded_before": 0,
+                "gap_after": 0,
+                "gap_before": 0,
+                "new_start": 1,
+                "old_start": 1,
+                "rows": [
+                  {
+                    "emphasis": [],
+                    "kind": "Context",
+                    "new_lineno": 1,
+                    "old_lineno": 1,
+                    "raw": "# Auth"
+                  },
+                  {
+                    "emphasis": [],
+                    "kind": "Removed",
+                    "new_lineno": null,
+                    "old_lineno": 2,
+                    "raw": "A token is read from the header."
+                  },
+                  {
+                    "emphasis": [],
+                    "kind": "Added",
+                    "new_lineno": 2,
+                    "old_lineno": null,
+                    "raw": "A token is read from the header and checked for emptiness."
+                  }
+                ]
+              }
+            ],
+            "hunks_cut": 0,
+            "insertions": 1,
+            "language": null,
+            "path": "docs/auth.md",
+            "rows_cut": 0,
+            "status": "Modified"
           }
         ],
         "files_cut": 0
       },
       "review_ui": {
         "collapsed_dirs": [
-          "src"
+          "docs"
         ],
         "collapsed_dirs_cut": 0,
         "current_hunk": 0,

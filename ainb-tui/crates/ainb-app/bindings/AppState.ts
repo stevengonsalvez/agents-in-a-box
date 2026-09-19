@@ -3944,7 +3944,17 @@ export type ReviewUiFrame = {
 	collapsed_dirs: string[],
 	/**  Collapsed directories the frame did not carry. */
 	collapsed_dirs_cut: number,
+	/**
+	 *  The first row to draw, in the FRAME's rows rather than the reducer's:
+	 *  the frame carries a cut of the model, so the same number would
+	 *  otherwise name different content on each side.
+	 */
 	scroll: number,
+	/**
+	 *  The row the reducer is on was not sent, so `scroll` is the nearest one
+	 *  that was.
+	 */
+	scroll_cut: boolean,
 	current_hunk: number,
 };
 
