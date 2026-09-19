@@ -40,16 +40,7 @@ waiting_at_least() {
 waiting_is() { test "$(applied_cards waiting)" = "$1"; }
 
 scenario() {
-  if [[ ! -x "$DESKTOP_BIN" ]]; then
-    check "the desktop shell is built at $DESKTOP_BIN" false
-    return
-  fi
-  if ! command -v xvfb-run >/dev/null; then
-    # Not a failure: a box with no headless X server has falsified nothing
-    # about the window, so the result says why the node could not run.
-    skip "xvfb-run is not installed, so the window has no display to open on"
-    return
-  fi
+  desktop_ready || return
 
   fixture_session || { check "the CLI seeded a session before the window opened" false; return; }
 

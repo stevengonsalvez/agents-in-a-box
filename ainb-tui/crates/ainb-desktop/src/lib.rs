@@ -20,7 +20,6 @@
 //! None of it needs a window: the Tauri binary (`app` feature) wires these to
 //! channels and commands, and the tests drive them headless.
 
-pub mod agent_status;
 /// TypeScript for the shapes the webview sends and receives (#1158).
 #[cfg(feature = "typescript-bindings")]
 pub mod bindings;

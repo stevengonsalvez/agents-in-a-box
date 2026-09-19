@@ -150,6 +150,9 @@ rand = "0.8"
 # when the issue tracker is absent. Used by `BdClient::new`.
 which = { workspace = true }
 chrono = { workspace = true }
+# P6d: the boot import mints a UUID (the CLI's session key) for a
+# sessions.json record that carries no session id.
+uuid = { workspace = true }
 # CancellationToken for cooperative shutdown of the inbound beads poll loop
 # (P2.4): the loop selects on `cancel.cancelled()` so the daemon's supervisor can
 # stop it within one tick.

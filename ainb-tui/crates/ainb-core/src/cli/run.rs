@@ -13,12 +13,13 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::RunArgs;
+use super::util::mutate_session_store;
 use crate::config::CliProvider;
 use crate::git::worktree_manager::WorktreeManager;
 use crate::interactive::session_manager::{
-    CodexRemote, InteractiveSessionManager, ModelSource, SessionMetadata, SessionStore,
-    WorktreeRollback, claim_codex_remote_thread, discard_codex_remote_thread,
-    ensure_codex_remote_thread, rollback_failed_interactive_launch,
+    CodexRemote, InteractiveSessionManager, ModelSource, SessionMetadata, WorktreeRollback,
+    claim_codex_remote_thread, discard_codex_remote_thread, ensure_codex_remote_thread,
+    rollback_failed_interactive_launch,
 };
 use crate::models::session::{SessionAgentType, is_default_model};
 use crate::tmux::TmuxSession;
@@ -315,7 +316,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     // Locked RMW (pu4): another `ainb run`/`kill` or a daemon register racing
     // this write must not lost-update the store.
-    if let Err(error) = SessionStore::mutate(|store| store.upsert(metadata)) {
+    if let Err(error) = mutate_session_store(|store| store.upsert(metadata)) {
         rollback_failed_interactive_launch(session_id, Some(&tmux_name), rollback_worktree()).await;
         if codex_thread_id.is_some() {
             if let Err(cleanup_error) = discard_codex_remote_thread(session_id).await {

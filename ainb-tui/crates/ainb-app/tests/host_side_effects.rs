@@ -615,6 +615,89 @@ fn the_workspace_load_seam_is_the_only_public_way_in() {
     }
 }
 
+/// Every `.rs` file under `dir`, recursively, as (path, text).
+fn rust_sources(dir: &Path) -> Vec<(std::path::PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = std::fs::read_to_string(&path).expect("read source");
+                out.push((path, text));
+            }
+        }
+    }
+    out
+}
+
+/// One agent status reader (#1188): no crate's source reads the joined
+/// `fleet/roster_status` itself except the shared reader, so a host that wants
+/// section 20 runs that reader rather than growing a second read loop. The
+/// daemon that serves the read and the client that defines it are not readers.
+#[test]
+fn only_the_shared_reader_reads_the_agent_status_roster() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let reader = Path::new("ainb-app/src/fleet/agent_status_reader.rs");
+    let not_readers = ["ainb-hangar-client", "ainb-hangar-daemon"];
+    let mut readers: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&crates).expect("crates dir").flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if not_readers.contains(&name.as_str()) {
+            continue;
+        }
+        for (path, text) in rust_sources(&entry.path().join("src")) {
+            if text.contains(".fleet_roster_status(") {
+                let relative = path.strip_prefix(&crates).unwrap_or(&path).to_path_buf();
+                if relative != reader {
+                    readers.push(relative.display().to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        readers.is_empty(),
+        "a second agent status reader: {readers:?}"
+    );
+}
+
+/// The desktop reads section 20 through the shared reader and polls nothing of
+/// its own (#1188): its source starts `AgentStatusReader` and carries no poll
+/// loop, worker or poll interval for agent status.
+#[test]
+fn the_desktop_runs_the_shared_reader_and_no_poller() {
+    let desktop = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ainb-desktop/src");
+    let sources = rust_sources(&desktop);
+    assert!(!sources.is_empty(), "the desktop source is where it was");
+    assert!(
+        sources.iter().any(|(_, text)| text.contains("AgentStatusReader::spawn(")),
+        "the desktop no longer starts the shared reader"
+    );
+    let poller: Vec<String> = sources
+        .iter()
+        .filter(|(_, text)| {
+            [
+                "AgentStatusPoll",
+                "read_on_worker",
+                "ainb-agent-status",
+                "POLL_MS",
+            ]
+            .iter()
+            .any(|needle| text.contains(needle))
+        })
+        .map(|(path, _)| path.display().to_string())
+        .collect();
+    assert!(
+        poller.is_empty(),
+        "an agent status poller is back: {poller:?}"
+    );
+}
+
 /// `HostOnlyState` never serialises: nothing in it may reach a frame.
 #[test]
 fn host_only_state_is_not_serialize() {

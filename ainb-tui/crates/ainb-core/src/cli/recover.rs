@@ -16,6 +16,7 @@ use std::process::Command;
 use uuid::Uuid;
 
 use super::OutputFormat;
+use super::util::{load_session_store, mutate_session_store};
 use crate::interactive::session_manager::{SessionMetadata, SessionStore};
 use crate::models::session::SessionAgentType;
 
@@ -92,7 +93,7 @@ fn tmux_session_exists(name: &str) -> bool {
 
 /// Scan for orphaned sessions from all sources
 pub fn find_orphaned_sessions() -> Result<Vec<OrphanedSession>> {
-    let store = SessionStore::load();
+    let store = load_session_store().context("Failed to load session store")?;
     let tracked_tmux: Vec<&str> = store.tracked_tmux_names();
 
     let mut orphans = Vec::new();
@@ -402,7 +403,7 @@ fn execute_resume(session: &str) -> Result<()> {
     };
 
     // Locked RMW (pu4): serialise recovery's re-register against live writers.
-    SessionStore::mutate(|store| store.upsert(metadata)).context("Failed to save session store")?;
+    mutate_session_store(|store| store.upsert(metadata)).context("Failed to save session store")?;
 
     let short_id = &matched.id[..8.min(matched.id.len())];
     println!("Resumed session '{workspace}' (tmux: {tmux_name}).");
@@ -514,32 +515,18 @@ fn cleanup_single_orphan(orphan: &OrphanedSession) -> Result<()> {
         }
     }
 
-    // 4. Remove from session store if present, under the cross-process lock
-    // (pu4) so a concurrent create/register can't race this removal. Best-effort
-    // lock (proceed unlocked on failure); the guard spans load → save and drops
-    // at end of scope.
-    let lock_guard = SessionStore::lock()
-        .map_err(|e| eprintln!("  Warning: could not lock sessions.json: {e}; proceeding unlocked"))
-        .ok();
-    let mut store = SessionStore::load();
-    let mut changed = false;
-
-    if let Ok(uuid) = Uuid::parse_str(&orphan.id) {
-        let before = store.sessions.len();
-        store.remove_by_session_id(uuid);
-        changed = store.sessions.len() != before;
-    }
-
-    if let Some(ref tmux_name) = orphan.tmux_session_name {
-        if store.sessions.remove(tmux_name).is_some() {
-            changed = true;
+    // 4. Remove from session store if present, under the process's one
+    // session source (pu4 lock on the file path, RPC on the daemon path).
+    mutate_session_store(|store| {
+        if let Ok(uuid) = Uuid::parse_str(&orphan.id) {
+            store.remove_by_session_id(uuid);
         }
-    }
 
-    if changed {
-        store.save().context("Failed to save session store")?;
-    }
-    drop(lock_guard);
+        if let Some(ref tmux_name) = orphan.tmux_session_name {
+            store.sessions.remove(tmux_name);
+        }
+    })
+    .context("Failed to save session store")?;
 
     Ok(())
 }

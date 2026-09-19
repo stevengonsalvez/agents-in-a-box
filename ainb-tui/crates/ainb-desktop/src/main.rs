@@ -19,7 +19,7 @@ use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
 use ainb_app::{Intent, Keymap};
 use ainb_desktop::executor::DesktopExecutor;
-use ainb_desktop::host::{DesktopHost, FrameSink};
+use ainb_desktop::host::{DesktopHost, FrameSink, agent_status_dialer};
 use ainb_desktop::intent::{Refusal, RendererIntent};
 use ainb_desktop::shell::Shell;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarState, SidecarView};
@@ -470,6 +470,7 @@ fn main() {
             // How often the host frames work that happened outside a
             // dispatch: the same `ui.app_tick_ms` the terminal host paces by.
             let tick = Duration::from_millis(config.ui.app_tick_ms.max(1));
+            let legacy_panel = ainb_desktop::host::legacy_panel(&config);
             let frames = ChannelSink::default();
             let socket = ainb_hangar_client::socket_path_in(&hangar_home);
             let mut host = DesktopHost::new(
@@ -487,6 +488,8 @@ fn main() {
             // Both spawn onto the app's tokio runtime, so they start inside it.
             let sidecar = tauri::async_runtime::block_on(async {
                 host.start_workspace_load();
+                // Section 20, the board: the reader both hosts share (#1188).
+                host.start_agent_status(agent_status_dialer(), legacy_panel);
                 Sidecar::start(sidecar_config.clone())
             });
             let mut states = sidecar.state();
@@ -523,24 +526,13 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    let (view, connected, lost) = {
+                    let (view, connected) = {
                         let state = states.borrow_and_update();
-                        let lost = match &*state {
-                            SidecarState::Reconnecting { error }
-                            | SidecarState::Degraded { error, .. } => Some(error.clone()),
-                            _ => None,
-                        };
                         (
                             state.view(),
                             matches!(*state, SidecarState::Connected { .. }),
-                            lost,
                         )
                     };
-                    // The board's rows are only as current as the daemon they
-                    // came from: while it is gone they read unreachable.
-                    if let Some(reason) = &lost {
-                        handle.state::<Window>().shell.daemon_lost(reason);
-                    }
                     // A connected sidecar has completed a hello, so the daemon
                     // may now have named its host (#1066). The webview hears the
                     // new id first, then the mirror re-pins and reframes under
@@ -558,7 +550,6 @@ fn main() {
                             }
                             window.shell.set_host(host_id);
                         }
-                        window.shell.daemon_connected();
                     }
                     if let Err(error) = handle.emit("sidecar", view) {
                         tracing::warn!(%error, "sidecar state not delivered to the webview");

@@ -27,6 +27,11 @@ mod chat;
 mod presence;
 pub mod reconnect;
 
+pub use ainb_hangar_proto::sessions::{
+    WorkspaceSessionDeleteParams, WorkspaceSessionDeleteResult, WorkspaceSessionEntry,
+    WorkspaceSessionListParams, WorkspaceSessionListResult, WorkspaceSessionUpsertParams,
+    WorkspaceSessionUpsertResult,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use presence::reset_process_as_surface_for_test;
 pub use presence::{Dialer, PresenceLease, PresenceState, mark_process_as_surface};
@@ -714,6 +719,30 @@ impl DaemonClient {
         let value = serde_json::to_value(params).expect("FleetTranscriptPruneParams serializes");
         let result = self.call(methods::FLEET_TRANSCRIPT_PRUNE, value).await?;
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
+    /// List workspace sessions across all workspaces, or filtered by workspace_path.
+    pub async fn workspace_session_list(
+        &self,
+        params: WorkspaceSessionListParams,
+    ) -> Result<WorkspaceSessionListResult, DaemonError> {
+        self.call_typed(methods::WORKSPACE_SESSION_LIST, &params).await
+    }
+
+    /// Upsert one workspace session into the daemon store.
+    pub async fn workspace_session_upsert(
+        &self,
+        params: WorkspaceSessionUpsertParams,
+    ) -> Result<WorkspaceSessionUpsertResult, DaemonError> {
+        self.call_typed(methods::WORKSPACE_SESSION_UPSERT, &params).await
+    }
+
+    /// Delete one workspace session from the daemon store by ID.
+    pub async fn workspace_session_delete(
+        &self,
+        params: WorkspaceSessionDeleteParams,
+    ) -> Result<WorkspaceSessionDeleteResult, DaemonError> {
+        self.call_typed(methods::WORKSPACE_SESSION_DELETE, &params).await
     }
 
     /// Open a persistent transcript subscription and retain its live stream.
