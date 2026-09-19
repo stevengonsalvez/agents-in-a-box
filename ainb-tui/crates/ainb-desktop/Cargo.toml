@@ -1,6 +1,9 @@
 [package]
 name = "ainb-desktop"
-version = "0.1.0"
+# One version per release: the release workflow's prepare job bumps this line
+# with the parent workspace's, and the bundler reads it (tauri.conf.json
+# carries no version of its own).
+version = "1.28.2"
 edition = "2021"
 publish = false
 description = "ainb desktop shell: a Tauri v2 host of the ainb-app state machine"
