@@ -178,6 +178,13 @@ describe("reviewing from the window", () => {
     });
     const remountMs = Date.now() - remountStarted;
 
+    writeFileSync(
+      REPORT,
+      `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, ...measured, drawnMs, remountMs }, null, 2)}\n`,
+    );
+    console.log(
+      `review at ${bytes} bytes: ${rows} rows, ${nodes} nodes, first render ${drawnMs} ms, redraw ${remountMs} ms, cut banner ${JSON.stringify(cut)}`,
+    );
     // The settings page, last, because it takes the pane over: it draws the
     // config section the window already subscribes to, and a click on a
     // category goes to the reducer and comes back in the frame, the same round
@@ -208,13 +215,6 @@ describe("reviewing from the window", () => {
     });
     await click(".settings-head .close", 30_000);
 
-    writeFileSync(
-      REPORT,
-      `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, ...measured, drawnMs, remountMs }, null, 2)}\n`,
-    );
-    console.log(
-      `review at ${bytes} bytes: ${rows} rows, ${nodes} nodes, first render ${drawnMs} ms, redraw ${remountMs} ms, cut banner ${JSON.stringify(cut)}`,
-    );
     // #1221's line, asserted rather than only recorded: the window draws the
     // rows around the reducer's offset, so neither figure and neither DOM may
     // grow with the diff. The redraw is the window alone, with the frame
