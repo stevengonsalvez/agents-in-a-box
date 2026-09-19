@@ -34,10 +34,15 @@ use regex::Regex;
 
 /// Telegram bot tokens: `bot<digits>:<base64ish>` (as they appear in the API
 /// URL path) and the bare `<digits>:<base64ish>` token form.
-static TELEGRAM_TOKEN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"bot\d+:[A-Za-z0-9_-]{20,}").expect("valid telegram token regex"));
+static TELEGRAM_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"bot[0-9]+:[A-Za-z0-9_-]{20,}").expect("valid telegram token regex")
+});
+/// `[0-9]` rather than `\d` for the reason the Discord shape spells its class
+/// out: `\d` is Unicode-aware, and a bounded repetition of it with no literal
+/// prefix is the expensive shape over a long line. A token's id is ASCII
+/// digits, so nothing that is a token stops matching.
 static TELEGRAM_BARE_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b\d{6,}:[A-Za-z0-9_-]{20,}").expect("valid bare telegram token regex")
+    Regex::new(r"\b[0-9]{6,}:[A-Za-z0-9_-]{20,}").expect("valid bare telegram token regex")
 });
 /// Slack tokens: bot (`xoxb-…`), the `xox*` families (user `xoxp-`, config
 /// `xoxe-`, refresh `xoxr-`, …) AND app-level tokens (`xapp-…`), which use a
@@ -51,8 +56,15 @@ static SLACK_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
 /// 7-char middle is already in the wild) and a fixed `{6}` silently failed to
 /// redact those, leaking the token into `last_error`/logs. The `6,12` ceiling
 /// keeps it conservative so it still won't eat a short dotted version string.
+/// The class is spelled out rather than `\w` because `\w` is Unicode-aware:
+/// with it, three bounded repetitions over a class of hundreds of thousands of
+/// characters cost 3.5 ms on a 4,000-character line, which was 99% of a mirror
+/// frame's whole scrub, and the same shape over ASCII costs 0.7 us. A token's
+/// segments are base64url, so nothing that is a token stops matching; runs of
+/// Unicode letters, which are not tokens, stop being false positives.
 static DISCORD_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[\w-]{24,}\.[\w-]{6,12}\.[\w-]{27,}").expect("valid discord token regex")
+    Regex::new(r"[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,12}\.[A-Za-z0-9_-]{27,}")
+        .expect("valid discord token regex")
 });
 /// A PEM private key: the whole armoured block when it is closed, the
 /// header and everything after it when the capture cut it off.
@@ -220,20 +232,31 @@ pub fn scrub(input: &str) -> String {
 #[must_use]
 pub fn scrub_lines<S: AsRef<str>>(lines: &[S]) -> Vec<String> {
     let mut in_key = false;
+    scrub_lines_from(lines, &mut in_key)
+}
+
+/// [`scrub_lines`] over one chunk of a longer text, carrying the key-block flag
+/// in `in_key` so the caller can stop part way.
+///
+/// A caller that frames only what fits a budget would otherwise scrub the whole
+/// text to throw most of it away; with this it scrubs a chunk at a time and
+/// stops, and a key block still spans the chunk boundary.
+#[must_use]
+pub fn scrub_lines_from<S: AsRef<str>>(lines: &[S], in_key: &mut bool) -> Vec<String> {
     lines
         .iter()
         .map(|line| {
             let line = line.as_ref();
-            if in_key {
+            if *in_key {
                 if let Some(end) = PEM_END.find(line) {
-                    in_key = false;
+                    *in_key = false;
                     return format!("{REDACTED}{}", scrub(&line[end.end()..]));
                 }
                 return REDACTED.to_string();
             }
             match PEM_BEGIN.find(line) {
                 Some(begin) if !PEM_END.is_match(&line[begin.end()..]) => {
-                    in_key = true;
+                    *in_key = true;
                     format!("{}{REDACTED}", scrub(&line[..begin.start()]))
                 }
                 _ => scrub(line),
@@ -682,6 +705,78 @@ mod tests {
             fake("", 'q', 70)
         );
         assert_eq!(scrub(&text), format!("key:\n{REDACTED}"));
+    }
+
+    /// The Discord shape spells its character class out instead of using `\w`,
+    /// which is Unicode-aware and enormously more expensive. A token is
+    /// base64url either way, including one sitting against text that is not.
+    #[test]
+    fn a_discord_token_is_scrubbed_whatever_it_sits_against() {
+        let token = format!(
+            "{}.{}.{}",
+            fake("", 'a', 24),
+            fake("", 'b', 7),
+            fake("", 'c', 27)
+        );
+        for line in [
+            format!("Authorization: Bot {token}"),
+            format!("réponse={token}"),
+            format!("\"token\":\"{token}\""),
+        ] {
+            let scrubbed = scrub(&line);
+            assert!(
+                !scrubbed.contains(&token),
+                "the token survived in {scrubbed}"
+            );
+        }
+    }
+
+    /// A long run of letters that are not ASCII is not a token, and the shapes
+    /// that could once scan it character by character are the ones that cost
+    /// milliseconds a line.
+    #[test]
+    fn a_long_non_ascii_run_matches_no_token_shape() {
+        let text = "\u{4f60}\u{597d}".repeat(2_000);
+
+        assert_eq!(
+            scrub(&text),
+            text,
+            "a run of non-ASCII text is not a credential"
+        );
+        assert_eq!(find_secret(&text), None);
+
+        // And the same run with a real token inside it still loses the token.
+        let token = format!(
+            "{}.{}.{}",
+            fake("", 'a', 24),
+            fake("", 'b', 7),
+            fake("", 'c', 27)
+        );
+        let scrubbed = scrub(&format!("{text}{token}{text}"));
+        assert!(!scrubbed.contains(&token), "the token survived");
+    }
+
+    /// A key block spans lines, so a caller scrubbing a chunk at a time hands
+    /// the flag back in and the body below the header is still removed.
+    #[test]
+    fn a_key_block_survives_the_chunk_boundary() {
+        let head = [
+            "notes".to_string(),
+            "-----BEGIN RSA PRIVATE KEY-----".to_string(),
+        ];
+        let tail = [
+            fake("", 'd', 64),
+            "-----END RSA PRIVATE KEY-----".to_string(),
+        ];
+
+        let mut in_key = false;
+        let first = scrub_lines_from(&head, &mut in_key);
+        assert!(in_key, "the block is open across the boundary");
+        let second = scrub_lines_from(&tail, &mut in_key);
+
+        assert_eq!(first[1], REDACTED);
+        assert_eq!(second[0], REDACTED);
+        assert!(!in_key, "and the END line closes it");
     }
 
     #[test]

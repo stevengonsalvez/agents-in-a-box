@@ -354,7 +354,7 @@ const NAME_ALLOW: &[(&str, &str)] = &[
     ),
     ("FileTreeItem.full_path", "repo-relative path of a tree row"),
     (
-        "GitViewState.file_tree_items",
+        "GitViewFrame.file_tree_items",
         "changed-file tree rows (`file` in the field name)",
     ),
     (
@@ -492,19 +492,19 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "diff hunk line the review pane paints, scrubbed through redact::scrub",
     ),
     (
-        "GitViewState.diff_content",
-        "diff lines the git pane paints, scrubbed through redact::scrub",
+        "GitViewFrame.diff_content",
+        "diff lines the git pane paints, scrubbed through redact::scrub, then cut to the frame's window with `diff_lines_cut` saying what was dropped",
     ),
     (
-        "GitViewState.markdown_content",
-        "rendered markdown lines, each scrubbed through redact::scrub",
+        "GitViewFrame.markdown_content",
+        "rendered markdown lines, each scrubbed through redact::scrub, cut to the frame's window",
     ),
     (
-        "GitViewState.worktree_path",
+        "GitViewFrame.worktree_path",
         "the worktree the git view is open on, drawn in its title",
     ),
     (
-        "ReviewFile.path",
+        "ReviewFileFrame.path",
         "repo-relative path of a changed file, the review list row",
     ),
     (
@@ -741,8 +741,9 @@ const TYPE_ALLOW: &[(&str, &str)] = &[
     ),
     ("AgentDef.tools", "tool names an agent definition allows"),
     (
-        "CodeReviewUi.collapsed_dirs",
-        "repo-relative folders collapsed in the review tree",
+        "ReviewUiFrame.collapsed_dirs",
+        "repo-relative folders collapsed in the review tree, sorted and counted \
+         against the frame's list budget",
     ),
     (
         "ConfigScreenState.dirty",
@@ -784,11 +785,11 @@ const TYPE_ALLOW: &[(&str, &str)] = &[
         "env var names with every value `<redacted>` in frame",
     ),
     (
-        "GitViewState.diff_content",
-        "diff lines, scrubbed as one text",
+        "GitViewFrame.diff_content",
+        "diff lines, scrubbed as one text and bounded by the frame's window",
     ),
     (
-        "GitViewState.expanded_folders",
+        "GitViewFrame.expanded_folders",
         "repo-relative folder paths expanded in the tree",
     ),
     (
@@ -903,7 +904,7 @@ const TYPE_ALLOW: &[(&str, &str)] = &[
         "package names installed in the container",
     ),
     (
-        "GitViewState.worktree_path",
+        "GitViewFrame.worktree_path",
         "the worktree the git view is open on, drawn in its title",
     ),
     (
@@ -1081,10 +1082,14 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "DiffRow.raw",
     "FleetView.daemon_attention",
     "FleetView.fleet_snapshot",
-    "GitViewState.commit_message_len",
-    "GitViewState.diff_content",
+    // The whole section, not its rows: the frame carries `wire::git_view`'s
+    // projection, so `Hunk.rows` and the other row-level serializers are no
+    // longer on the traced shape to name. The scrub they held is the same code
+    // (`wire::git_view::scrub_and_cut`, which the state's own row serializer
+    // also calls), and what it now guards is every text field under here at
+    // once: the diff, the rows, the markdown and the commit draft.
+    "GitViewView.git_view_state",
     "GitViewView.quick_commit_message_len",
-    "Hunk.rows",
     "ImageSource.build_args",
     "InputState.buffer_len",
     "LogEntry.message",
