@@ -104,7 +104,9 @@
 
 9. The kill switch works. Daemon state: a daemon that advertises the capability with import and reconcile complete, behind a socket that counts accepted connections (the fake-daemon shape of P6d's `session_cli_daemon.rs`). With `AINB_SESSION_SOURCE=file` set, `SessionSource::resolve` answers `File` and the socket accepted zero connections; without it, the same setup answers `Daemon`. One test, red if the variable is read after dialing or not at all.
 
-10. The programme row `docs/plans/2026-09-12-desktop-programme.md:126` is flipped to done with the PR numbers and the proof run id, in the implementation PR.
+10. Bounded blocking, no nested lock. Daemon state: a daemon that answers hello with the capability and import complete, then never answers a session RPC (a fake socket). Every converted reducer and effect site returns an error within `SESSION_RPC_DEADLINE` plus 250 ms, and the TUI reducer under test produces its next frame; a site that hangs fails the test on a timeout rather than hanging CI. A nested lock (holding `SessionStore::lock` and calling `mutate_session_store`) returns an error within 1 s. Both are red with the deadline or the guard removed.
+
+11. The programme row `docs/plans/2026-09-12-desktop-programme.md:126` is flipped to done with the PR numbers and the proof run id, in the implementation PR.
 
 ─ WHICH EXISTING TESTS MUST STAY GREEN ─
 
@@ -145,7 +147,7 @@
 
 3. **Where does the reconciliation marker live?** Decided: a second row in `session_import` keyed `<path>#reconcile`, written by the first successful reconcile pass in the same transaction as its rows. No migration: widening the primary key would rebuild the table in SQLite and drag `migration_upgrade_full_chain`. `import_complete` becomes kind-aware: `SessionsRepo::any_import_completed` (P6d `repo/sessions.rs:299`, today `COUNT(*) > 0`) is replaced by a check that BOTH the `<path>` import row and the `<path>#reconcile` row exist for the file the daemon resolves, so the P6d row alone never reports the table authoritative.
 
-4. **Do the reducer's synchronous reads block the TUI loop?** `state.rs` reads the store synchronously in reducers and effects; `load_session_store` goes through `run_async`, which uses `block_in_place` on the TUI's multi-thread runtime. Recommended: measure one `session_list` round trip on the proof box (expect single-digit milliseconds on the local socket), keep the sync entry points for the reducer sites, and move any site that runs per frame onto an effect that caches the store. Record the measurement in the progress log.
+4. **Do the reducer's synchronous reads block the TUI loop?** Decided: they are bounded, not measured. `state.rs` reads the store synchronously in reducers and effects, and `load_session_store` goes through `run_async`'s `block_in_place` on the TUI's multi-thread runtime. Every session RPC `SessionSource` makes carries a named deadline (`SESSION_RPC_DEADLINE`, recommended 2 s), and taking the `sessions.json` flock is bounded by the same deadline (a try-lock loop, not a blocking `flock`). On expiry the call returns an error that the reducer surfaces; it never hangs. Nesting is forbidden: no code holds `SessionStore::lock` or `lock_sessions_store*` while it calls `load_session_store` or `mutate_session_store`, because a second `flock` on a second descriptor in the same process blocks forever. `state.rs:13392-13395` (lock, then load) becomes one resolver call. A thread-local held-lock guard turns a nested attempt into an immediate error instead of a deadlock. Criterion 10.
 
 5. **What counts as "every combination" for `p6-concurrent`?** Recommended: the four combinations `scripts/surface-combo-smoke.sh:10` already defines, each with a CLI leg added, rather than a fresh matrix; the scenario reuses that script's fail-closed setup.
 
