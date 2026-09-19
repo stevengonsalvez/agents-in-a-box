@@ -84,7 +84,10 @@ fn renderer_applied(sections: Subscription, sessions: usize, board: Vec<(AgentSt
     if dropped > 0 {
         // Said, not swallowed: a proof reading the line below would otherwise
         // take a renderer that drew no board for one that drew five columns.
-        tracing::warn!(dropped, "renderer applied: the board list ran past the states");
+        tracing::warn!(
+            dropped,
+            "renderer applied: the board list ran past the states"
+        );
     }
     tracing::info!(sections = ?named, sessions, board = ?board, "renderer applied");
 }
