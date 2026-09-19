@@ -281,9 +281,16 @@ impl Updater {
     /// The production updater: HTTP, the pinned key, the home's settings.
     #[must_use]
     pub fn new(home: PathBuf) -> Self {
+        // A file that does not read is `off` with the reason, never the
+        // default: nothing is fetched or applied until it is fixed.
         let (settings, settings_fault) = match Settings::load(&home) {
             Ok(settings) => (settings, None),
-            Err(error) => (Settings::default(), Some(format!("{error:#}"))),
+            Err(error) => (
+                Settings {
+                    channel: Channel::Off,
+                },
+                Some(format!("{error:#}")),
+            ),
         };
         Self {
             source: Arc::new(HttpSource),
