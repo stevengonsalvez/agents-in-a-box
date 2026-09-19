@@ -413,6 +413,7 @@ git_view.git_view_state.review_ui.scroll
 git_view.git_view_state.review_ui.scroll_cut
 git_view.git_view_state.review_ui.selected_file
 git_view.git_view_state.review_ui.sidebar_selected
+git_view.git_view_state.selected_commit_cut
 git_view.git_view_state.selected_commit_index
 git_view.git_view_state.selected_file_index
 git_view.git_view_state.selected_tree_index

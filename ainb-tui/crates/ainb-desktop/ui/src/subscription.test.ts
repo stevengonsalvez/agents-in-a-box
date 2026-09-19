@@ -10,8 +10,10 @@ import { createFrameStore, type FrameStore, type SectionName } from "./store.ts"
 import {
   AHEAD_OF_READERS,
   shellAgentStatus,
+  shellConfig,
   shellFleet,
   shellGitView,
+  shellHangar,
   shellSessions,
   shellUsage,
   SUBSCRIBED,
@@ -56,6 +58,8 @@ test("the shell chrome reads only subscribed sections, and the list names no unr
     shellSessions(store, "local");
     shellAgentStatus(store, "local");
     shellFleet(store, "local");
+    shellConfig(store, "local");
+    shellHangar(store, "local");
     shellGitView(store, "local");
     shellUsage(store, "local");
     dispose();
@@ -85,6 +89,8 @@ test("reading without a host reads no section", () => {
     assert.equal(shellSessions(store, undefined), undefined);
     assert.equal(shellAgentStatus(store, undefined), undefined);
     assert.equal(shellFleet(store, undefined), undefined);
+    assert.equal(shellConfig(store, undefined), undefined);
+    assert.equal(shellHangar(store, undefined), undefined);
     assert.equal(shellGitView(store, undefined), undefined);
     dispose();
   });

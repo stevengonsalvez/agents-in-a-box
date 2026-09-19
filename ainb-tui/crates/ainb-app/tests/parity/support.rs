@@ -14,6 +14,7 @@
 //! crate as `ainb_app` in both.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use uuid::Uuid;
@@ -21,7 +22,9 @@ use uuid::Uuid;
 use ainb_app::app::AppState;
 use ainb_app::app::screens::ids;
 use ainb_app::components::code_review::model::{DiffRow, Hunk, ReviewFile, ReviewModel, RowKind};
+use ainb_app::components::daemons::Snapshot;
 use ainb_app::components::git_view::{GitFileStatus, GitTab, GitViewState};
+use ainb_app::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
 use ainb_app::models::{Session, SessionStatus, Workspace};
 
 /// One committed scenario.
@@ -81,7 +84,13 @@ pub enum ScreenFixture {
     SessionList,
     NewSessionPickRepo,
     Config,
-    Daemons,
+    /// The daemons screen over a collected snapshot, so both renderers draw
+    /// rows and not only a table's headings: each `DaemonFixture` is one
+    /// daemon as the collector would report it.
+    Daemons {
+        #[serde(default)]
+        daemons: Vec<DaemonFixture>,
+    },
     GitView {
         files: Vec<ReviewFileFixture>,
         /// Sidebar directories the person has collapsed. A fixture carries one
@@ -100,6 +109,24 @@ pub enum ScreenFixture {
     Stats {
         usage: Box<ainb_hangar_proto::fleet::FleetUsageSummaryResult>,
     },
+}
+
+/// One daemon row of a `daemons` fixture.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonFixture {
+    /// `DaemonKind`'s lowercase id.
+    pub kind: DaemonKind,
+    pub state: DaemonState,
+    #[serde(default)]
+    pub connected: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub error_count: u64,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,7 +178,7 @@ impl ParityFixture {
             ScreenFixture::SessionList => ids::SESSION_LIST,
             ScreenFixture::NewSessionPickRepo => ids::NEW_SESSION,
             ScreenFixture::Config => ids::CONFIG,
-            ScreenFixture::Daemons => ids::DAEMONS,
+            ScreenFixture::Daemons { .. } => ids::DAEMONS,
             ScreenFixture::GitView { .. } => ids::GIT_VIEW,
             ScreenFixture::SessionRecovery => ids::SESSION_RECOVERY,
             ScreenFixture::SkillManager => ids::SKILL_MANAGER,
@@ -204,10 +231,21 @@ impl ParityFixture {
             ScreenFixture::Stats { usage } => {
                 state.apply_usage_read((**usage).clone(), 0);
             }
+            ScreenFixture::Daemons { daemons } => {
+                // A collected snapshot, at a fixed clock so the relative
+                // columns and the frame dump do not move between runs, and
+                // not parked, so the render's touch spawns no collector.
+                let snapshot = Snapshot {
+                    rows: daemons.iter().map(build_daemon).collect(),
+                    collected_at_ms: 1_700_000_000_000,
+                    last_touch_ms: 1_700_000_000_000,
+                    ..Snapshot::default()
+                };
+                state.hangar.daemons_state.shared = Some(Arc::new(Mutex::new(snapshot)));
+            }
             ScreenFixture::Home
             | ScreenFixture::SessionList
             | ScreenFixture::Config
-            | ScreenFixture::Daemons
             | ScreenFixture::SessionRecovery
             | ScreenFixture::SkillManager
             | ScreenFixture::LogHistory
@@ -231,6 +269,32 @@ fn build_workspace((index, fixture): (usize, &WorkspaceFixture)) -> Workspace {
         workspace.add_session(built);
     }
     workspace
+}
+
+fn build_daemon(fixture: &DaemonFixture) -> DaemonStatus {
+    DaemonStatus {
+        kind: fixture.kind,
+        state: fixture.state,
+        pid: None,
+        uptime_ms: None,
+        version: fixture.version.clone(),
+        // A version the fixture names is this binary's, so the terminal
+        // prints it rather than "unknown".
+        version_current: fixture.version.as_ref().map(|_| true),
+        connected: fixture.connected,
+        channel: None,
+        last_activity_at: None,
+        error_count: fixture.error_count,
+        last_error: fixture.last_error.clone(),
+        last_attention_poll_at: None,
+        last_attention_error: None,
+        inbound_expected: 0,
+        inbound_live: 0,
+        last_inbound_error: None,
+        reason: fixture.reason.clone(),
+        scheduler_orphan: None,
+        atc_instance: None,
+    }
 }
 
 fn build_review_file(fixture: &ReviewFileFixture) -> ReviewFile {

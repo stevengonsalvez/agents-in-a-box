@@ -59,8 +59,9 @@ body {
   padding: 2px 10px;
 }
 
-.header .settings:disabled {
-  color: var(--muted);
+.header .settings[aria-pressed="true"] {
+  border-color: var(--gold);
+  color: var(--gold);
 }
 
 .banner {
@@ -761,6 +762,134 @@ body {
   font-size: 11px;
 }
 
+/* The settings page: the config section as a form, the daemons panel and the
+   Setup panel for the writes the window may not run itself (D3d). */
+.settings-page {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-head h2,
+.settings-page h3,
+.settings-page h4 {
+  margin: 0;
+  color: var(--gold);
+}
+
+.settings-page .close,
+.settings-page button {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 3px 10px;
+}
+
+.settings-body {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) 1fr;
+  gap: 12px;
+  min-height: 0;
+}
+
+.settings-search {
+  flex: 1;
+  margin: 0 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 3px 8px;
+}
+
+.settings-search.active {
+  border-color: var(--gold);
+}
+
+.settings-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-node {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.settings-node button {
+  text-align: left;
+  flex: 1;
+}
+
+.settings-node .chevron,
+.settings-node .chevron-gap {
+  flex: 0 0 22px;
+  width: 22px;
+  padding: 2px 0;
+  text-align: center;
+  border: none;
+  color: var(--muted);
+}
+
+.settings-node button.active {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+
+.settings-row.current {
+  border-color: var(--green);
+}
+
+.settings-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-row {
+  border: 1px solid var(--highlight);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.settings-row.dirty {
+  border-color: var(--gold);
+}
+
+.settings-row label {
+  display: grid;
+  grid-template-columns: 1fr minmax(160px, 320px);
+  gap: 10px;
+  align-items: center;
+}
+
+.settings-row input,
+.settings-row select,
+.otel input {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 3px 6px;
+}
+
+.settings-page .description,
+.settings-page .empty,
+.readonly-note {
+  margin: 4px 0 0;
 /* The review tab: the changed files beside the diff body. Laid out like the
    board, because it has the same job: fill the work area and let its own
    panes scroll, rather than clipping what does not fit. */
@@ -785,6 +914,19 @@ body {
   font-size: 12px;
 }
 
+.daemons-panel table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.daemons-panel th,
+.daemons-panel td {
+  text-align: left;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--highlight);
+}
+
+.daemons-panel th {
 .review-withheld {
   border-color: var(--red);
   color: var(--text);
@@ -850,6 +992,62 @@ body {
   font-size: 11px;
 }
 
+.daemons-panel tr[data-state="running"] td:nth-child(2) {
+  color: var(--green);
+}
+
+.daemons-panel tr[data-state="stopped"] td:nth-child(2),
+.daemons-panel tr[data-state="crashed"] td:nth-child(2) {
+  color: var(--red);
+}
+
+.hook-health {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dependencies {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dependencies li {
+  display: grid;
+  grid-template-columns: 200px 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.dependencies li[data-satisfied="true"] .dep-name {
+  color: var(--green);
+}
+
+.setup-actions,
+.otel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  align-items: center;
+}
+
+.otel {
+  flex-direction: column;
+  align-items: stretch;
+  max-width: 480px;
+}
+
+.otel label {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px;
+  align-items: center;
 .review-body {
   min-height: 0;
   border: 1px solid var(--border);

@@ -256,16 +256,39 @@ jobs:
       - name: Stage the hangar daemon sidecar
         run: cargo xtask stage-desktop-sidecar --release
         working-directory: ainb-tui
+      # The same pinned CLI the release workflow bundles with, so a bundle this
+      # job proves is the bundle a release would ship.
+      - name: Install the Tauri CLI (pinned)
+        run: |
+          if cargo tauri --version 2>/dev/null | grep -q "tauri-cli ${TAURI_CLI_VERSION}"; then
+            echo "tauri-cli ${TAURI_CLI_VERSION} already installed"
+          else
+            cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
+          fi
+          cargo tauri --version
+        env:
+          TAURI_CLI_VERSION: "2.11.4"
       # `bundled` serves `ui/dist` over the window's own protocol, which is what
-      # a shipped build does; it does not pull the WebDriver in.
-      - name: Build the release shell
-        run: cargo build --release --features bundled
+      # a shipped build does; it does not pull the WebDriver in. The bundler
+      # builds the same `target/release/ainb-desktop` the checks below read and
+      # wraps it, with the staged sidecar, into the platform's bundle.
+      - name: Build the release shell and its bundle
+        run: cargo tauri build --features bundled --bundles ${{ runner.os == 'macOS' && 'app' || 'appimage' }} -- --locked
         working-directory: ainb-tui/crates/ainb-desktop
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
       # Run this exact block against any release build to check it yourself.
       - name: No WebDriver symbol or plugin string in the release binary
         run: |
           set -euo pipefail
+          # On macOS the copy inside the bundle is what ships, so that is the
+          # binary read; on Linux the AppImage wraps the same file.
           BIN=target/release/ainb-desktop
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            APP="$(find target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+            BIN="$APP/Contents/MacOS/ainb-desktop"
+          fi
+          echo "binary under test: $BIN"
           test -x "$BIN"
           # Each tool's output is kept and asserted non-empty first: a stripped
           # binary would otherwise pass by telling us nothing. An `! pipeline`
@@ -321,4 +344,68 @@ jobs:
           kill "$app" || true
           kill "$runner" || true
           echo "the running release shell owns no listener"
+        working-directory: ainb-tui/crates/ainb-desktop
+      # The bundle itself, not only the binary inside it. On Linux the AppImage
+      # is run the way the block above runs the binary: alive after 20 s, no
+      # listener, the sidecar reachable beside the app binary inside it.
+      - name: The AppImage runs and binds no port (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          APPIMAGE="$(find target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)"
+          test -x "$APPIMAGE"
+          echo "bundle: $APPIMAGE"
+          HOME_DIR="$(mktemp -d)"
+          HOME="$HOME_DIR" AINB_HANGAR_HOME="$HOME_DIR/.agents-in-a-box" APPIMAGE_EXTRACT_AND_RUN=1 \
+            xvfb-run -a "$APPIMAGE" &
+          runner=$!
+          sleep 20
+          app="$(pgrep -x ainb-desktop | head -1 || true)"
+          if [ -z "$app" ]; then
+            echo "no shell was running 20 s after launching the AppImage" >&2
+            ps -o pid,args -u "$(id -u)" >&2
+            kill "$runner" || true
+            exit 1
+          fi
+          echo "AppImage shell pid $app: $(tr '\0' ' ' < "/proc/$app/cmdline")"
+          kill -0 "$app"
+          # The sidecar is beside the app binary inside the extracted image.
+          exe_dir="$(dirname "$(readlink -f "/proc/$app/exe")")"
+          test -x "$exe_dir/ainb-hangar-daemon"
+          if ss -ltnp 2>/dev/null | grep -q "pid=$app,"; then
+            echo "the AppImage shell is listening on a port of its own" >&2
+            ss -ltnp | grep "pid=$app," >&2
+            kill "$app" || true
+            kill "$runner" || true
+            exit 1
+          fi
+          kill "$app" || true
+          kill "$runner" || true
+          echo "the AppImage runs, carries its sidecar and owns no listener"
+        working-directory: ainb-tui/crates/ainb-desktop
+      # On macOS the bundle is read, never launched: a hosted macOS runner is
+      # not a GUI host (the e2e job declares its substitute leg for the same
+      # reason). Structure, version agreement between the app and the sidecar
+      # inside it, and a valid signature; launching is the human rehearsal's.
+      - name: The app bundle carries its sidecar at its own version (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          APP="$(find target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          test -d "$APP"
+          echo "bundle: $APP"
+          test -x "$APP/Contents/MacOS/ainb-desktop"
+          test -x "$APP/Contents/MacOS/ainb-hangar-daemon"
+          crate_version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          short="$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")"
+          test "$short" = "$crate_version"
+          test "$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")" = "dev.agentsinabox.desktop"
+          reported="$("$APP/Contents/MacOS/ainb-hangar-daemon" --version)"
+          echo "sidecar reports: $reported"
+          case "$reported" in
+            *" $crate_version") ;;
+            *) echo "the sidecar inside the bundle is not at the app's version $crate_version" >&2; exit 1 ;;
+          esac
+          codesign -v --strict --deep "$APP"
+          echo "the app bundle is well formed, signed, and carries its sidecar at $crate_version"
         working-directory: ainb-tui/crates/ainb-desktop
