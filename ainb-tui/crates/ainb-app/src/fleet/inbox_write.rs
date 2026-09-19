@@ -190,7 +190,10 @@ mod tests {
         assert_eq!(first["op_id"], op.op_id().as_str());
         assert_eq!(first["workspace_id"], INBOX_WORKSPACE_ID);
         assert_eq!(first["recipient"], INBOX_RECIPIENT);
-        assert!(first.get("fence").is_none(), "the registry fences this on nothing");
+        assert!(
+            first.get("fence").is_none(),
+            "the registry fences this on nothing"
+        );
     }
 
     #[test]
