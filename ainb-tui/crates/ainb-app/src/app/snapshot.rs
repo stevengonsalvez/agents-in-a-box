@@ -33,7 +33,7 @@ pub struct SnapshotManager;
 
 impl SnapshotManager {
     pub async fn take_snapshot() -> Result<SessionSnapshot> {
-        let store = SessionStore::load();
+        let store = crate::cli::util::load_session_store_async().await?;
         let mut entries = Vec::new();
 
         for (tmux_name, metadata) in store.sessions() {

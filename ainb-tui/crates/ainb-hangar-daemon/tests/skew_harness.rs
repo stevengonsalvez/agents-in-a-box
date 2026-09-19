@@ -305,6 +305,69 @@ async fn a_client_from_the_future_is_refused_as_incompatible() {
     );
     // The refusal still SAYS what the daemon speaks, so a client can report it.
     assert_eq!(ack["error"]["data"]["protocol"]["max"], 1, "{ack}");
+
+    // And the client reads it as its own variant, both ranges decoded, never
+    // as a generic rpc error a supervisor would answer with a spawn.
+    let error: ainb_hangar_proto::RpcError =
+        serde_json::from_value(ack["error"].clone()).expect("an rpc error");
+    let client = ainb_hangar_proto::protocol::ProtocolRange { min: 99, max: 100 };
+    let decoded = ainb_hangar_client::DaemonError::from_hello_error(error, client);
+    let ainb_hangar_client::DaemonError::Incompatible {
+        daemon,
+        client: ours,
+        daemon_version,
+        message,
+    } = decoded
+    else {
+        panic!("a PROTOCOL_INCOMPATIBLE refusal decoded as {decoded:?}");
+    };
+    assert_eq!(
+        daemon,
+        Some(ainb_hangar_proto::protocol::ProtocolRange::supported())
+    );
+    assert_eq!(ours, client);
+    assert_eq!(daemon_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    assert!(
+        message.contains("restart from the newer binary"),
+        "{message}"
+    );
+    assert!(
+        !ainb_hangar_client::DaemonError::Incompatible {
+            daemon,
+            client,
+            daemon_version,
+            message,
+        }
+        .means_not_running(),
+        "a daemon that refused is running; a second one is not the remedy"
+    );
+
+    // The code alone decides: a refusal whose `data` is missing or unusable
+    // is still a running daemon that cannot serve this build, with what it
+    // did not say left blank, never a generic error a supervisor spawns on.
+    for data in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(serde_json::json!("junk")),
+    ] {
+        let bare = ainb_hangar_proto::RpcError {
+            code: ainb_hangar_proto::protocol::PROTOCOL_INCOMPATIBLE,
+            message: "refused".into(),
+            data,
+        };
+        let decoded = ainb_hangar_client::DaemonError::from_hello_error(bare, client);
+        assert!(
+            matches!(
+                decoded,
+                ainb_hangar_client::DaemonError::Incompatible {
+                    daemon: None,
+                    daemon_version: None,
+                    ..
+                }
+            ),
+            "{decoded:?}"
+        );
+    }
 }
 
 /// Leg 7, the local leg (amendment 21): `hangar.sock` and `hangar-v<N>.sock`

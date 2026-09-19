@@ -220,6 +220,17 @@ jobs:
           name: desktop-throughput-${{ matrix.os }}
           path: ainb-tui/crates/ainb-desktop/e2e/throughput.json
           if-no-files-found: warn
+      # What the review tab costs a real window at the frame's bound: rows,
+      # DOM nodes, first render and redraw (#1221). Recorded like the
+      # throughput figure, never a pass condition; the journey's own
+      # assertions are what pass or fail.
+      - name: Upload the review render figures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-review-render-${{ matrix.os }}
+          path: ainb-tui/crates/ainb-desktop/e2e/review-render.json
+          if-no-files-found: warn
 
   # The release bundle carries no WebDriver: the `wdio` feature is off, so the
   # binary exports no driver symbol, holds no plugin string and binds no port.

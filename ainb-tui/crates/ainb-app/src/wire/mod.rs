@@ -24,6 +24,7 @@ pub mod inbox;
 pub mod shape;
 pub mod store;
 pub mod trace;
+pub mod usage;
 pub mod web;
 
 use crate::app::AppState;
@@ -95,7 +96,10 @@ pub fn daemon_read(state: &AppState, id: SectionId) -> Option<frame::DaemonRead>
         | SectionId::Skills
         | SectionId::Recovery
         | SectionId::Onboarding
-        | SectionId::Shell => None,
+        | SectionId::Shell
+        // Section 21 names its own clock (`received_at_ms`, and the daemon's
+        // `generated_at` inside the summary); it is not a revisioned read.
+        | SectionId::Usage => None,
     }
 }
 
@@ -123,6 +127,7 @@ pub const fn section_name(id: SectionId) -> &'static str {
         SectionId::Onboarding => "onboarding",
         SectionId::Shell => "shell",
         SectionId::AgentStatus => "agent_status",
+        SectionId::Usage => "usage",
     }
 }
 
@@ -166,6 +171,7 @@ pub fn serialize_section<S: Serializer>(
         SectionId::Onboarding => OnboardingView::from(&*state.onboarding).serialize(serializer),
         SectionId::Shell => ShellView::from(&*state.shell).serialize(serializer),
         SectionId::AgentStatus => AgentStatusView::from(&*state.agent_status).serialize(serializer),
+        SectionId::Usage => usage::UsageView::from(&*state.usage).serialize(serializer),
     })
 }
 
@@ -1057,6 +1063,7 @@ struct SectionBodies<'a> {
     onboarding: OnboardingView<'a>,
     shell: ShellView<'a>,
     agent_status: AgentStatusView<'a>,
+    usage: usage::UsageView,
 }
 
 /// Register every section view with the TypeScript export, named for its section.
@@ -1085,4 +1092,5 @@ pub(crate) fn register_section_views(types: specta::Types) -> specta::Types {
         .register::<OnboardingView<'static>>()
         .register::<ShellView<'static>>()
         .register::<AgentStatusView<'static>>()
+        .register::<usage::UsageView>()
 }

@@ -1189,6 +1189,183 @@ impl AgentStatusSection {
     }
 }
 
+/// Section 21: usage, a fold of the daemon's `fleet/usage_summary` (D3p-e).
+///
+/// The counters have one producer, the daemon's usage projection
+/// (`ainb-hangar-daemon/src/fleet_usage.rs`), and this section computes
+/// nothing from them: it holds the last reply, bounded to the verb's own caps
+/// whatever the daemon sent, with each list's loss counted. The frame
+/// (`wire::usage`) scrubs and cuts the free text. `absent` when the daemon does
+/// not serve `fleet.usage.read`; `failure` when a read failed, with the last
+/// numbers kept rather than drawn as zeros.
+#[derive(Debug, Default)]
+pub struct UsageSection {
+    /// The last reply, bounded, or `None` until one lands.
+    pub summary: Option<HeldUsage>,
+    /// The local epoch-ms clock the held reply was received at.
+    pub received_at_ms: Option<i64>,
+    /// Why there is no summary, when the daemon cannot serve one.
+    pub absent: Option<String>,
+    /// Why the last read failed, while the held summary is kept.
+    pub failure: Option<String>,
+}
+
+/// One `fleet/usage_summary` reply as the section holds it: each list cut to
+/// the verb's cap, each string clipped to what its frame cut can show plus a
+/// scrub window, and the lists' losses counted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeldUsage {
+    pub reply: ainb_hangar_proto::fleet::FleetUsageSummaryResult,
+    pub daily_cut: usize,
+    pub providers_cut: usize,
+    pub models_cut: usize,
+    pub projects_cut: usize,
+}
+
+impl HeldUsage {
+    /// Bound `reply` to the caps a frame carries, counting what each list lost.
+    #[must_use]
+    pub fn bound(mut reply: ainb_hangar_proto::fleet::FleetUsageSummaryResult) -> Self {
+        use crate::wire::usage::{
+            USAGE_DETAIL_MAX_BYTES, USAGE_MAX_BREAKDOWN, USAGE_MAX_DAILY, USAGE_MAX_NAME_CHARS,
+            USAGE_SCRUB_WINDOW,
+        };
+        fn keep<T>(list: &mut Vec<T>, cap: usize) -> usize {
+            let cut = list.len().saturating_sub(cap);
+            list.truncate(cap);
+            cut
+        }
+        // Clipped, not cut: the frame scrubs before it cuts, so the section
+        // keeps the scrub window past the cut for a token straddling it.
+        fn clip(text: &mut String, chars: usize) {
+            if let Some((end, _)) = text.char_indices().nth(chars) {
+                text.truncate(end);
+            }
+        }
+        let name = USAGE_MAX_NAME_CHARS + USAGE_SCRUB_WINDOW;
+        // `daily` is oldest first: the cut drops the oldest, so the frame keeps
+        // the thirty days that end today.
+        let daily_cut = reply.daily.len().saturating_sub(USAGE_MAX_DAILY);
+        reply.daily.drain(..daily_cut);
+        let providers_cut = keep(&mut reply.providers, USAGE_MAX_BREAKDOWN);
+        let models_cut = keep(&mut reply.models, USAGE_MAX_BREAKDOWN);
+        let projects_cut = keep(&mut reply.projects, USAGE_MAX_BREAKDOWN);
+        reply.daily.iter_mut().for_each(|day| clip(&mut day.date, name));
+        reply.providers.iter_mut().for_each(|row| clip(&mut row.provider, name));
+        reply.models.iter_mut().for_each(|row| clip(&mut row.model, name));
+        reply.projects = merge_projects(std::mem::take(&mut reply.projects));
+        for row in &mut reply.projects {
+            clip(&mut row.project, name);
+            if let Some(repo) = &mut row.repo {
+                clip(repo, name);
+            }
+        }
+        if let Some(detail) = &mut reply.detail {
+            clip(detail, USAGE_DETAIL_MAX_BYTES + USAGE_SCRUB_WINDOW);
+        }
+        Self {
+            reply,
+            daily_cut,
+            providers_cut,
+            models_cut,
+            projects_cut,
+        }
+    }
+}
+
+/// A project's aggregation key as the label a frame carries: its leaf segment.
+///
+/// The producer keys a provider that records a working directory by that path
+/// with its separators dashed (`-home-<user>-src-app`, `-Volumes-Work-<user>-
+/// src-app`, `parsers/codex.rs`), so any segment before the leaf can be a root,
+/// a volume, a user or a parent directory. Every key keeps only its last
+/// segment split on `/`, `\\` and `-`, whatever its root; a hyphenated project
+/// name shortens to its last word, which is the price of naming no path (the
+/// #1260 review's call). An empty leaf reads `project`.
+fn project_label(key: &str) -> String {
+    key.rsplit(['/', '\\', '-'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("project")
+        .to_string()
+}
+
+/// Fold each project to its label and merge the rows that fold to one: the
+/// counts added, a cost only when every merged row was priced, a repo only when
+/// every merged row named the same one, in the place the first of them held.
+fn merge_projects(
+    projects: Vec<ainb_hangar_proto::fleet::FleetUsageProjectBucket>,
+) -> Vec<ainb_hangar_proto::fleet::FleetUsageProjectBucket> {
+    let mut merged: Vec<ainb_hangar_proto::fleet::FleetUsageProjectBucket> = Vec::new();
+    for mut row in projects {
+        row.project = project_label(&row.project);
+        let Some(held) = merged.iter_mut().find(|held| held.project == row.project) else {
+            merged.push(row);
+            continue;
+        };
+        let (a, b) = (&mut held.bucket, &row.bucket);
+        a.input_tokens = a.input_tokens.saturating_add(b.input_tokens);
+        a.cache_creation_tokens = a.cache_creation_tokens.saturating_add(b.cache_creation_tokens);
+        a.cache_read_tokens = a.cache_read_tokens.saturating_add(b.cache_read_tokens);
+        a.output_tokens = a.output_tokens.saturating_add(b.output_tokens);
+        a.reasoning_tokens = a.reasoning_tokens.saturating_add(b.reasoning_tokens);
+        a.call_count = a.call_count.saturating_add(b.call_count);
+        a.session_count = a.session_count.saturating_add(b.session_count);
+        a.project_count = a.project_count.saturating_add(b.project_count);
+        a.cost_usd = match (a.cost_usd, b.cost_usd) {
+            (Some(x), Some(y)) => Some(x + y),
+            _ => None,
+        };
+        if held.repo != row.repo {
+            held.repo = None;
+        }
+    }
+    merged
+}
+
+impl UsageSection {
+    /// Fold one reply. True when anything a surface renders changed: the same
+    /// counters read again move nothing, not even the received clock.
+    pub fn apply_read(
+        &mut self,
+        reply: ainb_hangar_proto::fleet::FleetUsageSummaryResult,
+        received_at_ms: i64,
+    ) -> bool {
+        let held = HeldUsage::bound(reply);
+        let cleared = self.absent.take().is_some() | self.failure.take().is_some();
+        if self.summary.as_ref() == Some(&held) {
+            return cleared;
+        }
+        self.summary = Some(held);
+        self.received_at_ms = Some(received_at_ms);
+        true
+    }
+
+    /// The read failed for `reason`; the held summary stays. The reason is
+    /// scrubbed and cut to the shared reason cap, as the inbox's is.
+    pub fn mark_read_failed(&mut self, reason: impl Into<String>) -> bool {
+        let reason = bound_reason(&reason.into());
+        if self.failure.as_deref() == Some(reason.as_str()) {
+            return false;
+        }
+        self.failure = Some(reason);
+        true
+    }
+
+    /// The daemon cannot serve a summary, for `reason`: nothing is held. The
+    /// reason is scrubbed and cut as a failure's is.
+    pub fn mark_absent(&mut self, reason: impl Into<String>) -> bool {
+        let reason = bound_reason(&reason.into());
+        let changed = self.summary.is_some()
+            || self.failure.is_some()
+            || self.absent.as_deref() != Some(reason.as_str());
+        self.summary = None;
+        self.received_at_ms = None;
+        self.failure = None;
+        self.absent = Some(reason);
+        changed
+    }
+}
+
 #[cfg(test)]
 mod agent_status_section_tests {
     use super::AgentStatusSection;

@@ -12,6 +12,7 @@ import type {
   HostId,
   InboxView_Serialize,
   SessionsView_Serialize,
+  UsageView,
 } from "../../../ainb-app/bindings/AppState";
 import type { FrameStore, SectionName } from "./store.ts";
 
@@ -30,6 +31,7 @@ export const SUBSCRIBED: SectionName[] = [
   "agent_status",
   "hangar",
   "git_view",
+  "usage",
   "inbox",
 ];
 
@@ -83,6 +85,14 @@ export function configRevision(store: FrameStore, host: HostId | undefined): num
  */
 export function shellGitView(store: FrameStore, host: HostId | undefined): GitViewView_Serialize | undefined {
   return host === undefined ? undefined : store.section(host, "git_view");
+}
+
+/**
+ * The stats tab's numbers: section 21, a fold of the daemon's own usage
+ * summary (D3p-e). Subscribing to it is what starts the host's usage reader.
+ */
+export function shellUsage(store: FrameStore, host: HostId | undefined): UsageView | undefined {
+  return host === undefined ? undefined : store.section(host, "usage");
 }
 
 /**

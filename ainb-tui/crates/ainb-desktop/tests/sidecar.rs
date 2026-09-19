@@ -12,7 +12,10 @@ use std::time::Duration;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarState, daemon_pid};
 use ainb_hangar_client::DaemonClient;
 use ainb_hangar_proto::connections::SurfaceKind;
+use ainb_hangar_proto::protocol::ProtocolRange;
 use tokio::sync::watch;
+
+mod skew_support;
 
 /// A cold runner needs time to migrate a fresh store and mint the token.
 const BOOT_BUDGET: Duration = Duration::from_secs(90);
@@ -138,6 +141,7 @@ async fn a_cold_start_spawns_the_daemon_which_outlives_the_app() {
     let SidecarState::Connected {
         daemon_pid: Some(pid),
         spawned,
+        ..
     } = wait_for(&mut state, "connected", connected).await
     else {
         panic!("connected without a daemon pid");
@@ -174,10 +178,12 @@ async fn a_second_host_attaches_to_the_winner_instead_of_spawning_another() {
         SidecarState::Connected {
             daemon_pid: pid_a,
             spawned: spawned_a,
+            ..
         },
         SidecarState::Connected {
             daemon_pid: pid_b,
             spawned: spawned_b,
+            ..
         },
     ) = (a, b)
     else {
@@ -383,4 +389,54 @@ async fn a_child_that_never_owned_the_home_is_stopped() {
         String::from_utf8_lossy(&strays.stdout).trim().is_empty(),
         "a child that never owned the home is still running"
     );
+}
+
+/// A daemon that owns the home and refuses this build's protocol range is
+/// read on the first frame: nothing is spawned (the child would only lose the
+/// flock to the same daemon), and the app says which binary to move rather
+/// than "no daemon answered" after a budget of polling a daemon that answered
+/// every time.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusing_daemon_is_read_on_the_first_frame_and_nothing_is_spawned() {
+    let world = World::new();
+    let _daemon = skew_support::listen(
+        &world.home(),
+        skew_support::Hello::Refuse {
+            protocol: ProtocolRange { min: 5, max: 6 },
+            daemon_version: Some("9.9.9".into()),
+        },
+    );
+    let spawned = world.dir.path().join("spawned");
+    let mut config = world.config();
+    config.daemon_bin = skew_support::recording_daemon(world.dir.path(), &spawned);
+    config.grace = Duration::from_millis(300);
+    config.hello_budget = Duration::from_secs(1);
+    let sidecar = Sidecar::start(config);
+    let mut state = sidecar.state();
+
+    let SidecarState::Incompatible {
+        message,
+        daemon_is_newer,
+    } = wait_for(&mut state, "incompatible", |state| {
+        matches!(state, SidecarState::Incompatible { .. })
+    })
+    .await
+    else {
+        unreachable!("matched incompatible");
+    };
+    assert!(
+        message.contains("restart from the newer binary"),
+        "{message}"
+    );
+    assert!(daemon_is_newer, "5-6 sits above this build's range");
+    // Long enough for a spawn to have left its mark, had one happened.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !spawned.is_file(),
+        "the bundled daemon was spawned against a daemon that answered"
+    );
+    let view = serde_json::to_value(state.borrow().view()).expect("view serialises");
+    assert_eq!(view["state"], "incompatible");
+    assert_eq!(view["daemon_is_newer"], true);
+    assert_eq!(view["message"], message);
 }

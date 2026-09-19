@@ -10,6 +10,7 @@ use ainb_app::app::state::WorkspaceRescan;
 use ainb_app::config::AppConfig;
 use ainb_app::fleet::agent_status_reader::{AgentStatusReader, Dialer};
 use ainb_app::fleet::inbox_reader::{Dialer as InboxDialer, InboxReader};
+use ainb_app::fleet::usage_reader::UsageReader;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
 use ainb_app::{AppState, CommandId, Effect, Intent, Keymap, SectionId};
 use ainb_hangar_proto::connections::SurfaceKind;
@@ -125,6 +126,13 @@ pub struct DesktopHost<S: FrameSink> {
     /// The agent status reader both hosts share (#1188), once
     /// [`Self::start_agent_status`] has started it.
     agent_status: Option<AgentStatusReader>,
+    /// How to dial the daemon for section 21, once [`Self::enable_usage`]
+    /// named one; taken when the reader starts.
+    usage_dialer: Option<Dialer>,
+    /// The usage reader behind section 21, the stats tab. Started by the tick
+    /// on the first subscription that names `usage`, so a renderer that does
+    /// not subscribe to it costs the daemon no read (D3p-e).
+    usage: Option<UsageReader>,
     /// How the inbox reader dials the daemon. The reader itself runs only
     /// while a renderer subscribes to `inbox`, so no read is issued for a
     /// screen nobody has open.
@@ -192,6 +200,8 @@ impl<S: FrameSink> DesktopHost<S> {
             sink,
             rescan: WorkspaceRescan::default(),
             agent_status: None,
+            usage_dialer: None,
+            usage: None,
             daemons_panel: crate::daemons_panel::DaemonsPanel::default(),
             inbox_dialer: std::sync::Arc::new(inbox_dialer()),
             inbox: None,
@@ -273,6 +283,15 @@ impl<S: FrameSink> DesktopHost<S> {
         self.agent_status = Some(AgentStatusReader::spawn(dialer, legacy_panel));
     }
 
+    /// Let the tick start the usage reader behind section 21, the stats tab,
+    /// dialing with `dialer`, once a subscription names `usage` (D3p-e). Until
+    /// then nothing reads: a renderer that does not subscribe to `usage` costs
+    /// the daemon nothing. The webview subscribes to it at launch
+    /// (`ui/src/subscription.ts`), so today the read starts with the window.
+    pub fn enable_usage(&mut self, dialer: Dialer) {
+        self.usage_dialer = Some(dialer);
+    }
+
     /// Never start the daemon attention poller on a tick. For tests: the
     /// poller's first publish counts as news, which runs the attention merge
     /// whenever the thread happens to get there, whatever the cadence says.
@@ -336,6 +355,30 @@ impl<S: FrameSink> DesktopHost<S> {
         self.state.tick_surfaces(ainb_app::fleet::daemons::heartbeat::now_ms());
         // Section 20, which the board draws, from the shared reader.
         if let Some(reader) = &mut self.agent_status {
+            reader.drain_into(&mut self.state);
+        }
+        // Section 21, which the stats tab draws: started by the first
+        // subscription that names it, then drained like section 20.
+        // On the runtime the host holds, as the inbox reader is: the ticking
+        // thread's own runtime is not the host's to assume.
+        if self.usage.is_none()
+            && self.usage_dialer.is_some()
+            && self.mirror.subscription().contains(SectionId::Usage)
+        {
+            match &self.runtime {
+                Some(runtime) => {
+                    if let Some(dialer) = self.usage_dialer.take() {
+                        let _entered = runtime.enter();
+                        self.usage = Some(UsageReader::spawn(dialer));
+                    }
+                }
+                None => {
+                    tracing::warn!("usage: no runtime to start the reader on");
+                    self.state.usage_absent("this window has no runtime to read usage on");
+                }
+            }
+        }
+        if let Some(reader) = &mut self.usage {
             reader.drain_into(&mut self.state);
         }
         // The daemons panel on the settings page (D3d): the collector the

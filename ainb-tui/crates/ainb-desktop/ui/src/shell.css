@@ -79,6 +79,7 @@ body {
 }
 
 .banner.degraded,
+.banner.incompatible,
 .banner.reconnecting {
   color: var(--gold);
 }
@@ -1128,6 +1129,134 @@ body {
   color: var(--muted);
   text-align: right;
   user-select: none;
+}
+
+/* The stats tab: section 21, the daemon's usage summary. Laid out like the
+   review tab, filling the work area and scrolling its own content. */
+.stats {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+}
+
+.stats-status,
+.stats-detail,
+.stats-cut {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.stats[data-state="absent"] .stats-status,
+.stats[data-state="failed"] .stats-status {
+  border-color: var(--red);
+  color: var(--text);
+}
+
+.stats-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.stats-figure {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--panel);
+}
+
+.stats-figure dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.stats-figure dd {
+  margin: 2px 0 0;
+  color: var(--gold);
+  font-weight: 600;
+}
+
+.stats-days {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 120px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stats-day {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  height: 100%;
+  min-width: 0;
+}
+
+.stats-bar {
+  width: 100%;
+  min-height: 1px;
+  background: var(--border);
+  border-radius: 2px 2px 0 0;
+}
+
+.stats-date {
+  color: var(--muted);
+  font-size: 9px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.stats-breakdowns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.stats-breakdown {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.stats-breakdown caption {
+  color: var(--gold);
+  font-weight: 600;
+  text-align: left;
+  padding-bottom: 4px;
+}
+
+.stats-breakdown th,
+.stats-breakdown td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--highlight);
+  text-align: right;
+}
+
+.stats-breakdown th[scope="row"],
+.stats-breakdown thead th:first-child {
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.stats-repo {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: normal;
 }
 
 /* The header's inbox button, with the daemon's unread count beside it. */

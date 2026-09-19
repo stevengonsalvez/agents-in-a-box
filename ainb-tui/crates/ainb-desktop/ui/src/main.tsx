@@ -4,6 +4,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
 import { createFrameStore } from "./store.ts";
+import { Stats } from "./stats.tsx";
 import {
   configRevision,
   shellAgentStatus,
@@ -13,6 +14,7 @@ import {
   shellHangar,
   shellInbox,
   shellSessions,
+  shellUsage,
   SUBSCRIBED,
 } from "./subscription.ts";
 import { allSessions, label } from "./sessions.ts";
@@ -31,6 +33,7 @@ import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
 import { SettingsPage } from "./settings.tsx";
 import { CLOSE_SETTINGS, OPEN_SETTINGS } from "./settings.ts";
+import { banner as sidecarBanner, retryable, type SidecarState } from "./sidecar.ts";
 import type { SetupView, SetupWrite } from "../../bindings/Desktop.ts";
 import {
   accelerator,
@@ -61,13 +64,6 @@ const HEADER_COUNTS = [
 const TOAST_MS = 5000;
 
 const MAC = navigator.userAgent.includes("Mac");
-
-/** `ainb_desktop::sidecar::SidecarView`: no pid and no filesystem path. */
-type SidecarState =
-  | { state: "starting" }
-  | { state: "connected"; spawned: boolean }
-  | { state: "reconnecting"; error: string }
-  | { state: "degraded"; error: string; has_log: boolean };
 
 function Shell() {
   const store = createFrameStore(SUBSCRIBED);
@@ -106,7 +102,7 @@ function Shell() {
   // for one pane is three ways to be wrong and a fourth that draws nothing.
   // The transcript card is not in here; it stands in a session's place and
   // closes back to whatever was chosen.
-  const [pane, setPane] = createSignal<"board" | "review" | "terminal">("board");
+  const [pane, setPane] = createSignal<"board" | "review" | "stats" | "terminal">("board");
   // The ACP session whose transcript card holds the work area, if any. It has
   // no tmux pane, so the card stands where its terminal would.
   const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
@@ -115,7 +111,7 @@ function Shell() {
    * and the settings page and the inbox page (the reducer on its Config or
    * Inbox screen) take it over every pane.
    */
-  const showing = (which: "board" | "review" | "terminal") =>
+  const showing = (which: "board" | "review" | "stats" | "terminal") =>
     transcriptKey() === null && !settings() && !inboxOpen() && pane() === which;
   // The settings page: the config section as a form, the daemons panel and
   // the Setup panel (D3d). Whether it is open is the reducer's: the page shows
@@ -333,6 +329,8 @@ function Shell() {
   const fleet = () => shellFleet(store, host());
   const agentStatus = () => shellAgentStatus(store, host());
   const gitView = () => shellGitView(store, host());
+  const usage = () => shellUsage(store, host());
+  const usageStale = createMemo(() => ROOT_SELECTORS.usageStale(store, host()));
   const counts = HEADER_COUNTS.map(([select, label]) => ({
     label,
     count: createMemo(() => select(store, host())),
@@ -390,19 +388,7 @@ function Shell() {
     return label(session?.name ?? target.tmux);
   };
 
-  const banner = () => {
-    const state = sidecar();
-    switch (state.state) {
-      case "starting":
-        return "Connecting to the hangar daemon";
-      case "connected":
-        return state.spawned ? "Started the hangar daemon" : "Attached to the hangar daemon";
-      case "reconnecting":
-        return `Reconnecting: ${state.error}`;
-      case "degraded":
-        return `No hangar daemon: ${state.error}`;
-    }
-  };
+  const banner = () => sidecarBanner(sidecar());
 
   return (
     <main class="shell">
@@ -453,7 +439,7 @@ function Shell() {
       <Show when={sidecar().state !== "connected"}>
         <div class={`banner ${sidecar().state}`} role="status">
           <span>{banner()}</span>
-          <Show when={sidecar().state === "degraded"}>
+          <Show when={retryable(sidecar())}>
             <span class="actions">
               <Show when={(sidecar() as { has_log?: boolean }).has_log}>
                 <button
@@ -515,6 +501,19 @@ function Shell() {
                 }}
               >
                 Review
+              </button>
+            </span>
+            <span class="tab stats-tab" classList={{ active: showing("stats") }}>
+              <button
+                type="button"
+                class="tab-title"
+                aria-current={showing("stats") ? "page" : undefined}
+                onClick={() => {
+                  closeTranscript();
+                  setPane("stats");
+                }}
+              >
+                Stats
               </button>
             </span>
             {/* The ACP card's own place in the strip, where the session's
@@ -596,6 +595,7 @@ function Shell() {
               config={config()}
               revision={configRevision(store, host())}
               hangar={hangar()}
+              sidecar={sidecar()}
               setup={setup()}
               run={(intents) => void run(intents)}
               onSetupWrite={setupWrite}
@@ -608,6 +608,9 @@ function Shell() {
           </Show>
           <Show when={showing("review")}>
             <Review gitView={gitView()} stale={gitViewStale()} onChoose={dispatch} />
+          </Show>
+          <Show when={showing("stats")}>
+            <Stats usage={usage()} stale={usageStale()} />
           </Show>
           <Show when={showing("board")}>
             <Board
