@@ -69,7 +69,7 @@ pub fn palette_offers(
     id: &CommandId,
     row: &ainb_app::app::keymap::Binding,
 ) -> bool {
-    !refused_from_webview(keymap, id) && row.action.with_args(&serde_json::Value::Null).is_some()
+    !refused_from_webview(keymap, id) && ainb_app::app::palette::nameable(row)
 }
 
 impl TryFrom<RendererIntent> for Intent {
