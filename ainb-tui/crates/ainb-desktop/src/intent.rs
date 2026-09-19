@@ -96,16 +96,17 @@ impl TryFrom<RendererIntent> for Intent {
     type Error = Refusal;
 
     fn try_from(intent: RendererIntent) -> Result<Self, Refusal> {
+        if let RendererIntent::Command(id, args) = &intent {
+            if let Some(reason) = watched_screen_refusal(id, args) {
+                tracing::warn!("command `{id}` refused from the webview: {reason}");
+                return Err(Refusal {
+                    command: id.clone(),
+                    reason,
+                });
+            }
+        }
         match intent {
             RendererIntent::Key(chord) => Ok(Self::Key(chord)),
-            RendererIntent::Command(id, args) if watched_screen_refusal(&id, &args).is_some() => {
-                let reason = watched_screen_refusal(&id, &args).unwrap_or_default();
-                tracing::warn!("command `{id}` refused from the webview: {reason}");
-                Err(Refusal {
-                    command: id,
-                    reason,
-                })
-            }
             RendererIntent::Command(id, _) if is_host_authored(&id) => {
                 tracing::warn!("command `{id}` is host-authored; refused from the webview");
                 Err(Refusal {
