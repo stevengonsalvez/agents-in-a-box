@@ -285,6 +285,23 @@ impl ConfigValue {
     }
 }
 
+/// A row edit a renderer sends by key, `config.set_row`, before the reducer
+/// resolves it against the row's own [`ConfigValue`] kind.
+///
+/// It carries what the person chose and nothing the frame already holds: a
+/// choice is its option index. There is no secret edit: a secret row is not
+/// renderer-settable (`renderer_edit::SECRET_REASON`), so the wire cannot
+/// carry one. An edit whose kind does not fit the row is dropped with a
+/// notice, so a form cannot turn a choice into free text.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ConfigRowEdit {
+    Text(String),
+    Bool(bool),
+    /// The index of the chosen option in the row's own list.
+    Choice(usize),
+    Number(i64),
+}
+
 /// View filter for the session tree, cycled by `Shift+F` or its clickable title chip.
 ///
 /// Phase 2 of `load_interactive_mode_sessions` started surfacing Stopped sessions

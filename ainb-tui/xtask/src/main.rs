@@ -10,9 +10,10 @@
 //! * `gen-catalog-index` — emit the enriched curated-catalog index
 //!   (default `<repo>/catalog-index.json`, consumed by `AinbCuratedCatalogBackend`)
 //!   from a cloned `ainb-toolkit` checkout (`--toolkit-root`).
-//! * `stage-desktop-sidecar [--release]`: build the hangar daemon and stage it
-//!   at `crates/ainb-desktop/binaries/ainb-hangar-daemon-<triple>` for the
-//!   desktop bundle. See [`desktop_sidecar`].
+//! * `stage-desktop-sidecar [--release] [--target <triple>]`: build the hangar
+//!   daemon and stage it at `crates/ainb-desktop/binaries/ainb-hangar-daemon-<triple>`
+//!   for the desktop bundle; `--target` is the cross-compiled release leg.
+//!   See [`desktop_sidecar`].
 //! * `ci-lint` — assert `.github/workflows/ci.yml` satisfies the real Hangar
 //!   e2e CI contract (the `hangar-e2e` job). See [`ci_lint`].
 //!
