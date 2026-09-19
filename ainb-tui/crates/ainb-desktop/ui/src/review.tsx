@@ -5,6 +5,7 @@ import {
   fileRows,
   gitView,
   keyRows,
+  MAX_PAGE_ROWS,
   ROW_PX,
   scrollIntent,
   sectionCut,
@@ -60,7 +61,10 @@ export function Review(props: Props) {
    */
   const [rowsPerPage, setRowsPerPage] = createSignal(40);
   onMount(() => {
-    const measure = () => setRowsPerPage(Math.max(Math.floor((bodyElement?.clientHeight ?? 0) / ROW_PX), 1));
+    const measure = () =>
+      setRowsPerPage(
+        Math.min(Math.max(Math.floor((bodyElement?.clientHeight ?? 0) / ROW_PX), 1), MAX_PAGE_ROWS),
+      );
     measure();
     // The body, not the window: a pane that grows because the sidebar
     // collapsed or the banner cleared changes how many rows fit without the

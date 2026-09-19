@@ -235,6 +235,11 @@ body {
 .workarea {
   flex: 1;
   min-width: 0;
+  /* A flex item's default min-height is auto, which is its content: without
+     this the work area grows with whatever the tab draws, every box inside it
+     measures the content rather than the viewport, and a windowed list asks
+     for as many rows as it just drew (#1221). */
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
