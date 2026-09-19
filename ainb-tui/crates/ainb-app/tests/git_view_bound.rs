@@ -71,6 +71,19 @@ fn framed(state: &AppState) -> serde_json::Value {
     section_json(state, SectionId::GitView, &HostId::local())
 }
 
+/// The same projection on budgets small enough to prove a property without
+/// building megabytes of text first.
+fn framed_within(state: &AppState, text: usize, lists: usize) -> serde_json::Value {
+    let git = state.git_view.get().git_view_state.clone().expect("the git view");
+    serde_json::to_value(ainb_app::wire::git_view::project_within(&git, text, lists))
+        .expect("the frame encodes")
+}
+
+/// What the section encodes to, as the frame writer measures it.
+fn encoded(body: &serde_json::Value) -> usize {
+    serde_json::to_vec(body).expect("encodes").len()
+}
+
 #[test]
 fn a_large_diff_frames_inside_the_cap_and_says_what_it_cut() {
     // Past the frame's own ceiling if nothing bounded it: 60 files of 250
@@ -276,43 +289,98 @@ fn the_worst_case_of_every_bound_together_still_frames() {
 /// The review's byte budget is spent on the file the person has open first, so
 /// a huge diff in a file they are not looking at cannot leave their own file
 /// with nothing in it.
+///
+/// Remove either the budget or the selected-file-first pass and this fails: the
+/// files are framed in order, and the first of them spends everything.
 #[test]
 fn the_open_file_keeps_its_rows_when_the_others_spend_the_budget() {
-    // Three files of 2,000 rows at 4,000 characters: 24 million characters,
-    // five times the ceiling, against a budget of half of it.
-    let mut state = state_with(3, 2_000, &"z".repeat(4_000));
+    // A control character costs six bytes encoded, so 200 rows of them is
+    // already more than the budget this asks for.
+    let mut state = state_with(12, 200, &"\u{1}".repeat(400));
     {
         let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
-        git.review_ui.selected_file = 2;
-        // The review rows are what is under test here, so the raw diff stays
-        // small: it has its own worst case in the test below.
+        git.review_ui.selected_file = 11;
         git.diff_content = vec!["a changed line".to_string()];
     }
 
-    let body = framed(&state);
-    let bytes = serde_json::to_vec(&body).expect("encodes").len();
-    assert!(
-        bytes < MAX_FRAME_BYTES,
-        "the section frames in {bytes} bytes, over the {MAX_FRAME_BYTES} ceiling"
-    );
-
-    let files = body["git_view_state"]["review"]["files"].as_array().expect("files");
-    let rows = |index: usize| -> usize {
-        files[index]["hunks"]
+    let body = framed_within(&state, 64 * 1024, 16 * 1024);
+    let files = body["review"]["files"].as_array().expect("files");
+    let rows = |file: &serde_json::Value| -> usize {
+        file["hunks"]
             .as_array()
-            .expect("hunks")
-            .iter()
-            .map(|hunk| hunk["rows"].as_array().expect("rows").len())
-            .sum()
+            .map(|hunks| {
+                hunks.iter().map(|hunk| hunk["rows"].as_array().expect("rows").len()).sum()
+            })
+            .unwrap_or_default()
     };
+
+    let open = files
+        .iter()
+        .find(|file| file["path"] == "src/file11.rs")
+        .unwrap_or_else(|| panic!("the open file is framed at all: {files:?}"));
+    assert!(rows(open) > 0, "the open file frames rows: {open}");
     assert!(
-        rows(2) > 0,
-        "the open file frames rows: {}",
-        files[2]["rows_cut"]
+        files.iter().any(|file| file["path"] != "src/file11.rs" && rows(file) == 0),
+        "and the files it spent the budget on say they carry nothing: {files:?}"
     );
+    assert_eq!(
+        body["review_ui"]["selected_file"].as_u64().expect("the selection"),
+        files
+            .iter()
+            .position(|file| file["path"] == "src/file11.rs")
+            .expect("the open file") as u64,
+        "the selection points at the open file where it ended up"
+    );
+}
+
+/// A file costs bytes before any of its rows do, and a repository mid-rebase
+/// has thousands of them. An empty `ReviewFileFrame` is about 170 bytes, so
+/// twenty thousand of them is over three MiB with not one row in the section.
+#[test]
+fn twenty_thousand_changed_files_do_not_pass_the_budget_on_their_headers() {
+    let state = state_with(20_000, 1, "a changed line");
+
+    let body = framed_within(&state, 64 * 1024, 16 * 1024);
+
     assert!(
-        files.iter().any(|file| file["rows_cut"].as_u64().expect("a cut count") > 0),
-        "and the budget it cost the others is counted"
+        encoded(&body) < 256 * 1024,
+        "the section frames in {} bytes on a 80 KiB budget",
+        encoded(&body)
+    );
+    let files = body["review"]["files"].as_array().expect("files").len();
+    assert!(files > 0, "the review is shortened, never emptied");
+    assert_eq!(
+        files as u64 + body["review"]["files_cut"].as_u64().expect("a cut count"),
+        20_000,
+        "and every file it dropped is counted"
+    );
+}
+
+/// One file rewritten line by line has one hunk per line, and a hunk costs
+/// bytes with no rows in it at all.
+#[test]
+fn fifty_thousand_hunks_in_one_file_do_not_pass_the_budget_on_their_headers() {
+    let mut state = state_with(1, 1, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        let hunk = git.review.files[0].hunks[0].clone();
+        git.review.files[0].hunks = (0..50_000).map(|_| hunk.clone()).collect();
+    }
+
+    let body = framed_within(&state, 64 * 1024, 16 * 1024);
+
+    assert!(
+        encoded(&body) < 256 * 1024,
+        "the section frames in {} bytes on a 80 KiB budget",
+        encoded(&body)
+    );
+    let file = &body["review"]["files"][0];
+    let hunks = file["hunks"].as_array().expect("hunks").len();
+    assert!(hunks > 0, "the file keeps hunks");
+    assert_eq!(
+        hunks as u64 + file["hunks_cut"].as_u64().expect("a cut count"),
+        50_000,
+        "and the hunks it dropped are counted"
     );
 }
 
@@ -372,5 +440,54 @@ fn a_repository_of_thousands_of_paths_frames_a_shortened_tree_that_says_so() {
         listed as u64 + view["files_cut"].as_u64().expect("a cut count"),
         20_000,
         "and what it dropped is counted, not silently missing"
+    );
+}
+
+/// What the projection costs in the worst case, in a build like the one that
+/// ships. Not a gate, a number: the frame is built on the UI's thread whenever
+/// the section's version moves, so the scrub behind it is a budget of time as
+/// well as of bytes.
+///
+/// `cargo test -p ainb-app --features test-support --release --test
+/// git_view_bound -- --ignored --nocapture`
+#[test]
+#[ignore = "a measurement, and only meaningful in release"]
+fn what_the_worst_case_projection_costs() {
+    use ainb_app::components::git_view::{MarkdownLine, MarkdownStyle};
+
+    let wide = "z".repeat(4_000);
+    let mut state = state_with(3, 2_000, &wide);
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.diff_content = (0..2_000).map(|_| wide.clone()).collect();
+        git.markdown_content = (0..2_000)
+            .map(|_| MarkdownLine {
+                content: wide.clone(),
+                style: MarkdownStyle::Paragraph,
+            })
+            .collect();
+        git.changed_files = (0..20_000)
+            .map(|i| ChangedFile {
+                path: format!("src/deep/path/to/file{i}.rs"),
+                status: GitFileStatus::Modified,
+                insertions: 1,
+                deletions: 0,
+            })
+            .collect();
+    }
+    let git = state.git_view.get().git_view_state.clone().expect("the git view");
+
+    // Once to warm the caches the regexes build, then the measurement.
+    let _ = ainb_app::wire::git_view::project(&git);
+    let start = std::time::Instant::now();
+    let frame = ainb_app::wire::git_view::project(&git);
+    let projected = start.elapsed();
+    let start = std::time::Instant::now();
+    let bytes = serde_json::to_vec(&frame).expect("encodes").len();
+    let encoded = start.elapsed();
+
+    println!(
+        "worst case: project {:?}, encode {:?}, {bytes} bytes",
+        projected, encoded
     );
 }
