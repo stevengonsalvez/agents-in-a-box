@@ -138,12 +138,12 @@ export function SettingsPage(props: Props) {
           <tbody>
             <For each={daemons()}>
               {(row) => (
-                <tr data-daemon={row.kind} data-state={row.state}>
+                <tr data-daemon={row.kind} data-state={row.state} data-connected={row.connected}>
                   <td>{row.kind}</td>
                   <td>{row.state}</td>
                   <td>{row.version}</td>
                   <td>{row.errors}</td>
-                  <td>{row.connected ? "connected" : row.reason}</td>
+                  <td>{row.reason}</td>
                 </tr>
               )}
             </For>
