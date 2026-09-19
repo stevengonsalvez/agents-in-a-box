@@ -5485,7 +5485,7 @@ impl AppState {
 
     /// Load Interactive mode sessions from tmux
     async fn load_interactive_mode_sessions(&mut self) {
-        use crate::interactive::{InteractiveSessionManager, SessionStore};
+        use crate::interactive::InteractiveSessionManager;
 
         // Create Interactive session manager (no Docker needed)
         let mut manager = match InteractiveSessionManager::new() {
@@ -10055,7 +10055,7 @@ impl AppState {
         session_id: Uuid,
         trigger_key: String,
     ) -> anyhow::Result<()> {
-        use crate::interactive::{InteractiveSessionManager, SessionStore};
+        use crate::interactive::InteractiveSessionManager;
         use crate::models::SessionStatus;
 
         info!(
