@@ -162,6 +162,7 @@
         "collapsed_dirs_cut": 0,
         "current_hunk": 0,
         "scroll": 0,
+        "scroll_cut": false,
         "selected_file": 0,
         "sidebar_selected": 0
       },
