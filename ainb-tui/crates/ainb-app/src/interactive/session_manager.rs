@@ -1032,7 +1032,7 @@ pub async fn rollback_failed_interactive_launch(
         }
     }
 
-    if let Err(error) = SessionStore::mutate(|store| {
+    if let Err(error) = crate::cli::util::mutate_session_store(|store| {
         if let Some(tmux_name) = exact_tmux_name {
             store.remove_by_tmux_name(tmux_name);
         }
@@ -1043,7 +1043,7 @@ pub async fn rollback_failed_interactive_launch(
 }
 
 pub fn persist_codex_thread_id(session_id: Uuid, thread_id: String) -> anyhow::Result<()> {
-    SessionStore::mutate(|store| {
+    crate::cli::util::mutate_session_store(|store| {
         if let Some(metadata) =
             store.sessions.values_mut().find(|metadata| metadata.session_id == session_id)
         {
@@ -1675,7 +1675,7 @@ impl InteractiveSessionManager {
         };
         // Locked RMW so a concurrent `ainb kill` / recovery / daemon register
         // can't lost-update this upsert (pu4).
-        if let Err(e) = SessionStore::mutate(|store| store.upsert(metadata)) {
+        if let Err(e) = crate::cli::util::mutate_session_store(|store| store.upsert(metadata)) {
             warn!("Failed to persist session metadata: {}", e);
             // Continue anyway - session is still usable, just won't survive restarts gracefully
         }
@@ -1946,7 +1946,7 @@ impl InteractiveSessionManager {
             codex_thread_id: codex_remote.and_then(|remote| remote.thread_id),
         };
         // Locked RMW (pu4): serialise against concurrent kill/recovery writers.
-        if let Err(e) = SessionStore::mutate(|store| store.upsert(metadata)) {
+        if let Err(e) = crate::cli::util::mutate_session_store(|store| store.upsert(metadata)) {
             warn!("Failed to persist session metadata: {}", e);
         }
 
@@ -2578,28 +2578,30 @@ impl InteractiveSessionManager {
         // Best-effort lock: if it can't be taken we still clean up (unlocked)
         // rather than leak the metadata — the guard is held across load+save and
         // dropped before the reap read below.
-        let lock_guard = SessionStore::lock()
-            .map_err(|e| {
-                warn!("Failed to lock sessions.json for removal: {e}; proceeding unlocked");
-            })
-            .ok();
-        let mut store = SessionStore::load();
-        if let Some(ref name) = tmux_session_name {
-            store.remove_by_tmux_name(name);
-        }
-        store.remove_by_session_id(session_id); // Also remove by ID in case tmux name changed
-        if let Err(e) = store.save() {
+        // P6e: one read-modify-write through the process's session source,
+        // under its bounded lock. A failure is logged and the removal goes on
+        // (the tmux session and worktree are already gone); the reap below is
+        // then skipped, since what remains is unknown.
+        let mut remaining_headroom = None;
+        if let Err(e) = crate::cli::util::mutate_session_store_async(|store| {
+            if let Some(ref name) = tmux_session_name {
+                store.remove_by_tmux_name(name);
+            }
+            store.remove_by_session_id(session_id); // Also remove by ID in case tmux name changed
+            remaining_headroom =
+                Some(store.sessions.values().filter(|m| m.headroom_enabled).count());
+        })
+        .await
+        {
             warn!("Failed to update sessions.json after removal: {}", e);
             // Continue anyway - removal was successful
         }
-        drop(lock_guard);
 
         // Idle-reap: if no Headroom-enabled sessions remain, stop the shared
         // proxy so it doesn't linger after the last consumer is gone.
         // `headroom::stop()` is a no-op when the proxy wasn't ainb-spawned (no
         // pid file), so a user's own `headroom proxy` is never touched.
-        let remaining_headroom = store.sessions.values().filter(|m| m.headroom_enabled).count();
-        if remaining_headroom == 0 {
+        if remaining_headroom == Some(0) {
             info!("No Headroom sessions remain — reaping shared proxy");
             crate::headroom::stop();
         }
