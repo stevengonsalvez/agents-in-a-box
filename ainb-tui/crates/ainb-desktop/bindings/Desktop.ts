@@ -63,7 +63,13 @@ export type SetupView = {
 	otel: OtelView,
 };
 
-/**  One of the writes the settings page may ask the shell to confirm. */
+/**
+ *  One of the writes the settings page may ask the shell to confirm.
+ * 
+ *  `Debug` is written by hand: the telemetry write carries a token, and a
+ *  `{:?}` of it would put that token in the log `show_log` reads back into
+ *  the window.
+ */
 export type SetupWrite = 
 /**  Install the catalog dependency `id`, the way onboarding's `i` does. */
 { kind: "install_dependency"; id: string } | 
