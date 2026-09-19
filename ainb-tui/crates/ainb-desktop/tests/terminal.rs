@@ -114,6 +114,43 @@ impl Session<'_> {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
+    /// Start recording the pane's raw output, as its program writes it, to a
+    /// file in the server's directory. Returns the file's path.
+    fn pipe_output(&self) -> PathBuf {
+        let path = self.server.dir.path().join(format!("{}.out", self.name));
+        let status = self
+            .server
+            .command()
+            .args(["pipe-pane", "-o", "-t", &format!("={}:", self.name)])
+            .arg(format!("cat >> '{}'", path.display()))
+            .status()
+            .expect("pipe-pane runs");
+        assert!(status.success(), "pipe-pane on {} started", self.name);
+        path
+    }
+
+    /// Type `line` into the pane as literal keys, then Enter. An empty line
+    /// sends Enter alone.
+    fn send_line(&self, line: &str) {
+        let target = format!("={}:", self.name);
+        if !line.is_empty() {
+            let status = self
+                .server
+                .command()
+                .args(["send-keys", "-t", &target, "-l", line])
+                .status()
+                .expect("send-keys runs");
+            assert!(status.success(), "{line:?} typed into {}", self.name);
+        }
+        let status = self
+            .server
+            .command()
+            .args(["send-keys", "-t", &target, "Enter"])
+            .status()
+            .expect("send-keys runs");
+        assert!(status.success(), "Enter sent to {}", self.name);
+    }
+
     fn clients(&self) -> usize {
         let output = self
             .server
@@ -236,6 +273,69 @@ fn pane_output_reaches_the_sink_and_typed_input_reaches_the_pane() {
     wait_for("the typed line in the pane", || {
         session.capture().contains("typed-42")
     });
+}
+
+/// #1003: a paste whose payload carries the bracketed-paste terminator and
+/// then a command lands in the pane as text; the command never runs. A paste
+/// that ended early would run `echo pwned-$((6*7))` and print `pwned-42`.
+///
+/// The proof needs a shell that brackets pastes. Without that, the return
+/// inside the paste runs the line whatever the strip did, so the test would
+/// fail for the wrong reason. macOS ships bash 3.2, whose readline has no
+/// bracketed paste, so the pane runs zsh (zle brackets pastes by default since
+/// 5.1) and falls back to bash (on by default since 5.1) where zsh is absent.
+/// The test asserts the shell turned the mode on before it pastes.
+#[test]
+fn a_paste_carrying_the_terminator_lands_as_literal_text() {
+    let server = Server::new();
+    let session = server.start(
+        "d1c-paste",
+        r#"env -i PATH=/usr/bin:/bin TERM=xterm-256color sh -c "command -v zsh >/dev/null && exec zsh -f; exec bash --norc --noprofile""#,
+    );
+    let (terminals, _recorder, _reports) = terminals(&server);
+    assert_eq!(
+        terminals.open(tmux_tab("d1c-paste")),
+        None,
+        "the tab opened"
+    );
+    // Set inside the shell, not inherited: macOS zsh -f ignores a PS1 from
+    // the environment and keeps its `host%` prompt, where Linux zsh takes it.
+    // The line waits in the pty until the shell reads it. Only a line that
+    // STARTS with the prompt counts, since the typed line itself echoes it.
+    session.send_line("PS1='ready> '");
+    wait_for("the shell prompt", || {
+        session.capture().lines().any(|line| line.starts_with("ready>"))
+    });
+    // The shell's own output, not the tab's: tmux turns bracketed paste on
+    // for every client it drives, so the tab sees `ESC[?2004h` whatever the
+    // shell does. Both shells re-arm the mode on each prompt, so an empty
+    // line after the pipe is open draws one the pipe records.
+    let shell_output = session.pipe_output();
+    session.send_line("");
+    wait_for("the shell to turn bracketed paste on", || {
+        std::fs::read(&shell_output)
+            .unwrap_or_default()
+            .windows(8)
+            .any(|window| window == b"\x1b[?2004h")
+    });
+
+    // As xterm.js sends a paste: one chunk, wrapped in the markers, with the
+    // hostile payload between them.
+    let mut paste = b"\x1b[200~".to_vec();
+    paste.extend_from_slice(b"echo safe\x1b[201~\recho pwned-$((6*7))\r");
+    paste.extend_from_slice(b"\x1b[201~");
+    terminals.input("d1c-paste", paste);
+
+    wait_for("the pasted text in the prompt", || {
+        session.capture().contains("pwned-$((6*7))")
+    });
+    // Long enough for a leaked return to have run the command.
+    std::thread::sleep(Duration::from_millis(500));
+    let pane = session.capture();
+    assert!(
+        !pane.contains("pwned-42"),
+        "the pasted command ran:\n{pane}"
+    );
 }
 
 #[test]
