@@ -1,11 +1,12 @@
 //! The desktop's embedded host: one `AppState`, driven through `dispatch`, with
 //! every change framed for the webview.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ainb_app::app::RendererHost;
 use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
+use ainb_app::app::state::WorkspaceRescan;
 use ainb_app::config::AppConfig;
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
 use ainb_app::{AppState, CommandId, Effect, Intent, Keymap};
@@ -80,21 +81,6 @@ pub struct PaletteEntry {
     pub active: bool,
 }
 
-/// How long after a scan finishes the window asks for the next one.
-///
-/// A session another process creates reaches the sidebar only because this
-/// runs: the scan is what finds it, and nothing else tells this window it
-/// exists. A scan that finds the same list writes no Sessions frame, so the
-/// cadence costs a scan rather than a reframe; the WorkspaceLoad flag it does
-/// move is the "write only what changed" audit's, #1139.
-///
-/// Strictly longer than the floor the state publishes
-/// (`AppState::workspace_rescan_floor`, its own scan budget), and measured
-/// from the end of a scan, so a scan that times out is followed by a gap
-/// instead of the next one starting as it gives up.
-pub const WORKSPACE_RESCAN: Duration =
-    Duration::from_secs(ainb_app::AppState::workspace_rescan_floor().as_secs() + 5);
-
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
     state: AppState,
@@ -102,18 +88,9 @@ pub struct DesktopHost<S: FrameSink> {
     layout: DesktopLayout,
     mirror: Mirror,
     sink: S,
-    /// When the last scan was asked for, so the tick can pace the next.
-    scanned_at: Instant,
-    rescan_every: Duration,
-    /// The daemon's publish counter as it stood when the last scan started, so
-    /// news the poller brings can start one before the cadence would (#1156).
-    ///
-    /// `None` until this window has scanned at all: news is a reason to look
-    /// AGAIN, and a host that has never asked for a list has nothing to
-    /// refresh.
-    scanned_generation: Option<u64>,
-    /// The least time after a scan before news may start the next one.
-    news_floor: Duration,
+    /// How the tick asks the state to keep the session list fresh: the
+    /// cadence, and the floor under daemon news (#1156).
+    rescan: WorkspaceRescan,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -138,18 +115,15 @@ impl<S: FrameSink> DesktopHost<S> {
             layout: DesktopLayout::default(),
             mirror: Mirror::new(host_id, subscription),
             sink,
-            scanned_at: Instant::now(),
-            rescan_every: WORKSPACE_RESCAN,
-            scanned_generation: None,
-            news_floor: ainb_app::AppState::workspace_rescan_floor(),
+            rescan: WorkspaceRescan::default(),
         }
     }
 
-    /// Rescan on `every` instead of [`WORKSPACE_RESCAN`]. For tests, which
+    /// Rescan on `every` instead of [`AppState::WORKSPACE_RESCAN`]. For tests, which
     /// cannot wait ten seconds to see the second scan.
     #[must_use]
     pub const fn rescanning_every(mut self, every: Duration) -> Self {
-        self.rescan_every = every;
+        self.rescan.every = every;
         self
     }
 
@@ -157,7 +131,7 @@ impl<S: FrameSink> DesktopHost<S> {
     /// state's own scan budget. For tests, as [`Self::rescanning_every`] is.
     #[must_use]
     pub const fn flooring_news_at(mut self, floor: Duration) -> Self {
-        self.news_floor = floor;
+        self.rescan.news_floor = floor;
         self
     }
 
@@ -179,16 +153,7 @@ impl<S: FrameSink> DesktopHost<S> {
     /// policy; a later [`Self::tick`] applies the result. Must be called inside
     /// a tokio runtime.
     pub fn start_workspace_load(&mut self) {
-        self.scanned_generation = Some(self.daemon_generation());
         self.state.start_workspace_load();
-    }
-
-    /// The attention poller's publish counter as it stands.
-    fn daemon_generation(&self) -> u64 {
-        self.state
-            .host
-            .daemon_attention_generation
-            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Apply background work that finished (a workspace load, a daemon
@@ -196,14 +161,11 @@ impl<S: FrameSink> DesktopHost<S> {
     /// the effects that work queued.
     #[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
     pub fn tick(&mut self) -> Vec<Effect> {
-        let was_scanning = self.state.workspace_scan_running();
-        self.state.check_workspace_loading_complete();
-        // The cadence runs from the end of a scan, not its start: a scan that
-        // took the whole Docker budget would otherwise be followed by the next
-        // one immediately.
-        if was_scanning && !self.state.workspace_scan_running() {
-            self.scanned_at = Instant::now();
-        }
+        // A session another process created is found by a scan and by nothing
+        // else, so the window keeps asking for one: on daemon news once the
+        // news floor has passed, else on the cadence. The pacing is the
+        // state's (#1107, #1156).
+        self.state.pace_workspace_load(Some(self.rescan));
         // The poller is idempotent by an atomic, so starting it every tick is
         // its documented use. Every read here is by shared reference: a `&mut`
         // path through the `Versioned` Fleet section would bump it each tick.
@@ -223,27 +185,6 @@ impl<S: FrameSink> DesktopHost<S> {
         // is open: the worker reports into the state, and this is the only
         // thing in this process that folds it.
         self.state.tick_surfaces(ainb_app::fleet::daemons::heartbeat::now_ms());
-        // A session another process created is found by a scan and by nothing
-        // else, so the window keeps asking for one. Never two at once: the
-        // reducer owns the load and reports it running.
-        //
-        // The daemon already knows when something happened, so its publish
-        // counter starts a scan at once and the cadence is the floor under it
-        // (#1156): a box whose sessions never touch the daemon still gets one
-        // on the timer. The counter is recorded at the START of the scan, so
-        // news that arrives while it runs is still news when it finishes.
-        let generation = self.daemon_generation();
-        // News is floored too, on the state's own scan budget, so a daemon
-        // publishing while a scan runs cannot queue the next one the moment it
-        // ends.
-        let news = self.scanned_generation.is_some_and(|seen| seen != generation)
-            && self.scanned_at.elapsed() >= self.news_floor;
-        if !self.state.workspace_scan_running()
-            && (news || self.scanned_at.elapsed() >= self.rescan_every)
-        {
-            self.scanned_generation = Some(generation);
-            self.state.start_workspace_load();
-        }
         let effects = self.state.take_effects();
         self.pump();
         effects
