@@ -307,4 +307,3 @@ fn mark_all_read_folds_the_daemons_count_and_never_stamps_a_local_clock() {
     let frame = view_of(&state);
     assert!(frame["entries"].as_array().unwrap().iter().all(|e| e["read_at"] == NOW + 9));
 }
-
