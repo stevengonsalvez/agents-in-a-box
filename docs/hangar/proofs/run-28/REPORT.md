@@ -12,6 +12,7 @@ Since run 27 (`9342a492a`), v2 gained #1215, #1217 (D3a), #1226, #1222 (P6e-1, d
 | 28b | the same 21 nodes after installing webkit and building the desktop shell | **21 of 21 pass**, exit 0 |
 | journey 1 | `xvfb-run -a npm test` in `crates/ainb-desktop/e2e` (`journey.e2e.js`, `answer.e2e.js`) | **2 of 2 spec files pass** (3 tests), 9 min 15 s |
 | journey 2 | the same command, same build | **1 of 2 spec files pass**: `answer.e2e.js` fails at line 156, 9 min 5 s |
+| journey 3 | the same command, same build | **2 of 2 spec files pass**, 9 min 19 s |
 
 No harness scenario failed, so no harness node has a first failing assertion to report. The one failure in run 28 is in the desktop journey, below. `d1-shell` and `d2-board` pass in 28b, which is also their second run: both passed first in a `--only d1-shell --only d2-board` run at 17:37 UTC.
 
@@ -54,7 +55,7 @@ Expected and observed, line by line, are in `summary-28a-no-webkit.md` and `summ
 
 ## The desktop answer journey
 
-In CI, `answer.e2e.js` timed out after #1226, and the log showed `Tauri core.invoke not available`. Locally it is **flaky**: it passed in journey 1 and failed in journey 2, against the same build.
+In CI, `answer.e2e.js` timed out after #1226, and the log showed `Tauri core.invoke not available`. Locally it is **flaky**: it passed in journeys 1 and 3 and failed in journey 2, all against the same build (2 of 3). `journey.e2e.js` passed all three times.
 
 Journey 1:
 
@@ -104,7 +105,7 @@ The `core.invoke` message **does reproduce locally**: 106 `WARN tauri-service:wi
 
 Hypothesis, not confirmed: the CI timeout is those 5 s delays added to a slower runner, pushing a wait past its limit. The limits are `mochaOpts.timeout` 600 s per test and the 60 s and 30 s `waitUntil`s in the spec. The CI job's own log would confirm it (which wait timed out, and after how long) or rule it out, as would a local failure with the same message. Wiring `window.__wdio_original_core__` so the focus check stops waiting would remove the delay in both places.
 
-The journey logs, with stack frames removed and the home directory and host name masked, are `journey-run-1.txt` and `journey-run-2.txt`. A third run was in progress when this was written.
+The journey logs, with stack frames removed and the home directory and host name masked, are `journey-run-1.txt`, `journey-run-2.txt` and `journey-run-3.txt`. The `core.invoke` warning count was 106, 105 and 106.
 
 ## Leftovers
 
