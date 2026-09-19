@@ -23,7 +23,7 @@ required-features = ["app"]
 
 [features]
 default = []
-app = ["dep:tauri", "dep:tauri-build", "dep:ainb-hangar-core", "dep:tracing-subscriber"]
+app = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:ainb-hangar-core", "dep:tracing-subscriber"]
 # The window serves `ui/dist` over its own protocol instead of the dev server
 # at `build.devUrl`. A plain `cargo build` keeps the dev server, which is what
 # `tauri dev` and the frontend's hot reload want; every build that has to run
@@ -54,6 +54,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", optional = true, features = ["fmt"] }
 uuid = { version = "1.5", features = ["serde"] }
 tauri = { version = "~2.11.5", optional = true }
+# The native confirmation in front of the onboarding writes (#1175): a message
+# dialog the OS draws, which the webview's script cannot click. Rust side only;
+# the webview never calls the plugin, so it needs no capability.
+tauri-plugin-dialog = { version = "2.7", optional = true }
 tauri-plugin-wdio-webdriver = { version = "1.4", optional = true }
 # Pinned to the same releases `ainb-app` renders its frame contract with, so
 # both files are produced by one version of specta.
