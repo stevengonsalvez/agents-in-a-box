@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { GitViewView_Serialize } from "../../../ainb-app/bindings/AppState";
 import { commitRows, commitsCut, commitWindow, selectCommitIntent } from "./commits.ts";
+import { keyedList, sameKeys } from "./keyed.ts";
 import { gitView, keyRows, MAX_PAGE_ROWS, ROW_PX, scrollIntent, wheelRows, WITHHELD } from "./review.ts";
 import type { RendererIntent } from "./tabs.ts";
 
@@ -57,13 +58,19 @@ export function Commits(props: Props) {
     onCleanup(() => window.removeEventListener("resize", measure));
   });
 
-  const drawn = () => commitWindow(rows(), selected(), rowsPerPage());
+  // Keyed by the commit's own hash, so a frame that changes nothing patches
+  // the rows instead of re-creating them and a click cannot land on a node
+  // that has just been replaced (#1267).
+  const drawn = createMemo(() =>
+    keyedList(commitWindow(rows(), selected(), rowsPerPage()), (row) => row.sha),
+  );
+  const drawnKeys = createMemo(() => drawn().keys, [], { equals: sameKeys });
 
   // The selected commit is put in view, the way the terminal's list keeps it
   // there. The frame's selection is the only thing that moves it.
   createEffect(() => {
     const at = selected();
-    drawn();
+    drawnKeys();
     const element = listElement;
     if (element === undefined) return;
     const row = element.querySelector<HTMLElement>(`[data-index="${at}"]`);
@@ -110,25 +117,33 @@ export function Commits(props: Props) {
           fallback={<p class="empty">No commits on this branch yet</p>}
         >
           <div role="table" aria-rowcount={rows().length} aria-label="Commit rows">
-            <For each={drawn()}>
-              {(row) => (
-                <button
-                  type="button"
-                  class="commit-row"
-                  classList={{ selected: row.selected }}
-                  data-sha={row.sha}
-                  data-index={row.index}
-                  role="row"
-                  aria-rowindex={row.index + 1}
-                  aria-current={row.selected ? "true" : undefined}
-                  onClick={() => props.onChoose(selectCommitIntent(row.sha))}
-                >
-                  <span class="commit-sha">{row.sha}</span>
-                  <span class="commit-message">{row.message}</span>
-                  <span class="commit-author">{row.author}</span>
-                  <span class="commit-date">{row.date}</span>
-                </button>
-              )}
+            <For each={drawnKeys()}>
+              {(key) => {
+                // The row as the latest frame has it, read when it is drawn
+                // and again when it is clicked.
+                const row = () => drawn().byKey.get(key);
+                return (
+                  <button
+                    type="button"
+                    class="commit-row"
+                    classList={{ selected: row()?.selected }}
+                    data-sha={row()?.sha}
+                    data-index={row()?.index}
+                    role="row"
+                    aria-rowindex={(row()?.index ?? 0) + 1}
+                    aria-current={row()?.selected ? "true" : undefined}
+                    onClick={() => {
+                      const sha = row()?.sha;
+                      if (sha !== undefined) props.onChoose(selectCommitIntent(sha));
+                    }}
+                  >
+                    <span class="commit-sha">{row()?.sha}</span>
+                    <span class="commit-message">{row()?.message}</span>
+                    <span class="commit-author">{row()?.author}</span>
+                    <span class="commit-date">{row()?.date}</span>
+                  </button>
+                );
+              }}
             </For>
           </div>
         </Show>
