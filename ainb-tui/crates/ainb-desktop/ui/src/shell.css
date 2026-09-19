@@ -760,3 +760,133 @@ body {
   color: var(--muted);
   font-size: 11px;
 }
+
+.review {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.review-withheld,
+.review-cut {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.review-withheld {
+  border-color: var(--red);
+  color: var(--text);
+}
+
+.review-panes {
+  display: grid;
+  grid-template-columns: minmax(180px, 280px) 1fr;
+  gap: 12px;
+  min-height: 0;
+}
+
+.review-files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow-y: auto;
+}
+
+.review-file {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 8px;
+  width: 100%;
+  border: 0;
+  padding: 6px 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.review-file:hover {
+  background: var(--highlight);
+}
+
+.review-file.open {
+  background: var(--highlight);
+  color: var(--gold);
+}
+
+.review-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-counts {
+  color: var(--green);
+  font-size: 12px;
+}
+
+.review-file-cut {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.review-body {
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+}
+
+.review-hunk {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 4px 10px;
+  background: var(--highlight);
+  color: var(--border);
+}
+
+.review-hidden {
+  color: var(--muted);
+}
+
+.review-row {
+  display: grid;
+  grid-template-columns: 4ch 4ch 1fr;
+  gap: 8px;
+  margin: 0;
+  padding: 0 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.review-row[data-kind="added"] {
+  background: rgb(30, 50, 35);
+}
+
+.review-row[data-kind="removed"] {
+  background: rgb(55, 32, 35);
+}
+
+.review-lineno {
+  color: var(--muted);
+  text-align: right;
+  user-select: none;
+}
