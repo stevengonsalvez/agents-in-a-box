@@ -55,6 +55,7 @@
 
 · The whole seam is `SessionSource`. P6e does not add a second resolver: every `SessionStore::load`, `lock` and `mutate` call in the list above becomes `load_session_store` / `mutate_session_store` (or their async forms), so the TUI, the desktop, the CLI and, through `ainb list --frame`, the web read one decision per process.
 · The flip is a one-line change: append `CAP_WORKSPACE_SESSIONS` to `CAPABILITY_CATALOGUE` and to `capabilities.catalogue`. It is the LAST commit of the node, after every reader and writer has moved and the reconciliation has landed, so no intermediate commit on `v2` has a surface on the table while another is on the file.
+· Kill switch: `AINB_SESSION_SOURCE=file` in a process's environment makes `resolve` answer `File` before it dials anything: no `Degraded` notice, no re-resolve, no RPC. The flip is a compile-time constant, so this is the rollback that does not need a re-release. Any other value is ignored with one warning. Because the file stays written ("Mixed versions"), a process forced onto the file still sees current sessions.
 · Reconciliation happens in the daemon, in the same shape as the P6d import (a marker row, one transaction, clients on the file until the first pass completes), but it is repeatable, not one-time: see "Mixed versions" below.
 
 ─ DAEMON DOWN AT STARTUP ─
@@ -101,7 +102,9 @@
 
 8. Daemon down at startup. Daemon state: none when the TUI starts, then one started. A TUI started with no daemon resolves to `Degraded` and shows the notice; a session it creates lands in the file; a daemon is then started; within the re-resolve bound (at most 16 s after the daemon's hello succeeds, plus the reconcile) the TUI leaves `Degraded`, the session created while degraded is in the table, a CLI resolved to `Daemon` lists it, and a session the TUI creates after the switch is in both the table and the file. The test fails if the TUI stays on the file after the daemon is up, or if the degraded-time session is missing from the table.
 
-9. The programme row `docs/plans/2026-09-12-desktop-programme.md:126` is flipped to done with the PR numbers and the proof run id, in the implementation PR.
+9. The kill switch works. Daemon state: a daemon that advertises the capability with import and reconcile complete, behind a socket that counts accepted connections (the fake-daemon shape of P6d's `session_cli_daemon.rs`). With `AINB_SESSION_SOURCE=file` set, `SessionSource::resolve` answers `File` and the socket accepted zero connections; without it, the same setup answers `Daemon`. One test, red if the variable is read after dialing or not at all.
+
+10. The programme row `docs/plans/2026-09-12-desktop-programme.md:126` is flipped to done with the PR numbers and the proof run id, in the implementation PR.
 
 ─ WHICH EXISTING TESTS MUST STAY GREEN ─
 
