@@ -1,5 +1,5 @@
 // What the sessions sidebar and the header draw from the Sessions frame.
-// Projections only, in the manner of `wire::web::rows_from_frame`:
+// Projections only, in the manner of `wire::web::session_rows`:
 // every function reads the frame bodies it is handed and keeps nothing, so a
 // caller passing store proxies stays fine-grained.
 
@@ -66,15 +66,6 @@ export function label(text: string): string {
 /** Every session row the Sessions frame lists, across its workspaces. */
 export function allSessions(view: SessionsView_Serialize | undefined): Session_Serialize[] {
   return view?.workspaces.flatMap((workspace) => workspace.sessions) ?? [];
-}
-
-/**
- * The rows the sidebar draws for `workspace`: exactly the frame's, in frame
- * order. The frame already carries only the rows the reducer's filter shows
- * (#1180), so the window never filters them again, by status or otherwise.
- */
-export function drawnRows(workspace: Workspace_Serialize): Session_Serialize[] {
-  return workspace.sessions;
 }
 
 /**
