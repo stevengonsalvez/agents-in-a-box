@@ -42,6 +42,16 @@ pub struct ReleaseAsset {
 
 impl ReleaseAsset {
     fn validate(&self) -> Result<()> {
+        // Only a CLI archive belongs under `assets[]`: a shipped CLI matches
+        // this list on target alone and takes the first hit, so a desktop
+        // bundle here would be installed as the `ainb` binary. Refused at
+        // verification, whichever key signed the manifest.
+        if !self.archive.starts_with("ainb-") || !self.archive.ends_with(".tar.gz") {
+            bail!(
+                "release asset {} is not a CLI archive (ainb-<version>-<target>.tar.gz)",
+                self.archive
+            );
+        }
         let archive_is_file_name = std::path::Path::new(&self.archive)
             .file_name()
             .is_some_and(|name| name == self.archive.as_str());
