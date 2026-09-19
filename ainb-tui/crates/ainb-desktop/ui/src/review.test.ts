@@ -103,24 +103,30 @@ function section(
 test("a hunk renders its rows, under a header naming the lines it skipped", () => {
   const body = section([file("src/lib.rs", [hunk(10, [row(10, "one"), row(11, "two")], 8)])]);
 
-  const lines = bodyLines(openFile(body));
+  const lines = bodyLines(body);
 
   assert.deepEqual(
     lines.map((line) => line.kind),
-    ["hunk", "row", "row"],
+    ["file", "hunk", "row", "row"],
   );
-  assert.equal(lines[0].kind === "hunk" && lines[0].header, "@@ -10 +10 @@");
-  assert.equal(lines[0].kind === "hunk" && lines[0].hidden, 8);
+  assert.equal(lines[1].kind === "hunk" && lines[1].header, "@@ -10 +10 @@");
+  assert.equal(lines[1].kind === "hunk" && lines[1].hidden, 8);
   assert.deepEqual(
     lines.flatMap((line) => (line.kind === "row" ? [line.row.raw] : [])),
     ["one", "two"],
   );
 });
 
-test("a file with no hunks draws no body at all", () => {
+test("a file with no hunks is still named, with nothing under it", () => {
   const body = section([file("assets/logo.png", [], { binary: true })]);
 
-  assert.deepEqual(bodyLines(openFile(body)), []);
+  const lines = bodyLines(body);
+  assert.deepEqual(
+    lines.map((line) => line.kind),
+    ["file"],
+    "the file is drawn; it simply has no hunks",
+  );
+  assert.equal(lines[0].kind === "file" && lines[0].file.binary, true);
   assert.equal(openFile(body)?.path, "assets/logo.png");
 });
 
@@ -148,7 +154,7 @@ test("every row drawn came from the frame, and none was minted here", () => {
   const rows = [row(1, "kept"), row(2, "also kept")];
   const body = section([file("src/lib.rs", [hunk(1, rows)])]);
 
-  const drawn = bodyLines(openFile(body)).flatMap((line) => (line.kind === "row" ? [line.row] : []));
+  const drawn = bodyLines(body).flatMap((line) => (line.kind === "row" ? [line.row] : []));
 
   assert.equal(drawn.length, rows.length);
   for (const [index, row] of drawn.entries()) {
@@ -211,7 +217,7 @@ test("the tab draws the frame's files and the open file's rows", async () => {
   const body = section(
     [
       file("src/lib.rs", [hunk(1, [row(1, "kept one"), row(2, "kept two")])]),
-      file("README.md", [hunk(1, [row(1, "not drawn")])]),
+      file("README.md", [hunk(1, [row(1, "also drawn")])]),
     ],
     0,
   );
@@ -223,7 +229,9 @@ test("the tab draws the frame's files and the open file's rows", async () => {
   assert.equal(html.match(/aria-current="true"/g)?.length, 1, html);
   assert.match(html, /kept one/, html);
   assert.match(html, /kept two/, html);
-  assert.doesNotMatch(html, /not drawn/, "only the open file's rows are drawn");
+  // The body runs over every file, because the reducer's scroll offset and
+  // hunk cursor count across the whole review, not within the open file.
+  assert.match(html, /also drawn/, html);
 });
 
 test("a withheld section says so rather than drawing a stale diff silently", async () => {
@@ -235,12 +243,12 @@ test("a withheld section says so rather than drawing a stale diff silently", asy
   assert.match(html, /too large to send/, html);
 });
 
-test("a binary file says why its body is empty", async () => {
+test("a binary file says why it has nothing under its heading", async () => {
   const body = section([file("assets/logo.png", [], { binary: true })]);
 
   const html = await rendered({ gitView: body, stale: false, onChoose() {} });
 
-  assert.match(html, /Binary file/, html);
+  assert.match(html, /binary, nothing to show/, html);
 });
 
 test("a section that never arrived draws its own loading line", async () => {
