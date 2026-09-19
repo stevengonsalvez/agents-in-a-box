@@ -94,15 +94,28 @@ mod tests {
         state.shell.current_screen = ids::INBOX.to_string();
         settle(&mut host, &mut state, 5).await;
         assert!(host.running());
-        assert!(dials.load(Ordering::SeqCst) >= 1, "the screen starts the reads");
-        assert!(state.inbox.get().absent.is_some(), "a failed dial lands as the absent reason");
+        assert!(
+            dials.load(Ordering::SeqCst) >= 1,
+            "the screen starts the reads"
+        );
+        assert!(
+            state.inbox.get().absent.is_some(),
+            "a failed dial lands as the absent reason"
+        );
 
         state.shell.current_screen = ids::HOME.to_string();
         host.tick(&mut state);
         assert!(!host.running());
-        assert!(state.inbox.get().absent.is_none(), "leaving the screen resets the section");
+        assert!(
+            state.inbox.get().absent.is_none(),
+            "leaving the screen resets the section"
+        );
         let seen = dials.load(Ordering::SeqCst);
         settle(&mut host, &mut state, 30).await;
-        assert_eq!(dials.load(Ordering::SeqCst), seen, "no read after the screen is left");
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            seen,
+            "no read after the screen is left"
+        );
     }
 }
