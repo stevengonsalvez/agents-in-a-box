@@ -369,6 +369,7 @@ git_view.git_view_state.diff_content[]
 git_view.git_view_state.diff_lines_cut
 git_view.git_view_state.diff_scroll_offset
 git_view.git_view_state.expanded_folders[]
+git_view.git_view_state.expanded_folders_cut
 git_view.git_view_state.file_tree_items[].depth
 git_view.git_view_state.file_tree_items[].display_name
 git_view.git_view_state.file_tree_items[].file_count
@@ -406,6 +407,7 @@ git_view.git_view_state.review.files[].rows_cut
 git_view.git_view_state.review.files[].status
 git_view.git_view_state.review.files_cut
 git_view.git_view_state.review_ui.collapsed_dirs[]
+git_view.git_view_state.review_ui.collapsed_dirs_cut
 git_view.git_view_state.review_ui.current_hunk
 git_view.git_view_state.review_ui.scroll
 git_view.git_view_state.review_ui.selected_file
