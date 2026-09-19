@@ -93,6 +93,13 @@ pub struct ConfigField {
     pub choices: Vec<String>,
 }
 
+/// The wire-protocol ABI revision this build of the protocol speaks, and the
+/// one the runtime advertises in `plugin/init`. A plugin's
+/// [`PluginMeta::abi_version`] names the revision it was built against; a wire
+/// value newer than that revision is never sent to it (see
+/// [`crate::params::KeyCode::min_abi`], #1171).
+pub const ABI_VERSION: u32 = 2;
+
 /// `[plugin]` section.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginMeta {

@@ -212,8 +212,8 @@ pub enum KeyCode {
     /// Delete (forward delete).
     Delete,
     /// Insert. New in 0.3.0, so the terminal's key table routes through this
-    /// enum without losing a key (#1123). A host does not send it to a plugin
-    /// built against an older protocol, which could not decode it.
+    /// enum without losing a key (#1123). Only a plugin whose ABI is at least
+    /// [`KeyCode::min_abi`] for it receives it (#1171).
     Insert,
     /// Up arrow.
     Up,
@@ -236,6 +236,23 @@ pub enum KeyCode {
         /// Function number (1-based).
         n: u8,
     },
+}
+
+impl KeyCode {
+    /// The first plugin ABI revision that can decode this key.
+    ///
+    /// A host sends a key only to a plugin whose manifest `abi_version` is at
+    /// least this, so a variant added to the wire never reaches a plugin built
+    /// before it (#1171). Every key but [`KeyCode::Insert`] is as old as ABI 2.
+    /// Insert is 3: ABI 2 plugins were built on a protocol without it, and the
+    /// ABI moving to 3 is what lets a plugin declare that it decodes it.
+    #[must_use]
+    pub const fn min_abi(&self) -> u32 {
+        match self {
+            Self::Insert => 3,
+            _ => 2,
+        }
+    }
 }
 
 /// Press / repeat / release. `Press` is the default — older peers that
@@ -1547,6 +1564,25 @@ mod tests {
         assert_eq!(s, r#"{"type":"f","n":7}"#);
         let s = serde_json::to_string(&KeyCode::Insert).unwrap();
         assert_eq!(s, r#"{"type":"insert"}"#);
+    }
+
+    #[test]
+    fn only_insert_needs_a_newer_abi_than_the_current_one() {
+        use crate::manifest::ABI_VERSION;
+        assert_eq!(KeyCode::Insert.min_abi(), 3);
+        assert!(
+            KeyCode::Insert.min_abi() > ABI_VERSION,
+            "no ABI 2 plugin gets Insert"
+        );
+        for code in [
+            KeyCode::Char { ch: 'a' },
+            KeyCode::Enter,
+            KeyCode::BackTab,
+            KeyCode::Delete,
+            KeyCode::F { n: 1 },
+        ] {
+            assert!(code.min_abi() <= ABI_VERSION, "{code:?}");
+        }
     }
 
     #[test]
