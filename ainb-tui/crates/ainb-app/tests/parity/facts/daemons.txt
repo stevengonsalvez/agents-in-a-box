@@ -1,6 +1,6 @@
 # Expected facts of the `daemons` fixture, one per line, each a substring both
-# renderers must print: the ratatui snapshot (`daemons.snap`) and the settings
-# page's daemons panel (`ainb-desktop/ui/test/parity.test.ts`). The fixture
+# renderers must print: the ratatui snapshot (`../daemons.snap`) and the settings
+# page's daemons panel (`ainb-desktop/ui/test/parity.test.ts`, which mounts the page). The fixture
 # seeds a collected snapshot, so the facts are the collector's rows, not only
 # the table's headings: a renderer that drops a row, its state or its reason
 # fails on data.
