@@ -1306,6 +1306,43 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
         section.absent = Some(seed.text("agent_status.absent", Captured));
     }
 
+    // ---- inbox (section 16) ----------------------------------------------------------------
+    {
+        // Set directly rather than through `apply_read`, which scrubs before it
+        // stores: the seed's canary has to reach the frame's own scrub so the
+        // tripwire reads the boundary, as the transcript's chunks do.
+        let section = state.inbox.get_mut();
+        section.entries = vec![
+            ainb_hangar_proto::events::InboxEntryRow {
+                id: "01J0SAMPLEINBOXENTRY000001".to_string(),
+                kind: "issue".to_string(),
+                event: "issue_created".to_string(),
+                subject_id: "issue-sample".to_string(),
+                summary: seed.text("inbox.entry.summary", Captured),
+                recipient: crate::app::sections::INBOX_RECIPIENT.to_string(),
+                created_at: 1_700_000_000_000,
+                read_at: None,
+            },
+            ainb_hangar_proto::events::InboxEntryRow {
+                id: "01J0SAMPLEINBOXENTRY000002".to_string(),
+                kind: "task".to_string(),
+                event: "task_finished".to_string(),
+                subject_id: "task-sample".to_string(),
+                summary: seed.text("inbox.entry.summary_read", Captured),
+                recipient: crate::app::sections::INBOX_RECIPIENT.to_string(),
+                created_at: 1_699_999_999_000,
+                read_at: Some(1_700_000_000_500),
+            },
+        ];
+        section.unread = 1;
+        section.recipient = crate::app::sections::INBOX_RECIPIENT.to_string();
+        section.rows_cut = 3;
+        section.summaries_cut = 1;
+        section.received_at_ms = 1_700_000_001_000;
+        section.unreachable = Some(seed.text("inbox.unreachable", Captured));
+        section.absent = Some(seed.text("inbox.absent", Captured));
+    }
+
     // ---- hangar, mcp pool, plugins ---------------------------------------------------------
     {
         let status: crate::fleet::daemons::DaemonStatus =

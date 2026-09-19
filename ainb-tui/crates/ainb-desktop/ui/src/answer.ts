@@ -1,11 +1,13 @@
 // The question the banner answers, and the intents that answer it. Projections
 // and sequences only: `answer.tsx` draws and sends what these return.
 //
-// Nothing here decides an answer. The window moves the reducer's own cursor
-// with `session_list.ask.previous`/`next`, types through `Intent::Text` into
-// the reducer's own composer, and sends with `session_list.ask.enter`, so the
-// verified send (`AskState::send`) is the only send there is.
+// Nothing here decides an answer. A pick names its option by label in one
+// `session_list.ask.pick`, which the reducer resolves against the options it
+// holds; a typed answer goes through `Intent::Text` into the reducer's own
+// composer and is sent with `session_list.ask.enter`. The verified send
+// (`AskState::send`) is the only send there is.
 
+import { type Accessor, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import type {
   AnswerPhase_Serialize,
   AskState_Serialize,
@@ -30,7 +32,11 @@ export interface Question {
   title: string;
   kind: AttentionKind;
   detail: string | null;
-  /** The labels a pick chooses between, in the reducer's cursor order. */
+  /**
+   * The labels a pick chooses between, in the reducer's cursor order and as
+   * the frame carries them: a pick sends one back verbatim, so the reducer's
+   * own match finds it. Trimmed for display only where they are drawn.
+   */
   options: string[];
   /**
    * Whether a typed answer can be sent. Not over the approve broker: a parked
@@ -90,13 +96,57 @@ export function questionFor(sessions: SessionsView_Serialize | undefined): Quest
     title: label(session.name),
     kind: mark.kind,
     detail: mark.detail === null ? null : label(mark.detail),
-    options: mark.options.map((option) => label(option.label)),
+    options: mark.options.map((option) => option.label),
     // Not over the broker: it reads `approve` or `deny` and refuses anything
     // else. Not where nothing can deliver an answer at all.
     freeText: mark.route === "Daemon" || mark.route === "Pane",
     answerable: mark.route !== "None",
     route,
   };
+}
+
+/**
+ * What a banner shows of a question, as one string: a repaint is due when
+ * this changes. The request, the title, whether it can be answered, and the
+ * labels in order; a hook that rewrites its options under one id reaches the
+ * banner, and a frame that carries the same question again does not repaint.
+ */
+function drawnDigest(question: Question): string {
+  return [question.request, question.title, String(question.answerable), ...question.options].join("\u001f");
+}
+
+/**
+ * The question a banner has drawn, one paint behind `current`.
+ *
+ * `current` is the frame's question as of now. A click handler that read it
+ * at click time answered whatever question the frame had moved on to, with
+ * that question's own request id, so the reducer's request check passed for a
+ * question the person never saw (#1191). The drawn question follows the frame
+ * only after the next paint (`schedule`; `requestAnimationFrame` in the
+ * window), keyed on what the banner shows (`drawnDigest`): between a frame
+ * that moved the question on and the paint that shows it, a click still names
+ * the old request, which `pointedAt` refuses against the new answer state.
+ *
+ * `schedule` returns the paint's cancel. A newer frame cancels the paint still
+ * pending, so only the newest question paints, and the banner's unmount
+ * cancels the last one, so nothing paints into a banner that is gone.
+ */
+export function drawnQuestion(
+  current: Accessor<Question>,
+  schedule: (paint: () => void) => () => void,
+): Accessor<Question> {
+  const [drawn, setDrawn] = createSignal(current());
+  // A memo, not a bare accessor: `on` reruns whenever what it tracks writes,
+  // and every frame writes a new question object. The memo notifies only when
+  // the digest string itself changes.
+  const digest = createMemo(() => drawnDigest(current()));
+  createEffect(
+    on(digest, () => {
+      const question = current();
+      onCleanup(schedule(() => setDrawn(question)));
+    }),
+  );
+  return drawn;
 }
 
 /** What the reducer recorded for the request it is pointed at. */
@@ -146,13 +196,19 @@ function moves(from: number, to: number): RendererIntent[] {
 }
 
 /**
- * The intents that pick option `index` and send it, in order: the reducer's own
- * cursor, moved from where the frame says it is, then Enter. None at all when
- * the frame is not pointed at this question.
+ * The intents that pick option `index` and send it: the reducer put on the
+ * question, then ONE pick naming the option by its label. The reducer resolves
+ * the label against the options it holds when the pick runs, so a frame
+ * landing between two intents cannot move a counted cursor onto another
+ * option (#1191). The pick names the request the person read, and the reducer
+ * refuses it once the question has moved on. None at all when the frame is
+ * not pointed at this question, or when `index` names no option it offers.
  */
 export function pickIntents(question: Question, ask: AskState_Serialize | undefined, index: number): RendererIntent[] {
   if (!pointedAt(question, ask) || !question.answerable) return [];
-  return [...focusIntents(question), ...moves(ask.cursor, index), { Command: ["session_list.ask.enter", null] }];
+  const label = question.options[index];
+  if (label === undefined) return [];
+  return [...focusIntents(question), { Command: ["session_list.ask.pick", { request: question.request, label }] }];
 }
 
 /**
@@ -185,10 +241,10 @@ export interface Refusal {
  * Send `intents` in order, one at a time, and STOP at the first one the host
  * refused, returning it.
  *
- * The pick is a sequence: put the cursor on the row, step it to the option,
- * then Enter. Each step is applied before the next is sent. If a step is
- * refused and the sequence carries on, Enter still fires, on whatever option
- * the reducer's cursor is on: the wrong answer, sent as if a person picked it.
+ * A typed answer is a sequence: put the cursor on the composer row, clear it,
+ * type, then Enter. Each step is applied before the next is sent. If a step is
+ * refused and the sequence carries on, Enter still fires, on whatever the
+ * reducer's cursor is on: the wrong answer, sent as if a person typed it.
  */
 export async function sendInOrder(
   intents: RendererIntent[],

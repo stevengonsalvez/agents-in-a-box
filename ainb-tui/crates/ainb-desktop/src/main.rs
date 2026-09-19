@@ -485,7 +485,10 @@ fn main() {
                 // Nothing is framed until the webview subscribes.
                 Subscription::none(),
                 frames.clone(),
-            );
+            )
+            // `subscribe` is a synchronous command on the main thread, so the
+            // inbox reader it starts needs the app runtime handed to it.
+            .on_runtime(tauri::async_runtime::handle().inner().clone());
             let daemon_bin = daemon_bin()?;
             let sidecar_config = SidecarConfig::new(hangar_home, daemon_bin);
             // Both spawn onto the app's tokio runtime, so they start inside it.

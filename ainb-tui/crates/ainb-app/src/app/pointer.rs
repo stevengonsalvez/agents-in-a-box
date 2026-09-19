@@ -29,6 +29,9 @@ pub mod ids {
     pub const SESSION_LIST_SELECT_TAB: &str = "session_list.select_tab";
     /// `{"session_key": String | null}`: null closes.
     pub const SESSION_LIST_OPEN_TRANSCRIPT: &str = "session_list.open_transcript";
+    /// `{"request": String, "label": String}`: the request id the frame named
+    /// (`fleet.ask_state.request`) and one of its option labels.
+    pub const SESSION_LIST_ASK_PICK: &str = "session_list.ask.pick";
     /// `{"width": u16, "collapsed": bool}`
     pub const SESSION_LIST_SAVE_PANE_LAYOUT: &str = "session_list.save_pane_layout";
     /// No arguments.
@@ -54,6 +57,8 @@ pub mod ids {
     pub const CONFIG_SET_ROW: &str = "config.set_row";
     /// `{"id": String}`, a `ConfigTreeNode::id`.
     pub const CONFIG_SELECT_NODE: &str = "config.select_node";
+    /// No arguments: the inbox's one write is a whole-inbox sweep (D3-prime).
+    pub const INBOX_MARK_ALL_READ: &str = "inbox.mark_all_read";
 
     /// Every pointer command id.
     pub const ALL: &[&str] = &[
@@ -62,6 +67,7 @@ pub mod ids {
         SESSION_LIST_FOCUS_PANE,
         SESSION_LIST_SELECT_TAB,
         SESSION_LIST_OPEN_TRANSCRIPT,
+        SESSION_LIST_ASK_PICK,
         SESSION_LIST_SAVE_PANE_LAYOUT,
         SKILL_MANAGER_ALL_SOURCES,
         SKILL_MANAGER_SELECT_SOURCE,
@@ -74,6 +80,7 @@ pub mod ids {
         GIT_VIEW_SCROLL,
         CONFIG_SET_ROW,
         CONFIG_SELECT_NODE,
+        INBOX_MARK_ALL_READ,
     ];
 }
 
@@ -128,6 +135,23 @@ pub fn open_transcript(session_key: Option<&str>) -> Intent {
     command(
         ids::SESSION_LIST_OPEN_TRANSCRIPT,
         json!({ "session_key": session_key }),
+    )
+}
+
+/// Answer the question `request` names with the option labelled `label`.
+///
+/// One intent, resolved by the reducer against the options it holds when it
+/// runs. A banner that counted cursor moves off its frame and then sent Enter
+/// picked a different option when a frame landed mid-sequence and reordered
+/// them; here nothing sits between the pick and the send (#1191). `request`
+/// is the id the frame carried for the question the person read: the reducer
+/// refuses the pick when the question it would answer is another one, so a
+/// label both questions offer (yes, no, approve) cannot answer the new one.
+#[must_use]
+pub fn pick_answer(request: &str, label: &str) -> Intent {
+    command(
+        ids::SESSION_LIST_ASK_PICK,
+        json!({ "request": request, "label": label }),
     )
 }
 
@@ -237,6 +261,12 @@ pub fn select_config_node(id: &str) -> Intent {
     command(ids::CONFIG_SELECT_NODE, json!({ "id": id }))
 }
 
+/// Mark every entry in the inbox read: the daemon's sweep, sent with one op id.
+#[must_use]
+pub fn mark_inbox_all_read() -> Intent {
+    command(ids::INBOX_MARK_ALL_READ, Args::Null)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewRowArgs {
@@ -305,6 +335,13 @@ struct TranscriptArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PickArgs {
+    request: String,
+    label: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LayoutArgs {
     fraction: f64,
     collapsed: bool,
@@ -363,6 +400,12 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
         }
         AppEvent::SessionListOpenTranscript(_) => parse::<TranscriptArgs>(args)
             .map(|args| AppEvent::SessionListOpenTranscript(args.session_key)),
+        AppEvent::SessionAskPick { .. } => {
+            parse::<PickArgs>(args).map(|args| AppEvent::SessionAskPick {
+                request: args.request,
+                label: args.label,
+            })
+        }
         AppEvent::SaveSessionsPaneLayout { .. } => parse::<LayoutArgs>(args)
             .filter(|args| (0.0..=1.0).contains(&args.fraction))
             .map(|args| AppEvent::SaveSessionsPaneLayout {
