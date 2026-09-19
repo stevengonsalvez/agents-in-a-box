@@ -256,13 +256,6 @@ function Widget(props: { row: SettingsRow; onInput(input: string | number | bool
       <Show when={row().kind === "text"}>
         <input type="text" placeholder={row().value} onChange={(event) => props.onInput(event.currentTarget.value)} />
       </Show>
-      <Show when={row().kind === "secret"}>
-        <input
-          type="text"
-          placeholder="$ENV_VAR or keychain:<service>"
-          onChange={(event) => props.onInput(event.currentTarget.value)}
-        />
-      </Show>
     </Show>
   );
 }
