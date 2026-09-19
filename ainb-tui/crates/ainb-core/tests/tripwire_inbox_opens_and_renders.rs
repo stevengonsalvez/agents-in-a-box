@@ -99,7 +99,16 @@ fn b_opens_the_inbox_over_its_section_and_esc_returns_home() {
 
     let session = Session(format!("tripwire-inbox-{}", std::process::id()));
     let status = Command::new("tmux")
-        .args(["new-session", "-d", "-s", &session.0, "-x", "160", "-y", "45"])
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            &session.0,
+            "-x",
+            "160",
+            "-y",
+            "45",
+        ])
         .status()
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
@@ -119,25 +128,50 @@ fn b_opens_the_inbox_over_its_section_and_esc_returns_home() {
     let home_deadline = Instant::now() + Duration::from_secs(30);
     let home = poll_capture(&session.0, home_deadline, |cap| cap.contains("Daemons"))
         .unwrap_or_else(|| panic!("home never drew its sidebar:\n{}", capture_pane(&session.0)));
-    assert!(!home.contains("📥"), "the inbox is not open before the key:\n{home}");
+    assert!(
+        !home.contains("📥"),
+        "the inbox is not open before the key:\n{home}"
+    );
 
     send_key(&session.0, "b");
-    let opened = poll_capture(&session.0, Instant::now() + Duration::from_secs(15), |cap| {
-        cap.contains("Inbox") && cap.contains("mark all read")
-    })
+    let opened = poll_capture(
+        &session.0,
+        Instant::now() + Duration::from_secs(15),
+        |cap| cap.contains("Inbox") && cap.contains("mark all read"),
+    )
     .unwrap_or_else(|| panic!("the inbox did not open:\n{}", capture_pane(&session.0)));
-    assert!(!opened.contains("⚙ Daemons"), "the wrong panel opened:\n{opened}");
+    assert!(
+        !opened.contains("⚙ Daemons"),
+        "the wrong panel opened:\n{opened}"
+    );
     // The section, not a placeholder: with no daemon the reader's failure is
     // what the screen draws, in the section's own words.
-    let absent = poll_capture(&session.0, Instant::now() + Duration::from_secs(15), |cap| {
-        cap.contains("inbox unavailable")
-    })
-    .unwrap_or_else(|| panic!("the screen never drew the section's absent reason:\n{}", capture_pane(&session.0)));
-    assert!(absent.contains("0 unread"), "the unread count is drawn from the section:\n{absent}");
+    let absent = poll_capture(
+        &session.0,
+        Instant::now() + Duration::from_secs(15),
+        |cap| cap.contains("inbox unavailable"),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "the screen never drew the section's absent reason:\n{}",
+            capture_pane(&session.0)
+        )
+    });
+    assert!(
+        absent.contains("0 unread"),
+        "the unread count is drawn from the section:\n{absent}"
+    );
 
     send_key(&session.0, "Escape");
-    poll_capture(&session.0, Instant::now() + Duration::from_secs(15), |cap| {
-        !cap.contains("📥") && cap.contains("Daemons")
-    })
-    .unwrap_or_else(|| panic!("Esc did not return to the origin screen:\n{}", capture_pane(&session.0)));
+    poll_capture(
+        &session.0,
+        Instant::now() + Duration::from_secs(15),
+        |cap| !cap.contains("📥") && cap.contains("Daemons"),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "Esc did not return to the origin screen:\n{}",
+            capture_pane(&session.0)
+        )
+    });
 }
