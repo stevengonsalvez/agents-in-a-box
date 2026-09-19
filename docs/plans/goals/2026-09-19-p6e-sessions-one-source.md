@@ -169,6 +169,11 @@ Six PRs, in this order. Each targets `v2`, is mergeable alone, and keeps the cap
 
 6. **The snapshot path (`snapshot.rs:92-95`) copies `sessions.json`.** Decided: no interim mirror. The file stays current after the flip ("Mixed versions"), so the verbatim copy keeps working; moving snapshots onto the table is filed as #1213 for the snapshots-index move base spec `:286` names next.
 
+7. **What is the reconcile rule after the flip?** Recommended, for P6e-6 to build and test in the flip PR. The existence rule (the file decides which sessions exist, amended on #1250) is PRE-FLIP ONLY: it exists because before the flip every surface writes the file and only the file is complete. After the flip the table is the authority on existence and contents, and the file is a downgrade mirror kept current row by row. The daemon decides which rule applies from its own compiled catalogue (`advertises(CAP_WORKSPACE_SESSIONS)`), the same way clients decide whether they speak the capability, so there is no runtime flag to get wrong. Post-flip, a pass:
+   - inserts file sessions the table lacks (writes from an older binary, or from a surface while degraded), as before;
+   - deletes a table row the file lacks only when the file exists and parses, and only for rows older than the file's previous stamp, so an older binary's `ainb kill` is still reconciled (criterion 7b) but a row a new writer created between two passes is never taken for one the file dropped;
+   - reads a MISSING `sessions.json` as "the mirror was lost", not "no sessions": it deletes nothing, still COMMITS its marker (so the first-pass gate opens and readers are served from the table, never a permanent not-ready), logs one warning, and lets the next new-binary write recreate the file row by row. The pre-flip refusal (a missing file with rows in the table keeps the gate shut until the file exists, P6e-2) must not survive the flip. The P6e-6 flip PR carries a test for this: a post-flip daemon with rows and no file opens its gate on the first pass and serves the rows.
+
 ─ FOLLOW-UPS TO FILE, NOT TO SOLVE ─
 
 · Removing the downgrade file write (open question 2) once a release has shipped with the table authoritative.
