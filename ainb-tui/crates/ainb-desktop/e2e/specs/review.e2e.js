@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { click, intentsSent, selectedNode } from "../support.js";
+import { appliedBatches, click, intentsSent, selectedNode } from "../support.js";
 import { run, seeded } from "../world.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -177,10 +177,15 @@ describe("reviewing from the window", () => {
       timeoutMsg: "the review tab drew no rows the second time",
     });
     const remountMs = Date.now() - remountStarted;
+    // What the window was doing while that clock ran. A bounded DOM that still
+    // takes forty seconds is busy with something else, and the only view of it
+    // from out here is the batches the host says it applied.
+    const batches = appliedBatches();
+    const applied = { batches: batches.length, gitView: batches.filter((line) => line.includes("git_view")).length };
 
     writeFileSync(
       REPORT,
-      `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, ...measured, drawnMs, remountMs }, null, 2)}\n`,
+      `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, ...measured, ...applied, drawnMs, remountMs }, null, 2)}\n`,
     );
     console.log(
       `review at ${bytes} bytes: ${rows} rows, ${nodes} nodes, first render ${drawnMs} ms, redraw ${remountMs} ms, cut banner ${JSON.stringify(cut)}`,
