@@ -603,7 +603,7 @@ fn what_the_worst_case_projection_costs() {
 /// it, so the frame translates the offset into its own rows rather than
 /// sending a number that names different content on each side of the wire.
 ///
-/// `flatten` (components/code_review/render.rs:112) counts a row per file
+/// `flatten` (`components/code_review/render.rs:112`) counts a row per file
 /// heading and a row per code line, so in a two-file state of ten rows each
 /// the model's row 12 is the second file's first line.
 #[test]
@@ -700,11 +700,14 @@ fn the_current_hunk_is_the_frames_hunk_too() {
         .map(|file| file["hunks"].as_array().expect("hunks").len())
         .sum();
 
-    let current = body["git_view_state"]["review_ui"]["current_hunk"]
-        .as_u64()
-        .expect("a hunk cursor");
+    let current = usize::try_from(
+        body["git_view_state"]["review_ui"]["current_hunk"]
+            .as_u64()
+            .expect("a hunk cursor"),
+    )
+    .expect("a cursor that fits an index");
     assert!(
-        (current as usize) < hunks,
+        current < hunks,
         "the cursor names a hunk the frame carries: {current} of {hunks}"
     );
 }
