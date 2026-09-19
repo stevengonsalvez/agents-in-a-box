@@ -341,24 +341,14 @@ impl AppState {
         read: ainb_hangar_proto::snapshots::InboxListResult,
         received_at_ms: i64,
     ) -> bool {
-        let changed = self
-            .inbox
-            .update(|section| section.apply_read(read, INBOX_RECIPIENT, received_at_ms));
-        self.clamp_inbox_scroll();
-        changed
-    }
-
-    /// Keep the inbox screen's first row inside the rows the section holds.
-    pub fn clamp_inbox_scroll(&mut self) {
-        let last = self.inbox.get().entries.len().saturating_sub(1);
-        self.host.inbox_scroll = self.host.inbox_scroll.min(last);
+        self.inbox
+            .update(|section| section.apply_read(read, INBOX_RECIPIENT, received_at_ms))
     }
 
     /// Move the inbox screen's first row by `delta`, bounded at both ends.
+    /// The section's version moves only when the row did.
     pub fn scroll_inbox_by(&mut self, delta: i32) {
-        let next = self.host.inbox_scroll.saturating_add_signed(delta as isize);
-        self.host.inbox_scroll = next;
-        self.clamp_inbox_scroll();
+        self.inbox.update(|section| section.scroll_by(delta));
     }
 
     /// The host's inbox read failed: the rows shown stay and say the host is
