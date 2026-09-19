@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { click } from "../support.js";
 import { env, run, seeded } from "../world.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -221,73 +222,6 @@ describe("reviewing from the window", () => {
     );
   });
 });
-
-/**
- * Click `selector`, re-finding it each try until it lands.
- *
- * Every list in this window is redrawn on every frame the host sends, and a
- * frame arrives whenever anything moves: an element found a moment ago can be
- * detached before the click reaches it, which WebDriver reports as a stale
- * reference. That is the window working, not failing, so the click waits it
- * out and only the absence of the element is a failure.
- */
-async function click(selector, timeout = 60_000) {
-  let last = null;
-  try {
-    await browser.waitUntil(
-      async () => {
-        try {
-          const element = await $(selector);
-          if (!(await element.isExisting())) return false;
-          await element.click();
-          return true;
-        } catch (error) {
-          last = error;
-          if (!/stale element|no longer attached|not interactable/i.test(String(error))) throw error;
-          return false;
-        }
-      },
-      { timeout },
-    );
-  } catch (error) {
-    // The message is built here rather than in `timeoutMsg`: wdio takes that
-    // option as a string, so a function there is dropped and the run reports
-    // the bare timeout with nothing about what the clicks were hitting.
-    throw new Error(`${selector} never took a click in ${timeout} ms, last: ${last ?? error}`);
-  }
-}
-
-/**
- * What the webview asked the host for and what became of it, from the
- * desktop's own log, so a failure here names the command that was refused
- * rather than only the element that never appeared.
- */
-function intentsSent() {
-  try {
-    const lines = run("sh", [
-      "-c",
-      'cat "$1"/desktop.log* 2>/dev/null | grep "renderer intent"',
-      "log",
-      env().AINB_HANGAR_HOME,
-    ]);
-    return lines
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => `${line.match(/command="?([^"\s]+)/)?.[1] ?? "unknown"}:${line.match(/outcome="?(\w+)/)?.[1] ?? "unknown"}`);
-  } catch {
-    return [];
-  }
-}
-
-/** The category the frame says is selected, as the tree draws it. */
-async function selectedNode() {
-  // Read through the document rather than a `:has()` selector: this runner's
-  // WebKit is the one the bundle ships with, not the newest one.
-  return browser.execute(() => {
-    const current = document.querySelector('.settings-node button[aria-current="true"]');
-    return current === null ? null : current.closest(".settings-node").getAttribute("data-node");
-  });
-}
 
 /** The file the frame says is open, as the window draws it. */
 async function openFile() {
