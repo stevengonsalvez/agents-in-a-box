@@ -940,7 +940,7 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // writes no marker: the daemon keeps running, `workspace/session_list`
         // answers `import_complete: false`, and the CLI keeps reading the file,
         // so a failed import never hides a populated file behind an empty table.
-        let sessions_path = ainb_fleet_core::session_registry::sessions_json_path();
+        let sessions_path = crate::session_import::daemon_sessions_path();
         match crate::session_import::import_sessions_if_needed(store.pool(), &sessions_path).await {
             Ok(crate::session_import::ImportReport::Completed(marker)) => {
                 if marker.rejected > 0 {
