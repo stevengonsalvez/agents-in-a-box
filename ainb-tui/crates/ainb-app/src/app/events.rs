@@ -282,6 +282,13 @@ pub enum AppEvent {
         store: String,
         error: String,
     },
+    /// Sweep the local human's inbox read (D3-prime): one `hangar/inbox_mark_read`,
+    /// a whole-inbox sweep, with an op id the host mints.
+    InboxMarkAllRead,
+    /// The host's "mark all read" sweep ended.
+    InboxMarkAllReadFinished {
+        outcome: crate::fleet::inbox_write::MarkAllReadOutcome,
+    },
     /// Click the code review sidebar row `target`; nothing when it is gone.
     GitReviewSelectRow {
         target: crate::components::code_review::render::ReviewRowId,
@@ -4166,6 +4173,35 @@ impl EventHandler {
                 tracing::warn!(%store, %error, "a store write failed");
                 let label = crate::app::effect::Persist::store_label(&store);
                 state.add_error_notification(format!("Could not save {label}: {error}"));
+            }
+            AppEvent::InboxMarkAllRead => {
+                // One held key is one sweep: nothing is sent while one is in
+                // flight. Nothing flips here either: the daemon's reply is what
+                // the section folds, so a surface never shows a count the
+                // daemon did not.
+                if state.host.inbox_mark_in_flight {
+                    return;
+                }
+                state.host.inbox_mark_in_flight = true;
+                state.emit(Effect::InboxMarkAllRead);
+            }
+            AppEvent::InboxMarkAllReadFinished { outcome } => {
+                state.host.inbox_mark_in_flight = false;
+                if outcome.ok {
+                    state.apply_inbox_mark_all_read(outcome.unread);
+                    if let Some(after) = outcome.after {
+                        let now = crate::fleet::daemons::heartbeat::now_ms();
+                        state.apply_inbox_read(after, now);
+                    }
+                } else {
+                    // The daemon's own error text can carry a path or a token:
+                    // scrubbed before it is logged or shown.
+                    let why = crate::fleet::bridge::redact::scrub(
+                        outcome.error.as_deref().unwrap_or("not sent"),
+                    );
+                    tracing::warn!(op_id = %outcome.op_id, %why, "mark all read did not land");
+                    state.add_error_notification(format!("Could not mark the inbox read: {why}"));
+                }
             }
             AppEvent::DaemonActionFinished { report } => {
                 let Some(action) = crate::cli::daemon::Action::from_id(&report.verb) else {

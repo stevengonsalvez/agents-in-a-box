@@ -71,6 +71,14 @@ pub enum Effect {
         /// row gave up on) is not taken for this one.
         generation: u64,
     },
+    /// Sweep the local human's inbox read over `hangar/inbox_mark_read`, the
+    /// D18 mutation it is: the host mints one op id, sends it, and retries a
+    /// lost reply with the same id ([`crate::fleet::inbox_write`]). Reported
+    /// with [`crate::app::reports::inbox_mark_all_read_finished`].
+    ///
+    /// Terminal host and desktop host: the same call off the UI thread,
+    /// against the daemon each drives.
+    InboxMarkAllRead,
     /// Ask `plugin` to run its own action `action_id` with `payload`, over
     /// `plugin/handle_action`.
     ///
