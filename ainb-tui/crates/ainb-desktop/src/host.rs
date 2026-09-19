@@ -358,9 +358,23 @@ impl<S: FrameSink> DesktopHost<S> {
         }
         // Section 21, which the stats tab draws: started by the first
         // subscription that names it, then drained like section 20.
-        if self.usage.is_none() && self.mirror.subscription().contains(SectionId::Usage) {
-            if let Some(dialer) = self.usage_dialer.take() {
-                self.usage = Some(UsageReader::spawn(dialer));
+        // On the runtime the host holds, as the inbox reader is: the ticking
+        // thread's own runtime is not the host's to assume.
+        if self.usage.is_none()
+            && self.usage_dialer.is_some()
+            && self.mirror.subscription().contains(SectionId::Usage)
+        {
+            match &self.runtime {
+                Some(runtime) => {
+                    if let Some(dialer) = self.usage_dialer.take() {
+                        let _entered = runtime.enter();
+                        self.usage = Some(UsageReader::spawn(dialer));
+                    }
+                }
+                None => {
+                    tracing::warn!("usage: no runtime to start the reader on");
+                    self.state.usage_absent("this window has no runtime to read usage on");
+                }
             }
         }
         if let Some(reader) = &mut self.usage {
