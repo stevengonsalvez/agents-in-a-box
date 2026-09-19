@@ -123,6 +123,22 @@ describe("reviewing from the window", () => {
 
     const rows = (await $$(".review-row")).length;
     const nodes = await browser.execute(() => document.querySelectorAll(".review *").length);
+    // What the window thinks its page is. The body's own box decides how many
+    // rows the window asks for, and a body that is not bounded by its grid row
+    // measures the content it just drew instead of the viewport, which is how
+    // a windowed body draws the whole diff again.
+    const measured = await browser.execute(() => {
+      const body = document.querySelector(".review-body");
+      const panes = document.querySelector(".review-panes");
+      return body === null
+        ? null
+        : {
+            bodyHeight: body.clientHeight,
+            bodyScrollHeight: body.scrollHeight,
+            panesHeight: panes === null ? null : panes.clientHeight,
+            drawnRows: body.querySelectorAll("[data-vrow]").length,
+          };
+    });
     const banners = await browser.execute(() =>
       [...document.querySelectorAll(".review-cut")].map((banner) => banner.textContent.trim()),
     );
@@ -197,6 +213,7 @@ describe("reviewing from the window", () => {
     // grow with the diff. The redraw is the window alone, with the frame
     // already in the store; the first render also carries the reducer reading
     // the diff and the frame crossing the channel.
+    console.log(`review window: ${JSON.stringify(measured)}`);
     assert.ok(
       nodes < 2_000,
       `the review tab built ${nodes} nodes for ${rows} rows: a DOM that grows with the diff, not with the viewport`,
@@ -215,7 +232,7 @@ describe("reviewing from the window", () => {
 
     writeFileSync(
       REPORT,
-      `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, drawnMs, remountMs }, null, 2)}\n`,
+      `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, ...measured, drawnMs, remountMs }, null, 2)}\n`,
     );
     console.log(
       `review at ${bytes} bytes: ${rows} rows, ${nodes} nodes, first render ${drawnMs} ms, redraw ${remountMs} ms, cut banner ${JSON.stringify(cut)}`,
