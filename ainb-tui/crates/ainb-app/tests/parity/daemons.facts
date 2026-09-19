@@ -1,0 +1,11 @@
+# Expected facts of the `daemons` fixture, one per line, each a substring both
+# renderers must print: the ratatui snapshot (`daemons.snap`) and the settings
+# page's daemons panel (`ainb-desktop/ui/src/settings.ts::settingsLines`).
+# Before the collector's first pass the table is its headings only.
+Daemons
+runtime health
+DAEMON
+STATE
+VERSION
+ERR
+HEALTH
