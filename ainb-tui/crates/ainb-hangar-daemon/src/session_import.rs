@@ -1,22 +1,19 @@
 //! One-time idempotent boot import of `~/.agents-in-a-box/sessions.json` into
 //! the daemon-owned `sessions` table (spec P6d, #1166).
 
-use std::path::Path;
-use anyhow::Result;
-use sqlx::SqlitePool;
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_store::repo::sessions::{SessionRow, SessionsRepo};
+use anyhow::Result;
+use sqlx::SqlitePool;
+use std::path::Path;
 
 /// One-time idempotent import from `sessions.json` into the `sessions` table.
 ///
 /// Leaves `sessions.json` in place. Skips records that are already present
 /// in the database (by session_id or tmux_session_name), so repeated boots
 /// import nothing further. Returns the count of newly imported sessions.
-pub async fn import_sessions_if_needed(
-    pool: &SqlitePool,
-    sessions_path: &Path,
-) -> Result<usize> {
+pub async fn import_sessions_if_needed(pool: &SqlitePool, sessions_path: &Path) -> Result<usize> {
     if !sessions_path.exists() {
         return Ok(0);
     }
@@ -58,11 +55,8 @@ pub async fn import_sessions_if_needed(
             continue;
         }
 
-        let worktree_path = entry
-            .get("worktree_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let worktree_path =
+            entry.get("worktree_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let workspace_name = entry
             .get("workspace_name")
             .and_then(|v| v.as_str())
@@ -72,46 +66,26 @@ pub async fn import_sessions_if_needed(
             Some(serde_json::Value::Number(n)) => {
                 n.as_i64().unwrap_or_else(|| SystemClock.now_ms())
             }
-            Some(serde_json::Value::String(s)) => {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .map(|dt| dt.timestamp_millis())
-                    .unwrap_or_else(|_| SystemClock.now_ms())
-            }
+            Some(serde_json::Value::String(s)) => chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or_else(|_| SystemClock.now_ms()),
             _ => SystemClock.now_ms(),
         };
-        let agent_type = entry
-            .get("agent_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Claude")
-            .to_string();
-        let headroom_enabled = entry
-            .get("headroom_enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let rtk_enabled = entry
-            .get("rtk_enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let skip_permissions = entry
-            .get("skip_permissions")
-            .and_then(|v| v.as_bool());
-        let model = entry
-            .get("model")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let agent_type =
+            entry.get("agent_type").and_then(|v| v.as_str()).unwrap_or("Claude").to_string();
+        let headroom_enabled =
+            entry.get("headroom_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let rtk_enabled = entry.get("rtk_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let skip_permissions = entry.get("skip_permissions").and_then(|v| v.as_bool());
+        let model = entry.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
         let model_source = entry
             .get("model_source")
             .and_then(|v| v.as_str())
             .unwrap_or("LegacyTyped")
             .to_string();
-        let codex_model = entry
-            .get("codex_model")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let codex_thread_id = entry
-            .get("codex_thread_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let codex_model = entry.get("codex_model").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let codex_thread_id =
+            entry.get("codex_thread_id").and_then(|v| v.as_str()).map(|s| s.to_string());
 
         let row = SessionRow {
             session_id,
