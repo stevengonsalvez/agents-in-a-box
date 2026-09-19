@@ -630,6 +630,10 @@ jobs:
           test "$short" = "${VERSION}"
           test "$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")" = "dev.agentsinabox.desktop"
           codesign -v --strict --deep "$APP"
+          # `spctl --assess` reads signatures and the stapled ticket; it does
+          # not execute the app, so it assesses the cross-compiled x64 bundle
+          # on the arm64 runner without Rosetta. Launching it is the human
+          # rehearsal's job on a matching host.
           if [ "${{ github.event.inputs.desktop_signed }}" = "true" ]; then
             spctl --assess --type execute "$APP"
           fi
@@ -686,7 +690,8 @@ jobs:
     # leg leaves its entry out of the manifest and is named in the release
     # body, and the tag is never left pushed with no release behind it.
     needs: [prepare, build, desktop, fleet_macos]
-    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && (needs.fleet_macos.result == 'success' || needs.fleet_macos.result == 'skipped') }}
+    # `!cancelled()` rather than `always()`: a cancelled run must not publish.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.build.result == 'success' && (needs.fleet_macos.result == 'success' || needs.fleet_macos.result == 'skipped') }}
     timeout-minutes: 20
     runs-on: ubuntu-latest
     permissions:

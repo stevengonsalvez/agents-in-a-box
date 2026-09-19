@@ -166,10 +166,18 @@ desktop updater and runs when it ships.
    hangar daemon with the release version and protocol range. Record whether
    the daemon was spawned by this app or attached to one an installed `ainb`
    already ran, and which version that one reports.
-4. Set the update channel to `prerelease` in settings and enter the tag
-   `v<X>-rc1`. Check now. It reports current.
-5. Cut `-rc2` the same way. Enter the tag `v<X>-rc2`. Check now. It reports
-   `<X>-rc2` available and the archive verified. Restart to update. The window
+   Until the settings page carries an updates section, the updater's surface
+   is the application menu on macOS (Check for Updates, Install Update and
+   Restart, Roll Back Update) and the channel is the file
+   `desktop-updater.json` in the hangar home (`~/.agents-in-a-box` unless
+   `AINB_HANGAR_HOME` says otherwise): `{"channel":"stable"}`,
+   `{"channel":"prerelease","tag":"v<X>-rc1"}` or `{"channel":"off"}`, read
+   at each check. Every outcome arrives as a toast in the window.
+4. Set the update channel to `prerelease` with the tag `v<X>-rc1` (the file
+   above, or the settings section once it exists). Check for Updates. It
+   reports current.
+5. Cut `-rc2` the same way. Set the tag to `v<X>-rc2`. Check for Updates. It
+   reports `<X>-rc2` available. Install Update and Restart. The window
    relaunches with no Gatekeeper prompt, because the updater leaves no
    quarantine attribute on what it downloads; if a prompt appears anyway, use
    the step 2 override, continue, and record it as a finding. About shows
@@ -177,8 +185,8 @@ desktop updater and runs when it ships.
    it, or the older attached daemon marked older than this bundle with the
    banner naming the stop verb when it did not; run that verb in a terminal,
    click retry in the banner, and confirm the panel shows `-rc2`.
-6. Roll back from settings. The window relaunches as `-rc1`, again with no
-   prompt expected. The daemons panel shows the `-rc2` daemon still serving,
+6. Roll Back Update from the menu. The window relaunches as `-rc1`, again with
+   no prompt expected. The daemons panel shows the `-rc2` daemon still serving,
    marked newer than this app, and the update check reports `-rc2` available
    again. Run the stop verb the banner names, click retry: the panel shows an
    `-rc1` daemon and, if the `-rc2` daemon migrated the store forward, the red
