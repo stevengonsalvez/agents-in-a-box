@@ -1,6 +1,9 @@
 // ABOUTME: Report commands: a host tells the reducer what it measured or how
 // something it ran ended, and the reducer, not the host, changes state.
 
+#[path = "support/home.rs"]
+mod home;
+
 use ainb_app::app::NoRenderer;
 use ainb_app::app::reports;
 use ainb_app::{AppState, Keymap, SectionId, dispatch};
@@ -15,12 +18,7 @@ fn bumped(before: &[u64], after: &[u64]) -> Vec<SectionId> {
 /// One scratch `HOME` for the binary, so the migration's save lands nowhere
 /// real.
 fn isolated_home() {
-    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| {
-        let home = tempfile::tempdir().expect("scratch home");
-        std::env::set_var("HOME", home.path());
-        home
-    });
+    home::shared();
 }
 
 #[test]
