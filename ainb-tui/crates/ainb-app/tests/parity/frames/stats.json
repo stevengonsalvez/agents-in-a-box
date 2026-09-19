@@ -3276,7 +3276,6 @@
   "usage": {
     "absent": null,
     "failure": null,
-    "received_at_ms": 0,
     "summary": {
       "daily": [
         {
@@ -3310,8 +3309,6 @@
       ],
       "daily_cut": 0,
       "detail": "codex session logs could not be fully read",
-      "end_at": 1758240000000,
-      "generated_at": 1758240000000,
       "models": [
         {
           "bucket": {
@@ -3392,7 +3389,6 @@
         }
       ],
       "providers_cut": 0,
-      "start_at": 1755648000000,
       "state": "partial",
       "totals": {
         "cache_creation_tokens": 30000,
