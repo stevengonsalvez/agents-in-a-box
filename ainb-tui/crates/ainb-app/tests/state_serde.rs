@@ -500,10 +500,6 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "rendered markdown lines, each scrubbed through redact::scrub, cut to the frame's window",
     ),
     (
-        "GitViewFrame.worktree_path",
-        "the worktree the git view is open on, drawn in its title",
-    ),
-    (
         "ReviewFileFrame.path",
         "repo-relative path of a changed file, the review list row",
     ),
@@ -904,10 +900,6 @@ const TYPE_ALLOW: &[(&str, &str)] = &[
         "package names installed in the container",
     ),
     (
-        "GitViewFrame.worktree_path",
-        "the worktree the git view is open on, drawn in its title",
-    ),
-    (
         "LogsView.live_logs",
         "live log entries; message scrubbed and metadata omitted in frame",
     ),
@@ -1065,6 +1057,7 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "ClaudeChatState.message_count",
     "CloneProgress.error",
     "CloneProgress.url",
+    "CommitInfo.author",
     "CommitInfo.message",
     "ConfigPopupType::SecretInput.value_len",
     "ConfigScreenState.edit_len",
