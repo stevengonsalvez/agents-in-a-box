@@ -11,8 +11,8 @@
 use ainb_app::AppState;
 use ainb_app::SectionId;
 use ainb_app::app::sections::{
-    INBOX_SUMMARY_CUT_MARKER, MAX_INBOX_BYTES, MAX_INBOX_ID_CHARS, MAX_INBOX_ROWS,
-    MAX_INBOX_SUMMARY_CHARS,
+    INBOX_SUMMARY_CUT_MARKER, MAX_INBOX_BYTES, MAX_INBOX_ID_CHARS, MAX_INBOX_REASON_CHARS,
+    MAX_INBOX_ROWS, MAX_INBOX_SUMMARY_CHARS,
 };
 use ainb_app::wire::frame::{HostId, MAX_FRAME_BYTES};
 use ainb_app::wire::section_json;
@@ -105,13 +105,56 @@ fn a_multibyte_summary_is_cut_on_a_char_boundary() {
 
 #[test]
 fn a_row_whose_id_is_not_an_id_is_dropped_and_counted() {
-    let mut bad = row(0, "ok");
-    bad.subject_id = "i".repeat(MAX_INBOX_ID_CHARS + 1);
-    let state = state_with(vec![bad, row(1, "kept")]);
+    let mut long = row(0, "ok");
+    long.subject_id = "i".repeat(MAX_INBOX_ID_CHARS + 1);
+    let mut text = row(2, "ok");
+    text.recipient = "member:me <token sk-abcdefghijklmnopqrstuvwxyz0123456789>".into();
+    let mut control = row(3, "ok");
+    control.event = "issue\u{1b}[31mcreated".into();
+    let state = state_with(vec![long, text, control, row(1, "kept")]);
     let frame = view_of(&state);
     assert_eq!(frame["entries"].as_array().map(Vec::len), Some(1));
     assert_eq!(frame["entries"][0]["summary"], "kept");
-    assert_eq!(frame["rows_cut"], 1);
+    assert_eq!(frame["rows_cut"], 3);
+}
+
+#[test]
+fn a_long_reason_is_scrubbed_and_cut_and_the_frame_stays_inside_the_budget() {
+    // The daemon's error text is as long as the client accepts (4 MiB);
+    // a reason that blanked the section is the failure the budget stops.
+    let reason = format!("connect: sk-{} {}", "k".repeat(48), "e".repeat(4 * 1024 * 1024));
+    let mut state = AppState::new();
+    assert!(state.inbox_absent(reason.clone()));
+    let frame = view_of(&state);
+    let absent = frame["absent"].as_str().unwrap();
+    assert!(absent.ends_with(INBOX_SUMMARY_CUT_MARKER));
+    assert!(absent.chars().count() <= MAX_INBOX_REASON_CHARS + INBOX_SUMMARY_CUT_MARKER.len());
+    assert!(!absent.contains(&"k".repeat(48)), "the key survived: {absent}");
+    assert!(encoded_len(&frame) < MAX_INBOX_BYTES);
+    // The same for a failure after rows landed.
+    let mut state = state_with(vec![row(0, "a")]);
+    assert!(state.inbox_read_failed(reason, NOW + 1));
+    let frame = view_of(&state);
+    assert!(frame["unreachable"].as_str().unwrap().ends_with(INBOX_SUMMARY_CUT_MARKER));
+    assert!(encoded_len(&frame) < MAX_INBOX_BYTES);
+}
+
+#[test]
+fn the_budget_is_enforced_on_the_encoded_frame_not_only_by_the_fold() {
+    // Rows placed on the section directly, past what the fold would keep, so
+    // the frame's own check is what holds the line.
+    let mut state = AppState::new();
+    state.inbox.update(|section| {
+        section.entries = (0..MAX_INBOX_ROWS).map(|n| row(n, &"s".repeat(32 * 1024))).collect();
+        section.unread = 1;
+        true
+    });
+    let frame = view_of(&state);
+    let bytes = encoded_len(&frame);
+    assert!(bytes < MAX_INBOX_BYTES, "framed {bytes} bytes");
+    let kept = frame["entries"].as_array().unwrap().len();
+    assert!(kept < MAX_INBOX_ROWS, "some rows were cut: {kept}");
+    assert_eq!(frame["rows_cut"], MAX_INBOX_ROWS - kept);
 }
 
 #[test]
