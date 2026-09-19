@@ -334,6 +334,7 @@ impl LayoutComponent {
         area: Rect,
         state: &AppState,
         active: crate::components::session_tabs::SessionTab,
+        ui: &mut UiState,
     ) {
         use crate::components::session_tabs;
         let block = Block::default()
@@ -341,6 +342,11 @@ impl LayoutComponent {
             .border_style(Style::default().fg(SUBDUED_BORDER))
             .title(session_tabs::strip(state, active))
             .title_bottom(session_tabs::footer(state, active, false));
+        ui.sessions_pane.set_tab_strip(session_tabs::strip_hits(
+            state,
+            active,
+            title_row(&block, area),
+        ));
         // Only the border cells are painted, so whatever the pane already drew
         // inside stays exactly as it was.
         frame.render_widget(block, area);
@@ -393,6 +399,7 @@ impl LayoutComponent {
         area: Rect,
         state: &AppState,
         active: crate::components::session_tabs::SessionTab,
+        ui: &mut UiState,
     ) {
         use crate::components::session_tabs::{self, SessionTab};
 
@@ -411,6 +418,11 @@ impl LayoutComponent {
                 state.session_tab_owns_keys(),
             ));
         let inner = block.inner(area);
+        ui.sessions_pane.set_tab_strip(session_tabs::strip_hits(
+            state,
+            active,
+            title_row(&block, area),
+        ));
         frame.render_widget(block, area);
 
         match active {
@@ -720,28 +732,9 @@ impl LayoutComponent {
             // requires `!is_interactive_pane()` — so the strip advertises
             // nothing the pane cannot do, and without it the operator loses the
             // only affordance saying the other tabs exist.
-            Self::render_tab_strip(frame, content_chunks[1], state, active_tab);
-            // Top and bottom borders only, so the title starts at the pane's
-            // first column.
-            let area = content_chunks[1];
-            ui.sessions_pane.set_tab_strip(crate::components::session_tabs::strip_hits(
-                state,
-                Rect::new(area.x, area.y, area.width, 1),
-            ));
+            Self::render_tab_strip(frame, content_chunks[1], state, active_tab, ui);
         } else {
-            self.render_session_tab(frame, content_chunks[1], state, active_tab);
-            // All four borders, so the title starts one column in and stops one
-            // column short, as ratatui places it.
-            let area = content_chunks[1];
-            ui.sessions_pane.set_tab_strip(crate::components::session_tabs::strip_hits(
-                state,
-                Rect::new(
-                    area.x.saturating_add(1),
-                    area.y,
-                    area.width.saturating_sub(2),
-                    1,
-                ),
-            ));
+            self.render_session_tab(frame, content_chunks[1], state, active_tab, ui);
         }
 
         // Render bottom logs area (traditional logs viewer)
@@ -1455,6 +1448,14 @@ impl LayoutComponent {
         .style(Style::default().bg(PANEL_BG));
         frame.render_widget(help_bar, inner_layout[1]);
     }
+}
+
+/// The row a block's top title is drawn on over `area`: the top line, between
+/// the side borders the block draws. Read from the block itself so a change to
+/// its borders moves the clickable labels with the painted ones.
+fn title_row(block: &Block, area: Rect) -> Rect {
+    let inner = block.inner(area);
+    Rect::new(inner.x, area.y, inner.width, 1)
 }
 
 impl Default for LayoutComponent {
@@ -2444,5 +2445,71 @@ mod notification_render_tests {
             painted.contains("17a4b207"),
             "the tail of the path never reached the screen:\n{painted}"
         );
+    }
+}
+
+/// The clickable tab labels are read from the block each pane actually draws,
+/// so they sit on the painted labels whatever borders that block has.
+#[cfg(test)]
+mod tab_strip_hit_tests {
+    use super::*;
+    use crate::app::state::AppState;
+    use crate::components::session_tabs::{ALL_TABS, SessionTab};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    const PANE: Rect = Rect::new(10, 2, 90, 12);
+
+    /// Walk the strip's row: each run of cells `tab_at` names must spell that
+    /// tab's label in the drawn buffer, and every tab must be found once.
+    fn assert_hits_sit_on_the_painted_labels(terminal: &Terminal<TestBackend>, ui: &UiState) {
+        let buffer = terminal.backend().buffer();
+        let mut runs: Vec<(SessionTab, String)> = Vec::new();
+        for x in 0..buffer.area.width {
+            let Some(tab) = ui.sessions_pane.tab_at(x, PANE.y) else {
+                continue;
+            };
+            let cell = buffer[(x, PANE.y)].symbol();
+            match runs.last_mut() {
+                Some((last, text)) if *last == tab => text.push_str(cell),
+                _ => runs.push((tab, cell.to_string())),
+            }
+        }
+        assert_eq!(
+            runs,
+            ALL_TABS.iter().map(|tab| (*tab, tab.label().to_string())).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn the_preview_strip_hits_where_its_labels_are_drawn() {
+        let state = AppState::default();
+        let mut ui = UiState::default();
+        let mut terminal = Terminal::new(TestBackend::new(110, 20)).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                LayoutComponent::render_tab_strip(
+                    frame,
+                    PANE,
+                    &state,
+                    SessionTab::Preview,
+                    &mut ui,
+                );
+            })
+            .expect("draw strip");
+        assert_hits_sit_on_the_painted_labels(&terminal, &ui);
+    }
+
+    #[test]
+    fn a_bordered_tab_strip_hits_where_its_labels_are_drawn() {
+        let state = AppState::default();
+        let mut ui = UiState::default();
+        let mut component = LayoutComponent::new();
+        let mut terminal = Terminal::new(TestBackend::new(110, 20)).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                component.render_session_tab(frame, PANE, &state, SessionTab::Log, &mut ui);
+            })
+            .expect("draw tab");
+        assert_hits_sit_on_the_painted_labels(&terminal, &ui);
     }
 }
