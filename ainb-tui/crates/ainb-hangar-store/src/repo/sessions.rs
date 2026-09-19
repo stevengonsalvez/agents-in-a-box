@@ -75,6 +75,10 @@ pub struct ReconcileOutcome {
     pub marker: ImportMarker,
     /// Every name conflict of this pass, for the caller to report.
     pub conflicts: Vec<NameConflict>,
+    /// Table rows this pass deleted because the file no longer has them (the
+    /// file is the authority on which sessions exist until the flip). Not a
+    /// marker column: that would take a migration, which the goal rules out.
+    pub deleted: Vec<String>,
 }
 
 /// The `session_import` key of the repeatable reconcile of `source_path`
@@ -355,16 +359,25 @@ impl SessionsRepo {
         Ok(n == 2)
     }
 
-    /// Insert every file session the table lacks and record the pass on the
-    /// `<path>#reconcile` marker, in one `IMMEDIATE` transaction.
+    /// Make the table hold exactly the file's sessions, and record the pass
+    /// on the `<path>#reconcile` marker, in one `IMMEDIATE` transaction.
     ///
-    /// Repeatable, unlike [`Self::complete_import`]. The table wins: a file
-    /// session whose id is already a row leaves that row untouched, and one
-    /// whose tmux name the table binds to another id is skipped and returned
-    /// as a [`NameConflict`]. A record with a minted id counts as present when
-    /// its tmux name is. Deletes are never inferred: a row absent from the
-    /// file stays. On any error the transaction rolls back and the marker
-    /// keeps its previous value, or stays absent.
+    /// Repeatable, unlike [`Self::complete_import`]. Until the flip the FILE
+    /// is the authority on which sessions exist and the TABLE on their
+    /// contents (the orchestrator's rule on #1250), so a pass:
+    /// - deletes every table row whose session the file does not have, first
+    ///   (a delete that reached the file but not the table, or a table write
+    ///   whose file change was reverted), returned in `deleted`;
+    /// - then inserts every file session the table lacks;
+    /// - leaves a row the file and the table both have untouched: the table
+    ///   wins on contents.
+    ///
+    /// A record with a minted id matches by tmux name. A file session whose
+    /// tmux name is still bound to another id after the deletes is skipped
+    /// and returned as a [`NameConflict`]. Sound only while every writer
+    /// writes the file row before the table row, which every pre-flip writer
+    /// does. On any error the transaction rolls back and the marker keeps its
+    /// previous value, or stays absent.
     pub async fn complete_reconcile(
         pool: &SqlitePool,
         source_path: &str,
@@ -373,6 +386,33 @@ impl SessionsRepo {
         completed_at: i64,
     ) -> Result<ReconcileOutcome, sqlx::Error> {
         let mut tx = pool.begin_with(crate::repo::fleet::IMMEDIATE_TRANSACTION).await?;
+
+        let file_ids: std::collections::HashSet<&str> = sessions
+            .iter()
+            .filter(|s| !s.id_minted)
+            .map(|s| s.row.session_id.as_str())
+            .collect();
+        let minted_names: std::collections::HashSet<&str> = sessions
+            .iter()
+            .filter(|s| s.id_minted)
+            .map(|s| s.row.tmux_session_name.as_str())
+            .collect();
+        let table: Vec<(String, String)> =
+            sqlx::query_as("SELECT session_id, tmux_session_name FROM sessions")
+                .fetch_all(&mut *tx)
+                .await?;
+        let mut deleted = Vec::new();
+        for (session_id, tmux_name) in table {
+            if file_ids.contains(session_id.as_str()) || minted_names.contains(tmux_name.as_str()) {
+                continue;
+            }
+            sqlx::query("DELETE FROM sessions WHERE session_id = ?")
+                .bind(&session_id)
+                .execute(&mut *tx)
+                .await?;
+            deleted.push(session_id);
+        }
+
         let mut imported = 0_i64;
         let mut conflicts = Vec::new();
         for session in sessions {
@@ -424,7 +464,11 @@ impl SessionsRepo {
         .await?;
         tx.commit().await?;
 
-        Ok(ReconcileOutcome { marker, conflicts })
+        Ok(ReconcileOutcome {
+            marker,
+            conflicts,
+            deleted,
+        })
     }
 
     /// Write the imported `rows` and the completion marker for `source_path`

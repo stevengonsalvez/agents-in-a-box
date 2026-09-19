@@ -29,15 +29,19 @@
 //! pass ──▶ flock sessions.json (bounded) ──▶ read + parse
 //!            │ timeout / read / parse error ──▶ Err, marker unchanged
 //!            ▼
-//!          one tx: insert every file session whose id the table lacks,
-//!          skip + count a tmux name bound to another id (table wins),
+//!          one tx: delete every table row the file does not have,
+//!          insert every file session the table lacks,
+//!          skip + count a tmux name still bound to another id,
 //!          write the <path>#reconcile marker ──▶ release the flock
 //! ```
 //!
 //! The pass holds the flock from before its read until its commit, so no
-//! flock-taking writer can add or remove a file row in between. It never
-//! deletes and never overwrites a table row, so it cannot resurrect a session
-//! the new stack removed: that stack removes the file row too. The table is
+//! flock-taking writer can add or remove a file row in between. Until the
+//! flip the file is the authority on which sessions exist and the table on
+//! their contents: a pass deletes a table row the file lacks and never
+//! overwrites a row both have. That is sound because every pre-flip writer
+//! writes the file row before the table row (the daemon's own registration
+//! included, which writes no table row when its file write fails). The table is
 //! authoritative for a client only once the import AND a pass have finished
 //! (`SessionsRepo::import_complete_for`).
 
@@ -253,7 +257,23 @@ async fn reconcile_pass(
     .await
     .context("sessions.json read task")??;
     let (sessions, rejected) = match content {
-        None => (Vec::new(), 0),
+        // A missing file is "no sessions" only on a fresh home. With rows in
+        // the table it is far more likely a file that went away (deleted,
+        // moved, a home on a volume that is not mounted) than a user who
+        // killed every session, and the existence rule would turn it into an
+        // empty table. So the pass is refused, the marker left as it was, and
+        // the watcher tries again. A fresh home (no file, no rows) still
+        // commits, or the table could never become authoritative.
+        None => {
+            if !SessionsRepo::list(pool, None, 1).await?.is_empty() {
+                bail!(
+                    "{} is missing while the sessions table holds sessions; \
+                     refusing a pass that would delete them",
+                    sessions_path.display()
+                );
+            }
+            (Vec::new(), 0)
+        }
         Some(content) => parse_records(&content)
             .with_context(|| format!("could not parse {}", sessions_path.display()))?,
     };
@@ -272,6 +292,12 @@ async fn reconcile_pass(
         gate.send_replace(true);
     }
 
+    for session_id in &outcome.deleted {
+        tracing::info!(
+            %session_id,
+            "sessions table row deleted: sessions.json no longer has this session"
+        );
+    }
     for conflict in &outcome.conflicts {
         tracing::warn!(
             session_id = %conflict.session_id,
@@ -445,11 +471,12 @@ impl ReconcileWatch {
 /// Log a finished pass: quiet when it changed nothing.
 pub fn log_reconcile(outcome: &ReconcileOutcome) {
     let m = &outcome.marker;
-    if m.imported > 0 || m.skipped > 0 || m.rejected > 0 {
+    if m.imported > 0 || m.skipped > 0 || m.rejected > 0 || !outcome.deleted.is_empty() {
         tracing::info!(
             imported = m.imported,
             skipped = m.skipped,
             rejected = m.rejected,
+            deleted = outcome.deleted.len(),
             "sessions.json reconciled into the sessions table"
         );
     }

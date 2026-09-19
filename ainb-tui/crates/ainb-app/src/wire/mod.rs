@@ -470,17 +470,6 @@ impl<'a> From<&'a crate::app::sections::AgentStatusSection> for AgentStatusView<
     }
 }
 
-/// Plugin render failures, scrubbed: an error string can carry a URL or token.
-// serde's `serialize_with` hands the view's `&&T`, so the double reference is its signature.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn scrubbed_values<K: Serialize + std::hash::Hash + Eq, S: Serializer>(
-    map: &&std::collections::HashMap<K, String>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer
-        .collect_map(map.iter().map(|(key, text)| (key, crate::fleet::bridge::redact::scrub(text))))
-}
-
 /// Subprocess error text, scrubbed.
 // serde's `serialize_with` hands the view's `&&T`, so the double reference is its signature.
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -723,10 +712,47 @@ view!(McpPoolView<'a> for McpPoolSection {
 view!(PluginsHostView<'a> for PluginsHostSection {
     plugin_captures_text: std::collections::HashMap<crate::app::screens::ScreenId, bool>,
     plugin_presence: std::collections::BTreeMap<crate::app::screens::ScreenId, crate::app::sections::PluginPresence>,
-    #[serde(serialize_with = "scrubbed_values")]
-    #[cfg_attr(feature = "typescript-bindings", specta(type = std::collections::HashMap<crate::app::screens::ScreenId, String>))]
+    #[serde(serialize_with = "render_errors")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = std::collections::HashMap<crate::app::screens::ScreenId, RenderErrorFrame>))]
     plugin_render_errors: std::collections::HashMap<crate::app::screens::ScreenId, String>,
 });
+
+/// The most characters of a plugin's render error a frame carries.
+///
+/// A placeholder shows one line of it; the whole error is in the log. Without
+/// a cap an error could push `plugins_host` past [`frame::MAX_FRAME_BYTES`], the
+/// section would be withheld whole, and the desktop would read a registered,
+/// failing plugin as not loaded.
+pub const RENDER_ERROR_MAX_CHARS: usize = 512;
+
+/// One plugin's render error as a frame carries it: scrubbed, then cut to
+/// [`RENDER_ERROR_MAX_CHARS`], with `cut` saying whether it was.
+#[derive(Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+pub struct RenderErrorFrame {
+    pub text: String,
+    pub cut: bool,
+}
+
+/// Plugin render failures, scrubbed and cut: an error string can carry a URL or
+/// token, and can be any length.
+// serde's `serialize_with` hands the view's `&&T`, so the double reference is its signature.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn render_errors<K: Serialize + std::hash::Hash + Eq, S: Serializer>(
+    map: &&std::collections::HashMap<K, String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_map(map.iter().map(|(key, text)| {
+        let scrubbed = crate::fleet::bridge::redact::scrub(text);
+        let cut = scrubbed.chars().count() > RENDER_ERROR_MAX_CHARS;
+        let text = if cut {
+            scrubbed.chars().take(RENDER_ERROR_MAX_CHARS).collect()
+        } else {
+            scrubbed
+        };
+        (key, RenderErrorFrame { text, cut })
+    }))
+}
 
 view!(ConfigView<'a> for ConfigSection {
     app_config: crate::config::AppConfig,

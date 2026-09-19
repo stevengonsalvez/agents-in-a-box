@@ -920,6 +920,17 @@ impl Runner {
         }
     }
 
+    /// Put one line on this run's live task stream, when it has one: what the
+    /// board timeline, the run banner and the task card show. The interactive
+    /// path captures no stdout, so this is how it tells the operator about
+    /// something the daemon did around the run (P6e: a session that is live
+    /// but could not be registered). A runner without a stream drops it.
+    pub(crate) fn stream_line(&self, kind: ainb_hangar_proto::events::MessageKind, body: String) {
+        if let Some(stream) = &self.stream {
+            stream.line(kind, body);
+        }
+    }
+
     /// The hard wall-clock deadline each run is bounded by (the interactive tmux
     /// path — [`crate::interactive`] — reuses the same budget the headless path
     /// enforces).

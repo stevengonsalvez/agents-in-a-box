@@ -411,12 +411,16 @@ pub fn advertise_workspace_sessions_for_tests(on: bool) {
 }
 
 /// The capabilities a hello reply carries: the catalogue, plus the dark
-/// sessions capability when a test has switched it on.
+/// sessions capability when a test has switched it on, in process or, for a
+/// real daemon binary built with `test-support` (the P6e proof harness), by
+/// `AINB_TEST_WORKSPACE_SESSIONS=1` in its environment.
 fn advertised_capabilities() -> Vec<String> {
     #[allow(unused_mut)]
     let mut capabilities = catalogue_strings();
     #[cfg(any(test, feature = "test-support"))]
-    if ADVERTISE_WORKSPACE_SESSIONS.load(std::sync::atomic::Ordering::SeqCst) {
+    if ADVERTISE_WORKSPACE_SESSIONS.load(std::sync::atomic::Ordering::SeqCst)
+        || std::env::var("AINB_TEST_WORKSPACE_SESSIONS").is_ok_and(|v| v == "1")
+    {
         capabilities.push(ainb_hangar_proto::protocol::CAP_WORKSPACE_SESSIONS.to_string());
     }
     capabilities

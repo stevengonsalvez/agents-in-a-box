@@ -1,0 +1,16 @@
+# What both renderers must show for the plugin_not_registered fixture (D3p-f):
+# a plugin screen whose plugin is not loaded, with the ways it can have been
+# switched off and how to restore it. Checked against the ratatui snapshot
+# (tests/parity.rs) and the webview's render of the same frame
+# (ainb-desktop/ui/src/parity.test.ts).
+#
+# Facts are renderer-neutral: what is shown, not how it is spaced or framed.
+learnings unavailable
+This screen is owned by the `learnings` plugin, which isn't loaded.
+AINB_DISABLE_PLUGINS=1
+AINB_DISABLE_PLUGIN=learnings
+AINB_ONLY_PLUGINS=…
+config.toml [plugins]
+To restore it: unset the env var(s) and/or edit ~/.agents-in-a-box/config/config.toml
+search `applying plugin filter`.
+See docs/plugins.md → Configuration → Enable/disable plugins.
