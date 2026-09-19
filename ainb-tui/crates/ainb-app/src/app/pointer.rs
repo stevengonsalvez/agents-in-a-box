@@ -28,6 +28,8 @@ pub mod ids {
     pub const SESSION_LIST_SELECT_TAB: &str = "session_list.select_tab";
     /// `{"session_key": String | null}`: null closes.
     pub const SESSION_LIST_OPEN_TRANSCRIPT: &str = "session_list.open_transcript";
+    /// `{"label": String}`, an option of the question the `ask` pane shows.
+    pub const SESSION_LIST_ASK_PICK: &str = "session_list.ask.pick";
     /// `{"width": u16, "collapsed": bool}`
     pub const SESSION_LIST_SAVE_PANE_LAYOUT: &str = "session_list.save_pane_layout";
     /// No arguments.
@@ -56,6 +58,7 @@ pub mod ids {
         SESSION_LIST_FOCUS_PANE,
         SESSION_LIST_SELECT_TAB,
         SESSION_LIST_OPEN_TRANSCRIPT,
+        SESSION_LIST_ASK_PICK,
         SESSION_LIST_SAVE_PANE_LAYOUT,
         SKILL_MANAGER_ALL_SOURCES,
         SKILL_MANAGER_SELECT_SOURCE,
@@ -121,6 +124,17 @@ pub fn open_transcript(session_key: Option<&str>) -> Intent {
         ids::SESSION_LIST_OPEN_TRANSCRIPT,
         json!({ "session_key": session_key }),
     )
+}
+
+/// Answer the question the `ask` pane shows with the option labelled `label`.
+///
+/// One intent, resolved by the reducer against the options it holds when it
+/// runs. A banner that counted cursor moves off its frame and then sent Enter
+/// picked a different option when a frame landed mid-sequence and reordered
+/// them; here nothing sits between the pick and the send (#1191).
+#[must_use]
+pub fn pick_answer(label: &str) -> Intent {
+    command(ids::SESSION_LIST_ASK_PICK, json!({ "label": label }))
 }
 
 /// Persist the sessions pane layout a renderer just changed: the sidebar's
@@ -262,6 +276,12 @@ struct TranscriptArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PickArgs {
+    label: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LayoutArgs {
     fraction: f64,
     collapsed: bool,
@@ -320,6 +340,9 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
         }
         AppEvent::SessionListOpenTranscript(_) => parse::<TranscriptArgs>(args)
             .map(|args| AppEvent::SessionListOpenTranscript(args.session_key)),
+        AppEvent::SessionAskPick { .. } => {
+            parse::<PickArgs>(args).map(|args| AppEvent::SessionAskPick { label: args.label })
+        }
         AppEvent::SaveSessionsPaneLayout { .. } => parse::<LayoutArgs>(args)
             .filter(|args| (0.0..=1.0).contains(&args.fraction))
             .map(|args| AppEvent::SaveSessionsPaneLayout {
