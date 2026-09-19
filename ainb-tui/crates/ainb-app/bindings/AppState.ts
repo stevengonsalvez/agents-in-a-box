@@ -1024,8 +1024,10 @@ export type CommitInfo = CommitInfo_Serialize;
 export type CommitInfo_Serialize = {
 	hash_short: string,
 	/**
-	 *  Git config text, as free as the message, so a frame carries it
-	 *  scrubbed (#1212).
+	 *  The commit author's display name (`author().name()`); the email is
+	 *  never read. A frame carries it scrubbed, so a credential shape in it is
+	 *  redacted (#1212). The name itself is kept by design: the Commits tab
+	 *  shows who wrote each commit. Withholding it from remote hosts is #1244.
 	 */
 	author: string,
 	date: string,
@@ -2633,10 +2635,12 @@ export type GitViewFrame_Serialize = {
 	diff_lines_cut: number,
 	diff_scroll_offset: number,
 	/**
-	 *  The worktree's directory name, scrubbed. Never the absolute path: the
-	 *  seam denies paths on the wire for remote surfaces, and nothing that
-	 *  draws this view reads more than the name (the #1097 rule for the web
-	 *  rows, #1212 here).
+	 *  The worktree's directory name, scrubbed, or `worktree` when that name
+	 *  would be the operator's username (a worktree at home) or empty (`/`,
+	 *  a path ending in `..`). Never the absolute path: the seam denies paths
+	 *  on the wire for remote surfaces, and nothing that draws this view
+	 *  reads more than the name (the #1097 rule for the web rows, #1212
+	 *  here).
 	 */
 	worktree_name: string,
 	is_dirty: boolean,
