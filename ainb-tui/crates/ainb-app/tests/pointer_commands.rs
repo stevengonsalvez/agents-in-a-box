@@ -277,7 +277,7 @@ fn a_pick_by_label_sends_that_option_even_after_the_options_reordered() {
         &mut state,
         &keymap,
         &mut NoRenderer,
-        pointer::pick_answer("staging"),
+        pointer::pick_answer("att-7", "staging"),
     );
 
     assert_eq!(
@@ -308,7 +308,7 @@ fn a_pick_of_a_label_the_question_does_not_offer_sends_nothing_and_says_so() {
         &mut state,
         &keymap,
         &mut NoRenderer,
-        pointer::pick_answer("prod"),
+        pointer::pick_answer("att-7", "prod"),
     );
 
     assert!(
@@ -319,6 +319,37 @@ fn a_pick_of_a_label_the_question_does_not_offer_sends_nothing_and_says_so() {
     assert_eq!(
         state.shell.notifications.last().map(|note| note.message.as_str()),
         Some("that option is not offered here")
+    );
+}
+
+#[test]
+fn a_pick_naming_the_question_that_moved_on_sends_nothing() {
+    // The frame the person read carried att-6 with the same labels. Before the
+    // click lands, that question is answered elsewhere and att-7 takes its
+    // place on the row: a pick against att-6 must not answer att-7, however
+    // ordinary the label.
+    let keymap = Keymap::defaults();
+    let (mut state, chip) = waiting_on(&["yes", "no"]);
+    let before = state.versions();
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        pointer::pick_answer("att-6", "yes"),
+    );
+
+    assert!(
+        state.fleet.ask_state.phase_for(&chip).is_none(),
+        "nothing went out"
+    );
+    assert_eq!(
+        state.shell.notifications.last().map(|note| note.message.as_str()),
+        Some("that question has moved on; read the new one")
+    );
+    assert!(
+        bumped(&before, &state.versions()).iter().all(|id| *id == SectionId::Shell),
+        "only the notice moved"
     );
 }
 
@@ -336,7 +367,7 @@ fn a_pick_runs_only_while_the_ask_pane_is_showing() {
         &mut state,
         &keymap,
         &mut NoRenderer,
-        pointer::pick_answer("staging"),
+        pointer::pick_answer("att-7", "staging"),
     );
 
     assert!(effects.is_empty());
