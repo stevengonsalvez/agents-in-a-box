@@ -1,6 +1,7 @@
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import type { AskState_Serialize } from "../../../ainb-app/bindings/AppState";
 import { phaseOf, pickIntents, typedIntents, type Question } from "./answer.ts";
+import { label } from "./sessions.ts";
 import type { RendererIntent } from "./tabs.ts";
 
 interface Props {
@@ -67,7 +68,7 @@ export function AnswerBanner(props: Props) {
                 disabled={busy()}
                 onClick={() => pick(index())}
               >
-                {index() + 1}. {option}
+                {index() + 1}. {label(option)}
               </button>
             )}
           </For>
