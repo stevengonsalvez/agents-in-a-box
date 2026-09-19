@@ -28,8 +28,9 @@ pub mod ids {
     pub const SESSION_LIST_SELECT_TAB: &str = "session_list.select_tab";
     /// `{"session_key": String | null}`: null closes.
     pub const SESSION_LIST_OPEN_TRANSCRIPT: &str = "session_list.open_transcript";
-    /// `{"request": String, "label": String}`: the request id the frame named
-    /// (`fleet.ask_state.request`) and one of its option labels.
+    /// `{"request": String, "index": usize, "label": String}`: the request id
+    /// the frame named (`fleet.ask_state.request`), the option's index in its
+    /// list, and the label the person read there.
     pub const SESSION_LIST_ASK_PICK: &str = "session_list.ask.pick";
     /// `{"width": u16, "collapsed": bool}`
     pub const SESSION_LIST_SAVE_PANE_LAYOUT: &str = "session_list.save_pane_layout";
@@ -130,7 +131,8 @@ pub fn open_transcript(session_key: Option<&str>) -> Intent {
     )
 }
 
-/// Answer the question `request` names with the option labelled `label`.
+/// Answer the question `request` names with its option at `index`, which the
+/// person read as `label`.
 ///
 /// One intent, resolved by the reducer against the options it holds when it
 /// runs. A banner that counted cursor moves off its frame and then sent Enter
@@ -139,11 +141,13 @@ pub fn open_transcript(session_key: Option<&str>) -> Intent {
 /// is the id the frame carried for the question the person read: the reducer
 /// refuses the pick when the question it would answer is another one, so a
 /// label both questions offer (yes, no, approve) cannot answer the new one.
+/// The option is named by index, since two labels can scrub alike on a frame
+/// (#1248), and the label is the check that the list did not change under it.
 #[must_use]
-pub fn pick_answer(request: &str, label: &str) -> Intent {
+pub fn pick_answer(request: &str, index: usize, label: &str) -> Intent {
     command(
         ids::SESSION_LIST_ASK_PICK,
-        json!({ "request": request, "label": label }),
+        json!({ "request": request, "index": index, "label": label }),
     )
 }
 
@@ -294,6 +298,7 @@ struct TranscriptArgs {
 #[serde(deny_unknown_fields)]
 struct PickArgs {
     request: String,
+    index: usize,
     label: String,
 }
 
@@ -360,6 +365,7 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
         AppEvent::SessionAskPick { .. } => {
             parse::<PickArgs>(args).map(|args| AppEvent::SessionAskPick {
                 request: args.request,
+                index: args.index,
                 label: args.label,
             })
         }
