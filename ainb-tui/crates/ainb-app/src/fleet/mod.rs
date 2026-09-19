@@ -36,6 +36,7 @@ pub mod read;
 pub mod session_log;
 pub mod transcript;
 pub mod unit_program;
+pub mod usage_reader;
 
 pub use ainb_fleet_core::fleet::{discover, enrich_cache, send, types};
 
