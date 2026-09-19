@@ -480,11 +480,14 @@ impl SessionSource {
         let after = entries_by_id(&store);
         let removed: Vec<Uuid> =
             before.keys().filter(|id| !after.contains_key(*id)).copied().collect();
-        let written: Vec<&WorkspaceSessionEntry> = after
+        // Sorted by tmux name, so a multi-row write happens in the same
+        // order every time, whatever the map's order.
+        let mut written: Vec<&WorkspaceSessionEntry> = after
             .iter()
             .filter(|(id, entry)| before.get(*id) != Some(*entry))
             .map(|(_, entry)| entry)
             .collect();
+        written.sort_by(|a, b| a.tmux_session_name.cmp(&b.tmux_session_name));
         if removed.is_empty() && written.is_empty() {
             return Ok(());
         }
