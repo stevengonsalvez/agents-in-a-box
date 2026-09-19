@@ -151,10 +151,14 @@ fn a_credential_past_the_cut_does_not_survive_and_the_marker_draws() {
         "B".repeat(8),
         "C".repeat(40)
     );
-    let summary = format!("{}{token}", "New issue: ".repeat(MAX_INBOX_SUMMARY_CHARS / 11));
+    // The token starts inside the cut window and ends past it; the text
+    // after it is what makes the cut happen once the token has shrunk to
+    // the redaction marker.
+    let summary = format!("{}{token}{}", "x".repeat(200), "y".repeat(400));
     let state = state_with(vec![row(0, &summary)]);
     let cut = view_of(&state)["entries"][0]["summary"].as_str().unwrap().to_string();
     assert!(!cut.contains(&"A".repeat(30)), "the token's head survived the frame: {cut}");
+    assert!(!cut.contains("AAAA"), "no fragment of the token survives the cut: {cut}");
     assert!(cut.contains("<redacted>"), "the redaction marker is drawn: {cut}");
     assert!(cut.ends_with(INBOX_SUMMARY_CUT_MARKER));
 }
