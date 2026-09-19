@@ -104,3 +104,24 @@ export async function selectedNode() {
     return current === null ? null : current.closest(".settings-node").getAttribute("data-node");
   });
 }
+
+/**
+ * Every batch the window applied, as the desktop logged it: one entry per
+ * `renderer applied` line, with the sections it carried.
+ *
+ * A window that looks slow with a bounded DOM is usually busy with frames, and
+ * this is the only view of that from outside the window.
+ */
+export function appliedBatches() {
+  try {
+    const lines = run("sh", [
+      "-c",
+      'cat "$1"/desktop.log* 2>/dev/null | grep "renderer applied"',
+      "log",
+      env().AINB_HANGAR_HOME,
+    ]);
+    return lines.split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
