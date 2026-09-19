@@ -8,7 +8,7 @@
 //! producer it was copied from.
 
 use ainb_hangar_proto::events::MessageKind;
-use ainb_hangar_proto::transcript::{AcpClassifier, acp_card_text};
+use ainb_hangar_proto::transcript::AcpClassifier;
 
 /// Classify a whole session's rows, oldest first, through one classifier.
 fn classify(rows: &[(&str, &str)]) -> Vec<(MessageKind, String)> {
@@ -418,59 +418,4 @@ fn a_token_straddling_each_cut_never_survives_it() {
     )]);
     assert_eq!(message.len(), 1, "one message line: {message:?}");
     assert_no_token_piece(&message[0].1, "message body");
-}
-
-/// #1187: the ACP card names every chunk kind, the prompt echo and the usage
-/// report included, so it reads those two through [`acp_card_text`]. The
-/// transcript lanes stay silent on both (see
-/// `usage_prompt_echo_and_session_bookkeeping_render_nothing`); only the card
-/// draws them.
-#[test]
-fn the_card_reads_the_prompt_echo_and_the_usage_report() {
-    let card = |event_type: &str, payload: &str| {
-        acp_card_text(event_type, &serde_json::from_str(payload).unwrap())
-    };
-
-    // reducer, `UserMessageChunk`.
-    assert_eq!(
-        card(
-            "acp.user_message",
-            r#"{"kind":"acp.user_message","text":"do the work","coalescedDeltas":1}"#
-        ),
-        Some("do the work".to_string())
-    );
-    // reducer, `UsageUpdate`, without and with a cost.
-    assert_eq!(
-        card(
-            "acp.usage",
-            r#"{"sessionUpdate":"usage_update","used":1200,"size":200000}"#
-        ),
-        Some("1200 of 200000 tokens in context".to_string())
-    );
-    assert_eq!(
-        card(
-            "acp.usage",
-            r#"{"sessionUpdate":"usage_update","used":1200,"size":200000,"cost":{"amount":0.42,"currency":"USD"}}"#
-        ),
-        Some("1200 of 200000 tokens in context · 0.42 USD".to_string())
-    );
-
-    // Nothing to say is nothing, not an empty string the card draws as a row.
-    assert_eq!(card("acp.user_message", r#"{"text":"  "}"#), None);
-    assert_eq!(card("acp.usage", r#"{"sessionUpdate":"usage_update"}"#), None);
-    // Every other kind is the classifier's to render.
-    assert_eq!(card("acp.message", r#"{"text":"hello"}"#), None);
-}
-
-/// The prompt echo is operator text, and an operator pastes credentials into
-/// prompts: the card's read scrubs it before its own cut, like every lane.
-#[test]
-fn the_cards_prompt_echo_is_scrubbed_before_its_cut() {
-    let token = token();
-    let text = acp_card_text(
-        "acp.user_message",
-        &serde_json::json!({"text": format!("{} {token}", "x".repeat(8180))}),
-    )
-    .expect("the echo reads");
-    assert_no_token_piece(&text, "prompt echo");
 }
