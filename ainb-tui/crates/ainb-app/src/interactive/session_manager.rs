@@ -1153,7 +1153,7 @@ pub struct SessionStore {
 #[must_use = "the sessions.json lock is released as soon as the guard is dropped"]
 pub struct SessionStoreGuard {
     _file: std::fs::File,
-    _held: HeldLockMark,
+    _held: Option<HeldLockMark>,
 }
 
 /// Threads that hold the `sessions.json` lock (P6e), by count.
@@ -1266,13 +1266,19 @@ impl SessionStore {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         Ok(SessionStoreGuard {
             _file: file,
-            _held: HeldLockMark::enter(),
+            _held: Some(HeldLockMark::enter()),
         })
     }
 
     /// Take the lock once without blocking. `Ok(None)` means another
     /// descriptor holds it; the caller retries on its own bounded schedule
     /// (P6e: the resolver never waits on this lock without a deadline).
+    ///
+    /// Unlike [`lock`](Self::lock) this does not mark the calling thread: it
+    /// is for async code, whose guard can outlive the thread that took it
+    /// while that thread runs other tasks. Such a caller marks only the
+    /// synchronous stretch where it runs code that might nest, with
+    /// [`HeldLockMark::enter`].
     ///
     /// # Errors
     ///
@@ -1285,7 +1291,7 @@ impl SessionStore {
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         Ok(file.map(|file| SessionStoreGuard {
             _file: file,
-            _held: HeldLockMark::enter(),
+            _held: None,
         }))
     }
 
