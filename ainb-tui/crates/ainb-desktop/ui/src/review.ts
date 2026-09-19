@@ -133,6 +133,52 @@ export function bodyLines(section: GitViewView_Serialize | undefined): BodyLine[
 }
 
 /**
+ * Rows drawn beyond each edge of the viewport, so a wheel that moves a row or
+ * two has something already in the DOM to show while the next frame is on its
+ * way.
+ */
+export const OVERSCAN = 20;
+
+/**
+ * The lines the window actually draws: the viewport's own rows, plus
+ * `overscan` on each side.
+ *
+ * The whole body at the frame's bound is 4,000 rows and 16,122 nodes, and a
+ * real window spends fifty seconds building them (#1221). The reducer still
+ * owns the offset: this takes `first` from `review_ui.scroll` and draws
+ * outwards from it, keeping no scroll position of its own.
+ *
+ * A hunk header carries no virtual index (the reducer's flatten does not count
+ * it), so it is held until a row that is in the window needs it: a window that
+ * opens in the middle of a hunk still says which hunk it is in.
+ */
+export function windowLines(
+  lines: BodyLine[],
+  first: number,
+  rowsPerPage: number,
+  overscan: number = OVERSCAN,
+): BodyLine[] {
+  const from = Math.max(first - overscan, 0);
+  const to = first + rowsPerPage + overscan;
+  const drawn: BodyLine[] = [];
+  let header: BodyLine | undefined;
+  for (const line of lines) {
+    if (line.index === undefined) {
+      header = line;
+      continue;
+    }
+    if (line.index >= to) break;
+    if (line.index < from) continue;
+    if (header !== undefined) {
+      drawn.push(header);
+      header = undefined;
+    }
+    drawn.push(line);
+  }
+  return drawn;
+}
+
+/**
  * The height of one body row in pixels, which is what a wheel delta is
  * measured against before it becomes a row count for the reducer.
  *
