@@ -110,7 +110,10 @@ fn body_lines(section: &InboxSection) -> Vec<Line<'static>> {
         };
         lines.push(Line::from(vec![
             Span::styled(marker, marker_style),
-            Span::styled(format!("{:<8}", row.kind), Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(
+                format!("{:<8}", row.kind),
+                Style::default().fg(CORNFLOWER_BLUE),
+            ),
             Span::styled(row.summary.clone(), text_style),
         ]));
     }
@@ -127,7 +130,8 @@ fn body_lines(section: &InboxSection) -> Vec<Line<'static>> {
 }
 
 fn footer_line() -> Line<'static> {
-    let key = |k: &'static str| Span::styled(k, Style::default().fg(GOLD).add_modifier(Modifier::BOLD));
+    let key =
+        |k: &'static str| Span::styled(k, Style::default().fg(GOLD).add_modifier(Modifier::BOLD));
     let desc = |d: &'static str| Span::styled(d, Style::default().fg(MUTED_GRAY));
     Line::from(vec![
         key("r"),
@@ -174,7 +178,10 @@ mod tests {
     #[test]
     fn rows_draw_newest_first_with_unread_marked() {
         let section = InboxSection {
-            entries: vec![row(2, "New issue: two", false), row(1, "New issue: one", true)],
+            entries: vec![
+                row(2, "New issue: two", false),
+                row(1, "New issue: one", true),
+            ],
             unread: 1,
             ..InboxSection::default()
         };
@@ -182,9 +189,20 @@ mod tests {
         let two = drawn.iter().position(|l| l.contains("New issue: two")).expect("row two");
         let one = drawn.iter().position(|l| l.contains("New issue: one")).expect("row one");
         assert!(two < one, "the daemon's order is kept");
-        assert!(drawn[two].contains('●'), "an unread row carries the marker: {}", drawn[two]);
-        assert!(drawn[one].contains('○'), "a read row does not: {}", drawn[one]);
-        assert!(drawn[0].contains("1 unread"), "the title carries the section's count");
+        assert!(
+            drawn[two].contains('●'),
+            "an unread row carries the marker: {}",
+            drawn[two]
+        );
+        assert!(
+            drawn[one].contains('○'),
+            "a read row does not: {}",
+            drawn[one]
+        );
+        assert!(
+            drawn[0].contains("1 unread"),
+            "the title carries the section's count"
+        );
         assert!(drawn.iter().any(|l| l.contains("mark all read")));
     }
 
@@ -193,7 +211,10 @@ mod tests {
         let mut section = InboxSection::default();
         section.mark_absent("connect: no daemon");
         let drawn = text(&section);
-        assert!(drawn.contains("inbox unavailable: connect: no daemon"), "{drawn}");
+        assert!(
+            drawn.contains("inbox unavailable: connect: no daemon"),
+            "{drawn}"
+        );
         assert!(!drawn.contains("nothing in the inbox"));
         assert!(drawn.contains("0 unread"));
     }
@@ -208,8 +229,14 @@ mod tests {
         };
         section.mark_read_failed("io: broken pipe");
         let drawn = text(&section);
-        assert!(drawn.contains("daemon unreachable: io: broken pipe"), "{drawn}");
-        assert!(drawn.contains("New issue: one"), "the last read stays on screen");
+        assert!(
+            drawn.contains("daemon unreachable: io: broken pipe"),
+            "{drawn}"
+        );
+        assert!(
+            drawn.contains("New issue: one"),
+            "the last read stays on screen"
+        );
     }
 
     #[test]
