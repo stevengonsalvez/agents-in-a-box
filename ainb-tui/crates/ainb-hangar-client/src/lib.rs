@@ -27,10 +27,9 @@ mod chat;
 mod presence;
 pub mod reconnect;
 
-pub use presence::{
-    Dialer, PresenceLease, PresenceState, mark_process_as_surface,
-    reset_process_as_surface_for_test,
-};
+#[cfg(any(test, feature = "test-support"))]
+pub use presence::reset_process_as_surface_for_test;
+pub use presence::{Dialer, PresenceLease, PresenceState, mark_process_as_surface};
 pub use reconnect::{
     BACKOFF_1S, BACKOFF_4S, BACKOFF_16S, ConnectionState, RECONNECT_SCHEDULE,
     ReconnectingFleetSubscription, RendererConnectionView, Timing as ReconnectTiming,
