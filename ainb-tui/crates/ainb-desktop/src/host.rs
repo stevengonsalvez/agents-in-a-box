@@ -353,10 +353,16 @@ impl<S: FrameSink> DesktopHost<S> {
             // Judged with its payload: a pointer row's action is what the
             // arguments name (the settings row a `config.set_row` edits,
             // #1224), not the placeholder the table wrote. A payload the row
-            // cannot parse leaves the placeholder, which the reducer drops.
+            // cannot parse is refused here, closed, rather than judged on the
+            // placeholder and left for the reducer to drop.
             Intent::Command(id, args) => {
                 let row = self.keymap.command(id)?;
-                let action = row.action.with_args(args).unwrap_or_else(|| row.action.clone());
+                let Some(action) = row.action.with_args(args) else {
+                    return Some(Refusal {
+                        command: id.clone(),
+                        reason: "its payload does not fit the row",
+                    });
+                };
                 (id.clone(), action)
             }
             _ => return None,
