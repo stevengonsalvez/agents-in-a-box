@@ -27,10 +27,18 @@ env:
   WORKING_DIR: ainb-tui
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
+# Two dispatches of one version would race the tag push; the second waits
+# for the first rather than cancelling it, because a release half published
+# is worse than one published twice over.
+concurrency:
+  group: release-v${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
 jobs:
   prepare:
     name: Prepare Release
-    timeout-minutes: 20
+    # The desktop lockfile update below may fetch the registry index.
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -167,7 +175,9 @@ jobs:
 
       - name: Update the desktop lockfile version
         working-directory: ${{ env.WORKING_DIR }}/crates/ainb-desktop
-        run: cargo update -p ainb-desktop
+        # Offline first: the lockfile only changes its own version line, so
+        # the registry index is needed only when the cache is cold.
+        run: cargo update -p ainb-desktop --offline || cargo update -p ainb-desktop
 
       - name: Update CHANGELOG.md
         working-directory: ${{ env.WORKING_DIR }}
@@ -457,12 +467,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `app` declared beside `dmg`: the bundle check reads the .app, so
+          # it is asked for rather than relied on as the dmg's byproduct.
           - target: aarch64-apple-darwin
             os: macos-latest
-            bundles: dmg
+            bundles: app,dmg
           - target: x86_64-apple-darwin
             os: macos-latest
-            bundles: dmg
+            bundles: app,dmg
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             bundles: appimage,deb
