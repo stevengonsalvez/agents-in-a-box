@@ -158,3 +158,15 @@ test("a placeholder given no render error fails the plugins_host facts", async (
     "a render without the recorded error still showed every expected fact, so the list proves nothing",
   );
 });
+
+for (const [fixture, screen] of [
+  ["plugin_not_registered", "learnings"],
+  ["plugin_connecting", "abtop"],
+] as const) {
+  test(`the plugin placeholder shows every fact the ${fixture} list names`, async () => {
+    const html = await drawPlaceholder(fixture, screen);
+
+    assert.ok(facts(fixture).length > 0, "the facts list has facts in it");
+    assert.deepEqual(missing(html, fixture), [], text(html));
+  });
+}
