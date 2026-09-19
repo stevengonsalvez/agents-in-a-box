@@ -490,3 +490,109 @@ fn a_corrupt_file_is_refused_not_rewritten() {
     assert_eq!(UPSERTS.load(Ordering::SeqCst), 0, "a table write was sent");
     assert_eq!(fs::read(homes.sessions_json()).unwrap(), before);
 }
+
+fn daemon_source(rt: &tokio::runtime::Runtime, homes: &Homes) -> (FleetHangar, SessionSource) {
+    ainb_hangar_daemon::rpc::auth::advertise_workspace_sessions_for_tests(true);
+    let hangar = FleetHangar::start(&homes.hangar);
+    reconcile(&hangar, homes);
+    let token = fs::read_to_string(ainb_hangar_proto::auth::token_file_in(&homes.hangar))
+        .unwrap()
+        .trim()
+        .to_string();
+    let source = rt.block_on(SessionSource::resolve_at(
+        ainb_hangar_daemon::rpc::socket_path_in(&homes.hangar),
+        token,
+    ));
+    (hangar, source)
+}
+
+/// The boot import and a reconcile pass of `homes`' file, as a daemon runs.
+fn reconcile(hangar: &FleetHangar, homes: &Homes) -> usize {
+    let path = homes.sessions_json();
+    hangar.block_on(async {
+        ainb_hangar_daemon::session_import::import_sessions_if_needed(hangar.pool(), &path)
+            .await
+            .unwrap();
+        ainb_hangar_daemon::session_import::reconcile_sessions(hangar.pool(), &path)
+            .await
+            .unwrap()
+            .deleted
+            .len()
+    })
+}
+
+fn table_names(hangar: &FleetHangar) -> Vec<String> {
+    let mut names: Vec<String> = hangar.block_on(async {
+        SessionsRepo::list(hangar.pool(), None, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.tmux_session_name)
+            .collect()
+    });
+    names.sort_unstable();
+    names
+}
+
+/// A delete made while degraded reaches the file only. It is not undone: the
+/// next pass removes the table row, the file being the authority on which
+/// sessions exist until the flip.
+#[test]
+fn a_delete_made_while_degraded_is_not_undone_by_the_daemon() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let homes = Homes::new();
+    homes.write_file_store(&[&make_session("sess-gone"), &make_session("sess-kept")]);
+    let rt = rt();
+    let (hangar, _) = daemon_source(&rt, &homes);
+    assert_eq!(table_names(&hangar), vec!["sess-gone", "sess-kept"]);
+
+    let degraded = rt.block_on(SessionSource::resolve_at(
+        homes.hangar.join("no-daemon.sock"),
+        "t".to_string(),
+    ));
+    assert!(degraded.is_degraded(), "{degraded:?}");
+    rt.block_on(degraded.mutate(|s| {
+        s.sessions.remove("sess-gone");
+    }))
+    .expect("a degraded delete goes to the file");
+
+    assert_eq!(reconcile(&hangar, &homes), 1);
+    assert_eq!(table_names(&hangar), vec!["sess-kept"]);
+}
+
+/// A multi-row write whose later row the daemon refuses is reverted in the
+/// file, but the earlier row already reached the table. The next pass
+/// deletes that row, because the file does not have it.
+#[test]
+fn a_reverted_multi_row_write_leaves_nothing_after_the_next_pass() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let homes = Homes::new();
+    homes.write_file_store(&[&make_session("sess-kept")]);
+    let before = fs::read(homes.sessions_json()).unwrap();
+    let rt = rt();
+    let (hangar, source) = daemon_source(&rt, &homes);
+    assert!(matches!(source, SessionSource::Daemon(_)), "{source:?}");
+
+    // Written in tmux-name order: "sess-a1" lands, then the daemon refuses
+    // "sess-z9" (a relative worktree path fails validation).
+    let mut refused = make_session("sess-z9");
+    refused.worktree_path = PathBuf::from("relative/z9");
+    rt.block_on(source.mutate(|s| {
+        s.upsert(make_session("sess-a1"));
+        s.upsert(refused.clone());
+    }))
+    .expect_err("the refused row fails the write");
+    assert_eq!(
+        fs::read(homes.sessions_json()).unwrap(),
+        before,
+        "the file was not put back"
+    );
+    assert_eq!(
+        table_names(&hangar),
+        vec!["sess-a1", "sess-kept"],
+        "the first row reached the table before the refusal"
+    );
+
+    assert_eq!(reconcile(&hangar, &homes), 1);
+    assert_eq!(table_names(&hangar), vec!["sess-kept"]);
+}
