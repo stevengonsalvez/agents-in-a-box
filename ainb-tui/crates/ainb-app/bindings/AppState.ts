@@ -2639,6 +2639,11 @@ export type GitViewFrame_Serialize = {
 	 *  twice for the same state.
 	 */
 	expanded_folders: string[],
+	/**
+	 *  Expanded folders the frame did not carry, so a tree that draws fewer
+	 *  open folders than the person opened says why.
+	 */
+	expanded_folders_cut: number,
 	file_tree_items: FileTreeItem[],
 	/**  Tree rows the frame did not carry. */
 	tree_items_cut: number,
@@ -3923,6 +3928,8 @@ export type ReviewUiFrame = {
 	sidebar_selected: number,
 	/**  Sorted, for the reason [`GitViewFrame::expanded_folders`] is. */
 	collapsed_dirs: string[],
+	/**  Collapsed directories the frame did not carry. */
+	collapsed_dirs_cut: number,
 	scroll: number,
 	current_hunk: number,
 };

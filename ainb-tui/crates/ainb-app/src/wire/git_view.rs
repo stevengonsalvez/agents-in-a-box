@@ -95,6 +95,9 @@ pub struct GitViewFrame {
     /// Sorted, because a set has no order and a frame has to be the same bytes
     /// twice for the same state.
     pub expanded_folders: Vec<String>,
+    /// Expanded folders the frame did not carry, so a tree that draws fewer
+    /// open folders than the person opened says why.
+    pub expanded_folders_cut: usize,
     pub file_tree_items: Vec<FileTreeItem>,
     /// Tree rows the frame did not carry.
     pub tree_items_cut: usize,
@@ -132,6 +135,8 @@ pub struct ReviewUiFrame {
     pub sidebar_selected: usize,
     /// Sorted, for the reason [`GitViewFrame::expanded_folders`] is.
     pub collapsed_dirs: Vec<String>,
+    /// Collapsed directories the frame did not carry.
+    pub collapsed_dirs_cut: usize,
     pub scroll: usize,
     pub current_hunk: usize,
 }
@@ -190,12 +195,19 @@ pub fn project_within(
 
     // The file the person has open goes first, so it never frames zero rows
     // because a diff somewhere else spent the budget.
+    // The files a frame may carry: the first MAX_LIST_ITEMS, and the open one
+    // wherever it sits. A repository with more changed files than that would
+    // otherwise frame an open file it never sent, and name the last file it did
+    // send as the one in front of the person.
     let held_files = state.review.files.len();
-    let files = &state.review.files[..MAX_LIST_ITEMS.min(held_files)];
-    let mut framed: Vec<Option<ReviewFileFrame>> = vec![None; files.len()];
     let selected = state.review_ui.selected_file;
-    if let Some(file) = files.get(selected) {
-        framed[selected] = project_file(file, &mut rows, &mut bytes);
+    let mut carried: Vec<usize> = (0..MAX_LIST_ITEMS.min(held_files)).collect();
+    if selected >= carried.len() && selected < held_files {
+        carried.push(selected);
+    }
+    let mut framed: Vec<Option<ReviewFileFrame>> = vec![None; carried.len()];
+    if let Some(place) = carried.iter().position(|index| *index == selected) {
+        framed[place] = project_file(&state.review.files[selected], &mut rows, &mut bytes);
     }
 
     // Scrubbed over the lines that could be framed, not over the whole diff: a
@@ -207,9 +219,9 @@ pub fn project_within(
     let (diff_content, diff_over_budget) = spend(&raw_diff, &mut bytes);
     let diff_lines_cut = diff_over_count + diff_over_budget;
 
-    for (index, file) in files.iter().enumerate() {
-        if framed[index].is_none() {
-            framed[index] = project_file(file, &mut rows, &mut bytes);
+    for (place, index) in carried.iter().enumerate() {
+        if framed[place].is_none() {
+            framed[place] = project_file(&state.review.files[*index], &mut rows, &mut bytes);
         }
     }
 
@@ -230,13 +242,14 @@ pub fn project_within(
     let (changed_files, files_cut) = take_within(&state.changed_files, &mut list_bytes);
     let (file_tree_items, tree_items_cut) = take_within(&state.file_tree_items, &mut list_bytes);
     let (commits, commits_cut) = take_within(&state.commits, &mut list_bytes);
-    let (folders, _) = take_within(&sorted(&state.expanded_folders), &mut list_bytes);
-    let (collapsed_dirs, _) =
+    let (folders, folders_cut) = take_within(&sorted(&state.expanded_folders), &mut list_bytes);
+    let (collapsed_dirs, collapsed_dirs_cut) =
         take_within(&sorted(&state.review_ui.collapsed_dirs), &mut list_bytes);
 
     // The file the state points at moves when a file before it is dropped, so
     // the frame points at where it ended up rather than where it was.
-    let selected_framed = framed[..selected.min(framed.len())].iter().flatten().count();
+    let selected_place = carried.iter().position(|index| *index == selected).unwrap_or(0);
+    let selected_framed = framed[..selected_place.min(framed.len())].iter().flatten().count();
     let files: Vec<ReviewFileFrame> = framed.into_iter().flatten().collect();
     let hunk_count: usize = files.iter().map(|file| file.hunks.len()).sum();
     let row_count: usize =
@@ -263,6 +276,7 @@ pub fn project_within(
             .map(|text| u32::try_from(text.chars().count()).unwrap_or(u32::MAX)),
         commit_message_cursor: state.commit_message_cursor,
         expanded_folders: folders,
+        expanded_folders_cut: folders_cut,
         selected_tree_index: within(state.selected_tree_index, file_tree_items.len()),
         tree_items_cut,
         file_tree_items,
@@ -274,13 +288,17 @@ pub fn project_within(
         commits,
         review_ui: ReviewUiFrame {
             selected_file: within(selected_framed, review.files.len()),
-            // The sidebar draws a row per file and a row per directory it holds,
-            // so a cut file list shortens it too.
-            sidebar_selected: within(
-                state.review_ui.sidebar_selected,
-                review.files.len() + collapsed_dirs.len(),
-            ),
+            // Crosses as the state holds it. The sidebar's rows are
+            // `build_sidebar`'s (`components/code_review/render.rs:353`): a row
+            // per directory whether or not it is collapsed, plus a row per file
+            // a collapsed directory is not hiding. Files plus collapsed
+            // directories is not that number, and clamping to it moved a valid
+            // selection down in any repository with subdirectories. A surface
+            // that draws the tree knows its own row count; the frame does not
+            // guess at it.
+            sidebar_selected: state.review_ui.sidebar_selected,
             collapsed_dirs,
+            collapsed_dirs_cut,
             scroll: within(state.review_ui.scroll, row_count + hunk_count),
             current_hunk: within(state.review_ui.current_hunk, hunk_count),
         },
@@ -310,8 +328,10 @@ fn project_file(
     total: &mut usize,
     bytes: &mut usize,
 ) -> Option<ReviewFileFrame> {
-    // The file's own fields cost bytes before a single row does.
-    if !afford(FILE_BYTES + file.path.len(), bytes) {
+    // The file's own fields cost bytes before a single row does, and the path
+    // costs what it ENCODES to: a path is arbitrary bytes, and one with a quote
+    // or a control character in it is longer on the wire than in the state.
+    if !afford(FILE_BYTES + text_bytes(&file.path), bytes) {
         return None;
     }
 
@@ -323,18 +343,24 @@ fn project_file(
     let candidates: Vec<DiffRow> =
         file.hunks.iter().flat_map(|hunk| &hunk.rows).take(keep).cloned().collect();
     let framed = scrub_and_cut(&candidates, keep, MAX_LINE_CHARS, bytes);
-    *total -= framed.len();
-    let rows_cut = held - framed.len();
 
     // A hunk costs bytes with no rows in it, and a file rewritten line by line
-    // has one hunk per line, so the hunks are counted and afforded too.
-    let mut rows = framed.into_iter();
+    // has one hunk per line, so the hunks are counted and afforded too. The
+    // header is afforded BEFORE its rows leave the iterator: a hunk whose
+    // header will not fit keeps none of them, and rows taken for a hunk that
+    // was never pushed would be counted as framed and reported as kept.
+    let mut rows = framed.into_iter().peekable();
     let mut hunks = Vec::new();
+    let mut kept = 0;
     for hunk in file.hunks.iter().take(MAX_ROWS_PER_FILE) {
-        let rows: Vec<DiffRow> = rows.by_ref().take(hunk.rows.len()).collect();
+        if rows.peek().is_none() && !hunk.rows.is_empty() {
+            break;
+        }
         if !afford(HUNK_BYTES, bytes) {
             break;
         }
+        let rows: Vec<DiffRow> = rows.by_ref().take(hunk.rows.len()).collect();
+        kept += rows.len();
         hunks.push(HunkFrame {
             old_start: hunk.old_start,
             new_start: hunk.new_start,
@@ -345,6 +371,8 @@ fn project_file(
             rows,
         });
     }
+    *total -= kept;
+    let rows_cut = held - kept;
 
     Some(ReviewFileFrame {
         path: file.path.clone(),
@@ -500,7 +528,7 @@ fn row_bytes(raw: &str, emphasis: usize) -> usize {
 const ROW_BYTES: usize = 96;
 const EMPHASIS_BYTES: usize = 24;
 const FILE_BYTES: usize = 192;
-const HUNK_BYTES: usize = 128;
+const HUNK_BYTES: usize = 160;
 
 /// How many lines are scrubbed between two looks at the budget. Small enough
 /// that a spent budget stops the scrub promptly, large enough that a key block
