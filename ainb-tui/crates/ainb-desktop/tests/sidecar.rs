@@ -424,7 +424,10 @@ async fn a_refusing_daemon_is_read_on_the_first_frame_and_nothing_is_spawned() {
     else {
         unreachable!("matched incompatible");
     };
-    assert!(message.contains("restart from the newer binary"), "{message}");
+    assert!(
+        message.contains("restart from the newer binary"),
+        "{message}"
+    );
     assert!(daemon_is_newer, "5-6 sits above this build's range");
     // Long enough for a spawn to have left its mark, had one happened.
     tokio::time::sleep(Duration::from_millis(500)).await;
