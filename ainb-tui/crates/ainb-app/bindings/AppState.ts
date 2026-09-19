@@ -2844,7 +2844,79 @@ export type InFlight = {
 	generation: number,
 };
 
-export type InboxView = Record<string, never>;
+/**  One inbox row on the wire: `InboxEntryRow` as the fold bounded it. */
+export type InboxRowFrame = InboxRowFrame_Serialize;
+
+/**  One inbox row on the wire: `InboxEntryRow` as the fold bounded it. */
+export type InboxRowFrame_Serialize = {
+	/**  The entry id (a ULID), the stable id a surface keys the row by. */
+	id: string,
+	/**  The entity family (`issue`, `comment`, `task`). */
+	kind: string,
+	/**  The event that produced the entry (`issue_created`, ...). */
+	event: string,
+	/**  The id of the issue, comment or task the entry addresses. */
+	subject_id: string,
+	/**  The pre-rendered human line, scrubbed then cut by the fold, scrubbed again here. */
+	summary: string,
+	/**  The actor the entry is addressed to. */
+	recipient: string,
+	/**  Creation time, epoch milliseconds. */
+	created_at: number,
+	/**  When the entry was marked read; absent when unread. */
+	read_at?: number | null,
+};
+
+/**
+ *  Section 16 (inbox) on the wire.
+ * 
+ *  Every field is either an id, an enum token, a number, or text the fold
+ *  scrubbed before it cut. `summary` is scrubbed again here, as the ACP
+ *  transcript's chunks are, because the frame is the boundary and the fold is
+ *  not. `absent` and `unreachable` are the host's own reasons, which can carry
+ *  a socket path or a daemon error, so they are scrubbed too.
+ * 
+ *  The byte budget is enforced here, not only claimed: rows are added in the
+ *  daemon's order while their encoded bytes fit under [`MAX_INBOX_BYTES`]
+ *  less the reserve the scalar fields need, and the rest are counted in
+ *  `rows_cut`. A section past `MAX_FRAME_BYTES` is withheld whole, and a
+ *  withheld inbox has no counter to say why.
+ */
+export type InboxView = InboxView_Serialize;
+
+/**
+ *  Section 16 (inbox) on the wire.
+ * 
+ *  Every field is either an id, an enum token, a number, or text the fold
+ *  scrubbed before it cut. `summary` is scrubbed again here, as the ACP
+ *  transcript's chunks are, because the frame is the boundary and the fold is
+ *  not. `absent` and `unreachable` are the host's own reasons, which can carry
+ *  a socket path or a daemon error, so they are scrubbed too.
+ * 
+ *  The byte budget is enforced here, not only claimed: rows are added in the
+ *  daemon's order while their encoded bytes fit under [`MAX_INBOX_BYTES`]
+ *  less the reserve the scalar fields need, and the rest are counted in
+ *  `rows_cut`. A section past `MAX_FRAME_BYTES` is withheld whole, and a
+ *  withheld inbox has no counter to say why.
+ */
+export type InboxView_Serialize = {
+	/**  The rows a surface draws, newest first, at most `MAX_INBOX_ROWS`. */
+	entries: InboxRowFrame_Serialize[],
+	/**  The daemon's unread count for `recipient`. */
+	unread: number,
+	/**  The actor whose inbox this is. */
+	recipient: string,
+	/**  Why there are no rows, when the host knows. */
+	absent: string | null,
+	/**  The last read failed for this reason; the rows are the last that landed. */
+	unreachable: string | null,
+	/**  Rows the daemon sent that the fold did not keep. */
+	rows_cut: number,
+	/**  Summaries the fold cut to `MAX_INBOX_SUMMARY_CHARS`. */
+	summaries_cut: number,
+	/**  The local clock when the last read landed, epoch milliseconds. */
+	received_at_ms: number,
+};
 
 /**  Which kind of text the active input prompt is collecting. */
 export type InputKind = 
@@ -4015,7 +4087,7 @@ export type SectionBodies_Serialize = {
 	fleet: FleetView_Serialize,
 	hangar: HangarView_Serialize,
 	mcp_pool: McpPoolView_Serialize,
-	inbox: InboxView,
+	inbox: InboxView_Serialize,
 	plugins_host: PluginsHostView_Serialize,
 	config: ConfigView_Serialize,
 	skills: SkillsView_Serialize,
