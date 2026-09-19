@@ -342,21 +342,31 @@ impl<S: FrameSink> DesktopHost<S> {
     /// up.
     #[must_use]
     pub fn refused_from_renderer(&self, intent: &Intent) -> Option<Refusal> {
-        let (id, row) = match intent {
+        let (id, action) = match intent {
             Intent::Key(chord) => {
                 let (ctx, _) =
                     self.keymap.resolve_with_context(&active_contexts(&self.state), chord)?;
-                self.keymap
+                let (id, row) = self
+                    .keymap
                     .commands()
-                    .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))?
+                    .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))?;
+                (id, row.action.clone())
             }
-            Intent::Command(id, _) => (id.clone(), self.keymap.command(id)?),
+            // Judged with its payload: a pointer row's action is what the
+            // arguments name (the settings row a `config.set_row` edits,
+            // #1224), not the placeholder the table wrote. A payload the row
+            // cannot parse leaves the placeholder, which the reducer drops.
+            Intent::Command(id, args) => {
+                let row = self.keymap.command(id)?;
+                let action = row.action.with_args(args).unwrap_or_else(|| row.action.clone());
+                (id.clone(), action)
+            }
             _ => return None,
         };
         let why = if self.keymap.is_key_only(&id) {
             Some("it writes outside ainb, so it runs only from its key")
         } else {
-            self.state.remote_command_refusal(&row.action)
+            self.state.remote_command_refusal(&action)
         };
         // An onboarding write has a path of its own in this shell (#1175):
         // the refusal points at it rather than at a key the window cannot use.
