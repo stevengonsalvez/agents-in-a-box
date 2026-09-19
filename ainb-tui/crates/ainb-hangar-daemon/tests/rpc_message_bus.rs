@@ -1800,7 +1800,6 @@ async fn a_cursored_transcript_subscribe_replays_the_gap() {
 /// scrubbed whole.
 #[tokio::test]
 async fn a_token_in_a_stored_payload_never_reaches_a_transcript_reply() {
-    use ainb_hangar_core::redact::{REDACTED, find_secret};
     use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
 
     // Assembled at runtime so no literal here matches a secret scanner.
@@ -1831,41 +1830,6 @@ async fn a_token_in_a_stored_payload_never_reaches_a_transcript_reply() {
     seed_transcript_payload(&store, "acp:mine", "text-secret", &text_payload).await;
 
     let secrets = [github.as_str(), anthropic.as_str(), "MMMMMMMMMMMMMMMM"];
-    let assert_clean = |surface: &str, chunks: &[&serde_json::Value]| {
-        assert_eq!(chunks.len(), 2, "{surface}: both secret rows arrive");
-        for chunk in chunks {
-            let wire = chunk.to_string();
-            assert_eq!(
-                find_secret(&wire),
-                None,
-                "{surface}: a credential shape left the daemon: {wire}"
-            );
-            for secret in secrets {
-                assert!(!wire.contains(secret), "{surface}: {secret} leaked: {wire}");
-            }
-            assert!(
-                wire.contains(REDACTED),
-                "{surface}: redaction marked: {wire}"
-            );
-        }
-        let json = &chunks[0]["payload"];
-        assert_eq!(
-            json["content"]["text"],
-            format!("export GH_TOKEN={REDACTED} then retry"),
-            "{surface}: the prose around a token survives"
-        );
-        assert_eq!(json["sessionUpdate"], "agent_message_chunk");
-        assert_eq!(
-            json["rawInput"]["argv"][0], "curl",
-            "{surface}: arrays keep shape"
-        );
-        assert_eq!(json["exitCode"], 0, "{surface}: numbers pass through");
-        assert_eq!(
-            chunks[1]["payload"],
-            format!("not json: token={REDACTED}"),
-            "{surface}: a non-JSON payload is scrubbed as a string"
-        );
-    };
 
     let mut client = Client::authed(dir.path(), &socket).await;
 
@@ -1876,7 +1840,7 @@ async fn a_token_in_a_stored_payload_never_reaches_a_transcript_reply() {
         )
         .await;
     let tail_chunks: Vec<_> = tail["result"]["chunks"].as_array().unwrap()[1..].iter().collect();
-    assert_clean("uncursored list", &tail_chunks);
+    assert_chunks_clean("uncursored list", &tail_chunks, &secrets);
 
     let walk = client
         .call(
@@ -1885,7 +1849,7 @@ async fn a_token_in_a_stored_payload_never_reaches_a_transcript_reply() {
         )
         .await;
     let walk_chunks: Vec<_> = walk["result"]["chunks"].as_array().unwrap().iter().collect();
-    assert_clean("cursored list", &walk_chunks);
+    assert_chunks_clean("cursored list", &walk_chunks, &secrets);
 
     client
         .call(
@@ -1897,7 +1861,7 @@ async fn a_token_in_a_stored_payload_never_reaches_a_transcript_reply() {
         .drain_notifications("fleet/transcript_event", Duration::from_millis(800))
         .await;
     let replayed_chunks: Vec<_> = replayed.iter().map(|params| &params["chunk"]).collect();
-    assert_clean("replayed push", &replayed_chunks);
+    assert_chunks_clean("replayed push", &replayed_chunks, &secrets);
 
     // Live: the rows land after the subscription and arrive by wakeup.
     seed_transcript_payload(&store, "acp:mine", "live-json", &json_payload).await;
@@ -1911,7 +1875,47 @@ async fn a_token_in_a_stored_payload_never_reaches_a_transcript_reply() {
         .drain_notifications("fleet/transcript_event", Duration::from_millis(800))
         .await;
     let live_chunks: Vec<_> = live.iter().map(|params| &params["chunk"]).collect();
-    assert_clean("live push", &live_chunks);
+    assert_chunks_clean("live push", &live_chunks, &secrets);
+}
+
+/// The two secret rows of one surface, as the test above seeds them, carry
+/// no credential and keep everything around one.
+fn assert_chunks_clean(surface: &str, chunks: &[&serde_json::Value], secrets: &[&str]) {
+    use ainb_hangar_core::redact::{REDACTED, find_secret};
+
+    assert_eq!(chunks.len(), 2, "{surface}: both secret rows arrive");
+    for chunk in chunks {
+        let wire = chunk.to_string();
+        assert_eq!(
+            find_secret(&wire),
+            None,
+            "{surface}: a credential shape left the daemon: {wire}"
+        );
+        for secret in secrets {
+            assert!(!wire.contains(secret), "{surface}: {secret} leaked: {wire}");
+        }
+        assert!(
+            wire.contains(REDACTED),
+            "{surface}: redaction marked: {wire}"
+        );
+    }
+    let json = &chunks[0]["payload"];
+    assert_eq!(
+        json["content"]["text"],
+        format!("export GH_TOKEN={REDACTED} then retry"),
+        "{surface}: the prose around a token survives"
+    );
+    assert_eq!(json["sessionUpdate"], "agent_message_chunk");
+    assert_eq!(
+        json["rawInput"]["argv"][0], "curl",
+        "{surface}: arrays keep shape"
+    );
+    assert_eq!(json["exitCode"], 0, "{surface}: numbers pass through");
+    assert_eq!(
+        chunks[1]["payload"],
+        format!("not json: token={REDACTED}"),
+        "{surface}: a non-JSON payload is scrubbed as a string"
+    );
 }
 
 /// An unbounded `targets` list is one request that writes an unbounded leg set
