@@ -42,7 +42,11 @@ external binary that `cargo xtask stage-desktop-sidecar --release --target
 the AppImage links the oldest glibc. Linux arm64 is not built yet.
 
 Before anything is bundled the job runs the staged sidecar's `--version` and
-fails unless it reports the release version. After bundling it reads the
+fails unless it reports the release version. The cross-compiled x64 sidecar
+can run on the arm64 runner only under Rosetta; without it that one run is
+skipped, the job summary says so, the binary's architecture is checked
+instead, and the version inside the bundle is still asserted by the desktop
+workflow's smoke on a matching host. After bundling the job reads the
 bundle rather than launching it (a hosted runner is not a GUI host): the
 `.app`'s `Info.plist` names the release version and the identifier
 `dev.agentsinabox.desktop`, the sidecar sits at `Contents/MacOS/ainb-hangar-daemon`,
@@ -59,14 +63,27 @@ bundled --bundles <dmg | appimage,deb> -- --locked` from
 The release job writes `release-manifest.json`, signs it with
 `AINB_RELEASE_SIGNING_KEY` and attaches `release-manifest.sig`. The desktop
 bundles are listed under the manifest's top-level `desktop` key, one entry per
-`.dmg` and for the `.AppImage`, each with `target`, `archive` and `sha256`.
-They are never listed under `assets[]`: a shipped CLI matches `assets[]` on
-target alone and takes the first hit, so a `.dmg` there would be installed as
-the `ainb` binary. The job reads the manifest back before signing it and fails
-if any `assets[]` entry is not an `ainb-<version>-` archive or any `desktop`
-entry is not an `ainb-desktop-<version>-` bundle. The `.deb` is a release asset
-and not in the manifest; the desktop updater never replaces a package-managed
-install.
+bundle, each with `target`, `format` (`dmg`, `appimage` or `deb`, which is what
+tells the two Linux entries apart), `archive`, `sha256` and a `signed` flag
+that is true only when the bundle was signed with the Developer ID and
+notarised. They are never listed under `assets[]`: a shipped CLI matches
+`assets[]` on target alone and takes the first hit, so a `.dmg` there would be
+installed as the `ainb` binary; `ainb-core/tests/update_domain.rs` pins that
+with the 1.28.2 struct shape. The job reads the manifest back before signing
+it and fails if any `assets[]` entry is not an `ainb-<version>-` archive or any
+`desktop` entry is not an `ainb-desktop-<version>-` bundle with a known
+format.
+
+The CLI release never waits on the desktop legs: a bundle leg that fails
+leaves its entries out of the `desktop` key, the release body names the
+missing bundles, and the CLI archives, the Fleet app and the tap publish as
+before. A pushed tag is never left without a release behind it. Two dispatches
+of one version share a concurrency group keyed on the version, so the second
+waits for the first.
+
+The desktop updater reads the `dmg` and `appimage` entries; it never replaces a
+package-managed install, so the `deb` entry is listed for completeness and
+checksums only.
 
 ### Signing and notarisation
 
