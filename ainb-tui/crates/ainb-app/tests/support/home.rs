@@ -40,8 +40,9 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
-use std::thread::ThreadId;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use ainb_app::env_lock::{ENV_LOCK, EnvGuard};
 
 /// One home directory for every test in this binary, taken once and never
 /// given back.
@@ -61,10 +62,12 @@ pub fn shared() -> &'static Path {
     // not `Send`, and it should not: this home is never given back. The lock is
     // held only while the environment is pointed at it, which is the moment a
     // test could see it half done.
+    assert!(!TOOK_SCOPED.load(Ordering::SeqCst), "{ONE_WAY}");
+    TOOK_SHARED.store(true, Ordering::SeqCst);
     static SHARED: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     SHARED
         .get_or_init(|| {
-            let _lock = HOME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let dir = tempfile::tempdir().expect("a temporary home directory");
             std::env::set_var("HOME", dir.path());
             std::env::set_var("AINB_HOME", dir.path());
@@ -73,13 +76,20 @@ pub fn shared() -> &'static Path {
         .path()
 }
 
-/// The lock every test that touches the environment takes, the crate's own and
-/// the only one in this process.
-use ainb_app::env_lock::ENV_LOCK as HOME;
+/// Which of the two ways to get a home this binary has used. A binary picks one:
+/// a `shared()` home stays pointed where it is for the rest of the run, while a
+/// `ScopedHome` points the environment somewhere else for as long as one test
+/// runs, and a test reading the shared home while another test holds a
+/// `ScopedHome` reads that test's home instead of the shared one.
+static TOOK_SHARED: AtomicBool = AtomicBool::new(false);
+static TOOK_SCOPED: AtomicBool = AtomicBool::new(false);
 
-/// The thread holding [`HOME`], so a second guard on the same thread says what
-/// happened instead of hanging on the lock forever.
-static HOLDER: Mutex<Option<ThreadId>> = Mutex::new(None);
+/// What to say when a binary asks for both.
+const ONE_WAY: &str = "this binary takes its home both ways: `shared()` leaves \
+     the environment pointed at one directory for the whole run, and \
+     `ScopedHome` points it somewhere else while one test runs, so a test \
+     reading the shared home can read another test's instead. Pick one for the \
+     binary";
 
 /// A home directory this test owns, and the environment it borrowed to say so.
 ///
@@ -89,7 +99,7 @@ static HOLDER: Mutex<Option<ThreadId>> = Mutex::new(None);
 pub struct ScopedHome {
     /// The lock, held for the guard's life. Named, not `_lock`, only because
     /// dropping it early would hand the home to another test mid-test.
-    lock: Option<MutexGuard<'static, ()>>,
+    lock: Option<EnvGuard>,
     /// Every variable this guard changed, oldest first, with what it held
     /// before. Restored in reverse.
     borrowed: Vec<(OsString, Option<OsString>)>,
@@ -100,24 +110,17 @@ impl ScopedHome {
     /// Take the home directory: block until no other test holds it, then point
     /// `HOME` and `AINB_HOME` at a fresh temporary directory.
     ///
-    /// Panics if the calling thread already holds one. Two guards on one thread
-    /// would deadlock, and a deadlock in a test suite reads as a hang with no
-    /// output at all.
+    /// Panics if this thread already holds the environment lock, whether through
+    /// a second guard or by taking the lock itself: the lock does not nest, and
+    /// [`ENV_LOCK`] says which take is the second one.
     pub fn new() -> Self {
-        let current = std::thread::current().id();
-        {
-            let holder = HOLDER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            assert!(
-                *holder != Some(current),
-                "this thread already holds the scoped home; one test takes it once"
-            );
-        }
+        assert!(!TOOK_SHARED.load(Ordering::SeqCst), "{ONE_WAY}");
+        TOOK_SCOPED.store(true, Ordering::SeqCst);
         // A test that panics while holding the home poisons the lock. The home
         // itself is fine: the guard's drop ran and put the environment back, so
         // the next test takes the lock as it stands rather than failing for a
         // panic that was already reported.
-        let lock = HOME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        *HOLDER.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(current);
+        let lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let dir = tempfile::tempdir().expect("a temporary home directory");
         let mut home = Self {
@@ -180,7 +183,6 @@ impl Drop for ScopedHome {
                 None => std::env::remove_var(&name),
             }
         }
-        *HOLDER.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         // The lock goes last: the environment is already back, so the next test
         // to take the home never sees this one's.
         drop(self.lock.take());
