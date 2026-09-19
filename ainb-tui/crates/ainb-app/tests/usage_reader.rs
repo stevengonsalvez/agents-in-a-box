@@ -172,4 +172,10 @@ async fn a_daemon_that_is_not_there_is_a_failure_not_a_state() {
         body["summary"].is_null(),
         "no zeros drawn for a missing daemon: {body}"
     );
+    // A dial error carries the absolute socket path, which is the log's, not
+    // the webview's: the frame says why in words that name no path.
+    assert_eq!(body["failure"], "daemon not reachable", "{body}");
+    let text = body.to_string();
+    let dir_text = dir.path().to_string_lossy().to_string();
+    assert!(!text.contains(&dir_text), "the socket path framed: {text}");
 }
