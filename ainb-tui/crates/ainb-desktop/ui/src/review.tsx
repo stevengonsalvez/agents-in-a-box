@@ -59,6 +59,15 @@ export function Review(props: Props) {
   onMount(() => {
     const measure = () => setRowsPerPage(Math.max(Math.floor((bodyElement?.clientHeight ?? 0) / ROW_PX), 1));
     measure();
+    // The body, not the window: a pane that grows because the sidebar
+    // collapsed or the banner cleared changes how many rows fit without the
+    // window ever being resized.
+    if (typeof ResizeObserver === "function" && bodyElement !== undefined) {
+      const observer = new ResizeObserver(measure);
+      observer.observe(bodyElement);
+      onCleanup(() => observer.disconnect());
+      return;
+    }
     window.addEventListener("resize", measure);
     onCleanup(() => window.removeEventListener("resize", measure));
   });
