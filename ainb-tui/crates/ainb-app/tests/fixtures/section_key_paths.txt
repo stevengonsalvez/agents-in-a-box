@@ -484,6 +484,7 @@ inbox.entries[].summary
 inbox.received_at_ms
 inbox.recipient
 inbox.rows_cut
+inbox.scroll
 inbox.summaries_cut
 inbox.unreachable
 inbox.unread

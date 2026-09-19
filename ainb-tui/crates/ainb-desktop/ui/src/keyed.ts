@@ -12,15 +12,28 @@ export interface KeyedList<T> {
   byKey: Map<string, T>;
 }
 
-/** Separates a repeated key from its count. No id the host sends carries it. */
-const REPEAT = String.fromCharCode(0);
+/**
+ * The key of the `count`th item (1-based) whose own key is `base`.
+ *
+ * `<count>:<base>`, which is one-to-one for every possible `base`: the digits
+ * before the first colon are the count and everything after it is the base, so
+ * two different (count, base) pairs cannot spell one key, whatever the host's
+ * ids carry, colons and control characters included.
+ *
+ * An earlier version suffixed a repeat with a NUL and relied on no id carrying
+ * one. Nothing enforced that, so a single id with a NUL in it would have
+ * silently made two rows share a key.
+ */
+function keyFor(count: number, base: string): string {
+  return `${count}:${base}`;
+}
 
 /**
  * `items` keyed by `keyOf`, keeping the order they came in.
  *
- * Two items that name the same key both stay: the second and later carry a
- * suffix, so a duplicate cannot drop a row from the list or make one row's
- * node draw another row's text.
+ * Two items that name the same key both stay, each with a key of its own, so a
+ * duplicate cannot drop a row from the list or make one row's node draw
+ * another row's text.
  */
 export function keyedList<T>(items: readonly T[], keyOf: (item: T) => string): KeyedList<T> {
   const keys: string[] = [];
@@ -30,7 +43,7 @@ export function keyedList<T>(items: readonly T[], keyOf: (item: T) => string): K
     const base = keyOf(item);
     const count = (seen.get(base) ?? 0) + 1;
     seen.set(base, count);
-    const key = count === 1 ? base : `${base}${REPEAT}${count}`;
+    const key = keyFor(count, base);
     keys.push(key);
     byKey.set(key, item);
   }

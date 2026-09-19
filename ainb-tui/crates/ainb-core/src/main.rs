@@ -204,6 +204,11 @@ async fn tokio_main() -> Result<()> {
                 Box::new(fleet::bridge::daemon::tui_client),
                 config::tunables::legacy_panel(),
             );
+            // Section 16 (D3-prime): read for the TUI's whole life, slowly
+            // while the inbox screen is closed (the legend's unread badge)
+            // and at the normal cadence while it is open.
+            let mut inbox_host =
+                ainb::inbox_host::InboxHost::new(Box::new(fleet::bridge::daemon::tui_client));
 
             // A plugin-disabled TUI is a diagnostic fallback with no Hangar
             // consumer. Do not leave a background daemon behind for it.
@@ -324,7 +329,14 @@ async fn tokio_main() -> Result<()> {
                 tracing::warn!("could not register as a headroom proxy user: {e}");
             }
 
-            let tui_result = run_tui(&mut app_state, &mut layout, &mut agent_status).await;
+            let tui_result = run_tui(
+                &mut app_state,
+                &mut layout,
+                &mut agent_status,
+                &mut inbox_host,
+            )
+            .await;
+            drop(inbox_host);
             drop(agent_status);
 
             // Explicitly tear down the plugin runtime before `app_state`
@@ -436,6 +448,7 @@ async fn run_tui(
     app: &mut App,
     layout: &mut LayoutComponent,
     agent_status: &mut ainb::agent_status_host::AgentStatusHost,
+    inbox_host: &mut ainb::inbox_host::InboxHost,
 ) -> Result<()> {
     // Check if we have a proper TTY
     if !IsTerminal::is_terminal(&io::stdout()) {
@@ -471,7 +484,7 @@ async fn run_tui(
     let mut terminal = Terminal::new(backend)?;
 
     // Ensure terminal cleanup happens even if there's an error
-    let result = run_tui_loop(app, layout, &mut terminal, agent_status).await;
+    let result = run_tui_loop(app, layout, &mut terminal, agent_status, inbox_host).await;
 
     // Always clean up terminal using unified cleanup
     if let Err(e) = cleanup_terminal_with_instance(&mut terminal) {
@@ -492,6 +505,7 @@ async fn run_tui_loop(
     layout: &mut LayoutComponent,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     agent_status: &mut ainb::agent_status_host::AgentStatusHost,
+    inbox_host: &mut ainb::inbox_host::InboxHost,
 ) -> Result<()> {
     // The ratatui host's own state: geometry, scroll offsets, hover and panel
     // widths. Lives here, beside the `LayoutComponent`, because
@@ -600,6 +614,12 @@ async fn run_tui_loop(
         // and its version is what a mirrored surface subscribes to.
         agent_status.drain_into(&mut app.state);
         agent_status.publish(&app.state, app.plugin_runtime());
+        // Section 16: read for the TUI's whole life, slowly while the inbox
+        // screen is closed and at the normal cadence while it is open; the
+        // legend's badge and the screen both draw from it, so a fold repaints.
+        if inbox_host.tick(&mut app.state) {
+            needs_redraw = true;
+        }
 
         // Drive plugin-owned screens before every paint. Pushes any
         // host-side state into each plugin and drains its painted

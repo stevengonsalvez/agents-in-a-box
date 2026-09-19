@@ -14,8 +14,8 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { click } from "../support.js";
-import { env, run, seeded } from "../world.js";
+import { appliedBatches, click, intentsSent, selectedNode } from "../support.js";
+import { run, seeded } from "../world.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -123,6 +123,22 @@ describe("reviewing from the window", () => {
 
     const rows = (await $$(".review-row")).length;
     const nodes = await browser.execute(() => document.querySelectorAll(".review *").length);
+    // What the window thinks its page is. The body's own box decides how many
+    // rows the window asks for, and a body that is not bounded by its grid row
+    // measures the content it just drew instead of the viewport, which is how
+    // a windowed body draws the whole diff again.
+    const measured = await browser.execute(() => {
+      const body = document.querySelector(".review-body");
+      const panes = document.querySelector(".review-panes");
+      return body === null
+        ? null
+        : {
+            bodyHeight: body.clientHeight,
+            bodyScrollHeight: body.scrollHeight,
+            panesHeight: panes === null ? null : panes.clientHeight,
+            drawnRows: body.querySelectorAll("[data-vrow]").length,
+          };
+    });
     const banners = await browser.execute(() =>
       [...document.querySelectorAll(".review-cut")].map((banner) => banner.textContent.trim()),
     );
@@ -161,7 +177,19 @@ describe("reviewing from the window", () => {
       timeoutMsg: "the review tab drew no rows the second time",
     });
     const remountMs = Date.now() - remountStarted;
+    // What the window was doing while that clock ran. A bounded DOM that still
+    // takes forty seconds is busy with something else, and the only view of it
+    // from out here is the batches the host says it applied.
+    const batches = appliedBatches();
+    const applied = { batches: batches.length, gitView: batches.filter((line) => line.includes("git_view")).length };
 
+    writeFileSync(
+      REPORT,
+      `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, ...measured, ...applied, drawnMs, remountMs }, null, 2)}\n`,
+    );
+    console.log(
+      `review at ${bytes} bytes: ${rows} rows, ${nodes} nodes, first render ${drawnMs} ms, redraw ${remountMs} ms, cut banner ${JSON.stringify(cut)}`,
+    );
     // The settings page, last, because it takes the pane over: it draws the
     // config section the window already subscribes to, and a click on a
     // category goes to the reducer and comes back in the frame, the same round
@@ -197,6 +225,7 @@ describe("reviewing from the window", () => {
     // grow with the diff. The redraw is the window alone, with the frame
     // already in the store; the first render also carries the reducer reading
     // the diff and the frame crossing the channel.
+    console.log(`review window: ${JSON.stringify(measured)}`);
     assert.ok(
       nodes < 2_000,
       `the review tab built ${nodes} nodes for ${rows} rows: a DOM that grows with the diff, not with the viewport`,
@@ -213,13 +242,6 @@ describe("reviewing from the window", () => {
       `the first render took ${drawnMs} ms; the window draws a page, so this is the reducer's read, not the DOM`,
     );
 
-    writeFileSync(
-      REPORT,
-      `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, drawnMs, remountMs }, null, 2)}\n`,
-    );
-    console.log(
-      `review at ${bytes} bytes: ${rows} rows, ${nodes} nodes, first render ${drawnMs} ms, redraw ${remountMs} ms, cut banner ${JSON.stringify(cut)}`,
-    );
   });
 });
 

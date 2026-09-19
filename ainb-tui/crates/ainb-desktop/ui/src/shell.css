@@ -235,6 +235,11 @@ body {
 .workarea {
   flex: 1;
   min-width: 0;
+  /* A flex item's default min-height is auto, which is its content: without
+     this the work area grows with whatever the tab draws, every box inside it
+     measures the content rather than the viewport, and a windowed list asks
+     for as many rows as it just drew (#1221). */
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -1257,4 +1262,98 @@ body {
   color: var(--muted);
   font-size: 11px;
   font-weight: normal;
+}
+
+/* The header's inbox button, with the daemon's unread count beside it. */
+.inbox-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inbox-unread {
+  min-width: 18px;
+  border-radius: 9px;
+  padding: 0 5px;
+  background: var(--gold);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* The inbox page: section 16, newest first, over the work area. */
+.inbox {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+}
+
+.inbox-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inbox-head h2 {
+  flex: 1;
+  margin: 0;
+  color: var(--gold);
+  font-size: 15px;
+}
+
+.inbox-status,
+.inbox-cut {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.inbox[data-state="absent"] .inbox-status,
+.inbox[data-state="unreachable"] .inbox-status {
+  border-color: var(--red);
+  color: var(--text);
+}
+
+.inbox-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.inbox-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--highlight);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.inbox-row.unread {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.inbox-row.unread .inbox-label::before {
+  content: "● ";
+  color: var(--green);
+}
+
+.inbox-summary {
+  overflow-wrap: anywhere;
+}
+
+.inbox-when {
+  color: var(--muted);
+  white-space: nowrap;
 }

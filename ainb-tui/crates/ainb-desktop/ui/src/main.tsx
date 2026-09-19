@@ -12,6 +12,7 @@ import {
   shellFleet,
   shellGitView,
   shellHangar,
+  shellInbox,
   shellSessions,
   shellUsage,
   SUBSCRIBED,
@@ -25,6 +26,8 @@ import { phaseOf, questionFor, type Refusal, sendInOrder } from "./answer.ts";
 import { newNotices, noticeKey } from "./notices.ts";
 import { terminal as updateDone, updateLine, type UpdatePhase } from "./update.ts";
 import { Board } from "./board.tsx";
+import { CLOSE_INBOX, OPEN_INBOX } from "./inbox.ts";
+import { Inbox } from "./inbox.tsx";
 import { Review } from "./review.tsx";
 import { boardColumns } from "./board.ts";
 import { Palette } from "./palette.tsx";
@@ -112,11 +115,11 @@ function Shell() {
   const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
   /**
    * Whether `which` holds the work area: the transcript card takes it first,
-   * and the settings page (the reducer on its Config screen) takes it over
-   * every pane.
+   * and the settings page and the inbox page (the reducer on its Config or
+   * Inbox screen) take it over every pane.
    */
   const showing = (which: "board" | "review" | "stats" | "terminal") =>
-    transcriptKey() === null && !settings() && pane() === which;
+    transcriptKey() === null && !settings() && !inboxOpen() && pane() === which;
   // The settings page: the config section as a form, the daemons panel and
   // the Setup panel (D3d). Whether it is open is the reducer's: the page shows
   // while `shell.current_screen` is the Config screen. Opening walks the
@@ -194,6 +197,16 @@ function Shell() {
   const closeSettings = () => {
     if (!settings()) return;
     void run(CLOSE_SETTINGS);
+  };
+  // The inbox page, the same way: open walks the reducer to its Inbox screen,
+  // where the sweep is active; close walks it back to the session list.
+  const openInbox = () => {
+    closeTranscript();
+    void run(OPEN_INBOX);
+  };
+  const closeInbox = () => {
+    if (!inboxOpen()) return;
+    void run(CLOSE_INBOX);
   };
   /** The shell confirms in its own dialog, runs the write, and toasts the outcome. */
   const setupWrite = (write: SetupWrite) =>
@@ -339,6 +352,10 @@ function Shell() {
   const hangar = () => shellHangar(store, host());
   /** The reducer is on its Config screen, which is the settings page. */
   const settings = createMemo(() => shell()?.current_screen === "config");
+  /** The reducer is on its Inbox screen, which is the inbox page (D3p-c). */
+  const inboxOpen = createMemo(() => shell()?.current_screen === "inbox");
+  const inbox = () => shellInbox(store, host());
+  const inboxUnread = createMemo(() => ROOT_SELECTORS.inboxUnread(store, host()));
   const ask = () => fleet()?.ask_state;
   const question = createMemo(() => questionFor(sessions()));
 
@@ -404,6 +421,18 @@ function Shell() {
             </span>
           </Show>
         </span>
+        <button
+          type="button"
+          class="inbox-button"
+          title="Inbox"
+          aria-pressed={inboxOpen()}
+          onClick={() => (inboxOpen() ? closeInbox() : openInbox())}
+        >
+          Inbox
+          <Show when={inboxUnread() > 0}>
+            <span class="inbox-unread">{inboxUnread()}</span>
+          </Show>
+        </button>
         <button
           type="button"
           class="settings"
@@ -557,6 +586,16 @@ function Shell() {
                 }}
               />
             )}
+          </Show>
+          <Show when={inboxOpen()}>
+            <Inbox
+              inbox={inbox()}
+              onChoose={dispatch}
+              onClose={() => {
+                closeInbox();
+                setPane("board");
+              }}
+            />
           </Show>
           <Show when={settings()}>
             <SettingsPage

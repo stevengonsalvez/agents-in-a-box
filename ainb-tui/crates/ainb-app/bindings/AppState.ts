@@ -2936,6 +2936,8 @@ export type InboxView_Serialize = {
 	summaries_cut: number,
 	/**  The local clock when the last read landed, epoch milliseconds. */
 	received_at_ms: number,
+	/**  The first row a screen draws, the reducer's bounded scroll. */
+	scroll: number,
 };
 
 /**  Which kind of text the active input prompt is collecting. */

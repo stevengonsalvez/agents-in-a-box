@@ -1,5 +1,8 @@
 // Helpers every desktop journey spec shares, so a spec does not grow its own
-// copy of how to click or how to type into the palette.
+// copy of how to click, how to type into the palette, or how to read back what
+// the host did with what the window sent.
+
+import { env, run } from "./world.js";
 
 /**
  * Click `selector`, re-finding it each try until it lands.
@@ -62,4 +65,63 @@ export async function setPaletteQuery(text, timeout = 30_000) {
     query.value = value;
     query.dispatchEvent(new Event("input", { bubbles: true }));
   }, text);
+}
+
+/**
+ * What the webview asked the host for and what became of it, from the
+ * desktop's own log, so a failure names the command that was refused rather
+ * than only the element that never appeared.
+ */
+export function intentsSent() {
+  try {
+    const lines = run("sh", [
+      "-c",
+      'cat "$1"/desktop.log* 2>/dev/null | grep "renderer intent"',
+      "log",
+      env().AINB_HANGAR_HOME,
+    ]);
+    return lines
+      .split("\n")
+      .filter(Boolean)
+      .map(
+        (line) =>
+          `${line.match(/command="?([^"\s]+)/)?.[1] ?? "unknown"}:${line.match(/outcome="?(\w+)/)?.[1] ?? "unknown"}`,
+      );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The settings category the frame says is selected, as the tree draws it.
+ *
+ * Read through the document rather than a `:has()` selector: this runner's
+ * WebKit is the one the bundle ships with, not the newest one.
+ */
+export async function selectedNode() {
+  return browser.execute(() => {
+    const current = document.querySelector('.settings-node button[aria-current="true"]');
+    return current === null ? null : current.closest(".settings-node").getAttribute("data-node");
+  });
+}
+
+/**
+ * Every batch the window applied, as the desktop logged it: one entry per
+ * `renderer applied` line, with the sections it carried.
+ *
+ * A window that looks slow with a bounded DOM is usually busy with frames, and
+ * this is the only view of that from outside the window.
+ */
+export function appliedBatches() {
+  try {
+    const lines = run("sh", [
+      "-c",
+      'cat "$1"/desktop.log* 2>/dev/null | grep "renderer applied"',
+      "log",
+      env().AINB_HANGAR_HOME,
+    ]);
+    return lines.split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
 }

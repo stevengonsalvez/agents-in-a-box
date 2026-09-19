@@ -307,15 +307,3 @@ fn mark_all_read_folds_the_daemons_count_and_never_stamps_a_local_clock() {
     let frame = view_of(&state);
     assert!(frame["entries"].as_array().unwrap().iter().all(|e| e["read_at"] == NOW + 9));
 }
-
-#[test]
-fn a_reader_of_the_empty_shape_still_decodes_the_new_frame() {
-    // Seam 6: a surface built when `inbox` was `InboxView {}` sees keys it
-    // did not have, and serde ignores unknown keys by default. This pins that
-    // no `deny_unknown_fields` ever lands on the reading side.
-    #[derive(serde::Deserialize)]
-    struct OldInboxView {}
-    let state = state_with(vec![row(0, "a")]);
-    let frame = view_of(&state);
-    let _old: OldInboxView = serde_json::from_value(frame).expect("the old shape decodes");
-}

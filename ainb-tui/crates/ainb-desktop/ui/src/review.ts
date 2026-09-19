@@ -133,6 +133,19 @@ export function bodyLines(section: GitViewView_Serialize | undefined): BodyLine[
 }
 
 /**
+ * The most rows the window will draw for one page, however tall the body
+ * measures.
+ *
+ * The page size comes from the body's own box, and a box that is not bounded
+ * by its grid row measures the content it just drew: the window then asks for
+ * more rows, draws them, measures larger again, and walks back to the whole
+ * diff one frame at a time. No viewport shows two hundred rows of a diff at
+ * twelve pixels a row, so a measurement over this is a broken layout, not a
+ * tall window, and the cap holds the DOM bounded while it is.
+ */
+export const MAX_PAGE_ROWS = 200;
+
+/**
  * Rows drawn beyond each edge of the viewport, so a wheel that moves a row or
  * two has something already in the DOM to show while the next frame is on its
  * way.

@@ -1,4 +1,5 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
+import { keyedList, sameKeys } from "./keyed.ts";
 import type { ConfigView_Serialize, HangarView_Serialize } from "../../../ainb-app/bindings/AppState";
 import type { SetupView, SetupWrite } from "../../bindings/Desktop.ts";
 import {
@@ -51,6 +52,17 @@ export function SettingsPage(props: Props) {
   const tree = createMemo(() => settingsTree(props.config));
   const rows = createMemo(() => settingsRows(props.config));
   const daemons = createMemo(() => daemonRows(props.hangar));
+  // Drawn by key, not by object identity (#1267). Each of these projections
+  // builds new objects whenever the frame behind it changes, and `For` keys by
+  // identity, so every node, row and daemon line was re-created under whatever
+  // the pointer or the keyboard focus was on. The keys are the node's id, the
+  // row's key and the daemon's kind, all stable across frames.
+  const treeList = createMemo(() => keyedList(tree(), (node) => node.id));
+  const treeKeys = createMemo(() => treeList().keys, [], { equals: sameKeys });
+  const rowList = createMemo(() => keyedList(rows(), (row) => row.key));
+  const rowKeys = createMemo(() => rowList().keys, [], { equals: sameKeys });
+  const daemonList = createMemo(() => keyedList(daemons(), (row) => row.kind));
+  const daemonKeys = createMemo(() => daemonList().keys, [], { equals: sameKeys });
   const hooks = createMemo(() => hookHealthLines(props.hangar));
   const collected = createMemo(() => daemonsCollectedAt(props.hangar));
   const [otel, setOtel] = createSignal({ otlp_endpoint: "", instance_id: "", api_token: "" });
@@ -78,30 +90,46 @@ export function SettingsPage(props: Props) {
       </header>
       <div class="settings-body">
         <nav class="settings-tree" aria-label="Categories">
-          <For each={tree()}>
-            {(node) => (
-              <div class="settings-node" style={{ "padding-left": `${node.depth * 14}px` }} data-node={node.id}>
-                <Show when={node.hasChildren} fallback={<span class="chevron-gap" />}>
+          <For each={treeKeys()}>
+            {(key) => {
+              const node = () => treeList().byKey.get(key);
+              return (
+                <div
+                  class="settings-node"
+                  style={{ "padding-left": `${(node()?.depth ?? 0) * 14}px` }}
+                  data-node={node()?.id}
+                >
+                  <Show when={node()?.hasChildren} fallback={<span class="chevron-gap" />}>
+                    <button
+                      type="button"
+                      class="chevron"
+                      aria-label={node()?.expanded ? `Collapse ${node()?.label}` : `Expand ${node()?.label}`}
+                      aria-expanded={node()?.expanded}
+                      // The node's own id, not the list key: a repeated id
+                      // draws under a disambiguated key the reducer does not
+                      // know, and the click would do nothing.
+                      onClick={() => {
+                        const current = node();
+                        if (current !== undefined) props.run(toggleNode(current.id));
+                      }}
+                    >
+                      {node()?.expanded ? "▾" : "▸"}
+                    </button>
+                  </Show>
                   <button
                     type="button"
-                    class="chevron"
-                    aria-label={node.expanded ? `Collapse ${node.label}` : `Expand ${node.label}`}
-                    aria-expanded={node.expanded}
-                    onClick={() => props.run(toggleNode(node.id))}
+                    classList={{ active: node()?.selected }}
+                    aria-current={node()?.selected ? "true" : undefined}
+                    onClick={() => {
+                      const current = node();
+                      if (current !== undefined) props.run([selectNode(current.id)]);
+                    }}
                   >
-                    {node.expanded ? "▾" : "▸"}
+                    {node()?.label}
                   </button>
-                </Show>
-                <button
-                  type="button"
-                  classList={{ active: node.selected }}
-                  aria-current={node.selected ? "true" : undefined}
-                  onClick={() => props.run([selectNode(node.id)])}
-                >
-                  {node.label}
-                </button>
-              </div>
-            )}
+                </div>
+              );
+            }}
           </For>
         </nav>
         <div class="settings-rows">
@@ -109,24 +137,33 @@ export function SettingsPage(props: Props) {
           <Show when={rows().length === 0}>
             <p class="empty">{props.config === undefined ? "No config frame yet" : "No settings here"}</p>
           </Show>
-          <For each={rows()}>
-            {(row) => (
-              <div
-                class="settings-row"
-                classList={{ dirty: row.dirty, readonly: row.readOnly, current: row.current }}
-                data-key={row.key}
-              >
-                <label>
-                  <span class="row-label">
-                    {row.label}: {row.value}
-                  </span>
-                  <Widget row={row} onInput={(input) => edit(row, input)} />
-                </label>
-                <Show when={row.description !== ""}>
-                  <p class="description">{row.description}</p>
+          <For each={rowKeys()}>
+            {(key) => {
+              // The row as the latest frame has it, read when it draws and
+              // again when its widget sends an edit.
+              const row = () => rowList().byKey.get(key);
+              return (
+                <Show when={row()}>
+                  {(current) => (
+                    <div
+                      class="settings-row"
+                      classList={{ dirty: current().dirty, readonly: current().readOnly, current: current().current }}
+                      data-key={current().key}
+                    >
+                      <label>
+                        <span class="row-label">
+                          {current().label}: {current().value}
+                        </span>
+                        <Widget row={current()} onInput={(input) => edit(current(), input)} />
+                      </label>
+                      <Show when={current().description !== ""}>
+                        <p class="description">{current().description}</p>
+                      </Show>
+                    </div>
+                  )}
                 </Show>
-              </div>
-            )}
+              );
+            }}
           </For>
         </div>
       </div>
@@ -139,16 +176,19 @@ export function SettingsPage(props: Props) {
             </tr>
           </thead>
           <tbody>
-            <For each={daemons()}>
-              {(row) => (
-                <tr data-daemon={row.kind} data-state={row.state} data-connected={row.connected}>
-                  <td>{row.kind}</td>
-                  <td>{row.state}</td>
-                  <td>{row.version}</td>
-                  <td>{row.errors}</td>
-                  <td>{row.reason}</td>
-                </tr>
-              )}
+            <For each={daemonKeys()}>
+              {(key) => {
+                const row = () => daemonList().byKey.get(key);
+                return (
+                  <tr data-daemon={row()?.kind} data-state={row()?.state} data-connected={row()?.connected}>
+                    <td>{row()?.kind}</td>
+                    <td>{row()?.state}</td>
+                    <td>{row()?.version}</td>
+                    <td>{row()?.errors}</td>
+                    <td>{row()?.reason}</td>
+                  </tr>
+                );
+              }}
             </For>
           </tbody>
         </table>

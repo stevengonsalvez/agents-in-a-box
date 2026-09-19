@@ -290,6 +290,10 @@ pub enum AppEvent {
     InboxMarkAllReadFinished {
         outcome: crate::fleet::inbox_write::MarkAllReadOutcome,
     },
+    /// Move the inbox screen's first row up one, bounded at the top.
+    InboxScrollUp,
+    /// Move the inbox screen's first row down one, bounded at the last row.
+    InboxScrollDown,
     /// Click the code review sidebar row `target`; nothing when it is gone.
     GitReviewSelectRow {
         target: crate::components::code_review::render::ReviewRowId,
@@ -586,8 +590,9 @@ pub enum AppEvent {
     SkillManagerSourceRemoveCancel,      // Esc — dismiss, remove nothing
     GoToRecovery,                        // Navigate to session recovery view
     GoToDaemons,                         // Navigate to the daemon runtime-health view
-    PanelBack,                           // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,                          // Navigate to the Hangar control plane (plugin screen)
+    GoToInbox,  // Navigate to the inbox screen over the inbox section (D3-prime)
+    PanelBack,  // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar, // Navigate to the Hangar control plane (plugin screen)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
     ConfigBack,            // Return to home screen (Esc)
@@ -4280,6 +4285,8 @@ impl EventHandler {
                 state.host.inbox_mark_in_flight = true;
                 state.emit(Effect::InboxMarkAllRead);
             }
+            AppEvent::InboxScrollUp => state.scroll_inbox_by(-1),
+            AppEvent::InboxScrollDown => state.scroll_inbox_by(1),
             AppEvent::InboxMarkAllReadFinished { outcome } => {
                 state.host.inbox_mark_in_flight = false;
                 if outcome.ok {
@@ -5731,6 +5738,16 @@ impl EventHandler {
                 // MCP, Headroom, Hangar and notifyd are rows in that same
                 // collect, so there is nothing else to arm.
                 state.hangar.daemons_state.arm();
+            }
+            AppEvent::GoToInbox => {
+                tracing::info!("Navigating to Inbox");
+                // A panel: Esc pops back to where it was opened from. The host
+                // reads the section for the TUI's whole life and only quickens
+                // its cadence while this screen is open, so nothing here reads.
+                if state.shell.current_screen != screen_ids::INBOX {
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
+                }
+                state.shell.current_screen = screen_ids::INBOX.to_string();
             }
             AppEvent::GoToHangar => {
                 tracing::info!("Navigating to Hangar");

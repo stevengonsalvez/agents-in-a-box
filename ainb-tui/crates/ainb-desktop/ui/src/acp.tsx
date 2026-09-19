@@ -63,7 +63,7 @@ export function AcpCard(props: Props) {
                   {(key) => {
                     const chunk = () => chunks().byKey.get(key);
                     return (
-                      <li class="acp-chunk" data-kind={chunk()?.kind} data-chunk={key}>
+                      <li class="acp-chunk" data-kind={chunk()?.kind} data-chunk={chunk()?.key}>
                         <span class="acp-kind">{chunk()?.label}</span>
                         <span class="acp-body">
                           {chunk()?.body}

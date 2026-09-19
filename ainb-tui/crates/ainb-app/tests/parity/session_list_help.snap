@@ -29,7 +29,7 @@
 │ feat-login │ ● Running│  p            Commit & push                                          │                       │
 └───────────────────────│                                                                      │───────────────────────┘
 ╭ ⌨ Session actions ────│Tools:                                                                │─────── Panels & views ╮
-│    new  attach  → Pane│  c            Toggle Claude chat                                     │tr                     │
+│    new  attach  → Pane│  c            Toggle Claude chat                                     │w witr                 │
 │            r resume  d│                                                                      │ t abtop               │
 │          o editor  $ s│Panels (closing returns here):                                        │pand                   │
 │             f refresh └──────────────────────────────────────────────────────────────────────┘  ?/H help  q home     │
