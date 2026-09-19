@@ -5,6 +5,9 @@
 // session name, and closes whatever the reducer stops naming. No PTY, and no
 // handle that only one process can redeem.
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -99,12 +102,7 @@ impl HeadlessHost {
 }
 
 fn isolated_home() {
-    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| {
-        let home = tempfile::tempdir().expect("scratch home");
-        std::env::set_var("HOME", home.path());
-        home
-    });
+    home::shared();
 }
 
 fn session_list_with(rows: &[&str]) -> AppState {
