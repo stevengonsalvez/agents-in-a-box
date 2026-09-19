@@ -531,6 +531,10 @@
     {"context":"session_list.ask","chord":"ctrl+u","action":"Ui(SessionAskClear)"},
     {"context":"session_recovery.filtered","chord":"esc","action":"App(SessionRecoverySearchCancel)"},
     {"context":"inbox","chord":"r","action":"App(InboxMarkAllRead)"},
+    {"context":"inbox","chord":"j","action":"App(InboxScrollDown)"},
+    {"context":"inbox","chord":"down","action":"App(InboxScrollDown)"},
+    {"context":"inbox","chord":"k","action":"App(InboxScrollUp)"},
+    {"context":"inbox","chord":"up","action":"App(InboxScrollUp)"},
     {"context":"inbox","chord":"esc","action":"App(PanelBack)"},
     {"context":"inbox","chord":"q","action":"App(PanelBack)"}
   ]
