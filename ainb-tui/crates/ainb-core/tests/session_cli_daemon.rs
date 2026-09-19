@@ -216,7 +216,9 @@ fn a_file_mutation_that_changes_nothing_does_not_rewrite_the_file() {
     assert!(SessionStore::load().sessions.is_empty());
 }
 
-/// No daemon at all: the file is the source and is read as-is.
+/// No daemon at all: the process is degraded, and the file is read as-is.
+/// P6e: a build that speaks the capability but reaches no daemon is
+/// `Degraded`, not `File`, so a long-lived process knows to keep trying.
 #[test]
 fn with_no_daemon_the_file_is_the_source() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -227,7 +229,7 @@ fn with_no_daemon_the_file_is_the_source() {
     let rt = rt();
     let missing = homes.hangar.join("hangar.sock");
     let source = rt.block_on(SessionSource::resolve_at(missing, "no-token".to_string()));
-    assert!(matches!(source, SessionSource::File), "{source:?}");
+    assert!(source.is_degraded(), "{source:?}");
 
     let store = rt.block_on(source.load()).expect("file load");
     assert_eq!(store.sessions.len(), 1);
@@ -235,7 +237,8 @@ fn with_no_daemon_the_file_is_the_source() {
 }
 
 /// A daemon that advertises the capability but has no import marker must not
-/// hide a populated file behind its empty table.
+/// hide a populated file behind its empty table: the process is degraded and
+/// reads the file.
 #[test]
 fn an_unimported_daemon_table_does_not_mask_the_file() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -247,21 +250,21 @@ fn an_unimported_daemon_table_does_not_mask_the_file() {
 
     let rt = rt();
     let source = rt.block_on(SessionSource::resolve_at(socket, token));
-    assert!(matches!(source, SessionSource::File), "{source:?}");
+    assert!(source.is_degraded(), "{source:?}");
     let store = rt.block_on(source.load()).expect("file load");
     assert!(store.sessions.contains_key("sess-file-1"));
     assert!(table(&hangar).is_empty());
 }
 
 /// Writes go through the real handlers into the table, reads come back from
-/// it with every field, and `sessions.json` is never rewritten.
+/// it with every field. P6e: each write also changes the session's row in
+/// `sessions.json` first, so the file tracks the table row by row.
 #[test]
 fn daemon_source_round_trips_through_the_real_handlers() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let homes = Homes::new();
     let hangar = homes.start_daemon();
     complete_import(&hangar, &homes);
-    let file_before = homes.file_bytes();
     let (socket, token) = homes.daemon_parts();
 
     let rt = rt();
@@ -271,6 +274,11 @@ fn daemon_source_round_trips_through_the_real_handlers() {
     let meta = make_session("sess-run-1", "run-ws");
     let id = meta.session_id;
     rt.block_on(source.mutate(|s| s.upsert(meta.clone()))).expect("daemon upsert");
+    assert_eq!(
+        SessionStore::load().sessions["sess-run-1"].session_id,
+        id,
+        "the write put its row in sessions.json too"
+    );
 
     let rows = table(&hangar);
     assert_eq!(rows.len(), 1);
@@ -289,11 +297,9 @@ fn daemon_source_round_trips_through_the_real_handlers() {
     rt.block_on(source.mutate(|s| s.remove_by_session_id(id)))
         .expect("daemon delete");
     assert!(table(&hangar).is_empty());
-
-    assert_eq!(
-        homes.file_bytes(),
-        file_before,
-        "a daemon-mode write must never touch sessions.json"
+    assert!(
+        SessionStore::load().sessions.is_empty(),
+        "the delete removed the file row too"
     );
 }
 
@@ -523,7 +529,7 @@ fn a_not_ready_list_after_resolve_is_an_error_not_an_empty_store() {
 }
 
 /// The daemon answers hello but fails the list used to decide the source.
-/// The process settles on the file before doing anything, once.
+/// The process settles, degraded, on the file before doing anything, once.
 #[test]
 fn hello_then_a_failed_list_settles_on_the_file() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -538,7 +544,7 @@ fn hello_then_a_failed_list_settles_on_the_file() {
         |_| serde_json::json!({ "error": { "code": -32603, "message": "boom" } }),
     );
     let source = rt.block_on(SessionSource::resolve_at(socket, "t".to_string()));
-    assert!(matches!(source, SessionSource::File), "{source:?}");
+    assert!(source.is_degraded(), "{source:?}");
     assert!(
         rt.block_on(source.load())
             .expect("file load")
@@ -590,9 +596,11 @@ fn a_non_uuid_row_is_skipped_not_reinvented() {
     assert!(rows.iter().any(|r| r == &legacy), "legacy row changed");
 }
 
-/// Downgrade: a file imported by the daemon, then edited through the daemon,
-/// still holds every session it had. A binary without the daemon path (here:
-/// the real `ainb list` with no daemon reachable) finds them.
+/// Downgrade (P6e criterion 7a, new writer, old reader): a file imported by
+/// the daemon, then edited through the daemon, carries the edit row by row.
+/// A binary without the daemon path (here: the real `ainb list` with no
+/// daemon reachable) lists the session the edit created and not the one it
+/// killed, and still finds the session it left alone.
 #[test]
 fn a_downgrade_still_finds_its_sessions_in_the_file() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -614,7 +622,7 @@ fn a_downgrade_still_finds_its_sessions_in_the_file() {
     .expect("daemon-mode edit");
     drop(hangar);
 
-    assert_eq!(homes.file_bytes(), Some(file_before));
+    assert_ne!(homes.file_bytes(), Some(file_before));
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ainb"))
         .args(["list", "--format", "json"])
@@ -629,10 +637,16 @@ fn a_downgrade_still_finds_its_sessions_in_the_file() {
         String::from_utf8_lossy(&out.stderr)
     );
     let listed = String::from_utf8_lossy(&out.stdout);
-    for id in [a.session_id, b.session_id] {
-        assert!(
-            listed.contains(&id.to_string()),
-            "{id} missing from:\n{listed}"
-        );
-    }
+    assert!(
+        listed.contains(&b.session_id.to_string()),
+        "the untouched session is missing from:\n{listed}"
+    );
+    assert!(
+        listed.contains("sess-c"),
+        "the session the daemon-mode edit created is missing from:\n{listed}"
+    );
+    assert!(
+        !listed.contains(&a.session_id.to_string()),
+        "the session the daemon-mode edit killed is still listed:\n{listed}"
+    );
 }
