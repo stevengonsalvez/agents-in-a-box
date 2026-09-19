@@ -113,7 +113,7 @@ fn a_write_during_the_boot_pass_waits_for_it_without_holding_the_lock() {
     }
 
     // Only now does the boot pass start. It needs the lock the write holds.
-    let (path, pool) = (sessions_path.clone(), hangar.pool().clone());
+    let (path, pool) = (sessions_path, hangar.pool().clone());
     hangar.block_on(async move {
         tokio::spawn(ainb_hangar_daemon::session_import::ReconcileWatch::new(&path).run(pool));
     });
