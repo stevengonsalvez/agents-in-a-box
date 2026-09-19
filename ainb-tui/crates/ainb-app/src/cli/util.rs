@@ -206,6 +206,9 @@ impl SessionSource {
 
     /// Apply `f` to the store and persist the difference.
     ///
+    /// On [`File`](Self::File) the store is loaded under the lock, `f` runs,
+    /// and the file is saved only if something changed.
+    ///
     /// On [`Daemon`](Self::Daemon) the store is read fresh, `f` runs, and only
     /// what changed is written: one delete per session id that disappeared,
     /// one upsert per session that is new or different. The `sessions.json`
@@ -220,7 +223,19 @@ impl SessionSource {
         F: FnOnce(&mut SessionStore),
     {
         let client = match self {
-            Self::File => return SessionStore::mutate(f),
+            Self::File => {
+                let _guard = SessionStore::lock()?;
+                let mut store = SessionStore::load();
+                let before = snapshot(&store);
+                f(&mut store);
+                // Save only on change, as v2's orphan cleanup did: a no-op
+                // never rewrites the file another writer may be reading.
+                return if snapshot(&store) == before {
+                    Ok(())
+                } else {
+                    store.save()
+                };
+            }
             Self::Daemon(client) => client,
         };
         let _guard = SessionStore::lock()?;
@@ -251,6 +266,11 @@ impl SessionSource {
         }
         Ok(())
     }
+}
+
+/// Every entry keyed by its map key, for change detection.
+fn snapshot(store: &SessionStore) -> std::collections::BTreeMap<String, WorkspaceSessionEntry> {
+    store.sessions.iter().map(|(k, m)| (k.clone(), metadata_to_entry(m))).collect()
 }
 
 fn entries_by_id(store: &SessionStore) -> HashMap<Uuid, WorkspaceSessionEntry> {
