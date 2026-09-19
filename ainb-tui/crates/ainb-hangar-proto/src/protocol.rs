@@ -172,6 +172,12 @@ pub const CAP_CONNECTIONS_TRANSIENT: &str = "hangar.connections.transient";
 /// presence in the hello reply is the only signal that the daemon has one.
 pub const CAP_HOST_IDENTITY: &str = "hangar.host_identity";
 /// Capability: durable sessions table behind RPC (spec P6d, #1166).
+///
+/// Defined but DARK: it is deliberately not in [`CAPABILITY_CATALOGUE`], so no
+/// daemon advertises it and every CLI reader and writer stays on
+/// `sessions.json`. The table, its RPCs and the boot import ship in P6d; P6e
+/// moves the TUI's readers and writers with the CLI and appends this constant
+/// to the catalogue (and to `capabilities.catalogue`) to turn it on.
 pub const CAP_WORKSPACE_SESSIONS: &str = "hangar.workspace.sessions";
 /// Capability: the converged attention inbox, list, subscribe, answer.
 pub const CAP_ATTENTION_INBOX: &str = "hangar.attention.inbox";
@@ -329,7 +335,6 @@ pub const CAPABILITY_CATALOGUE: &[&str] = &[
     CAP_CONNECTIONS_TRANSIENT,
     crate::fleet::FLEET_CAPABILITY_ROSTER_STATUS_READ,
     CAP_HOST_IDENTITY,
-    CAP_WORKSPACE_SESSIONS,
 ];
 
 /// Whether this build advertises `id`.
@@ -347,6 +352,14 @@ pub fn catalogue_strings() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P6d lands dark: the sessions capability is defined but no build
+    /// advertises it until P6e flips it on together with the TUI.
+    #[test]
+    fn the_workspace_sessions_capability_is_dark() {
+        assert!(!advertises(CAP_WORKSPACE_SESSIONS));
+        assert!(!catalogue_strings().iter().any(|c| c == CAP_WORKSPACE_SESSIONS));
+    }
 
     /// The catalogue is a SET: a duplicated string means one of the two
     /// spellings is dead and nobody can tell which.
