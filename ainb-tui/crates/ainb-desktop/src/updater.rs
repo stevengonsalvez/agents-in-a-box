@@ -7,27 +7,27 @@
 //!    ──version rule (stable | prerelease | off)──▶ desktop bundle for this target
 //!    ──Source::download──▶ sha256 of the FILE ──▶ extract ──▶ Info.plist check
 //!    ──install owner check ──▶ same filesystem ──▶ swap (previous kept)
-//!    ──relaunch ──▶ clear previous once the sidecar connects
+//!    ──relaunch; the previous stays as the one rollback slot until the next
+//!      applied update replaces it or the person removes it
 //! ```
 //!
 //! No path skips a step. The host and the key are constants; the test seams
-//! (`Updater::with_key`, a fake [`Source`]) exist in debug builds only, and
-//! the guard at the bottom refuses a release build that carries them.
+//! (`Updater::with_key`, a fake [`Source`]) exist under the `test-seams`
+//! feature only, which this crate's own dev-dependency turns on for its tests
+//! and nothing else does; the guard at the bottom refuses a release build
+//! that carries them.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ainb_app::cli::update::{
     DesktopBundle, RELEASE_DOWNLOAD_ROOT, ReleaseManifest, ReleaseState, UpdateAvailability,
-    current_target, verify_manifest,
+    current_target, release_host, verify_manifest,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-
-/// The release host every root points into. The prerelease channel forms its
-/// root from a tag on this host and nowhere else.
-const RELEASE_HOST: &str = "https://github.com/stevengonsalvez/agents-in-a-box";
 
 /// Which manifest the check reads. A local setting of the app, never a field
 /// of the manifest.
@@ -45,19 +45,24 @@ pub enum Channel {
 impl Channel {
     /// The root to fetch the manifest from, or `None` for `off`. A persisted
     /// `next_root` moves `stable` only; a prerelease tag is pinned to its
-    /// release page by construction.
-    #[must_use]
-    pub fn root(&self, persisted_next_root: Option<&str>) -> Option<String> {
-        match self {
+    /// release page on the CLI's one release host by construction.
+    ///
+    /// # Errors
+    ///
+    /// A prerelease tag that does not parse, so the check declines with the
+    /// reason rather than reading as `off`.
+    pub fn root(&self, persisted_next_root: Option<&str>) -> Result<Option<String>> {
+        Ok(match self {
             Self::Stable => Some(
                 persisted_next_root
                     .map_or_else(|| RELEASE_DOWNLOAD_ROOT.to_string(), str::to_string),
             ),
-            Self::Prerelease { tag } => validate_tag(tag)
-                .ok()
-                .map(|()| format!("{RELEASE_HOST}/releases/download/{tag}")),
+            Self::Prerelease { tag } => {
+                validate_tag(tag).with_context(|| format!("the prerelease tag `{tag}`"))?;
+                Some(format!("{}/releases/download/{tag}", release_host()))
+            }
             Self::Off => None,
-        }
+        })
     }
 
     const fn allows_prerelease(&self) -> bool {
@@ -110,14 +115,26 @@ const SETTINGS_FILE: &str = "desktop-updater.json";
 const STATE_FILE: &str = "desktop-update-state.json";
 
 impl Settings {
-    /// The settings in `home`, or the default when there are none or they
-    /// do not parse.
-    #[must_use]
-    pub fn load(home: &Path) -> Self {
-        std::fs::read(home.join(SETTINGS_FILE))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+    /// The settings in `home`, or the default when there is no file.
+    ///
+    /// # Errors
+    ///
+    /// A file that exists but cannot be read or does not parse. That is not
+    /// the default: a file set to `off` and then damaged must not start
+    /// fetching from `stable`, so the updater declines until it is fixed.
+    pub fn load(home: &Path) -> Result<Self> {
+        let path = home.join(SETTINGS_FILE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", path.display()));
+            }
+        };
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("{SETTINGS_FILE} in the hangar home does not parse"))
     }
 
     /// Write the settings atomically.
@@ -151,15 +168,22 @@ pub trait Source {
     /// The request failed.
     fn manifest(&self, root: &str) -> Result<(Vec<u8>, String)>;
 
-    /// Download `url` whole to `to`.
+    /// Download `url` to `to`, reporting (bytes so far, declared total) as
+    /// it lands.
     ///
     /// # Errors
     ///
     /// The request or the write failed.
-    fn download(&self, url: &str, to: &Path) -> Result<()>;
+    fn download(
+        &self,
+        url: &str,
+        to: &Path,
+        progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+    ) -> Result<()>;
 }
 
-/// The production source: the CLI's own HTTP client, run on a runtime of its
+/// The production source: the CLI's own HTTP client (https pinned, redirects
+/// kept on host, bodies capped, the bundle streamed), run on a runtime of its
 /// own so it can be called from a blocking thread.
 pub struct HttpSource;
 
@@ -168,8 +192,13 @@ impl Source for HttpSource {
         block_on(ainb_app::cli::update::fetch_manifest_bytes_at(root))
     }
 
-    fn download(&self, url: &str, to: &Path) -> Result<()> {
-        block_on(ainb_app::cli::update::download_to(url, to))
+    fn download(
+        &self,
+        url: &str,
+        to: &Path,
+        progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+    ) -> Result<()> {
+        block_on(ainb_app::cli::update::download_to(url, to, progress)).map(|_hash| ())
     }
 }
 
@@ -184,7 +213,7 @@ fn block_on<F: std::future::Future<Output = Result<T>>, T>(future: F) -> Result<
 /// How the manifest is verified: always the pinned key in a release build.
 enum Verify {
     Pinned,
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "test-seams")]
     Key(String),
 }
 
@@ -192,7 +221,7 @@ impl Verify {
     fn manifest(&self, bytes: &[u8], signature: &str) -> Result<ReleaseManifest> {
         match self {
             Self::Pinned => verify_manifest(bytes, signature),
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "test-seams")]
             Self::Key(key) => {
                 ainb_app::cli::update::verify_manifest_with_key(bytes, signature, key)
             }
@@ -220,28 +249,54 @@ pub enum Check {
     Declined { reason: String },
 }
 
+/// Where an apply stands, for the window to frame. The download reports as
+/// chunks land; the rest are one event each.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum Phase {
+    Checking,
+    Downloading { received: u64, total: Option<u64> },
+    Verifying,
+    Applying,
+    Installed { version: String },
+    Failed { reason: String },
+}
+
 /// The updater over one source, one key and one home.
 pub struct Updater {
     source: Arc<dyn Source + Send + Sync>,
     verify: Verify,
     settings: Settings,
+    /// Why the settings file could not be read, when it could not: every
+    /// check declines with it until the file is fixed.
+    settings_fault: Option<String>,
     home: PathBuf,
+    /// Set once an apply swapped a bundle in: the next apply is refused until
+    /// the restart, so one install is in flight at a time and the rollback
+    /// slot keeps the version that was running before it.
+    applied: AtomicBool,
 }
 
 impl Updater {
     /// The production updater: HTTP, the pinned key, the home's settings.
     #[must_use]
     pub fn new(home: PathBuf) -> Self {
+        let (settings, settings_fault) = match Settings::load(&home) {
+            Ok(settings) => (settings, None),
+            Err(error) => (Settings::default(), Some(format!("{error:#}"))),
+        };
         Self {
             source: Arc::new(HttpSource),
             verify: Verify::Pinned,
-            settings: Settings::load(&home),
+            settings,
+            settings_fault,
             home,
+            applied: AtomicBool::new(false),
         }
     }
 
-    /// The test seam: a fake source and a throwaway key. Debug builds only.
-    #[cfg(debug_assertions)]
+    /// The test seam: a fake source and a throwaway key. `test-seams` only.
+    #[cfg(feature = "test-seams")]
     #[must_use]
     pub fn with_key(
         source: Arc<dyn Source + Send + Sync>,
@@ -253,7 +308,9 @@ impl Updater {
             source,
             verify: Verify::Key(public_key_b64.to_string()),
             settings,
+            settings_fault: None,
             home,
+            applied: AtomicBool::new(false),
         }
     }
 
@@ -271,6 +328,7 @@ impl Updater {
     pub fn set_settings(&mut self, settings: Settings) -> Result<()> {
         settings.save(&self.home)?;
         self.settings = settings;
+        self.settings_fault = None;
         Ok(())
     }
 
@@ -280,15 +338,25 @@ impl Updater {
 
     /// Checks 1 to 3: fetch, verify with the key, apply the channel's version
     /// rule, find this target's bundle. A verified `next_root` is persisted
-    /// so the next check starts there.
+    /// so the next check starts there, and stays until another replaces it.
     pub fn check(&self, running_version: &str) -> Check {
-        let persisted = ReleaseState::load_from(&self.state_path()).ok();
-        let Some(root) =
-            self.settings.channel.root(persisted.as_ref().and_then(|s| s.root.as_deref()))
-        else {
-            return Check::Off;
+        if let Some(fault) = &self.settings_fault {
+            return Check::Declined {
+                reason: fault.clone(),
+            };
+        }
+        let persisted =
+            ReleaseState::load_from(&self.state_path()).ok().and_then(|state| state.root);
+        let root = match self.settings.channel.root(persisted.as_deref()) {
+            Ok(Some(root)) => root,
+            Ok(None) => return Check::Off,
+            Err(error) => {
+                return Check::Declined {
+                    reason: format!("{error:#}"),
+                };
+            }
         };
-        match self.check_at(&root, running_version) {
+        match self.check_at(&root, running_version, persisted) {
             Ok(check) => check,
             Err(error) => Check::Declined {
                 reason: format!("{error:#}"),
@@ -296,18 +364,28 @@ impl Updater {
         }
     }
 
-    fn check_at(&self, root: &str, running_version: &str) -> Result<Check> {
+    fn check_at(
+        &self,
+        root: &str,
+        running_version: &str,
+        persisted_root: Option<String>,
+    ) -> Result<Check> {
         let (bytes, signature) = self.source.manifest(root)?;
         let manifest = self
             .verify
             .manifest(&bytes, &signature)
             .context("the release manifest's signature did not verify")?;
-        let state = ReleaseState::from_manifest_with(
+        let mut state = ReleaseState::from_manifest_with(
             running_version,
             &manifest,
             now_ms(),
             self.settings.channel.allows_prerelease(),
         )?;
+        // A move sticks: a manifest that names no next_root keeps the root
+        // the last one moved the check to.
+        if state.root.is_none() {
+            state.root = persisted_root;
+        }
         state.save_to(&self.state_path()).ok();
         if state.availability != UpdateAvailability::Available {
             return Ok(Check::Current {
@@ -334,8 +412,9 @@ impl Updater {
         })
     }
 
-    /// Check 4: download the bundle's archive into `staging` and hash the
-    /// file. On any failure the staging directory is removed.
+    /// Check 4: download the bundle's archive into `staging` (a directory of
+    /// this user's alone) and hash the file. On any failure the staging
+    /// directory is removed.
     ///
     /// # Errors
     ///
@@ -346,16 +425,30 @@ impl Updater {
         root: &str,
         staging: &Path,
     ) -> Result<PathBuf> {
+        self.download_and_verify_with(bundle, root, staging, &mut |_| {})
+    }
+
+    /// [`Self::download_and_verify`] reporting its phases.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::download_and_verify`].
+    pub fn download_and_verify_with(
+        &self,
+        bundle: &DesktopBundle,
+        root: &str,
+        staging: &Path,
+        phase: &mut (dyn FnMut(Phase) + Send),
+    ) -> Result<PathBuf> {
         let result = (|| {
-            std::fs::create_dir_all(staging)?;
+            create_private_dir(staging)?;
             let file = staging.join(&bundle.archive);
             let url = format!("{}/{}", root.trim_end_matches('/'), bundle.archive);
-            self.source.download(&url, &file)?;
-            let bytes = std::fs::read(&file)?;
-            let actual = format!("{:x}", Sha256::digest(&bytes));
-            if !actual.eq_ignore_ascii_case(bundle.sha256.trim()) {
-                bail!("checksum mismatch for {}", bundle.archive);
-            }
+            self.source.download(&url, &file, &mut |received, total| {
+                phase(Phase::Downloading { received, total });
+            })?;
+            phase(Phase::Verifying);
+            verify_file_hash(&file, &bundle.sha256)?;
             Ok(file)
         })();
         if result.is_err() {
@@ -363,6 +456,33 @@ impl Updater {
         }
         result
     }
+}
+
+/// `dir`, created for this user alone (0700), so nothing else on the machine
+/// can swap the file between the hash and the mount.
+fn create_private_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// The sha256 of the FILE at `path` against `expected`, streamed.
+fn verify_file_hash(path: &Path, expected: &str) -> Result<()> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    let actual = format!("{:x}", hasher.finalize());
+    if !actual.eq_ignore_ascii_case(expected.trim()) {
+        bail!(
+            "checksum mismatch for {}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("the download")
+        );
+    }
+    Ok(())
 }
 
 impl Updater {
@@ -374,8 +494,24 @@ impl Updater {
     ///
     /// # Errors
     ///
-    /// Any check that failed, with the staging removed.
+    /// Any check that failed, with the staging removed; the channel is `off`;
+    /// an update is already installed and waiting for the restart.
     pub fn apply(&self, check: &Check, install: &Install) -> Result<PathBuf> {
+        self.apply_with(check, install, &mut |_| {})
+    }
+
+    /// [`Self::apply`] reporting its phases: downloading (as chunks land),
+    /// verifying, applying.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::apply`].
+    pub fn apply_with(
+        &self,
+        check: &Check,
+        install: &Install,
+        phase: &mut (dyn FnMut(Phase) + Send),
+    ) -> Result<PathBuf> {
         let Check::Available {
             version,
             bundle,
@@ -384,12 +520,22 @@ impl Updater {
         else {
             bail!("nothing to install: the last check found no update");
         };
+        if self.settings.channel == Channel::Off {
+            bail!("updates are off in this app's settings");
+        }
+        if self.applied.load(Ordering::SeqCst) {
+            bail!("an update is already installed; restart to use it");
+        }
         let next = next_path(install);
         let staging = next.with_extension("staging");
         let _ = std::fs::remove_dir_all(&staging);
         let _ = remove_path(&next);
         let result = (|| {
-            let archive = self.download_and_verify(bundle, root, &staging)?;
+            let archive = self.download_and_verify_with(bundle, root, &staging, phase)?;
+            phase(Phase::Applying);
+            // The file was hashed once it landed; it is hashed again right
+            // before it is opened, so the mount sees what was verified.
+            verify_file_hash(&archive, &bundle.sha256)?;
             match bundle.format.as_str() {
                 "dmg" => extract_dmg(&archive, &next)?,
                 "appimage" => {
@@ -412,6 +558,7 @@ impl Updater {
             return Err(error);
         }
         swap(install, &next)?;
+        self.applied.store(true, Ordering::SeqCst);
         Ok(install.current().to_path_buf())
     }
 }
@@ -646,7 +793,9 @@ pub fn rollback(install: &Install) -> Result<()> {
     Ok(())
 }
 
-/// Remove the previous copy, once the new one has proved itself.
+/// Remove the previous copy, the one rollback slot. Only the person does
+/// this, or the next applied update by replacing it; nothing clears it on
+/// its own.
 ///
 /// # Errors
 ///
@@ -682,8 +831,8 @@ pub fn repair_interrupted_swap(current: &Path) -> Result<bool> {
 }
 
 /// The startup half of the repair: when this process runs from a
-/// `<name>.previous` or `<name>.next` bundle (the only things left to launch
-/// after a crash between the swap's two renames), finish the move-in of
+/// `<name>.previous` or `<name>.next` (the only things left to launch after
+/// a crash between the swap's two renames), finish the move-in of
 /// `<name>.next` so the next launch is the new version. `Ok(true)` when
 /// something moved.
 ///
@@ -692,11 +841,35 @@ pub fn repair_interrupted_swap(current: &Path) -> Result<bool> {
 /// The rename failed.
 pub fn repair_at_startup() -> Result<bool> {
     let exe = std::env::current_exe().context("resolving the desktop executable")?;
-    let Some(parked) = exe.ancestors().find(|p| {
-        p.file_name()
+    let appimage = std::env::var_os("APPIMAGE").map(PathBuf::from);
+    repair_at_startup_from(&exe, appimage.as_deref())
+}
+
+/// [`repair_at_startup`] from what the process knows about itself: on Linux
+/// the AppImage runtime mounts the file and names it in `$APPIMAGE`, so the
+/// executable's own path is inside a mount and says nothing; on macOS the
+/// executable sits inside the bundle.
+///
+/// # Errors
+///
+/// The rename failed.
+pub fn repair_at_startup_from(exe: &Path, appimage: Option<&Path>) -> Result<bool> {
+    let parked = if let Some(appimage) = appimage {
+        appimage
+            .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.ends_with(".app.previous") || n.ends_with(".app.next"))
-    }) else {
+            .filter(|n| n.ends_with(".AppImage.previous") || n.ends_with(".AppImage.next"))
+            .map(|_| appimage.to_path_buf())
+    } else {
+        exe.ancestors()
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".app.previous") || n.ends_with(".app.next"))
+            })
+            .map(Path::to_path_buf)
+    };
+    let Some(parked) = parked else {
         return Ok(false);
     };
     let name = parked
@@ -741,8 +914,9 @@ fn strip_quarantine(path: &Path) -> Result<()> {
     // xattr exits non-zero when the attribute is absent; the state after is
     // what matters, checked below.
     let _ = status;
+    // Recursive: Gatekeeper reads the inner files too.
     let listed = std::process::Command::new("xattr")
-        .arg("-l")
+        .arg("-lr")
         .arg(path)
         .output()
         .context("listing attributes")?;
@@ -753,7 +927,8 @@ fn strip_quarantine(path: &Path) -> Result<()> {
 }
 
 // A release build carries no test seam of the updater: `Updater::with_key`
-// and the `Verify::Key` arm exist only under debug assertions, and this
-// refuses a release build that somehow has them.
-#[cfg(all(test, not(debug_assertions)))]
+// and the `Verify::Key` arm exist only under the `test-seams` feature, which
+// only this crate's own dev-dependency enables, and this refuses a release
+// build that somehow has it.
+#[cfg(all(feature = "test-seams", not(debug_assertions)))]
 compile_error!("the updater's test seams must never be built into a release binary");
