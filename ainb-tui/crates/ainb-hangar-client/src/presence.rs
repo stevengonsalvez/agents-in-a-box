@@ -49,7 +49,7 @@ const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(5);
 /// Live presence leases in this process. Non-zero marks every other daemon
 /// connection from this process as transient.
 static LEASES_HELD: AtomicUsize = AtomicUsize::new(0);
-/// Set once by [`mark_process_as_surface`] and never cleared.
+/// Set by [`mark_process_as_surface`], cleared only by [`reset_process_as_surface_for_test`].
 static PROCESS_IS_SURFACE: AtomicBool = AtomicBool::new(false);
 
 /// Declare that this whole process is one surface whose presence is a lease.
@@ -61,6 +61,15 @@ static PROCESS_IS_SURFACE: AtomicBool = AtomicBool::new(false);
 /// lease's own lifetime.
 pub fn mark_process_as_surface() {
     PROCESS_IS_SURFACE.store(true, Ordering::SeqCst);
+}
+
+/// Test-only reset for [`PROCESS_IS_SURFACE`].
+///
+/// Clears the process-level surface mark so subsequent tests in the same test
+/// binary do not inherit transient connection status.
+#[doc(hidden)]
+pub fn reset_process_as_surface_for_test() {
+    PROCESS_IS_SURFACE.store(false, Ordering::SeqCst);
 }
 
 /// Whether connections from this process must not list as their own rows.
