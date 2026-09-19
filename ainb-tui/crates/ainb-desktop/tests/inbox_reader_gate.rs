@@ -82,3 +82,29 @@ async fn dropping_the_inbox_subscription_stops_the_reads_and_clears_the_section(
     settle(&mut host, 30).await;
     assert_eq!(dials.load(Ordering::SeqCst), seen, "no read after the subscription went");
 }
+
+/// The window's `subscribe` is a synchronous command on the main thread, with
+/// no runtime of its own. A host built there must still start the reader,
+/// on the runtime it was handed; without one it says so on the section.
+#[test]
+fn outside_a_runtime_the_reader_starts_on_the_handle_the_host_was_given() {
+    let (dialer, dials) = counting_dialer();
+    let mut bare = host(&[SectionId::Sessions], dialer);
+    bare.subscribe(Subscription::only(&[SectionId::Inbox]));
+    assert!(!bare.inbox_reader_running(), "no runtime, no reader");
+    assert!(
+        bare.state().inbox.get().absent.as_deref().unwrap_or_default().contains("runtime"),
+        "the section says why nothing reads it"
+    );
+    assert_eq!(dials.load(Ordering::SeqCst), 0);
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (dialer, dials) = counting_dialer();
+    let mut given = host(&[SectionId::Sessions], dialer).on_runtime(runtime.handle().clone());
+    given.subscribe(Subscription::only(&[SectionId::Inbox]));
+    assert!(given.inbox_reader_running(), "the handed runtime starts the reader");
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = given.tick();
+    assert!(dials.load(Ordering::SeqCst) >= 1, "the reader dials on the handed runtime");
+    drop(given);
+}
