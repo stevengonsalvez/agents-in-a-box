@@ -3653,13 +3653,68 @@ mod tests {
         );
         assert_eq!(row.errors.len(), 1);
         assert!(row.is_attached);
-        assert_eq!(row.provider_session_id.as_deref(), Some("prov-1"));
+        assert_eq!(
+            row.provider_session_id.as_deref(),
+            Some("prov-1"),
+            "a scan that found no id falls back to the held one"
+        );
         assert_eq!(row.recent_logs.as_deref(), Some("agent tick 1"));
         assert_eq!(row.preview_content.as_deref(), Some("agent tick 1"));
         let new_row = &state.sessions.workspaces[0].sessions[1];
         assert!(
             new_row.live_attention.is_empty(),
             "a row the host never saw stays bare"
+        );
+    }
+
+    /// The provider id is the scan's to learn: `to_session_model` is its only
+    /// writer, so a scan that found one must land it, and a held value is
+    /// only the fallback for a scan that found none. Carrying the held value
+    /// over the scan's froze it, and an Approve chip on a row whose thread id
+    /// arrived later never got its broker route.
+    #[test]
+    fn a_scan_that_learned_a_provider_id_lands_it_over_the_held_one() {
+        use crate::app::state::WorkspaceLoadResult;
+        use crate::models::{Session, Workspace};
+
+        let mut state = AppState::new();
+        let mut held = Workspace::new("api".to_string(), "/repo/api".into());
+        let mut without = Session::new("feat".to_string(), "/repo/api/wt".to_string());
+        let without_id = without.id;
+        without.provider_session_id = None;
+        let mut stale = Session::new("spike".to_string(), "/repo/api/wt2".to_string());
+        let stale_id = stale.id;
+        stale.provider_session_id = Some("prov-old".to_string());
+        held.add_session(without);
+        held.add_session(stale);
+        state.sessions.workspaces = vec![held];
+        state.host.workspaces_applied = true;
+
+        let mut found = Workspace::new("api".to_string(), "/repo/api".into());
+        let mut learned = Session::new("feat".to_string(), "/repo/api/wt".to_string());
+        learned.id = without_id;
+        learned.provider_session_id = Some("prov-new".to_string());
+        let mut relearned = Session::new("spike".to_string(), "/repo/api/wt2".to_string());
+        relearned.id = stale_id;
+        relearned.provider_session_id = Some("prov-newer".to_string());
+        found.add_session(learned);
+        found.add_session(relearned);
+        // A third row the scan lists without an id keeps the one it had.
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(vec![found])).expect("send load result");
+        assert!(state.check_workspace_loading_complete());
+
+        assert_eq!(
+            state
+                .find_session(without_id)
+                .and_then(|row| row.provider_session_id.as_deref()),
+            Some("prov-new"),
+            "an id the scan learned lands"
+        );
+        assert_eq!(
+            state.find_session(stale_id).and_then(|row| row.provider_session_id.as_deref()),
+            Some("prov-newer"),
+            "and a newer one replaces the held one"
         );
     }
 
