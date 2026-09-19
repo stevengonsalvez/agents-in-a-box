@@ -174,7 +174,10 @@
       }
     },
     "plugin_render_errors": {
-      "witr": "plugin spawn failed: witr exited with status 127"
+      "witr": {
+        "cut": false,
+        "text": "plugin spawn failed: witr exited with status 127"
+      }
     }
   },
   "config": {
