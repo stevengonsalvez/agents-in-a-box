@@ -46,7 +46,7 @@
 · A plugin's `ui.state` does not ride a frame (`wire/mod.rs:612-616`). The stats tab and the fallback cell are drawn some other way, or the node writes an amendment that says how a plugin view crosses the wire safely and what proves it. No silent exception.
 · `ainb-app` owns no plugin runtime (`host_side_effects.rs`), and the desktop answers plugin effects undelivered (`executor.rs:29`). A plugin host in the desktop is a new process boundary with its own quarantine rules, not a module.
 · A row that writes outside ainb still runs only from its key (`keymap.rs:1574`). #1175 adds a path the webview cannot script; it does not relax the rule.
-· Locked decisions D10 to D18 stand. D14 keeps one status truth, so a stats tab reads what `agent_status` and Fleet already carry rather than a second projection.
+· Locked decisions D10 to D18 stand. D14 keeps one status truth, so nothing in this node adds a second projection of a status a section already carries. D18 binds any write this node sends: a mutation carries its envelope, with an op id and a fence, and a new write that ships without one is the debt this programme already recorded once against `AnswerParams.mutation` and does not repeat. D15 binds what a root selector returns: scalars, never lists or objects (multi-surface `:58`), so a review row list is read by the screen that draws it, not by a header count.
 · `ainb-tui/crates/ainb-core/src/app/*` is untouched, the standing lane rule.
 
 ─ THE SEAMS D3 HAS TO OPEN ─
@@ -69,10 +69,16 @@
 │   parity.rs + parity_snapshots │   │ expected-facts list              │
 └────────────────────────────────┘   └──────────────────────────────────┘
 ┌────────────────────────────────┐   ┌──────────────────────────────────┐
-│ 5 no plugin host on the desktop│──▶│ decide: fallback cell paints the │
-│   executor.rs:29               │   │ plugin's own cells, or no tab    │
+│ 5 git_view frames a whole diff │──▶│ bound it like the D2 conversation│
+│   twice, 4 MiB withholds all   │   │ row window + per-file cap        │
+└────────────────────────────────┘   └──────────────────────────────────┘
+┌────────────────────────────────┐   ┌──────────────────────────────────┐
+│ 6 nothing draws the oversize   │──▶│ the webview says a section was   │
+│   signal, frame.rs:169         │   │ withheld and why                 │
 └────────────────────────────────┘   └──────────────────────────────────┘
 ```
+
+The fifth seam is the one the review tab cannot skip. `diff_content` and the review rows are two copies of the same diff on one section, so the bound is a row window plus a per-file cap, the treatment the D2 amendment gave the conversation (`spec:214`): the reducer writes a bounded projection, each new field carries a scrubber or an allow-list reason, and what was cut says so rather than reading as a short diff. The sixth is its partner: `FrameBatch.oversize` exists and no renderer in this repository reads it, so a withheld section today is a screen that silently stops updating. D3b's webview draws it, on the review tab first, and the `ui/` test for it names the section and the reason.
 
 ─ SCOPE, STAGED AS PRs ─
 
@@ -206,7 +212,7 @@ File each as an issue with its evidence. Do not fix it in this node.
 · **How a plugin view reaches the desktop.** Recommended: the fallback cell paints the plugin's own cells, the way `PluginScreen` already blits them in the TUI (`ainb-core/src/app/screens/builtin.rs:422-462`), and the window acts on that screen through `plugin.owned.watch_screen` and `plugin.owned.action` (`ainb-app/src/app/plugin_action.rs:15-33`), so no plugin JSON rides a frame. Burndown makes the stats half easy to scope: it publishes no `ui.state` at all (`ainb-plugin-burndown/src/plugin.rs:339-350`) and lives off the session topics at `:153-165`, so a stats tab is a component over that data rather than a render of the plugin's paint. If the lane wants `ui.state` on the wire instead, that is an amendment carrying a proof that a plugin view can be shown free of secrets, not a field. Answer on D3·spec.
 · **Whether the review tab brings a text editor dependency.** Recommended: yes, one pinned editor for the merge view, because hand-rolling selection, folding and syntax in the webview is a larger surface than the dependency, and the hunks themselves still come from the reducer. Answer on D3b with the package, its version and its licence.
 · **What the DOM half of parity renders with.** Recommended: the existing node test runner over the same fixtures, rendering the Solid components headless and comparing the expected-facts list, rather than a second browser run, because the wdio journeys already cover the real window. Answer on D3a.
-· **Whether `git_view` is enough for the review tab, or the review model needs its own section.** Recommended: enough, because `GitViewView` frames the whole `GitViewState` today (`wire/mod.rs:544`) and `git_view.select_review_row` already carries the click (`pointer.rs:46`, `tests/review_commands.rs`). The risk to measure is size, not shape: a large diff's frame against `MAX_FRAME_BYTES`, and whether the review model needs the same bounded window the ACP transcript took. Answer on D3b with the measured bytes of a real diff.
+· **How `git_view` is bounded, not whether it is measured.** Decided, not open: the section is bounded in D3a. The shape is enough, because `GitViewView` frames the whole `GitViewState` (`wire/mod.rs:544`) and `git_view.select_review_row` already carries the click (`pointer.rs:46`, `tests/review_commands.rs`). The size is not: the diff rides the frame twice, as `diff_content` (`ainb-app/src/components/git_view.rs:21`) and again as `review.files[].hunks[].rows`, and a section over `MAX_FRAME_BYTES` (`wire/frame.rs:149`, 4 MiB) is withheld WHOLE into `FrameBatch.oversize` (`frame.rs:169`, `:398`), so one large diff blanks the file tree and the commit box with it. Answer on D3b with the measured bytes of a real repository's diff at the bound, and the count of how often it was hit.
 
 ─ FINAL DELIVERABLE ─
 
