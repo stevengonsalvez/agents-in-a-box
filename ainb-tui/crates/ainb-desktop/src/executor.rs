@@ -9,6 +9,7 @@
 
 use std::path::Path;
 use std::sync::mpsc;
+use std::thread;
 
 use ainb_app::Intent;
 use ainb_app::app::reports::{
@@ -39,6 +40,10 @@ pub struct DesktopExecutor {
     terminals: Option<Terminals>,
     deferred_tx: mpsc::Sender<Intent>,
     deferred_rx: mpsc::Receiver<Intent>,
+    /// The one worker that writes the session store, with its handle for the
+    /// join on drop. One thread, not one per write: the writes are a queue,
+    /// and two at once would race for the same `sessions.json` lock.
+    session_store_writer: Option<(mpsc::Sender<ainb_app::app::Persist>, thread::JoinHandle<()>)>,
 }
 
 impl DesktopExecutor {
@@ -52,7 +57,48 @@ impl DesktopExecutor {
             terminals: None,
             deferred_tx,
             deferred_rx,
+            session_store_writer: None,
         }
+    }
+
+    /// Hand one session-store write to the worker, starting it on first use
+    /// (P6e). A write can reach the hangar daemon and wait out its deadline,
+    /// and the tick must not: this returns as soon as the write is queued,
+    /// and a failure comes back through the deferred reports.
+    fn queue_session_store_write(&mut self, store: ainb_app::app::Persist) -> Vec<Intent> {
+        let store_id = store.store_id();
+        if self.session_store_writer.is_none() {
+            let (work_tx, work_rx) = mpsc::channel::<ainb_app::app::Persist>();
+            let reports_tx = self.deferred_tx.clone();
+            match thread::Builder::new().name("ainb-desktop-session-store-write".into()).spawn(
+                move || {
+                    // In order, one at a time, until the sender is dropped.
+                    for store in work_rx {
+                        if let Err(error) = ainb_app::config::persist::write(&store) {
+                            let _ =
+                                reports_tx.send(reports::persist_failed(store.store_id(), &error));
+                        }
+                    }
+                },
+            ) {
+                Ok(handle) => self.session_store_writer = Some((work_tx, handle)),
+                Err(error) => {
+                    return vec![reports::persist_failed(
+                        store_id,
+                        &format!("the worker did not start: {error}"),
+                    )];
+                }
+            }
+        }
+        if let Some((work_tx, _)) = self.session_store_writer.as_ref() {
+            if let Err(error) = work_tx.send(store) {
+                return vec![reports::persist_failed(
+                    store_id,
+                    &format!("the session store worker is gone: {error}"),
+                )];
+            }
+        }
+        Vec::new()
     }
 
     /// Open terminal tabs on `terminals` for the attaches they can hold.
@@ -72,6 +118,18 @@ impl DesktopExecutor {
     /// Reports from finished background work, oldest first.
     pub fn take_deferred(&mut self) -> Vec<Intent> {
         self.deferred_rx.try_iter().collect()
+    }
+}
+
+impl Drop for DesktopExecutor {
+    /// Wait for every queued session-store write to land. The shell drops the
+    /// executor as it closes, and a write still in flight would otherwise go
+    /// with it, taking the operator's last change.
+    fn drop(&mut self) {
+        if let Some((work_tx, handle)) = self.session_store_writer.take() {
+            drop(work_tx);
+            let _ = handle.join();
+        }
     }
 }
 
@@ -145,23 +203,8 @@ impl Executor for DesktopExecutor {
             // for its bounded wait. That must not be on the tick: it goes to
             // a worker and its failure comes back as a deferred report. Every
             // other store is a local file write and stays here.
-            Effect::Persist(store) if store.store_id() == "session_store" => {
-                let tx = self.deferred_tx.clone();
-                let store_id = store.store_id();
-                let spawned = std::thread::Builder::new()
-                    .name("ainb-desktop-session-store-write".into())
-                    .spawn(move || {
-                        if let Err(error) = ainb_app::config::persist::write(&store) {
-                            let _ = tx.send(reports::persist_failed(store_id, &error));
-                        }
-                    });
-                match spawned {
-                    Ok(_) => Vec::new(),
-                    Err(error) => vec![reports::persist_failed(
-                        store_id,
-                        &format!("the worker did not start: {error}"),
-                    )],
-                }
+            Effect::Persist(store @ ainb_app::app::Persist::SessionHeadroom { .. }) => {
+                self.queue_session_store_write(store)
             }
             Effect::Persist(store) => match ainb_app::config::persist::write(&store) {
                 Ok(()) => Vec::new(),
