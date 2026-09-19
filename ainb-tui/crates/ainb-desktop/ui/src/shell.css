@@ -938,6 +938,13 @@ body {
   color: var(--text);
 }
 
+/* This grid is a flex item, and WebKit 605 (the bundle's own) resolves a
+   `minmax(0, 1fr)` row against its content there rather than against the
+   flex line: measured in the running window, `.review` reports 8,090 px
+   inside a 762 px work area. Nothing here is clipped, because `.review`
+   hides its overflow, but a box inside it cannot be asked how tall the
+   viewport is; the review body takes its page size from the window instead
+   (`review.tsx`). */
 .review-panes {
   display: grid;
   grid-template-columns: minmax(180px, 280px) minmax(0, 1fr);
