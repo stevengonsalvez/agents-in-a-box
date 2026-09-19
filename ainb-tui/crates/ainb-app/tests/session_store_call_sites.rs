@@ -3,10 +3,10 @@
 //! `Degraded` paths reads or writes `sessions.json` whatever this process's
 //! session source is, which is the split brain P6e exists to remove.
 //!
-//! The committed list is what is still direct. It only shrinks: P6e-3 moved
-//! the readers, P6e-4 moves the writers. A new direct call fails here until it
-//! goes through `cli::util::{load,mutate}_session_store` instead, or is
-//! triaged onto the list with a reason.
+//! The committed list is empty since P6e-4 (P6e-3 moved the readers, P6e-4
+//! the writers). A new direct call fails here until it goes through
+//! `cli::util::{load,mutate}_session_store` instead, or is triaged onto the
+//! list with a reason.
 //!
 //! The scan is literal text, like `serialize_guard.rs`: it finds the calls
 //! spelled out on one line. `Self::load()` inside `impl SessionStore` is the
@@ -135,9 +135,9 @@ fn every_direct_session_store_call_is_triaged() {
         let mut out = String::from(
             "# Direct SessionStore::{load,lock,mutate} calls outside the resolver\n\
              # (ainb-app/src/cli/util.rs), locked by tests/session_store_call_sites.rs.\n\
-             # Every line left is a P6e-4 writer site that still takes the file lock\n\
-             # itself; P6e-4 moves each onto cli::util::mutate_session_store and this\n\
-             # list ends empty. Readers go through cli::util::load_session_store.\n\
+             # Empty since P6e-4: every read goes through cli::util::load_session_store\n\
+             # and every write through cli::util::mutate_session_store. A new line is a\n\
+             # regression unless it carries its reason here.\n\
              # Regenerate: UPDATE_SESSION_STORE_CALL_SITES=1 cargo test -p ainb-app --test session_store_call_sites\n",
         );
         for site in &current {
