@@ -113,15 +113,6 @@ pub enum ScreenFixture {
         #[serde(default)]
         filler: usize,
     },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InboxRowFixture {
-    pub kind: String,
-    pub summary: String,
-    #[serde(default)]
-    pub read: bool,
     /// Section 21 holding one `fleet/usage_summary` reply, as the daemon
     /// sends it, on the terminal's `analytics` screen (burndown's).
     Stats {
@@ -139,6 +130,16 @@ pub struct InboxRowFixture {
         #[serde(default)]
         render_error: Option<String>,
     },
+}
+
+/// One row of an `inbox` fixture.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboxRowFixture {
+    pub kind: String,
+    pub summary: String,
+    #[serde(default)]
+    pub read: bool,
 }
 
 /// A screen `PLUGIN_SCREENS` hands to a plugin.
