@@ -167,7 +167,11 @@ export function Review(props: Props) {
               when={drawn().length > 0}
               fallback={<p class="empty">Nothing to show for these changes</p>}
             >
-              <For each={drawn()}>
+              {/* The window is a page of a longer diff, so the rows carry their
+                  place in the whole of it: without the count and the index, a
+                  reader is told the diff is eighty rows long. */}
+              <div role="table" aria-rowcount={body().length} aria-label="Diff rows">
+                <For each={drawn()}>
                 {(line) =>
                   line.kind === "file" ? (
                     <p
@@ -175,6 +179,8 @@ export function Review(props: Props) {
                       classList={{ open: line.open }}
                       data-head={line.file.path}
                       data-vrow={line.index}
+                      role="row"
+                      aria-rowindex={line.index + 1}
                     >
                       <span class="review-path">{line.file.path}</span>
                       <span class="review-counts">
@@ -190,11 +196,17 @@ export function Review(props: Props) {
                       {line.header}
                     </p>
                   ) : line.kind === "expand" ? (
-                    <p class="review-expand" data-vrow={line.index}>
+                    <p class="review-expand" data-vrow={line.index} role="row" aria-rowindex={line.index + 1}>
                       <span class="review-hidden">{line.hidden} lines hidden</span>
                     </p>
                   ) : (
-                    <p class="review-row" data-kind={line.row.kind.toLowerCase()} data-vrow={line.index}>
+                    <p
+                      class="review-row"
+                      data-kind={line.row.kind.toLowerCase()}
+                      data-vrow={line.index}
+                      role="row"
+                      aria-rowindex={line.index + 1}
+                    >
                       <span class="review-lineno">{line.row.old_lineno ?? ""}</span>
                       <span class="review-lineno">{line.row.new_lineno ?? ""}</span>
                       <span class="review-text">
@@ -209,7 +221,8 @@ export function Review(props: Props) {
                     </p>
                   )
                 }
-              </For>
+                </For>
+              </div>
             </Show>
           </div>
         </div>
