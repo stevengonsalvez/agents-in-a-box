@@ -276,3 +276,72 @@ fn the_wheel_on_an_empty_commit_list_stays_at_the_start() {
         0
     );
 }
+
+fn select_commit(state: &mut AppState, sha: &str) {
+    let _ = dispatch(
+        state,
+        &Keymap::defaults(),
+        &mut NoRenderer,
+        pointer::select_commit(sha),
+    );
+}
+
+/// A click names the commit, and the reducer moves its selection to the commit
+/// with that hash wherever it sits in the list.
+#[test]
+fn a_click_selects_the_commit_its_hash_names() {
+    let mut state = on_commits(10);
+    let before = state.versions();
+    let commit = |state: &AppState| {
+        state.git_view.git_view_state.as_ref().expect("git view").selected_commit_index
+    };
+
+    select_commit(&mut state, "c0007");
+    assert_eq!(commit(&state), 7);
+    assert_eq!(bumped(&before, &state.versions()), vec![SectionId::GitView]);
+    let frame = ainb_app::wire::section_json(
+        &state,
+        SectionId::GitView,
+        &ainb_app::wire::frame::HostId::local(),
+    );
+    assert_eq!(
+        frame["git_view_state"]["selected_commit_index"], 7,
+        "the frame carries the selection a click made"
+    );
+
+    select_commit(&mut state, "c0000");
+    assert_eq!(commit(&state), 0, "and back up the list");
+}
+
+/// The hash is read against the list as it stands: a commit that is no longer
+/// in it selects nothing rather than whatever now sits at some index.
+#[test]
+fn a_click_on_a_commit_that_is_gone_selects_nothing() {
+    let mut state = on_commits(10);
+    select_commit(&mut state, "c0004");
+
+    select_commit(&mut state, "c9999");
+    assert_eq!(
+        state.git_view.git_view_state.as_ref().expect("git view").selected_commit_index,
+        4,
+        "the selection stays where the last live click put it"
+    );
+
+    select_commit(&mut state, "");
+    assert_eq!(
+        state.git_view.git_view_state.as_ref().expect("git view").selected_commit_index,
+        4,
+        "and an empty hash is refused before the reducer sees it"
+    );
+}
+
+/// An empty commit list has nothing to select.
+#[test]
+fn a_click_on_an_empty_commit_list_stays_at_the_start() {
+    let mut state = on_commits(0);
+    select_commit(&mut state, "c0000");
+    assert_eq!(
+        state.git_view.git_view_state.as_ref().expect("git view").selected_commit_index,
+        0
+    );
+}
