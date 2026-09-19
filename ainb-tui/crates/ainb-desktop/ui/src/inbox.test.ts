@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { InboxRowFrame_Serialize, InboxView_Serialize } from "../../../ainb-app/bindings/AppState";
-import { CLOSE_INBOX, inboxView, MARK_ALL_READ, OPEN_INBOX, unreadCount } from "./inbox.ts";
+import { age, CLOSE_INBOX, inboxView, MARK_ALL_READ, OPEN_INBOX, unreadCount } from "./inbox.ts";
 
 const row = (n: number, read: number | null = null): InboxRowFrame_Serialize => ({
   id: `01J0INBOX00000000000000000${n}`,
@@ -31,8 +31,28 @@ const view = (over: Partial<InboxView_Serialize> = {}): InboxView_Serialize => (
   ...over,
 });
 
+test("a row's age is the daemon's clock, in the terminal's words", () => {
+  // `ainb-core/src/components/inbox.rs` age(): the largest unit that is at
+  // least one, `now` for a stamp at or past the clock, `?` with no read yet.
+  const at = (created: number, now: number) => age(created, now);
+  assert.equal(at(1_000, 0), "?", "no read has landed");
+  assert.equal(at(5_000, 4_000), "now", "skew reads now, never a negative age");
+  assert.equal(at(4_000, 5_000), "1s");
+  assert.equal(at(0, 59_000), "59s");
+  assert.equal(at(0, 60_000), "1m");
+  assert.equal(at(0, 3_599_000), "59m");
+  assert.equal(at(0, 3_600_000), "1h");
+  assert.equal(at(0, 86_399_000), "23h");
+  assert.equal(at(0, 86_400_000), "1d");
+});
+
 test("the rows draw newest first as framed, each marked read or unread", () => {
   const drawn = inboxView(view());
+  // The frame's own clock, so both surfaces print the same text.
+  assert.deepEqual(
+    drawn.rows.map((entry) => entry.when),
+    [age(row(2).created_at, 1), age(row(1).created_at, 1)],
+  );
   assert.deepEqual(
     drawn.rows.map((entry) => [entry.id, entry.unread, entry.summary, entry.label]),
     [
