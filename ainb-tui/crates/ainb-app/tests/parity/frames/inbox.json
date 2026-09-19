@@ -1062,6 +1062,7 @@
     "received_at_ms": 1700000001000,
     "recipient": "member:me",
     "rows_cut": 1,
+    "scroll": 0,
     "summaries_cut": 1,
     "unreachable": null,
     "unread": 100
@@ -4174,5 +4175,10 @@
     "absent": null,
     "head_revision": 0,
     "view": null
+  },
+  "usage": {
+    "absent": null,
+    "failure": null,
+    "summary": null
   }
 }
