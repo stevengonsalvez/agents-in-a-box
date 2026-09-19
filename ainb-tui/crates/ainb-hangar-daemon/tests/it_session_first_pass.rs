@@ -5,10 +5,14 @@
 //!
 //! The home is seeded as a previous boot left it: import and reconcile
 //! markers present, and a table that no longer matches `sessions.json`. Then
-//! `sessions.json.lock` is held so the boot pass cannot run. A read in that
-//! window must not be served from that stale table.
+//! `sessions.json.lock` is held so the boot pass cannot run. No session RPC in
+//! that window may act on that stale table: the list answers not-ready, and a
+//! mutation is refused with `STORE_UNAVAILABLE`.
 
-use ainb_hangar_client::{DaemonClient, WorkspaceSessionListParams};
+use ainb_hangar_client::{
+    DaemonClient, DaemonError, WorkspaceSessionDeleteParams, WorkspaceSessionListParams,
+    WorkspaceSessionUpsertParams,
+};
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::sessions::{SessionRow, SessionsRepo};
 use std::path::Path;
@@ -17,6 +21,13 @@ use std::time::{Duration, Instant};
 
 const KEPT: &str = "00000000-0000-0000-0000-00000000f001";
 const NEW: &str = "00000000-0000-0000-0000-00000000f002";
+
+/// The socket and `auth/hello` must answer well inside the 2 s flock bound
+/// the boot pass is stuck on, so a boot that waited on the pass fails here.
+/// Measured on the dev box: about 0.35 s from spawn for a debug build. The
+/// headroom is for a loaded CI runner; waiting on the pass costs at least
+/// the whole 2 s.
+const OPENS_WITHIN: Duration = Duration::from_millis(1500);
 
 /// The daemon child, killed by its own pid when the test ends.
 struct Daemon(Child);
@@ -69,8 +80,47 @@ fn ids(sessions: &[ainb_hangar_client::WorkspaceSessionEntry]) -> Vec<&str> {
     ids
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_read_during_a_held_lock_is_not_served_from_the_table() {
+fn entry(id: &str, tmux: &str) -> ainb_hangar_client::WorkspaceSessionEntry {
+    let r = row(id, tmux);
+    ainb_hangar_client::WorkspaceSessionEntry {
+        session_id: r.session_id,
+        tmux_session_name: r.tmux_session_name,
+        worktree_path: r.worktree_path,
+        workspace_name: r.workspace_name,
+        created_at: r.created_at,
+        agent_type: r.agent_type,
+        headroom_enabled: r.headroom_enabled,
+        rtk_enabled: r.rtk_enabled,
+        skip_permissions: r.skip_permissions,
+        model: r.model,
+        model_source: r.model_source,
+        codex_model: r.codex_model,
+        codex_thread_id: r.codex_thread_id,
+    }
+}
+
+/// What one session RPC answered while the first pass was held.
+#[derive(Debug, PartialEq, Eq)]
+enum Held {
+    /// The list's not-ready shape: no rows, `import_complete: false`.
+    ListNotReady,
+    /// A mutation refused with `STORE_UNAVAILABLE`.
+    StoreUnavailable,
+    /// Anything else, which means the RPC acted on the stale table.
+    Served(String),
+}
+
+fn refused<T: std::fmt::Debug>(answer: Result<T, DaemonError>) -> Held {
+    match answer {
+        Err(DaemonError::Rpc { code, .. }) if code == ainb_hangar_proto::STORE_UNAVAILABLE => {
+            Held::StoreUnavailable
+        }
+        other => Held::Served(format!("{other:?}")),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_session_rpc_touches_the_table_before_the_first_pass() {
     let home = tempfile::tempdir().unwrap();
     let hangar = home.path().join(".agents-in-a-box");
     std::fs::create_dir_all(hangar.join("config")).unwrap();
@@ -105,43 +155,65 @@ async fn a_read_during_a_held_lock_is_not_served_from_the_table() {
             .expect("spawn ainb-hangar-daemon"),
     );
 
+    // The socket opens and `auth/hello` completes at once, while the lock
+    // is still held: `connections_list` is not a session RPC, so it is not
+    // gated, and every call dials and says hello first.
     let socket = ainb_hangar_client::socket_path_in(&hangar);
     let token_file = ainb_hangar_proto::auth::token_file_in(&hangar);
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !(socket.exists() && token_file.exists()) {
+    let client = loop {
+        if socket.exists() && token_file.exists() {
+            let token = std::fs::read_to_string(&token_file).unwrap().trim().to_string();
+            let client = DaemonClient::with_parts(socket.clone(), token);
+            if client.connections_list().await.is_ok() {
+                break client;
+            }
+        }
         assert!(
-            Instant::now() < deadline,
-            "the daemon never opened its socket"
+            spawned.elapsed() < OPENS_WITHIN,
+            "connect and hello waited on the held lock: not done after {:?}",
+            spawned.elapsed()
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    // The boot pass is stuck on the lock this test holds. Every session RPC
+    // waits for it, bounded, then refuses rather than act on the stale
+    // table. One row per method.
+    let asked = Instant::now();
+    let (list, upsert, delete) = tokio::join!(
+        client.workspace_session_list(WorkspaceSessionListParams::default()),
+        client.workspace_session_upsert(WorkspaceSessionUpsertParams {
+            session: entry(NEW, "ainb-new"),
+        }),
+        client.workspace_session_delete(WorkspaceSessionDeleteParams {
+            session_id: Some(KEPT.to_string()),
+            tmux_session_name: None,
+        }),
+    );
+    let waited = asked.elapsed();
+    let list = match list {
+        Ok(answer) if !answer.import_complete && answer.sessions.is_empty() => Held::ListNotReady,
+        other => Held::Served(format!("{other:?}")),
+    };
+    let held = [
+        ("workspace/session_list", list, Held::ListNotReady),
+        (
+            "workspace/session_upsert",
+            refused(upsert),
+            Held::StoreUnavailable,
+        ),
+        (
+            "workspace/session_delete",
+            refused(delete),
+            Held::StoreUnavailable,
+        ),
+    ];
+    for (method, got, want) in held {
+        assert_eq!(got, want, "{method} before the first pass");
     }
     assert!(
-        spawned.elapsed() < Duration::from_secs(10),
-        "the socket waited on the held lock: {:?}",
-        spawned.elapsed()
-    );
-    let token = std::fs::read_to_string(&token_file).unwrap().trim().to_string();
-    let client = DaemonClient::with_parts(socket, token);
-
-    // The boot pass is stuck on the lock this test holds. The read waits for
-    // it, then says not-ready instead of serving the stale table.
-    let asked = Instant::now();
-    let early = client
-        .workspace_session_list(WorkspaceSessionListParams::default())
-        .await
-        .expect("session_list answers while the pass is stuck");
-    let waited = asked.elapsed();
-    assert!(
-        !early.import_complete,
-        "served as authoritative before the first pass"
-    );
-    assert!(
-        early.sessions.is_empty(),
-        "served table rows before the first pass: {early:?}"
-    );
-    assert!(
         waited < Duration::from_secs(5),
-        "the read was not bounded: {waited:?}"
+        "the wait was not bounded: {waited:?}"
     );
 
     // With the lock free, a pass commits and reads are served, NEW included.
@@ -155,5 +227,9 @@ async fn a_read_during_a_held_lock_is_not_served_from_the_table() {
         .await
         .unwrap();
     assert!(ready.import_complete);
-    assert_eq!(ids(&ready.sessions), vec![KEPT, NEW]);
+    assert_eq!(
+        ids(&ready.sessions),
+        vec![KEPT, NEW],
+        "the refused delete removed nothing and the pass inserted NEW"
+    );
 }
