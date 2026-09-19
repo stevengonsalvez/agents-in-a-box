@@ -486,6 +486,11 @@ async fn run_tui(
     // Ensure terminal cleanup happens even if there's an error
     let result = run_tui_loop(app, layout, &mut terminal, agent_status, inbox_host).await;
 
+    // P6e: a queued session-store write outlives the loop, so it is waited
+    // for before the process goes. Quitting mid-write would drop the
+    // operator's last change.
+    ainb::effect_host::finish_session_store_writes();
+
     // Always clean up terminal using unified cleanup
     if let Err(e) = cleanup_terminal_with_instance(&mut terminal) {
         tracing::error!("Failed to cleanup terminal: {}", e);

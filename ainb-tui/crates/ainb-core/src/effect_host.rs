@@ -72,6 +72,15 @@ pub fn execute<'t>(
             spawn_inbox_mark_all_read();
             Work::Done(Vec::new())
         }
+        // P6e: the session store is the one store a write can reach the
+        // hangar daemon for, and a daemon that is not ready holds a write for
+        // its bounded wait. That must not be on the tick: it goes to a worker
+        // and its failure comes back as a deferred report. Every other store
+        // is a local file write and stays here.
+        Effect::Persist(store @ ainb_app::app::Persist::SessionHeadroom { .. }) => {
+            queue_session_store_write(store);
+            Work::Done(Vec::new())
+        }
         Effect::Persist(store) => Work::Done(match crate::config::persist::write(&store) {
             Ok(()) => Vec::new(),
             Err(error) => vec![reports::persist_failed(store.store_id(), &error)],
@@ -232,6 +241,71 @@ fn spawn_inbox_mark_all_read() {
             after: None,
         };
         let _ = tx.send(reports::inbox_mark_all_read_finished(&outcome));
+    }
+}
+
+/// The one worker that writes the session store, and its handle for the join
+/// on exit. One thread, not one per write: the writes are a queue, and two of
+/// them running at once would race for the same `sessions.json` lock and land
+/// out of order.
+static SESSION_STORE_WRITER: std::sync::Mutex<
+    Option<(
+        std::sync::mpsc::Sender<ainb_app::app::Persist>,
+        std::thread::JoinHandle<()>,
+    )>,
+> = std::sync::Mutex::new(None);
+
+/// Hand one session-store write to the worker, starting it on first use
+/// (P6e). A write can reach the hangar daemon and wait out its deadline, and
+/// the tick must not: this returns as soon as the write is queued, and a
+/// failure comes back through the deferred reports.
+fn queue_session_store_write(store: ainb_app::app::Persist) {
+    let tx = deferred().0.clone();
+    let store_id = store.store_id();
+    let mut writer = SESSION_STORE_WRITER.lock().unwrap_or_else(|p| p.into_inner());
+    if writer.is_none() {
+        let (work_tx, work_rx) = std::sync::mpsc::channel::<ainb_app::app::Persist>();
+        let reports_tx = tx.clone();
+        match std::thread::Builder::new()
+            .name("ainb-session-store-write".into())
+            .spawn(move || {
+                // In order, one at a time, until the sender is dropped on exit.
+                for store in work_rx {
+                    if let Err(error) = crate::config::persist::write(&store) {
+                        let _ = reports_tx.send(reports::persist_failed(store.store_id(), &error));
+                    }
+                }
+            }) {
+            Ok(handle) => *writer = Some((work_tx, handle)),
+            Err(error) => {
+                let _ = tx.send(reports::persist_failed(
+                    store_id,
+                    &format!("the worker did not start: {error}"),
+                ));
+                return;
+            }
+        }
+    }
+    if let Some((work_tx, _)) = writer.as_ref() {
+        if let Err(error) = work_tx.send(store) {
+            let _ = tx.send(reports::persist_failed(
+                store_id,
+                &format!("the session store worker is gone: {error}"),
+            ));
+        }
+    }
+}
+
+/// Wait for every queued session-store write to land, then let the worker go.
+///
+/// The host calls this as it tears the terminal down: a quit while a write is
+/// in flight would otherwise drop it, and the operator's last change with it.
+/// Safe to call when no write ever ran.
+pub fn finish_session_store_writes() {
+    let taken = SESSION_STORE_WRITER.lock().unwrap_or_else(|p| p.into_inner()).take();
+    if let Some((work_tx, handle)) = taken {
+        drop(work_tx);
+        let _ = handle.join();
     }
 }
 
