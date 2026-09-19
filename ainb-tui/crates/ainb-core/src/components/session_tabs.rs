@@ -53,17 +53,22 @@ pub fn strip(state: &AppState, active: SessionTab) -> Line<'static> {
     Line::from(strip_spans(state, active).into_iter().map(|(_, span)| span).collect::<Vec<_>>())
 }
 
-/// Where each label of [`strip`] lands on screen when the strip is drawn as a
-/// title starting at `title_area`'s first cell, clipped to its width.
+/// Where each label of [`strip`] lands on screen when the strip painted with
+/// `active` is drawn as a title starting at `title_area`'s first cell, clipped
+/// to its width.
 ///
 /// Walked from the same spans `strip` renders, so a click and the label under
 /// it cannot disagree. Only label cells hit: the padding and the `│`
 /// separators name no tab.
 #[must_use]
-pub fn strip_hits(state: &AppState, title_area: Rect) -> Vec<(SessionTab, Rect)> {
+pub fn strip_hits(
+    state: &AppState,
+    active: SessionTab,
+    title_area: Rect,
+) -> Vec<(SessionTab, Rect)> {
     let mut hits = Vec::new();
     let mut offset: u16 = 0;
-    for (tab, span) in strip_spans(state, state.shell.session_tab) {
+    for (tab, span) in strip_spans(state, active) {
         let width = u16::try_from(span.width()).unwrap_or(u16::MAX);
         if let Some(tab) = tab.filter(|_| offset < title_area.width) {
             hits.push((
@@ -1732,7 +1737,7 @@ mod tests {
         //   " preview │ ask │ err │ thread │ pal │ log "
         // so `preview` covers 41..=47, `pal` 72..=74 and `log` 78..=80.
         let state = state_with(Vec::new(), true);
-        let hits = strip_hits(&state, Rect::new(40, 3, 100, 1));
+        let hits = strip_hits(&state, SessionTab::Preview, Rect::new(40, 3, 100, 1));
         assert_eq!(hits.len(), ALL_TABS.len());
 
         for (x, tab) in [
@@ -1764,7 +1769,7 @@ mod tests {
     fn a_strip_clipped_by_a_narrow_pane_hits_only_what_is_drawn() {
         let state = state_with(Vec::new(), true);
         // Twenty cells: " preview │ ask │ err" and nothing after.
-        let hits = strip_hits(&state, Rect::new(40, 3, 20, 1));
+        let hits = strip_hits(&state, SessionTab::Preview, Rect::new(40, 3, 20, 1));
         assert_eq!(
             hits.iter().map(|(tab, _)| *tab).collect::<Vec<_>>(),
             vec![SessionTab::Preview, SessionTab::Ask, SessionTab::Err],
