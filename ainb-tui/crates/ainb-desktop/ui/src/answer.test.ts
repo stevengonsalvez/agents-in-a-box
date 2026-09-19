@@ -169,7 +169,7 @@ test("the four phases read from the reducer's own record for the request on scre
   );
 });
 
-test("picking option two sends one pick naming it by label, wherever the cursor is", () => {
+test("picking option two sends one pick naming its index and label, wherever the cursor is", () => {
   // No cursor move and no Enter: a frame landing between two intents could
   // reorder the options under a counted cursor (#1191). The reducer resolves
   // the label against the options it holds when the pick runs.
@@ -181,7 +181,7 @@ test("picking option two sends one pick naming it by label, wherever the cursor 
   assert.deepEqual(pickIntents(question, ask(), 3), [], "an index off the list picks nothing");
 });
 
-test("a pick sends the label as the frame carried it, not as the banner trims it", () => {
+test("a pick sends its label as the frame carried it, not as the banner trims it, beside the index", () => {
   const long = "x".repeat(120);
   const question = questionFor(sessions(mark({ options: [{ label: long, description: "" }] })))!;
   const intents = pickIntents(question, ask(), 0);
