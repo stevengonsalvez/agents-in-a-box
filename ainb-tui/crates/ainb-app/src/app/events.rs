@@ -575,9 +575,9 @@ pub enum AppEvent {
     SkillManagerSourceRemoveCancel,      // Esc — dismiss, remove nothing
     GoToRecovery,                        // Navigate to session recovery view
     GoToDaemons,                         // Navigate to the daemon runtime-health view
-    GoToInbox,                           // Navigate to the inbox screen over the inbox section (D3-prime)
-    PanelBack,                           // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,                          // Navigate to the Hangar control plane (plugin screen)
+    GoToInbox,  // Navigate to the inbox screen over the inbox section (D3-prime)
+    PanelBack,  // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar, // Navigate to the Hangar control plane (plugin screen)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
     ConfigBack,             // Return to home screen (Esc)
