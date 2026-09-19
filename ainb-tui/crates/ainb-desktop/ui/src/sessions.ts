@@ -69,6 +69,15 @@ export function allSessions(view: SessionsView_Serialize | undefined): Session_S
 }
 
 /**
+ * The rows the sidebar draws for `workspace`: exactly the frame's, in frame
+ * order. The frame already carries only the rows the reducer's filter shows
+ * (#1180), so the window never filters them again, by status or otherwise.
+ */
+export function drawnRows(workspace: Workspace_Serialize): Session_Serialize[] {
+  return workspace.sessions;
+}
+
+/**
  * Whether `sessionId` is the session list's selected row.
  *
  * The frame carries only the rows the filter shows, and the selection by id
