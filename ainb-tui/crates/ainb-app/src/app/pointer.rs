@@ -49,8 +49,11 @@ pub mod ids {
     pub const GIT_VIEW_SELECT_REVIEW_ROW: &str = "git_view.select_review_row";
     /// `{"lines": i32}`, down when positive.
     pub const GIT_VIEW_SCROLL: &str = "git_view.scroll";
-    /// `{"key": String, "value": ConfigRowEdit}`, the row by its registry key.
+    /// `{"key": String, "value": ConfigRowEdit, "revision": u64}`, the row by
+    /// its registry key and the config section version the form drew.
     pub const CONFIG_SET_ROW: &str = "config.set_row";
+    /// `{"id": String}`, a `ConfigTreeNode::id`.
+    pub const CONFIG_SELECT_NODE: &str = "config.select_node";
 
     /// Every pointer command id.
     pub const ALL: &[&str] = &[
@@ -70,6 +73,7 @@ pub mod ids {
         GIT_VIEW_SELECT_REVIEW_ROW,
         GIT_VIEW_SCROLL,
         CONFIG_SET_ROW,
+        CONFIG_SELECT_NODE,
     ];
 }
 
@@ -215,10 +219,22 @@ pub fn scroll_git_view(lines: i32) -> Intent {
 /// Set the settings row `key` to what a form chose, and write that one key.
 ///
 /// The row is named by its registry key, so a form resolved against one frame
-/// edits the same row after the rows were reordered or filtered.
+/// edits the same row after the rows were reordered or filtered. `revision`
+/// is the config section version that frame carried: an edit of a frame the
+/// section has moved past (another surface saved, the tree changed) is
+/// refused rather than applied to rows the form never saw.
 #[must_use]
-pub fn set_config_row(key: &str, edit: ConfigRowEdit) -> Intent {
-    command(ids::CONFIG_SET_ROW, json!({ "key": key, "value": edit }))
+pub fn set_config_row(key: &str, edit: ConfigRowEdit, revision: u64) -> Intent {
+    command(
+        ids::CONFIG_SET_ROW,
+        json!({ "key": key, "value": edit, "revision": revision }),
+    )
+}
+
+/// Select the settings tree node `id` a click names.
+#[must_use]
+pub fn select_config_node(id: &str) -> Intent {
+    command(ids::CONFIG_SELECT_NODE, json!({ "id": id }))
 }
 
 #[derive(Deserialize)]
@@ -238,6 +254,13 @@ struct LinesArgs {
 struct RowEditArgs {
     key: String,
     value: ConfigRowEdit,
+    revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeArgs {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -381,7 +404,11 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
             .map(|args| AppEvent::ConfigSetRow {
                 key: args.key,
                 edit: args.value,
+                revision: args.revision,
             }),
+        AppEvent::ConfigSelectNode { .. } => parse::<NodeArgs>(args)
+            .filter(|args| !args.id.is_empty())
+            .map(|args| AppEvent::ConfigSelectNode { id: args.id }),
         _ => return None,
     })
 }
