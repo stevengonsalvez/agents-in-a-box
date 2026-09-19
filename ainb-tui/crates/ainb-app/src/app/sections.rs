@@ -1690,15 +1690,24 @@ pub struct HostOnlyState {
     pub attention_attached_at: HashMap<Uuid, i64>,
     /// Desktop only: sessions whose terminal tab the reducer just asked the
     /// window to open or bring forward, waiting for the next attention
-    /// refresh to stamp that instant as their clear point.
+    /// refresh to read its clock.
     ///
     /// The desktop's counterpart of the terminal's attach: a tab gaining
     /// focus puts the pane in front of the person the way a full-screen
     /// attach does, so what was already there stops nagging. Held here so the
-    /// refresh, which owns the clock, is the one that writes the instant, and
-    /// the baseline keeps its single writer (the fold from
-    /// `attention_attached_at`). Never set on the terminal surface.
+    /// refresh, which owns the clock, is the one that stamps the instant.
+    /// Never set on the terminal surface.
     pub attention_focus_pending: HashSet<Uuid>,
+    /// Desktop only: the instant each session's tab came forward, held until
+    /// a refresh sees the row with no blocking chip, and only then handed to
+    /// `attention_attached_at` to fold into the baseline.
+    ///
+    /// Focus clears attention the person has SEEN, never a question or an
+    /// approval still owed: folding while a blocking chip is on the row would
+    /// take the chip, the waiting entry and the banner away from an agent
+    /// that is still parked on it. The baseline keeps its single writer (the
+    /// fold from `attention_attached_at`).
+    pub attention_focus_at: HashMap<Uuid, i64>,
 }
 
 impl Default for HostOnlyState {
@@ -1744,6 +1753,7 @@ impl Default for HostOnlyState {
             inbox_mark_in_flight: false,
             attention_attached_at: HashMap::new(),
             attention_focus_pending: HashSet::new(),
+            attention_focus_at: HashMap::new(),
         }
     }
 }
