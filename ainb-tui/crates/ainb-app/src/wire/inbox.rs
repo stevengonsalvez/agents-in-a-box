@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use crate::app::sections::InboxSection;
+use crate::app::sections::{InboxSection, MAX_INBOX_BYTES};
 use crate::fleet::bridge::redact::scrub;
 
 /// Section 16 (inbox) on the wire.
@@ -16,6 +16,12 @@ use crate::fleet::bridge::redact::scrub;
 /// transcript's chunks are, because the frame is the boundary and the fold is
 /// not. `absent` and `unreachable` are the host's own reasons, which can carry
 /// a socket path or a daemon error, so they are scrubbed too.
+///
+/// The byte budget is enforced here, not only claimed: rows are added in the
+/// daemon's order while their encoded bytes fit under [`MAX_INBOX_BYTES`]
+/// less the reserve the scalar fields need, and the rest are counted in
+/// `rows_cut`. A section past `MAX_FRAME_BYTES` is withheld whole, and a
+/// withheld inbox has no counter to say why.
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Debug, Serialize)]
 pub struct InboxView {
@@ -60,28 +66,44 @@ pub struct InboxRowFrame {
     pub read_at: Option<i64>,
 }
 
+/// Bytes held back from the row budget for the scalar fields: the two
+/// reasons at their cap (512 characters, up to six bytes each encoded), the
+/// recipient, the counters, and the envelope.
+const SCALAR_RESERVE: usize = 8 * 1024;
+
 impl From<&InboxSection> for InboxView {
     fn from(section: &InboxSection) -> Self {
+        let budget = MAX_INBOX_BYTES.saturating_sub(SCALAR_RESERVE);
+        let mut spent = 0;
+        let mut rows_cut = section.rows_cut;
+        let mut entries = Vec::with_capacity(section.entries.len());
+        for row in &section.entries {
+            let frame = InboxRowFrame {
+                id: row.id.clone(),
+                kind: row.kind.clone(),
+                event: row.event.clone(),
+                subject_id: row.subject_id.clone(),
+                summary: scrub(&row.summary),
+                recipient: row.recipient.clone(),
+                created_at: row.created_at,
+                read_at: row.read_at,
+            };
+            // One byte for the separator; the encoded row is what the wire pays.
+            let cost = serde_json::to_vec(&frame).map_or(usize::MAX, |bytes| bytes.len() + 1);
+            if spent.saturating_add(cost) > budget {
+                rows_cut += section.entries.len() - entries.len();
+                break;
+            }
+            spent += cost;
+            entries.push(frame);
+        }
         Self {
-            entries: section
-                .entries
-                .iter()
-                .map(|row| InboxRowFrame {
-                    id: row.id.clone(),
-                    kind: row.kind.clone(),
-                    event: row.event.clone(),
-                    subject_id: row.subject_id.clone(),
-                    summary: scrub(&row.summary),
-                    recipient: row.recipient.clone(),
-                    created_at: row.created_at,
-                    read_at: row.read_at,
-                })
-                .collect(),
+            entries,
             unread: section.unread,
             recipient: section.recipient.clone(),
             absent: section.absent.as_deref().map(scrub),
             unreachable: section.unreachable.as_deref().map(scrub),
-            rows_cut: section.rows_cut,
+            rows_cut,
             summaries_cut: section.summaries_cut,
             received_at_ms: section.received_at_ms,
         }
