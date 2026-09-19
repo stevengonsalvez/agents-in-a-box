@@ -531,8 +531,11 @@ fn row_in_file(model: &ReviewFile, frame: &ReviewFileFrame, local: usize) -> (us
             return if row < frame_rows {
                 (at_frame + row, false)
             } else {
-                // Past what this hunk kept: the last row of it that was sent.
-                (at_frame + frame_rows.saturating_sub(1), true)
+                // Past what this hunk kept: the last row that was sent, which
+                // is the row before this hunk when the hunk was dropped whole.
+                // Saturating on the SUM, not on the count: `at_frame + (0 - 1)`
+                // is `at_frame`, one past the file's last framed row.
+                ((at_frame + frame_rows).saturating_sub(1), true)
             };
         }
         at_model += model_rows;
@@ -542,9 +545,10 @@ fn row_in_file(model: &ReviewFile, frame: &ReviewFileFrame, local: usize) -> (us
         let frame_after = framed.is_some_and(|hunk| hunk.gap_after > hunk.expanded_after);
         if model_after {
             if local == at_model {
-                // The gap below a hunk the frame truncated is drawn, but it is
-                // not the row the reducer is on: that row was cut.
-                return if frame_after && frame_rows == model_rows {
+                // The gap below a hunk is the same gap however many of the
+                // hunk's rows were sent: hidden context does not change with
+                // them. So when the frame drew it, this row was sent.
+                return if frame_after {
                     (at_frame, false)
                 } else {
                     (at_frame.saturating_sub(1), true)
