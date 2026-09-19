@@ -165,3 +165,30 @@ fn a_payload_that_does_not_fit_the_row_is_refused_closed() {
         .expect("wrong fields");
     assert!(refusal.reason.contains("does not fit"), "{refusal:?}");
 }
+
+/// A printable key in a text-input context resolves to a synthesised text
+/// action no row names. The gate cannot judge what it cannot name, so it
+/// refuses rather than answering "not refused"; the window types with `Text`.
+#[test]
+fn a_key_the_gate_cannot_name_is_refused_closed() {
+    let log = Log::default();
+    let mut host = host(&log);
+    for step in ["global.go_home", "home.config", "config.search"] {
+        let _ = host.dispatch(Intent::Command(
+            CommandId::new(step),
+            serde_json::Value::Null,
+        ));
+    }
+    assert!(host.state().config.config_screen_state.is_searching());
+
+    let refusal = host
+        .refused_from_renderer(&Intent::Key(Chord::parse("a").expect("chord")))
+        .expect("a printable key in the search is refused");
+    assert!(refusal.reason.contains("sends text instead"), "{refusal:?}");
+    assert!(refusal.command.as_str().ends_with(".text"), "{refusal:?}");
+    // The search's own bound rows are still judged by their row.
+    assert_eq!(
+        host.refused_from_renderer(&Intent::Key(Chord::parse("esc").expect("chord"))),
+        None
+    );
+}
