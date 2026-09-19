@@ -1,6 +1,6 @@
 import { createMemo, For, Show } from "solid-js";
 import type { InboxView_Serialize } from "../../../ainb-app/bindings/AppState";
-import { inboxView, MARK_ALL_READ } from "./inbox.ts";
+import { inboxView, MARK_ALL_READ, ROW_PX, scrollIntents } from "./inbox.ts";
 import { keyedList, sameKeys } from "./keyed.ts";
 import type { RendererIntent } from "./tabs.ts";
 
@@ -17,10 +17,15 @@ interface Props {
  * The desktop inbox (D3p-c): the daemon's inbox, newest first, drawn from
  * section 16 and nothing else.
  *
- * It keeps no state of its own. Which entries are unread, the count and the
- * cuts are the frame's; the one control is the whole-inbox sweep, sent as a
- * command, and the next frame is what says it landed. There is no per-row
- * control because the daemon's verb has none.
+ * It keeps no state of its own. Which entries are unread, the count, the cuts
+ * and which row the window starts at are the frame's; the one control is the
+ * whole-inbox sweep, sent as a command, and the next frame is what says it
+ * landed. There is no per-row control because the daemon's verb has none.
+ *
+ * The offset is the reducer's, as the review tab's is: the wheel sends
+ * `inbox.scroll_up` / `inbox.scroll_down` and the browser's own scrolling of
+ * the list is refused, so the terminal and this window draw one window of one
+ * inbox rather than two.
  */
 export function Inbox(props: Props) {
   const page = createMemo(() => inboxView(props.inbox));
@@ -28,8 +33,22 @@ export function Inbox(props: Props) {
   // objects, so an unchanged entry keeps its node and only its text patches.
   const rows = createMemo(() => keyedList(page().rows, (row) => row.id));
   const rowKeys = createMemo(() => rows().keys, [], { equals: sameKeys });
+  /** Pixels a wheel has sent that have not yet made a whole row. */
+  let pending = 0;
   return (
-    <section class="inbox" aria-label="Inbox" data-state={page().state}>
+    <section
+      class="inbox"
+      aria-label="Inbox"
+      data-state={page().state}
+      onWheel={(event) => {
+        // One source for the offset, and it is the reducer.
+        event.preventDefault();
+        const total = pending + event.deltaY * (event.deltaMode === 1 ? ROW_PX : 1);
+        const moved = Math.trunc(total / ROW_PX);
+        pending = total - moved * ROW_PX;
+        for (const intent of scrollIntents(moved)) props.onChoose(intent);
+      }}
+    >
       <header class="inbox-head">
         <h2>Inbox</h2>
         <button
@@ -50,6 +69,11 @@ export function Inbox(props: Props) {
             {line()}
           </p>
         )}
+      </Show>
+      <Show when={page().scrolled}>
+        <p class="inbox-cut" role="status">
+          Earlier entries are above; scroll up to see them.
+        </p>
       </Show>
       <Show when={page().cut}>
         {(line) => (

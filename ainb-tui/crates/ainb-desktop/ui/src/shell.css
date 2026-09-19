@@ -938,6 +938,13 @@ body {
   color: var(--text);
 }
 
+/* This grid is a flex item, and WebKit 605 (the bundle's own) resolves a
+   `minmax(0, 1fr)` row against its content there rather than against the
+   flex line: measured in the running window, `.review` reports 8,090 px
+   inside a 762 px work area. Nothing here is clipped, because `.review`
+   hides its overflow, but a box inside it cannot be asked how tall the
+   viewport is; the review body takes its page size from the window instead
+   (`review.tsx`). */
 .review-panes {
   display: grid;
   grid-template-columns: minmax(180px, 280px) minmax(0, 1fr);
@@ -1356,4 +1363,72 @@ body {
 .inbox-when {
   color: var(--muted);
   white-space: nowrap;
+}
+
+/* The Commits tab: the branch's commits, one row each, the reducer's
+   selection highlighted. The list hides its overflow for the same reason the
+   review body does, and is put in view by the frame's own selection. */
+.commits {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.commit-list {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+}
+
+.commit-row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content max-content;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  padding: 2px 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.commit-row.selected {
+  background: var(--highlight);
+}
+
+.commit-row:hover,
+.commit-row:focus-visible {
+  background: var(--highlight);
+  outline: none;
+}
+
+.commit-sha {
+  color: var(--gold);
+}
+
+.commit-message {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commit-author,
+.commit-date {
+  color: var(--muted);
+}
+
+.commits .empty {
+  margin: 8px 10px;
+  color: var(--muted);
 }

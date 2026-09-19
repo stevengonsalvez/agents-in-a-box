@@ -89,6 +89,56 @@ async function drawReview(
   }
 }
 
+/**
+ * Server-render the Commits tab over `fixture`'s committed git view frame,
+ * with `change` applied to that frame first.
+ */
+async function drawCommits(
+  fixture: string,
+  change: (gitView: GitViewView_Serialize) => void = () => {},
+): Promise<string> {
+  const server = await createServer({
+    configFile: false,
+    root: fileURLToPath(new URL("..", import.meta.url)),
+    plugins: [solid({ ssr: true })],
+    server: { middlewareMode: true, hmr: false },
+    appType: "custom",
+    ssr: { noExternal: ["solid-js"] },
+    logLevel: "silent",
+  });
+  try {
+    const { Commits } = await server.ssrLoadModule("/src/commits.tsx");
+    const { renderToString } = await server.ssrLoadModule("solid-js/web");
+    const gitView = framed(fixture, "git_view") as GitViewView_Serialize;
+    change(gitView);
+    return renderToString(() => Commits({ gitView, stale: false, onChoose() {} }));
+  } finally {
+    await server.close();
+  }
+}
+
+test("the commits tab shows every fact the fixture's list names", async () => {
+  const html = await drawCommits("git_commits");
+
+  assert.ok(facts("git_commits").length > 0, "the facts list has facts in it");
+  assert.deepEqual(missing(html, "git_commits"), [], text(html));
+});
+
+test("a renderer given one commit fewer fails the facts", async () => {
+  const whole = await drawCommits("git_commits");
+  assert.deepEqual(missing(whole, "git_commits"), [], "the fixture as it stands shows every fact");
+
+  const lost = await drawCommits("git_commits", (gitView) => {
+    gitView.git_view_state?.commits.shift();
+  });
+
+  assert.notDeepEqual(
+    missing(lost, "git_commits"),
+    [],
+    "a render missing a whole commit still showed every expected fact, so the list proves nothing",
+  );
+});
+
 // The review tab draws a window of its body now, not the whole of it (#1221),
 // so a fixture bigger than one window would only ever show the facts inside
 // that window. `git_review` is three small files and fits in one, which is why

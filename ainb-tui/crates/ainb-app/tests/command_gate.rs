@@ -8,6 +8,9 @@
 #[path = "parity/support.rs"]
 mod support;
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::path::Path;
 
 use ainb_app::app::keymap::{KeyContext, SubContext, active_contexts, command_contexts};
@@ -17,9 +20,7 @@ use ainb_app::{AppState, CommandId, Intent, Keymap, dispatch};
 use support::ParityFixture;
 
 fn fixtures() -> Vec<(String, ParityFixture)> {
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
-    std::mem::forget(home);
+    home::shared();
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
     ParityFixture::all_in(&dir)
         .into_iter()

@@ -53,6 +53,8 @@ pub mod ids {
     pub const GIT_VIEW_SELECT_REVIEW_ROW: &str = "git_view.select_review_row";
     /// `{"lines": i32}`, down when positive.
     pub const GIT_VIEW_SCROLL: &str = "git_view.scroll";
+    /// `{"sha": String}`, a commit's short hash as the frame carries it.
+    pub const GIT_VIEW_SELECT_COMMIT: &str = "git_view.select_commit";
     /// `{"key": String, "value": ConfigRowEdit, "revision": u64}`, the row by
     /// its registry key and the config section version the form drew.
     pub const CONFIG_SET_ROW: &str = "config.set_row";
@@ -77,6 +79,7 @@ pub mod ids {
         HOME_CLICK_SIDEBAR_ITEM,
         GIT_VIEW_SELECT_REVIEW_ROW,
         GIT_VIEW_SCROLL,
+        GIT_VIEW_SELECT_COMMIT,
         CONFIG_SET_ROW,
         CONFIG_SELECT_NODE,
     ];
@@ -256,6 +259,16 @@ pub fn set_config_row(key: &str, edit: ConfigRowEdit, revision: u64) -> Intent {
     )
 }
 
+/// Select the commit `sha` names in the Commits tab.
+///
+/// The commit is named by its short hash, the id the frame carries, never by
+/// its index: the list is cut to a byte budget on the wire and can move under
+/// a click.
+#[must_use]
+pub fn select_commit(sha: &str) -> Intent {
+    command(ids::GIT_VIEW_SELECT_COMMIT, json!({ "sha": sha }))
+}
+
 /// Select the settings tree node `id` a click names.
 #[must_use]
 pub fn select_config_node(id: &str) -> Intent {
@@ -272,6 +285,12 @@ struct ReviewRowArgs {
 #[serde(deny_unknown_fields)]
 struct LinesArgs {
     lines: i32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommitArgs {
+    sha: String,
 }
 
 #[derive(Deserialize)]
@@ -436,6 +455,9 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
                 target: args.target,
             })
         }
+        AppEvent::GitViewSelectCommit { .. } => parse::<CommitArgs>(args)
+            .filter(|args| !args.sha.is_empty())
+            .map(|args| AppEvent::GitViewSelectCommit { sha: args.sha }),
         AppEvent::GitViewScrollBy(_) => parse::<LinesArgs>(args)
             .filter(|args| args.lines != 0)
             .map(|args| AppEvent::GitViewScrollBy(args.lines)),

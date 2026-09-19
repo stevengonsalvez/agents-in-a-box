@@ -29,6 +29,7 @@ import { Board } from "./board.tsx";
 import { CLOSE_INBOX, OPEN_INBOX, inboxCounts } from "./inbox.ts";
 import { Inbox } from "./inbox.tsx";
 import { SURFACES } from "./surfaces.ts";
+import { Commits } from "./commits.tsx";
 import { Review } from "./review.tsx";
 import { boardColumns } from "./board.ts";
 import { Palette } from "./palette.tsx";
@@ -110,7 +111,7 @@ function Shell() {
   // for one pane is three ways to be wrong and a fourth that draws nothing.
   // The transcript card is not in here; it stands in a session's place and
   // closes back to whatever was chosen.
-  const [pane, setPane] = createSignal<"board" | "review" | "stats" | "terminal">("board");
+  const [pane, setPane] = createSignal<"board" | "review" | "commits" | "stats" | "terminal">("board");
   // The ACP session whose transcript card holds the work area, if any. It has
   // no tmux pane, so the card stands where its terminal would.
   const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
@@ -119,7 +120,7 @@ function Shell() {
    * and the settings page and the inbox page (the reducer on its Config or
    * Inbox screen) take it over every pane.
    */
-  const showing = (which: "board" | "review" | "stats" | "terminal") =>
+  const showing = (which: "board" | "review" | "commits" | "stats" | "terminal") =>
     transcriptKey() === null && !settings() && !inboxOpen() && pane() === which;
   // The settings page: the config section as a form, the daemons panel and
   // the Setup panel (D3d). Whether it is open is the reducer's: the page shows
@@ -512,6 +513,19 @@ function Shell() {
                 Review
               </button>
             </span>
+            <span class="tab commits-tab" classList={{ active: showing("commits") }}>
+              <button
+                type="button"
+                class="tab-title"
+                aria-current={showing("commits") ? "page" : undefined}
+                onClick={() => {
+                  closeTranscript();
+                  setPane("commits");
+                }}
+              >
+                Commits
+              </button>
+            </span>
             <span class="tab stats-tab" classList={{ active: showing("stats") }}>
               <button
                 type="button"
@@ -617,6 +631,9 @@ function Shell() {
           </Show>
           <Show when={showing("review")}>
             <Review gitView={gitView()} stale={gitViewStale()} onChoose={dispatch} />
+          </Show>
+          <Show when={showing("commits")}>
+            <Commits gitView={gitView()} stale={gitViewStale()} onChoose={dispatch} />
           </Show>
           <Show when={showing("stats")}>
             <Stats usage={usage()} stale={usageStale()} />

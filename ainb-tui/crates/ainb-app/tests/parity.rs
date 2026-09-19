@@ -11,21 +11,26 @@
 #[path = "parity/support.rs"]
 mod support;
 
+#[path = "support/home.rs"]
+mod home;
+
+use home::ScopedHome;
+
 use std::path::Path;
 
 use support::ParityFixture;
 
 #[test]
 fn every_parity_fixture_builds_the_screen_it_names() {
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
+    let _home = ScopedHome::new();
 
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
     let fixtures = ParityFixture::all_in(&dir);
     assert!(
-        // 18 with the inbox fixture (D3p-d) beside the three plugin
-        // placeholder fixtures (D3p-f) and the stats fixture (D3p-e).
-        fixtures.len() >= 18,
+        // 19: sixteen with the three plugin placeholder fixtures (D3p-f),
+        // seventeen with the Commits tab's, eighteen with the stats fixture
+        // (D3p-e) and nineteen with the inbox fixture (D3p-d).
+        fixtures.len() >= 19,
         "expected a fixture per screen, found {}",
         fixtures.len()
     );

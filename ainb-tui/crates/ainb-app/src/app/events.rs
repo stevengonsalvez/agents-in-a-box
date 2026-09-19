@@ -300,6 +300,15 @@ pub enum AppEvent {
     },
     /// Scroll the git view's active tab by this many lines, down when positive.
     GitViewScrollBy(i32),
+    /// Click the commit `sha` names in the Commits tab; nothing when the list
+    /// no longer carries it.
+    ///
+    /// The commit is named, never its index: the list is cut to a budget on
+    /// the wire and can move under a click, and an index would then select a
+    /// different commit than the one a person pressed.
+    GitViewSelectCommit {
+        sha: String,
+    },
     /// Click home sidebar `item`; a second click on it opens it.
     HomeSidebarClickItem {
         item: crate::components::sidebar::SidebarItem,
@@ -1061,6 +1070,15 @@ impl EventHandler {
             || state.shell.focused_pane == crate::app::state::FocusedPane::Preview
         {
             state.release_interactive_pane();
+        }
+        // On the desktop this opens the session's terminal tab, or brings it
+        // forward: the pane is now in front of the person, which is what a
+        // full-screen attach means on the terminal. The terminal's clear point
+        // moves through the scan's `is_attached` instead, never from here.
+        if state.host.surface == ainb_hangar_proto::connections::SurfaceKind::Desktop {
+            if let TerminalTarget::Session { id, .. } = &target {
+                state.host.attention_focus_pending.insert(*id);
+            }
         }
         state.emit(Effect::AttachTerminal(target));
     }
@@ -3892,6 +3910,19 @@ impl EventHandler {
                 if let Some(row) = row {
                     if let Some(ref mut git_state) = state.git_view.git_view_state {
                         git_state.review_click_row(row);
+                    }
+                }
+            }
+            AppEvent::GitViewSelectCommit { sha } => {
+                // Read first, against the model's own list as it stands now: a
+                // click on a commit the list no longer carries writes nothing.
+                let at =
+                    state.git_view.git_view_state.as_ref().and_then(|git| {
+                        git.commits.iter().position(|commit| commit.hash_short == sha)
+                    });
+                if let Some(at) = at {
+                    if let Some(ref mut git_state) = state.git_view.git_view_state {
+                        git_state.selected_commit_index = at;
                     }
                 }
             }
@@ -7575,8 +7606,10 @@ fn run_catalog_search(
 mod catalog_search_tokio_guard {
     use super::run_catalog_search;
 
-    // Serialize env mutation against other env-touching tests in this binary.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Serialize env mutation against other env-touching tests in this binary,
+    // through the crate's one lock: a private mutex here ordered this test
+    // against itself only.
+    use crate::env_lock::ENV_LOCK;
 
     /// Regression: `run_catalog_search` must run the `reqwest::blocking`
     /// search off the runtime thread. Building a blocking client inside a
@@ -9361,20 +9394,10 @@ mod hangar_daemon_persist_tests {
     /// snapshot that other tests in this binary read. Serialised, because the
     /// environment is process-global and cargo runs tests in parallel.
     fn with_isolated_home<T>(body: impl FnOnce() -> T) -> T {
-        // The crate-wide lock, not a private one: sibling tests call
+        // The shared guard, which takes the crate-wide lock: sibling tests call
         // `AppConfig::load()` and `snapshot()`, which read this same HOME.
-        let _guard =
-            crate::config::tunables::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let previous = std::env::var_os("HOME");
-        std::env::set_var("HOME", dir.path());
-        let out = body();
-        match previous {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        out
+        let _home = crate::test_home::ScopedHome::new();
+        body()
     }
 
     /// Two Hangar-daemon edits confirmed inside one app tick must BOTH be

@@ -7,6 +7,9 @@
 // popup uses, so a window never saves the whole config from the snapshot it
 // loaded at startup (#1175, D3d). An edit it drops says why, as a notice.
 
+#[path = "support/home.rs"]
+mod home;
+
 use ainb_app::app::NoRenderer;
 use ainb_app::app::effect::Persist;
 use ainb_app::app::pointer;
@@ -24,9 +27,7 @@ fn bumped(before: &[u64], after: &[u64]) -> Vec<SectionId> {
 
 /// The reducer on the Config screen, under a scratch home.
 fn on_config() -> AppState {
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
-    std::mem::forget(home);
+    home::shared();
     let mut state = AppState::new();
     state.shell.current_screen = screen_ids::CONFIG.to_string();
     state

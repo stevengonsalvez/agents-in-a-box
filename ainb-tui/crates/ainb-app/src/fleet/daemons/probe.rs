@@ -1494,7 +1494,7 @@ mod tests {
     /// `daemons.stale_after_ms` failed these tests locally while CI, with no
     /// config file, passed. The fixtures below are built from the consts, so
     /// the snapshot has to agree with them.
-    fn pin_default_snapshot() -> std::sync::MutexGuard<'static, ()> {
+    fn pin_default_snapshot() -> crate::env_lock::EnvGuard {
         // The shared lock, held by the CALLER for the length of its test: the
         // snapshot is process-global, so installing it without the lock races
         // every other test that installs or reads one.

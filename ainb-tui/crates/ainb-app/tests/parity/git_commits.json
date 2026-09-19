@@ -1,0 +1,28 @@
+{
+  "width": 120,
+  "height": 36,
+  "screen": {
+    "kind": "git_commits",
+    "selected": 1,
+    "commits": [
+      {
+        "hash": "a1b2c3d",
+        "author": "Ada Lovelace",
+        "date": "2026-09-18",
+        "message": "wire the review tab to the bounded section"
+      },
+      {
+        "hash": "e4f5a6b",
+        "author": "Grace Hopper",
+        "date": "2026-09-17",
+        "message": "bound the git view section by bytes, not counts"
+      },
+      {
+        "hash": "9c8d7e6",
+        "author": "Ada Lovelace",
+        "date": "2026-09-16",
+        "message": "draw what the frame left out"
+      }
+    ]
+  }
+}

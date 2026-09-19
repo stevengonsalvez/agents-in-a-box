@@ -1,0 +1,12 @@
+# The Commits tab: both renderers draw every commit the frame carries, with
+# its hash, its message and who wrote it. The reducer's selection is on the
+# second row, and neither renderer invents a commit.
+a1b2c3d
+e4f5a6b
+9c8d7e6
+wire the review tab to the bounded section
+bound the git view section by bytes, not counts
+draw what the frame left out
+Ada Lovelace
+Grace Hopper
+2026-09-16

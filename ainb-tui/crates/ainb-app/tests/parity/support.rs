@@ -99,6 +99,13 @@ pub enum ScreenFixture {
         #[serde(default)]
         collapsed_dirs: Vec<String>,
     },
+    /// The git view's Commits tab: the branch's commits as the reducer holds
+    /// them, with `selected` under its cursor.
+    GitCommits {
+        commits: Vec<CommitFixture>,
+        #[serde(default)]
+        selected: usize,
+    },
     SessionRecovery,
     SkillManager,
     LogHistory,
@@ -171,6 +178,16 @@ pub struct DaemonFixture {
     pub reason: String,
 }
 
+/// One commit of a Commits-tab fixture, as the reducer would hold it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitFixture {
+    pub hash: String,
+    pub author: String,
+    pub date: String,
+    pub message: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewFileFixture {
@@ -221,7 +238,7 @@ impl ParityFixture {
             ScreenFixture::NewSessionPickRepo => ids::NEW_SESSION,
             ScreenFixture::Config => ids::CONFIG,
             ScreenFixture::Daemons { .. } => ids::DAEMONS,
-            ScreenFixture::GitView { .. } => ids::GIT_VIEW,
+            ScreenFixture::GitView { .. } | ScreenFixture::GitCommits { .. } => ids::GIT_VIEW,
             ScreenFixture::SessionRecovery => ids::SESSION_RECOVERY,
             ScreenFixture::SkillManager => ids::SKILL_MANAGER,
             ScreenFixture::LogHistory => ids::LOG_HISTORY,
@@ -272,6 +289,21 @@ impl ParityFixture {
                     files: files.iter().map(build_review_file).collect(),
                 };
                 git.review_ui.collapsed_dirs = collapsed_dirs.iter().cloned().collect();
+                state.git_view.git_view_state = Some(git);
+            }
+            ScreenFixture::GitCommits { commits, selected } => {
+                let mut git = GitViewState::new(PathBuf::from("/parity/repo"));
+                git.active_tab = GitTab::Commits;
+                git.commits = commits
+                    .iter()
+                    .map(|commit| ainb_app::git::operations::CommitInfo {
+                        hash_short: commit.hash.clone(),
+                        author: commit.author.clone(),
+                        date: commit.date.clone(),
+                        message: commit.message.clone(),
+                    })
+                    .collect();
+                git.selected_commit_index = *selected;
                 state.git_view.git_view_state = Some(git);
             }
             ScreenFixture::Onboarding => {

@@ -12,6 +12,9 @@
 // one-line reason a security reviewer re-checks. An entry that no longer
 // matches anything fails too, so the lists cannot go stale.
 
+#[path = "support/home.rs"]
+mod home;
+
 use ainb_app::app::SectionId;
 use ainb_app::fleet::bridge::redact::{REDACTED, find_secret};
 use ainb_app::wire::frame::HostId;
@@ -22,12 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// One scratch `HOME` for the whole binary, set once before any `AppState` is
 /// built, so neither the developer's config nor a parallel test changes a frame.
 fn isolated_home() {
-    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| {
-        let home = tempfile::tempdir().expect("scratch home");
-        std::env::set_var("HOME", home.path());
-        home
-    });
+    home::shared();
 }
 
 fn all_frames(state: &ainb_app::AppState) -> Vec<(SectionId, serde_json::Value)> {

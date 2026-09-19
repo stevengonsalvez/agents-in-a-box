@@ -40,6 +40,8 @@ function frame(over: Partial<InboxView_Serialize> = {}): InboxView_Serialize {
     rows_cut: 0,
     summaries_cut: 0,
     received_at_ms: READ_AT,
+    scroll: 0,
+    scroll: 0,
     ...over,
   };
 }
@@ -138,4 +140,36 @@ test("a row keeps its node across a frame that only moves the count", async () =
   setHeld(frame({ unread: 1 }));
   await settle();
   assert.equal(document.querySelector("li.inbox-row"), first, "the row was patched, not rebuilt");
+});
+
+test("the page draws the window the reducer's scroll names, and the wheel asks it to move", async () => {
+  const { sent, setHeld } = await open(frame({ entries: [row(1), row(2, READ_AT), row(3)] }));
+  assert.equal([...document.querySelectorAll("li.inbox-row")].length, 3);
+
+  // The terminal scrolled: the window draws from that row, not from the top.
+  setHeld(frame({ entries: [row(1), row(2, READ_AT), row(3)], scroll: 2 }));
+  await settle();
+  const drawn = [...document.querySelectorAll("li.inbox-row")];
+  assert.deepEqual(
+    drawn.map((entry) => entry.getAttribute("data-entry")),
+    [row(3).id],
+    "the rows above the offset are the ones the terminal has scrolled past",
+  );
+
+  // The wheel is the reducer's to answer, and the page refuses the browser's
+  // own scrolling so one offset has one source.
+  const page = document.querySelector("section.inbox")!;
+  const wheel = new (window as unknown as { WheelEvent: typeof WheelEvent }).WheelEvent("wheel", {
+    deltaY: 48,
+    deltaMode: 0,
+    cancelable: true,
+    bubbles: true,
+  });
+  page.dispatchEvent(wheel as unknown as Event);
+  await settle();
+  assert.deepEqual(sent, [
+    { Command: ["inbox.scroll_down", null] },
+    { Command: ["inbox.scroll_down", null] },
+  ]);
+  assert.equal(wheel.defaultPrevented, true, "the browser does not scroll it too");
 });
