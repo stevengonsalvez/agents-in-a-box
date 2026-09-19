@@ -74,7 +74,7 @@ const SCALAR_RESERVE: usize = 8 * 1024;
 impl From<&InboxSection> for InboxView {
     fn from(section: &InboxSection) -> Self {
         let budget = MAX_INBOX_BYTES.saturating_sub(SCALAR_RESERVE);
-        let mut spent = 0;
+        let mut spent: usize = 0;
         let mut rows_cut = section.rows_cut;
         let mut entries = Vec::with_capacity(section.entries.len());
         for row in &section.entries {
