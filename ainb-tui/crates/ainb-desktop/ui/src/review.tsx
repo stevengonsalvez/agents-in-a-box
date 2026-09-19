@@ -1,4 +1,4 @@
-import { createEffect, For, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { GitViewView_Serialize } from "../../../ainb-app/bindings/AppState";
 import {
   bodyLines,
@@ -11,6 +11,7 @@ import {
   segments,
   selectFileIntent,
   wheelRows,
+  windowLines,
   WITHHELD,
 } from "./review.ts";
 import type { RendererIntent } from "./tabs.ts";
@@ -48,16 +49,38 @@ export function Review(props: Props) {
   let bodyElement: HTMLDivElement | undefined;
   /** Pixels a wheel has sent that have not yet made a whole row. */
   let pending = 0;
-  /** Rows the body can show at once, for a page key and a page wheel. */
-  const rowsPerPage = () => Math.max(Math.floor((bodyElement?.clientHeight ?? 0) / ROW_PX), 1);
+  /**
+   * Rows the body can show at once, for a page key, a page wheel and the
+   * window drawn below. It is a signal because the drawing reads it: a plain
+   * read of `clientHeight` would fix the window at whatever the body measured
+   * when it first mounted.
+   */
+  const [rowsPerPage, setRowsPerPage] = createSignal(40);
+  onMount(() => {
+    const measure = () => setRowsPerPage(Math.max(Math.floor((bodyElement?.clientHeight ?? 0) / ROW_PX), 1));
+    measure();
+    window.addEventListener("resize", measure);
+    onCleanup(() => window.removeEventListener("resize", measure));
+  });
+
+  /**
+   * What is drawn: the rows around the reducer's offset, never the whole body.
+   *
+   * The body overflows nothing (`.review-body` hides it) and the offset is the
+   * frame's, so the window has no scroll position of its own to keep and
+   * nothing below the last drawn row to reach. Drawing all 4,000 rows at the
+   * frame's bound cost a real window fifty seconds (#1221).
+   */
+  const drawn = () => windowLines(body(), scroll(), rowsPerPage());
 
   // The offset is the reducer's, so the body is put where the frame says
   // rather than wherever the last wheel left it: the terminal and this window
   // show the same rows, and #1221 can window them by the same number.
   createEffect(() => {
     const first = scroll();
-    // Read the body so a new frame's rows re-run this after they are drawn.
-    body();
+    // Read the drawn rows so a new frame's window re-runs this after it is
+    // drawn.
+    drawn();
     const element = bodyElement;
     if (element === undefined) return;
     const row = element.querySelector<HTMLElement>(`[data-vrow="${first}"]`);
@@ -141,10 +164,10 @@ export function Review(props: Props) {
             }}
           >
             <Show
-              when={body().length > 0}
+              when={drawn().length > 0}
               fallback={<p class="empty">Nothing to show for these changes</p>}
             >
-              <For each={body()}>
+              <For each={drawn()}>
                 {(line) =>
                   line.kind === "file" ? (
                     <p
