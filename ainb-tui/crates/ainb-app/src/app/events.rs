@@ -4120,14 +4120,24 @@ impl EventHandler {
                 state.add_error_notification(format!("Could not save {label}: {error}"));
             }
             AppEvent::InboxMarkAllRead => {
-                // Nothing flips here: the daemon's reply is what the section
-                // folds, so a surface never shows a count the daemon did not.
+                // One held key is one sweep: nothing is sent while one is in
+                // flight. Nothing flips here either: the daemon's reply is what
+                // the section folds, so a surface never shows a count the
+                // daemon did not.
+                if state.host.inbox_mark_in_flight {
+                    return;
+                }
+                state.host.inbox_mark_in_flight = true;
                 state.emit(Effect::InboxMarkAllRead);
             }
             AppEvent::InboxMarkAllReadFinished { outcome } => {
+                state.host.inbox_mark_in_flight = false;
                 if outcome.ok {
-                    let now = crate::fleet::daemons::heartbeat::now_ms();
-                    state.apply_inbox_mark_all_read(outcome.marked, outcome.unread, now);
+                    state.apply_inbox_mark_all_read(outcome.unread);
+                    if let Some(after) = outcome.after {
+                        let now = crate::fleet::daemons::heartbeat::now_ms();
+                        state.apply_inbox_read(after, now);
+                    }
                 } else {
                     // The daemon's own error text can carry a path or a token:
                     // scrubbed before it is logged or shown.
