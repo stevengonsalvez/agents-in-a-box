@@ -13,7 +13,10 @@ use sha2::{Digest, Sha256};
 
 use crate::cli::OutputFormat;
 
-const RELEASE_DOWNLOAD_ROOT: &str =
+/// Where the `stable` channel fetches `release-manifest.json` and its
+/// signature from. The one compiled-in root; a verified manifest's
+/// [`ReleaseManifest::next_root`] can move a client off it.
+pub const RELEASE_DOWNLOAD_ROOT: &str =
     "https://github.com/stevengonsalvez/agents-in-a-box/releases/latest/download";
 const RELEASE_SIGNING_PUBLIC_KEY_B64: &str = "2diG6eoKmUWKOk3XULwefjwKb5IIYTZA4xmNNA8Z6uk=";
 const LAUNCHD_LABEL: &str = "com.agentsinabox.release-check";
@@ -24,9 +27,21 @@ const SYSTEMD_STEM: &str = "com.agentsinabox.release-check";
 pub struct ReleaseManifest {
     /// Stable semantic version without a leading `v`.
     pub version: String,
-    /// Immutable archive metadata for each supported target.
+    /// Immutable archive metadata for each supported target: the CLI archives
+    /// and nothing else. A shipped CLI matches this list on `target` alone and
+    /// takes the first hit, which is why the desktop bundles live under
+    /// [`Self::desktop`] and never here.
     #[serde(default)]
     pub assets: Vec<ReleaseAsset>,
+    /// The desktop bundles, one per bundle, keyed by target and format. A CLI
+    /// built before the key existed ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desktop: Vec<DesktopBundle>,
+    /// A release root to fetch the NEXT manifest from, for a repository move:
+    /// honoured only from a manifest that verified under the pinned key, and
+    /// only as an `https://` root with a host (see [`validate_next_root`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_root: Option<String>,
 }
 
 /// One signed release archive.
@@ -40,24 +55,78 @@ pub struct ReleaseAsset {
     pub sha256: String,
 }
 
+/// One desktop bundle: a `.dmg`, an AppImage or a `.deb`, for one target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopBundle {
+    /// Rust target triple the bundle was built for.
+    pub target: String,
+    /// `dmg`, `appimage` or `deb`; what tells two bundles for one target apart.
+    pub format: String,
+    /// Release asset file name.
+    pub archive: String,
+    /// SHA-256 of the bundle file, lowercase hexadecimal.
+    pub sha256: String,
+    /// Whether the bundle was signed with a Developer ID and notarised, as
+    /// opposed to ad-hoc signed. Informational: the trust root is this
+    /// manifest's signature plus the checksum.
+    #[serde(default)]
+    pub signed: bool,
+}
+
+/// The archive-name and checksum rules every entry meets, whichever key it
+/// sits under.
+fn validate_archive_and_checksum(archive: &str, sha256: &str) -> Result<()> {
+    let archive_is_file_name =
+        std::path::Path::new(archive).file_name().is_some_and(|name| name == archive);
+    if !archive_is_file_name
+        || !archive
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        bail!("release archive name is unsafe: {archive}");
+    }
+    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("release archive checksum is invalid for {archive}");
+    }
+    Ok(())
+}
+
 impl ReleaseAsset {
     fn validate(&self) -> Result<()> {
-        let archive_is_file_name = std::path::Path::new(&self.archive)
-            .file_name()
-            .is_some_and(|name| name == self.archive.as_str());
-        if !archive_is_file_name
-            || !self
-                .archive
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-        {
-            bail!("release archive name is unsafe: {}", self.archive);
-        }
-        if self.sha256.len() != 64 || !self.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            bail!("release archive checksum is invalid for {}", self.archive);
-        }
-        Ok(())
+        validate_archive_and_checksum(&self.archive, &self.sha256)
     }
+}
+
+impl DesktopBundle {
+    fn validate(&self) -> Result<()> {
+        if !matches!(self.format.as_str(), "dmg" | "appimage" | "deb") {
+            bail!("desktop bundle format is unknown: {}", self.format);
+        }
+        validate_archive_and_checksum(&self.archive, &self.sha256)
+    }
+}
+
+/// Whether `root` may replace the compiled-in release root: `https://`, a
+/// host, an optional path, and no query, fragment, whitespace or non-ASCII.
+///
+/// # Errors
+///
+/// Names the first rule the value breaks.
+pub fn validate_next_root(root: &str) -> Result<()> {
+    let rest = root
+        .strip_prefix("https://")
+        .ok_or_else(|| anyhow::anyhow!("next_root must start with https://"))?;
+    let host = rest.split('/').next().unwrap_or("");
+    if host.is_empty() {
+        bail!("next_root has no host");
+    }
+    if !root.is_ascii() || root.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+        bail!("next_root carries whitespace or non-ASCII");
+    }
+    if root.contains('?') || root.contains('#') {
+        bail!("next_root must not carry a query or a fragment");
+    }
+    Ok(())
 }
 
 impl ReleaseManifest {
@@ -67,13 +136,30 @@ impl ReleaseManifest {
         Self {
             version: version.to_string(),
             assets: Vec::new(),
+            desktop: Vec::new(),
+            next_root: None,
         }
     }
 
+    /// The desktop bundle for `target` in `format`, when the release has one.
+    #[must_use]
+    pub fn desktop_bundle_for(&self, target: &str, format: &str) -> Option<&DesktopBundle> {
+        self.desktop
+            .iter()
+            .find(|bundle| bundle.target == target && bundle.format == format)
+    }
+
+    /// The release version as semver, refusing a prerelease.
     fn stable_version(&self) -> Result<Version> {
+        self.version_allowing(false)
+    }
+
+    /// The release version as semver. A prerelease is an error unless
+    /// `allow_prerelease`, which only the desktop's `prerelease` channel sets.
+    fn version_allowing(&self, allow_prerelease: bool) -> Result<Version> {
         let version = Version::parse(self.version.trim_start_matches('v'))
             .with_context(|| format!("invalid release version `{}`", self.version))?;
-        if !version.pre.is_empty() {
+        if !allow_prerelease && !version.pre.is_empty() {
             bail!("prerelease `{version}` is not eligible for stable updates");
         }
         Ok(version)
@@ -114,9 +200,17 @@ pub fn verify_manifest_with_key(
         .context("release manifest signature does not match")?;
     let manifest: ReleaseManifest =
         serde_json::from_slice(bytes).context("decoding signed release manifest")?;
-    manifest.stable_version()?;
+    // Any semver parses here; whether a prerelease is eligible is the
+    // caller's channel rule, applied in `ReleaseState::from_manifest_with`.
+    manifest.version_allowing(true)?;
     for asset in &manifest.assets {
         asset.validate()?;
+    }
+    for bundle in &manifest.desktop {
+        bundle.validate()?;
+    }
+    if let Some(root) = &manifest.next_root {
+        validate_next_root(root)?;
     }
     Ok(manifest)
 }
@@ -143,18 +237,35 @@ pub struct ReleaseState {
     /// Latest version when an update may safely be installed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub available_version: Option<String>,
+    /// The release root the next check starts from, when a verified manifest
+    /// named one (`next_root`); absent means the compiled-in root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
 }
 
 impl ReleaseState {
-    /// Derive durable availability from the running version and release manifest.
+    /// Derive durable availability from the running version and release
+    /// manifest, refusing a prerelease manifest.
     pub fn from_manifest(
         local_version: &str,
         manifest: &ReleaseManifest,
         checked_at_ms: i64,
     ) -> Result<Self> {
+        Self::from_manifest_with(local_version, manifest, checked_at_ms, false)
+    }
+
+    /// [`Self::from_manifest`] with the prerelease rule as a parameter: the
+    /// desktop's `prerelease` channel passes `true`, every other caller
+    /// `false`. Ordering is semver's in both cases.
+    pub fn from_manifest_with(
+        local_version: &str,
+        manifest: &ReleaseManifest,
+        checked_at_ms: i64,
+        allow_prerelease: bool,
+    ) -> Result<Self> {
         let local = Version::parse(local_version.trim_start_matches('v'))
             .with_context(|| format!("invalid local version `{local_version}`"))?;
-        let latest = manifest.stable_version()?;
+        let latest = manifest.version_allowing(allow_prerelease)?;
         let availability = if latest > local {
             UpdateAvailability::Available
         } else {
@@ -166,6 +277,7 @@ impl ReleaseState {
             available_version: (availability == UpdateAvailability::Available)
                 .then(|| latest.to_string()),
             availability,
+            root: manifest.next_root.clone(),
         })
     }
 
@@ -332,13 +444,34 @@ async fn fetch_release_state() -> Result<ReleaseState> {
 }
 
 async fn fetch_release_manifest() -> Result<ReleaseManifest> {
+    fetch_release_manifest_at(RELEASE_DOWNLOAD_ROOT).await
+}
+
+/// Fetch and verify the manifest under `root`, with the pinned key.
+///
+/// # Errors
+///
+/// A request failure, a bad signature, or a manifest that fails validation.
+pub async fn fetch_release_manifest_at(root: &str) -> Result<ReleaseManifest> {
+    let (bytes, signature) = fetch_manifest_bytes_at(root).await?;
+    verify_manifest(&bytes, &signature)
+}
+
+/// Fetch `<root>/release-manifest.json` and `<root>/release-manifest.sig`,
+/// unverified, so a caller with its own key can verify them.
+///
+/// # Errors
+///
+/// A request failure or a non-success status.
+pub async fn fetch_manifest_bytes_at(root: &str) -> Result<(Vec<u8>, String)> {
+    let root = root.trim_end_matches('/');
     let client = reqwest::Client::builder()
         .user_agent(format!("ainb/{} update-check", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .context("building GitHub release client")?;
-    let manifest_url = format!("{RELEASE_DOWNLOAD_ROOT}/release-manifest.json");
-    let signature_url = format!("{RELEASE_DOWNLOAD_ROOT}/release-manifest.sig");
+    let manifest_url = format!("{root}/release-manifest.json");
+    let signature_url = format!("{root}/release-manifest.sig");
     let manifest_bytes = client
         .get(manifest_url)
         .send()
@@ -359,7 +492,31 @@ async fn fetch_release_manifest() -> Result<ReleaseManifest> {
         .text()
         .await
         .context("reading release manifest signature")?;
-    verify_manifest(&manifest_bytes, &signature)
+    Ok((manifest_bytes.to_vec(), signature))
+}
+
+/// Download `url` to `path`, whole, so the caller can hash the FILE it will
+/// use rather than a stream it has already consumed.
+///
+/// # Errors
+///
+/// A request failure, a non-success status, or a write failure.
+pub async fn download_to(url: &str, path: &Path) -> Result<()> {
+    let bytes = reqwest::Client::builder()
+        .user_agent(format!("ainb/{} updater", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .context("building archive download client")?
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("downloading {url}"))?
+        .error_for_status()
+        .with_context(|| format!("download request failed for {url}"))?
+        .bytes()
+        .await
+        .context("reading download")?;
+    std::fs::write(path, &bytes).with_context(|| format!("writing {}", path.display()))
 }
 
 fn state_path() -> Result<PathBuf> {
@@ -576,7 +733,12 @@ async fn apply_direct_release(manifest: &ReleaseManifest) -> Result<()> {
     Ok(())
 }
 
-fn current_target() -> Result<&'static str> {
+/// The target triple a release archive or bundle for this build is named by.
+///
+/// # Errors
+///
+/// A platform the release matrix does not build.
+pub fn current_target() -> Result<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
         ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
