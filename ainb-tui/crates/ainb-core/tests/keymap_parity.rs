@@ -100,9 +100,9 @@ fn defaults_are_unique_documented_and_parseable() {
 
     assert_eq!(
         keymap.bindings().filter(|binding| binding.chord.is_some()).count(),
-        // 533 with the inbox screen's five rows (D3-prime): `b` from home and the
-        // session list, `r`, `esc` and `q` on the screen.
-        533,
+        // 537 with the inbox screen's nine rows (D3-prime): `b` from home and the
+        // session list, `r`, `j`/`down`, `k`/`up`, `esc` and `q` on the screen.
+        537,
         "default table must be complete"
     );
 }
@@ -112,7 +112,7 @@ fn default_rows_resolve_to_their_independent_golden_actions() {
     let golden = golden_default_bindings();
     assert_eq!(
         golden.bindings.len(),
-        533,
+        537,
         "golden fixture must cover every host binding"
     );
 
