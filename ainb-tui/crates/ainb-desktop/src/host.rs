@@ -8,8 +8,9 @@ use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
 use ainb_app::app::state::WorkspaceRescan;
 use ainb_app::config::AppConfig;
+use ainb_app::fleet::inbox_reader::{Dialer as InboxDialer, InboxReader};
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
-use ainb_app::{AppState, CommandId, Effect, Intent, Keymap};
+use ainb_app::{AppState, CommandId, Effect, Intent, Keymap, SectionId};
 use serde::Serialize;
 
 use crate::intent::Refusal;
@@ -81,6 +82,15 @@ pub struct PaletteEntry {
     pub active: bool,
 }
 
+/// The dialer the desktop's inbox reader uses: the daemon client from the
+/// environment, announced as the desktop, so its reads are recorded as this
+/// surface's.
+#[must_use]
+pub fn inbox_dialer() -> InboxDialer {
+    use ainb_hangar_proto::connections::SurfaceKind;
+    Box::new(|| ainb_app::fleet::bridge::daemon::surface_client(SurfaceKind::Desktop))
+}
+
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
     state: AppState,
@@ -93,6 +103,12 @@ pub struct DesktopHost<S: FrameSink> {
     rescan: WorkspaceRescan,
     agent_status: crate::agent_status::AgentStatusPoll,
     read_agent_status: fn(crate::agent_status::Reports),
+    /// How the inbox reader dials the daemon. The reader itself runs only
+    /// while a renderer subscribes to `inbox`, so no read is issued for a
+    /// screen nobody has open.
+    inbox_dialer: std::sync::Arc<InboxDialer>,
+    /// The inbox reader, while `inbox` is subscribed.
+    inbox: Option<InboxReader>,
     /// Whether the tick starts the daemon attention poller. A test that is
     /// about the reducer turns it off: the poller is a thread on a real
     /// socket, and its first publish is news whenever it lands.
@@ -142,7 +158,46 @@ impl<S: FrameSink> DesktopHost<S> {
             rescan: WorkspaceRescan::default(),
             agent_status: crate::agent_status::AgentStatusPoll::default(),
             read_agent_status: crate::agent_status::read_on_worker,
+            inbox_dialer: std::sync::Arc::new(inbox_dialer()),
+            inbox: None,
             poll_attention: true,
+        }
+    }
+
+    /// Dial the inbox reads through `dialer` instead of the daemon client from
+    /// the environment. For tests, which count the dials.
+    #[must_use]
+    pub fn reading_inbox_with(mut self, dialer: InboxDialer) -> Self {
+        self.inbox_dialer = std::sync::Arc::new(dialer);
+        self
+    }
+
+    /// Whether the inbox reader is running, which it is exactly while a
+    /// renderer subscribes to `inbox`.
+    #[must_use]
+    pub const fn inbox_reader_running(&self) -> bool {
+        self.inbox.is_some()
+    }
+
+    /// Start or stop the inbox reader to match `subscription`: a renderer
+    /// that reads `inbox` gets a reader, one that stops reading it stops the
+    /// reads. Must be called inside a tokio runtime to start one.
+    fn sync_inbox_reader(&mut self, subscription: &Subscription) {
+        let wanted = subscription.contains(SectionId::Inbox);
+        match (wanted, self.inbox.is_some()) {
+            (true, false) => {
+                if tokio::runtime::Handle::try_current().is_err() {
+                    tracing::warn!("inbox: no runtime to start the reader on");
+                    return;
+                }
+                let dialer = std::sync::Arc::clone(&self.inbox_dialer);
+                self.inbox = Some(InboxReader::spawn(Box::new(move || dialer())));
+            }
+            (false, true) => {
+                self.inbox = None;
+                self.state.inbox_reset();
+            }
+            _ => {}
         }
     }
 
@@ -257,6 +312,10 @@ impl<S: FrameSink> DesktopHost<S> {
             ainb_app::fleet::daemons::heartbeat::now_ms(),
             self.read_agent_status,
         );
+        // Section 16, while a renderer reads it.
+        if let Some(reader) = &mut self.inbox {
+            reader.drain_into(&mut self.state);
+        }
         let effects = self.state.take_effects();
         self.pump();
         effects
@@ -364,6 +423,7 @@ impl<S: FrameSink> DesktopHost<S> {
     /// Change the sections the renderer wants. A newly added one is framed in
     /// full now.
     pub fn resubscribe(&mut self, subscription: Subscription) {
+        self.sync_inbox_reader(&subscription);
         self.mirror.resubscribe(subscription);
         self.pump();
     }
@@ -395,6 +455,7 @@ impl<S: FrameSink> DesktopHost<S> {
     /// Take a renderer that just attached (or reloaded) wanting
     /// `subscription`: every section in it is framed in full, in one batch.
     pub fn subscribe(&mut self, subscription: Subscription) {
+        self.sync_inbox_reader(&subscription);
         self.mirror.resubscribe(subscription);
         self.mirror.reframe();
         self.pump();
