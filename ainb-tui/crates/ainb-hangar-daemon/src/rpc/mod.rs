@@ -13617,6 +13617,7 @@ async fn handle_session_reconcile(pool: &SqlitePool) -> Result<serde_json::Value
         imported: marker.imported,
         skipped: marker.skipped,
         rejected: marker.rejected,
+        deleted: i64::try_from(outcome.deleted.len()).unwrap_or(i64::MAX),
         completed_at: marker.completed_at,
     })
 }
