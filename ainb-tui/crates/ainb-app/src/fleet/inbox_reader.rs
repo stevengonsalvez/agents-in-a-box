@@ -167,7 +167,13 @@ async fn run(read: Read, tx: mpsc::UnboundedSender<InboxUpdate>, timing: Timing)
     loop {
         let wait = match read().await {
             Ok(result) => {
-                if tx.send(InboxUpdate::Read(result, crate::fleet::daemons::heartbeat::now_ms())).is_err() {
+                if tx
+                    .send(InboxUpdate::Read(
+                        result,
+                        crate::fleet::daemons::heartbeat::now_ms(),
+                    ))
+                    .is_err()
+                {
                     return;
                 }
                 backoff = timing.backoff_initial;
@@ -224,9 +230,7 @@ mod tests {
     }
 
     /// A read answering from a script, one answer per call, the last repeated.
-    fn scripted(
-        answers: Vec<Result<InboxListResult, DaemonError>>,
-    ) -> (Read, Arc<AtomicUsize>) {
+    fn scripted(answers: Vec<Result<InboxListResult, DaemonError>>) -> (Read, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
         let answers = Arc::new(answers);
@@ -255,7 +259,10 @@ mod tests {
     ) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while !ok(state) {
-            assert!(tokio::time::Instant::now() < deadline, "timed out waiting on the reader");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting on the reader"
+            );
             tokio::time::sleep(Duration::from_millis(2)).await;
             reader.drain_into(state);
         }
@@ -277,7 +284,10 @@ mod tests {
         let after = state.versions()[SectionId::Inbox.index()];
         tokio::time::sleep(Duration::from_millis(60)).await;
         reader.drain_into(&mut state);
-        assert!(calls.load(Ordering::SeqCst) >= 3, "the reader polls on its cadence");
+        assert!(
+            calls.load(Ordering::SeqCst) >= 3,
+            "the reader polls on its cadence"
+        );
         assert_eq!(state.versions()[SectionId::Inbox.index()], after);
     }
 
@@ -296,9 +306,19 @@ mod tests {
         ]);
         let mut reader = InboxReader::spawn_with(read, fast());
         let mut state = AppState::new();
-        drain_until(&mut reader, &mut state, |s| s.inbox.get().unreachable.is_some()).await;
-        assert_eq!(state.inbox.get().entries.len(), 1, "the rows stay through a failure");
-        drain_until(&mut reader, &mut state, |s| s.inbox.get().unreachable.is_none()).await;
+        drain_until(&mut reader, &mut state, |s| {
+            s.inbox.get().unreachable.is_some()
+        })
+        .await;
+        assert_eq!(
+            state.inbox.get().entries.len(),
+            1,
+            "the rows stay through a failure"
+        );
+        drain_until(&mut reader, &mut state, |s| {
+            s.inbox.get().unreachable.is_none()
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -313,7 +333,11 @@ mod tests {
         assert!(state.inbox.get().absent.as_deref().unwrap().contains("hangar/inbox_list"));
         let seen = calls.load(Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(15)).await;
-        assert_eq!(calls.load(Ordering::SeqCst), seen, "an absent method waits the long backoff");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            seen,
+            "an absent method waits the long backoff"
+        );
     }
 
     #[tokio::test]
