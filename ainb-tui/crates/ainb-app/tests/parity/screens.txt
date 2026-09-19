@@ -17,7 +17,7 @@
 home	both	home
 config	both	config
 daemons	both	daemons
-git_view	both	git_view git_review
+git_view	both	git_view git_review git_commits
 log_history	both	log_history
 new_session	both	new_session_pick_repo
 onboarding	both	onboarding
