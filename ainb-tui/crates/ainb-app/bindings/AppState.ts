@@ -241,7 +241,10 @@ export type AnswerPhase_Serialize =
  *  when the producer stops reporting the row.
  */
 ({ Delivered: {
-	/**  How it was delivered, e.g. `tmux (session-name)`. */
+	/**
+	 *  How it was delivered, e.g. `tmux (session-name)`, scrubbed as the
+	 *  failure's reason is: it echoes transport text.
+	 */
 	via: string,
 } }) & { Failed?: never; InFlight?: never } | 
 /**  Nothing was delivered. The chip goes BACK to ASK and this is why. */
@@ -495,19 +498,42 @@ export type AttentionKind =
 
 /**
  *  One chip of a session row's merged attention, as a mirror frame carries it:
- *  the kind the row paints and the detail it can show, scrubbed. How the chip
- *  is answered stays on the host.
+ *  the kind the row paints, the detail it can show, and what a surface needs to
+ *  answer THIS chip rather than another one, all in the reducer's own order.
+ * 
+ *  A renderer that answers from the window must name the chip the reducer will
+ *  answer (`selected_blocking`, the first blocking chip here). Reading the
+ *  daemon's rows instead picked a chip in wire order, so with two open
+ *  questions on one session a click could send the other question's option.
+ *  The route is the coarse kind of transport only; the attention id rides in
+ *  `request`, which is how the reducer's own answer state names the chip.
  */
 export type AttentionMark = AttentionMark_Serialize;
 
 /**
  *  One chip of a session row's merged attention, as a mirror frame carries it:
- *  the kind the row paints and the detail it can show, scrubbed. How the chip
- *  is answered stays on the host.
+ *  the kind the row paints, the detail it can show, and what a surface needs to
+ *  answer THIS chip rather than another one, all in the reducer's own order.
+ * 
+ *  A renderer that answers from the window must name the chip the reducer will
+ *  answer (`selected_blocking`, the first blocking chip here). Reading the
+ *  daemon's rows instead picked a chip in wire order, so with two open
+ *  questions on one session a click could send the other question's option.
+ *  The route is the coarse kind of transport only; the attention id rides in
+ *  `request`, which is how the reducer's own answer state names the chip.
  */
 export type AttentionMark_Serialize = {
 	kind: AttentionKind,
 	detail: string | null,
+	/**  The chip's request identity, as `fleet.ask_state.request` names it. */
+	request: string,
+	/**
+	 *  The structured answers it offers, labels and descriptions scrubbed, in
+	 *  the order the reducer's cursor walks them.
+	 */
+	options: AttentionOption_Serialize[],
+	/**  How an answer to it would travel. */
+	route: MarkRoute,
 };
 
 /**  One structured option an ASK offers. */
@@ -849,6 +875,28 @@ export type ChangedFile = {
 	insertions: number,
 	deletions: number,
 };
+
+/**  What one chunk is, from its `acp.<kind>` event type. */
+export type ChunkKind = 
+/**  The agent's message text. */
+"Message" | 
+/**  The user's message text. */
+"UserMessage" | 
+/**  The agent's reasoning. */
+"Thought" | 
+/**  A tool call or its update. */
+"ToolCall" | 
+/**  An execution plan. */
+"Plan" | 
+/**  A permission the agent asked for. */
+"Permission" | 
+/**  Token and cost accounting. */
+"Usage" | 
+/**
+ *  Anything else the daemon records about the run: a turn ending, a
+ *  truncation notice, a kind this build does not know.
+ */
+"Lifecycle";
 
 /**  Authentication provider for Claude API */
 export type ClaudeAuthProvider = 
@@ -2446,6 +2494,7 @@ export type FleetView_Serialize = {
 	ask_state: AskState_Serialize,
 	broadcast: Broadcast_Serialize,
 	conversation: Conversation_Serialize,
+	transcript: Transcript_Serialize,
 	daemon_attention: DaemonAttention_Serialize,
 	fleet_snapshot: FleetRowFrame[],
 	fleet_metadata: { [key in string]: SessionFleetMetadata },
@@ -2997,6 +3046,17 @@ export type ManagementState =
 "MANAGED" | 
 /**  Only discovery or fallback control is available. */
 "DEGRADED";
+
+/**  How an answer to a chip would travel, without the transport's details. */
+export type MarkRoute = 
+/**  Through the daemon's `attention/answer`. */
+"Daemon" | 
+/**  Typed into the session's own pane. */
+"Pane" | 
+/**  Through the approve broker: only `approve` or `deny` can land. */
+"Broker" | 
+/**  Not answerable from here. */
+"None";
 
 /**  A line of rendered markdown content */
 export type MarkdownLine = MarkdownLine_Serialize;
@@ -4731,6 +4791,63 @@ export type TopicReport_Serialize = {
 	label: string,
 	description: string,
 	deps: DepReport_Serialize[],
+};
+
+/**  The open ACP transcript, as a frame carries it. */
+export type Transcript = Transcript_Serialize;
+
+/**  One chunk as a frame carries it. */
+export type TranscriptChunk = TranscriptChunk_Serialize;
+
+/**  One chunk as a frame carries it. */
+export type TranscriptChunk_Serialize = {
+	/**  The daemon's ingest order, which keys and orders the chunks. */
+	order: number,
+	kind: ChunkKind,
+	/**
+	 *  What the chunk says, as the daemon's classifier renders it: scrubbed,
+	 *  then cut to [`MAX_CHUNK_CHARS`] as the host folds it, and scrubbed
+	 *  again on the frame.
+	 */
+	body: string,
+	/**  Whether the body was cut. */
+	truncated: boolean,
+};
+
+/**  Where the transcript read stands, as a frame carries it. */
+export type TranscriptStatus = TranscriptStatus_Serialize;
+
+/**  Where the transcript read stands, as a frame carries it. */
+export type TranscriptStatus_Serialize = 
+/**  No transcript is open. */
+"Closed" | 
+/**  Opened; the first page has not arrived. */
+"Loading" | 
+/**  The daemon answered. */
+"Live" | 
+/**  The daemon could not answer, in its client's words, scrubbed. */
+{ Unavailable: {
+	detail: string,
+} };
+
+/**  The open ACP transcript, as a frame carries it. */
+export type Transcript_Serialize = {
+	/**
+	 *  The Fleet session it belongs to (`acp:<id>`), an identity the host
+	 *  resolved against its own status read, scrubbed all the same.
+	 */
+	session_key: string | null,
+	status: TranscriptStatus_Serialize,
+	/**  The newest chunks, oldest first, at most [`MAX_CHUNKS`]. */
+	chunks: TranscriptChunk_Serialize[],
+	/**  How many chunks the host holds. */
+	chunks_held: number,
+	/**
+	 *  Whether older chunks exist that neither the host nor the frame holds,
+	 *  so a surface says the transcript starts part-way rather than implying
+	 *  the run began here.
+	 */
+	starts_part_way: boolean,
 };
 
 /**  Health of the preferred provider transport. */

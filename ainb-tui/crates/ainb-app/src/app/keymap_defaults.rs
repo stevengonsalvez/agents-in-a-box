@@ -1235,6 +1235,7 @@ pub fn defaults() -> Vec<Binding> {
         previous: "up" => KeyAction::Ui(UiAction::SessionAskPrevious),
         next: "down" => KeyAction::Ui(UiAction::SessionAskNext),
         backspace: "backspace" => KeyAction::Ui(UiAction::SessionAskBackspace),
+        clear: "ctrl+u" => KeyAction::Ui(UiAction::SessionAskClear),
     );
     append_app_rows!(rows, Context::Screen("session_recovery", super::keymap::SubContext::Named("filtered")),
         clear: "esc" => AppEvent::SessionRecoverySearchCancel,
@@ -1274,6 +1275,12 @@ pub fn defaults() -> Vec<Binding> {
             "select_tab",
             AppEvent::SessionListSelectTab(crate::components::session_tabs::SessionTab::Preview),
             "Show the session tab a click names",
+        ),
+        unbound(
+            Context::screen("session_list"),
+            "open_transcript",
+            AppEvent::SessionListOpenTranscript(None),
+            "Open the ACP transcript a board card names",
         ),
         unbound(
             Context::screen("session_list"),

@@ -159,6 +159,9 @@ bytes = "1.6"
 # the same self-dev-dep enables tests in skill-core itself.
 ainb-skill-core = { path = "../ainb-skill-core", version = "0.1.0", features = ["test-fixtures"] }
 ainb-hangar-daemon = { path = "../ainb-hangar-daemon", features = ["test-support"] }
+# Already in the tree through the daemon. Named here so a test can match every
+# ACP transcript kind exhaustively against the desktop frame's ChunkKind.
+ainb-acp = { path = "../ainb-acp" }
 tempfile = "3"
 
 [lints]

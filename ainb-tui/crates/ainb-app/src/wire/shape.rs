@@ -908,7 +908,11 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
                 crate::fleet::attention::AttentionKind::Ask,
                 1_000,
             )
-            .with_detail(seed.text("session.attention.detail", Captured)),
+            .with_detail(seed.text("session.attention.detail", Captured))
+            .with_options(vec![crate::fleet::attention::AttentionOption {
+                label: seed.text("session.attention.option_label", Captured),
+                description: seed.text("session.attention.option_description", Captured),
+            }]),
         ];
         let mut target = crate::models::SshTarget::new("build.example.com".to_string());
         target.user = Some("deploy".to_string());
@@ -1170,6 +1174,41 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
                 send_block: seed.text("fleet.conversation.send_block", Captured),
                 composer: seed.text("fleet.conversation.composer", Typed),
             };
+            // The open ACP transcript: one chunk per kind, and the status
+            // that carries text, so every leaf reaches the leak walk.
+            {
+                use crate::fleet::transcript::{
+                    ChunkKind, Transcript, TranscriptChunk, TranscriptStatus,
+                };
+                let kinds = [
+                    ChunkKind::Message,
+                    ChunkKind::UserMessage,
+                    ChunkKind::Thought,
+                    ChunkKind::ToolCall,
+                    ChunkKind::Plan,
+                    ChunkKind::Permission,
+                    ChunkKind::Usage,
+                    ChunkKind::Lifecycle,
+                ];
+                let mut chunks = Vec::new();
+                for (order, kind) in (1_i64..).zip(kinds) {
+                    chunks.push(TranscriptChunk {
+                        order,
+                        kind,
+                        body: seed.text("fleet.transcript.body", Captured),
+                        truncated: true,
+                    });
+                }
+                fleet.transcript = Transcript {
+                    session_key: Some("acp:s-1".to_string()),
+                    status: TranscriptStatus::Unavailable {
+                        detail: seed.text("fleet.transcript.unavailable", Captured),
+                    },
+                    chunks,
+                    chunks_held: 8,
+                    starts_part_way: true,
+                };
+            }
         }
         {
             let mut attention =

@@ -526,6 +526,7 @@
     {"context":"session_list.ask","chord":"up","action":"Ui(SessionAskPrevious)"},
     {"context":"session_list.ask","chord":"down","action":"Ui(SessionAskNext)"},
     {"context":"session_list.ask","chord":"backspace","action":"Ui(SessionAskBackspace)"},
+    {"context":"session_list.ask","chord":"ctrl+u","action":"Ui(SessionAskClear)"},
     {"context":"session_recovery.filtered","chord":"esc","action":"App(SessionRecoverySearchCancel)"}
   ]
 }

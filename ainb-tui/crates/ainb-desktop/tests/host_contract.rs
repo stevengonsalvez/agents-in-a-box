@@ -453,6 +453,164 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     found
 }
 
+/// The answer's full round trip with no window: the ask commands a person's
+/// clicks send, against a session waiting on a daemon question, move the
+/// frame's phase to in flight and then settle it. There is no daemon in this
+/// test, so it settles as a failure that names the call and keeps the answer;
+/// the delivered leg runs against a real daemon in the journey.
+#[test]
+fn the_ask_commands_send_an_answer_and_the_frame_follows_it() {
+    use ainb_app::AppState;
+    use ainb_app::app::pointer::select_session_tab;
+    use ainb_app::app::screens::ids as screen_ids;
+    use ainb_app::components::session_tabs::SessionTab;
+    use ainb_app::fleet::answer::AnswerPhase;
+    use ainb_app::fleet::attention::{AttentionKind, AttentionOption, SessionAttention};
+    use ainb_app::models::{Session, Workspace};
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    scratch_home();
+    let chip = SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-7".into()).with_options(
+        ["staging", "production"]
+            .iter()
+            .map(|label| AttentionOption {
+                label: (*label).to_string(),
+                description: String::new(),
+            })
+            .collect(),
+    );
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    let mut workspace = Workspace::new("api".to_string(), "/work/api".into());
+    let mut session = Session::new("feat".to_string(), "/work/api/wt".to_string());
+    session.live_attention = vec![chip.clone()];
+    let session_id = session.id;
+    workspace.add_session(session);
+    state.sessions.workspaces = vec![workspace];
+    state.sessions.selected_workspace_index = Some(0);
+    state.sessions.selected_session_index = Some(0);
+    // The chip is the seed; a merge would recompute it from stores this test
+    // does not have, so none is due while the test runs.
+    state.host.last_attention_refresh = Some(Instant::now());
+    let log = Log::default();
+    let sink_log = Rc::clone(&log);
+    let mut host = DesktopHost::hosting(
+        state,
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::only(&[SectionId::Fleet]),
+        move |batch: FrameBatch| {
+            for frame in batch.frames {
+                sink_log.borrow_mut().push(format!("frame {}", frame.section));
+            }
+        },
+    );
+    host.state().host.attention_poll_running.store(true, Ordering::Release);
+
+    // What the banner sends to pick the second option, in its order: the row
+    // selected without attaching it, the ask pane shown, the cursor moved,
+    // then Enter.
+    let _ = host.dispatch(ainb_app::app::pointer::select_session_row(
+        &ainb_app::app::state::SessionListRowId::Session(session_id),
+        false,
+    ));
+    let _ = host.dispatch(select_session_tab(SessionTab::Ask));
+    let _ = host.tick();
+    let _ = host.dispatch(Intent::Command(
+        CommandId::new("session_list.ask.next"),
+        serde_json::Value::Null,
+    ));
+    assert_eq!(
+        host.state().fleet.ask_state.cursor(),
+        1,
+        "the cursor is on option two"
+    );
+    log.borrow_mut().clear();
+    let _ = host.dispatch(Intent::Command(
+        CommandId::new("session_list.ask.enter"),
+        serde_json::Value::Null,
+    ));
+    assert!(
+        matches!(
+            host.state().fleet.ask_state.phase_for(&chip),
+            Some(AnswerPhase::InFlight { .. })
+        ),
+        "the send is out"
+    );
+    assert!(
+        log.borrow().iter().any(|frame| frame == "frame fleet"),
+        "and the frame says so"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while host.state().fleet.ask_state.in_flight() {
+        assert!(Instant::now() < deadline, "the send never settled");
+        std::thread::sleep(Duration::from_millis(20));
+        let _ = host.tick();
+    }
+    match host.state().fleet.ask_state.phase_for(&chip) {
+        Some(AnswerPhase::Failed { reason, .. }) => {
+            assert!(
+                reason.contains("attention/answer"),
+                "names the call: {reason}"
+            );
+        }
+        other => panic!("with no daemon the send fails, and says so: {other:?}"),
+    }
+}
+
+/// Typed text reaches the reducer's composer once its cursor is on the
+/// composer row, which is what the banner's free-text send relies on.
+#[test]
+fn text_typed_at_the_composer_row_lands_in_the_reducers_composer() {
+    use ainb_app::AppState;
+    use ainb_app::app::pointer::select_session_tab;
+    use ainb_app::app::screens::ids as screen_ids;
+    use ainb_app::components::session_tabs::SessionTab;
+    use ainb_app::fleet::attention::{AttentionKind, SessionAttention};
+    use ainb_app::models::{Session, Workspace};
+    use std::time::{Duration, Instant};
+
+    scratch_home();
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    let mut workspace = Workspace::new("api".to_string(), "/work/api".into());
+    let mut session = Session::new("feat".to_string(), "/work/api/wt".to_string());
+    session.live_attention = vec![SessionAttention::daemon(
+        AttentionKind::Ask,
+        1,
+        "att-9".into(),
+    )];
+    workspace.add_session(session);
+    state.sessions.workspaces = vec![workspace];
+    state.sessions.selected_workspace_index = Some(0);
+    state.sessions.selected_session_index = Some(0);
+    // Ahead of now, so the merge's cadence cannot come due however long the
+    // runner takes between here and the type: `elapsed` on a future instant is
+    // zero. The chip under test is a daemon one, and a merge with no daemon
+    // reachable takes it off the row, leaving no question to type into.
+    state.host.last_attention_refresh = Some(Instant::now() + Duration::from_secs(600));
+    let mut host = DesktopHost::hosting(
+        state,
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::only(&[SectionId::Fleet]),
+        |_batch: FrameBatch| {},
+    )
+    // The other way in: the poller's first publish is news, which runs the
+    // merge whatever the cadence says. This test is about the reducer's
+    // composer, so it runs no poller.
+    .without_attention_poll();
+
+    let _ = host.dispatch(select_session_tab(SessionTab::Ask));
+    let _ = host.tick();
+    // No options, so the retarget has already put the cursor on the composer.
+    let _ = host.dispatch(Intent::Text("qa".to_string()));
+
+    assert_eq!(host.state().fleet.ask_state.free_text(), "qa");
+}
+
 /// Seam 4 reaches the desktop: the host's own tick opens the conversation the
 /// open tab names and frames it. The terminal used to open and tick chat hosts
 /// only while drawing, so on this shell `fleet.conversation` stayed the default
@@ -484,4 +642,179 @@ fn a_desktop_tick_frames_the_open_conversation() {
         "and framed it: {:?}",
         log.borrow()
     );
+}
+
+/// An ACP session's transcript: opened from the board by its Fleet session
+/// key, paged by the host's own tick, framed on Fleet.
+mod transcript {
+    use super::*;
+    use ainb_app::app::pointer::open_transcript;
+    use ainb_app::fleet::transcript::{ChunkKind, MAX_CHUNKS, Transcript, TranscriptOutcome};
+    use ainb_hangar_proto::fleet::{FleetTranscriptChunk, FleetTranscriptListResult};
+
+    /// A state whose status read holds the ACP card `acp:s-1`: the host opens
+    /// a transcript only for a card it holds.
+    fn holding_acp_card() -> ainb_app::AppState {
+        use ainb_hangar_proto::agent_status as status;
+        use ainb_hangar_proto::fleet;
+        let session = fleet::FleetSession {
+            session_key: "acp:s-1".to_string(),
+            provider: fleet::FleetProvider::Acp,
+            provider_session_id: None,
+            tmux_target: None,
+            pane_binding: fleet::PaneBinding::PaneUnbound,
+            process_start_fingerprint: None,
+            cwd: "/w".to_string(),
+            display_name: None,
+            lifecycle: fleet::LifecycleState::Running,
+            active_work_count: 0,
+            attention: fleet::AttentionState::None,
+            current_request_fingerprint: None,
+            current_request: None,
+            management: fleet::ManagementState::Managed,
+            transport_health: fleet::TransportHealth::Healthy,
+            capabilities: fleet::FleetCapabilities::default(),
+            provenance: fleet::FleetProvenance::Authoritative,
+            confidence: fleet::FleetConfidence::High,
+            discovered_at: 1,
+            last_observed_at: 1,
+            lifecycle_updated_at: 1,
+            attention_updated_at: 1,
+            model: None,
+            reasoning_effort: None,
+            model_updated_at: 0,
+            version: 1,
+            updated_revision: 1,
+        };
+        let row = status::status_row_with_tier(&session, false, None);
+        let mut state = ainb_app::AppState::with_config(AppConfig::default());
+        state.apply_agent_status_read(
+            status::RosterStatusResult {
+                rows: vec![status::RosterStatusRow {
+                    session,
+                    status: row,
+                    read_revision: 1,
+                }],
+                read_revision: 1,
+                unknown_events: Vec::new(),
+                read_at_ms: 0,
+            },
+            1,
+        );
+        state
+    }
+
+    /// A host on the sessions screen whose sink records each Fleet frame's
+    /// encoded size.
+    fn sized_host(sizes: &Rc<RefCell<Vec<usize>>>) -> DesktopHost<impl FnMut(FrameBatch)> {
+        scratch_home();
+        let sizes = Rc::clone(sizes);
+        let mut host = DesktopHost::hosting(
+            holding_acp_card(),
+            Keymap::defaults(),
+            HostId::local(),
+            Subscription::only(&[SectionId::Fleet]),
+            move |batch: FrameBatch| {
+                for frame in batch.frames {
+                    sizes.borrow_mut().push(serde_json::to_vec(&frame).expect("encodes").len());
+                }
+            },
+        )
+        // Folding a large page takes a while in a debug build; no rescan may
+        // come due inside it, since a scan needs the runtime this test lacks.
+        .rescanning_every(std::time::Duration::from_secs(600));
+        host.open_sessions(&mut Recorder(Log::default()));
+        host
+    }
+
+    fn page(count: i64, text: &str) -> TranscriptOutcome {
+        let chunks: Vec<FleetTranscriptChunk> = (1..=count)
+            .map(|order| FleetTranscriptChunk {
+                ingest_order: order,
+                event_id: format!("e-{order}"),
+                session_key: "acp:s-1".to_string(),
+                event_type: if order % 2 == 0 {
+                    "acp.thought"
+                } else {
+                    "acp.message"
+                }
+                .to_string(),
+                payload: serde_json::json!({ "text": text }),
+                observed_at: order,
+            })
+            .collect();
+        TranscriptOutcome::Page(FleetTranscriptListResult {
+            next_after_order: chunks.last().map(|chunk| chunk.ingest_order),
+            chunks,
+            truncated: false,
+        })
+    }
+
+    /// Stand in for the page worker, as a real one reports.
+    fn deliver(host: &DesktopHost<impl FnMut(FrameBatch)>, outcome: TranscriptOutcome) {
+        let open = host.state().host.transcript.as_ref().expect("a transcript is open");
+        open.reports().lock().expect("inbox").insert(0, outcome);
+    }
+
+    #[test]
+    fn a_tick_frames_the_open_transcript() {
+        let sizes = Rc::new(RefCell::new(Vec::new()));
+        let mut host = sized_host(&sizes);
+        let _ = host.dispatch(open_transcript(Some("acp:s-1")));
+        deliver(&host, page(2, "hello"));
+
+        let _ = host.tick();
+
+        let framed = &host.state().fleet.transcript;
+        assert_eq!(framed.session_key.as_deref(), Some("acp:s-1"));
+        assert_eq!(
+            framed.chunks.iter().map(|chunk| chunk.kind).collect::<Vec<_>>(),
+            vec![ChunkKind::Message, ChunkKind::Thought]
+        );
+        assert!(!sizes.borrow().is_empty(), "and the Fleet frame went out");
+    }
+
+    #[test]
+    fn a_transcript_past_the_bound_still_frames_inside_one_frame() {
+        let sizes = Rc::new(RefCell::new(Vec::new()));
+        let mut host = sized_host(&sizes);
+        let _ = host.dispatch(open_transcript(Some("acp:s-1")));
+        // Far more than the host keeps, each far longer than a row survives.
+        deliver(&host, page(600, &"x".repeat(20_000)));
+        sizes.borrow_mut().clear();
+
+        let _ = host.tick();
+
+        let framed = &host.state().fleet.transcript;
+        assert_eq!(framed.chunks.len(), MAX_CHUNKS);
+        assert!(framed.starts_part_way);
+        let largest = sizes.borrow().iter().copied().max().expect("a frame went out");
+        assert!(
+            largest < ainb_app::wire::frame::MAX_FRAME_BYTES,
+            "a Fleet frame of {largest} bytes"
+        );
+    }
+
+    #[test]
+    fn a_closed_transcript_frames_nothing() {
+        let sizes = Rc::new(RefCell::new(Vec::new()));
+        let mut host = sized_host(&sizes);
+        let _ = host.dispatch(open_transcript(Some("acp:s-1")));
+        deliver(&host, page(2, "hello"));
+        let _ = host.tick();
+
+        let _ = host.dispatch(open_transcript(None));
+        let _ = host.tick();
+        assert_eq!(
+            host.state().fleet.transcript,
+            Transcript::default(),
+            "closing clears the field on the next tick"
+        );
+        sizes.borrow_mut().clear();
+        let _ = host.tick();
+        assert!(
+            sizes.borrow().is_empty(),
+            "and a closed transcript frames nothing after"
+        );
+    }
 }

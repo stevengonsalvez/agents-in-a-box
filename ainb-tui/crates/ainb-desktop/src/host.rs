@@ -91,6 +91,10 @@ pub struct DesktopHost<S: FrameSink> {
     /// How the tick asks the state to keep the session list fresh: the
     /// cadence, and the floor under daemon news (#1156).
     rescan: WorkspaceRescan,
+    /// Whether the tick starts the daemon attention poller. A test that is
+    /// about the reducer turns it off: the poller is a thread on a real
+    /// socket, and its first publish is news whenever it lands.
+    poll_attention: bool,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -104,7 +108,25 @@ impl<S: FrameSink> DesktopHost<S> {
         subscription: Subscription,
         sink: S,
     ) -> Self {
-        let mut state = AppState::with_config(config);
+        Self::hosting(
+            AppState::with_config(config),
+            keymap,
+            host_id,
+            subscription,
+            sink,
+        )
+    }
+
+    /// Host `state` as it was built, rather than one built on a config. For a
+    /// caller that has already assembled the state it wants hosted: a test
+    /// seeding a session that is waiting on a question, for one.
+    pub fn hosting(
+        mut state: AppState,
+        keymap: Keymap,
+        host_id: HostId,
+        subscription: Subscription,
+        sink: S,
+    ) -> Self {
         // This shell is the surface a person sits at, so an answer sent from
         // this window is recorded as the desktop's. The sidecar already tells
         // the daemon the same thing about this process (`sidecar::surface`).
@@ -116,6 +138,7 @@ impl<S: FrameSink> DesktopHost<S> {
             mirror: Mirror::new(host_id, subscription),
             sink,
             rescan: WorkspaceRescan::default(),
+            poll_attention: true,
         }
     }
 
@@ -132,6 +155,15 @@ impl<S: FrameSink> DesktopHost<S> {
     #[must_use]
     pub const fn flooring_news_at(mut self, floor: Duration) -> Self {
         self.rescan.news_floor = floor;
+        self
+    }
+
+    /// Never start the daemon attention poller on a tick. For tests: the
+    /// poller's first publish counts as news, which runs the attention merge
+    /// whenever the thread happens to get there, whatever the cadence says.
+    #[must_use]
+    pub const fn without_attention_poll(mut self) -> Self {
+        self.poll_attention = false;
         self
     }
 
@@ -169,12 +201,14 @@ impl<S: FrameSink> DesktopHost<S> {
         // The poller is idempotent by an atomic, so starting it every tick is
         // its documented use. Every read here is by shared reference: a `&mut`
         // path through the `Versioned` Fleet section would bump it each tick.
-        ainb_app::fleet::attention_poll::spawn(
-            &self.state.fleet.daemon_attention,
-            &self.state.fleet.fleet_snapshot,
-            &self.state.host.attention_poll_running,
-            &self.state.host.daemon_attention_generation,
-        );
+        if self.poll_attention {
+            ainb_app::fleet::attention_poll::spawn(
+                &self.state.fleet.daemon_attention,
+                &self.state.fleet.fleet_snapshot,
+                &self.state.host.attention_poll_running,
+                &self.state.host.daemon_attention_generation,
+            );
+        }
         // The merged attention each session row carries on its frame. The
         // reducer paces it: at once on daemon news, otherwise on its own
         // cadence, and a merge that finds nothing new bumps nothing.

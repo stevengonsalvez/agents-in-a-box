@@ -26,6 +26,8 @@ pub mod ids {
     pub const SESSION_LIST_FOCUS_PANE: &str = "session_list.focus_pane";
     /// `{"tab": SessionTab}`, spelled as the frame spells it.
     pub const SESSION_LIST_SELECT_TAB: &str = "session_list.select_tab";
+    /// `{"session_key": String | null}`: null closes.
+    pub const SESSION_LIST_OPEN_TRANSCRIPT: &str = "session_list.open_transcript";
     /// `{"width": u16, "collapsed": bool}`
     pub const SESSION_LIST_SAVE_PANE_LAYOUT: &str = "session_list.save_pane_layout";
     /// No arguments.
@@ -53,6 +55,7 @@ pub mod ids {
         SESSION_LIST_OPEN_ROW_MENU,
         SESSION_LIST_FOCUS_PANE,
         SESSION_LIST_SELECT_TAB,
+        SESSION_LIST_OPEN_TRANSCRIPT,
         SESSION_LIST_SAVE_PANE_LAYOUT,
         SKILL_MANAGER_ALL_SOURCES,
         SKILL_MANAGER_SELECT_SOURCE,
@@ -105,6 +108,19 @@ pub fn focus_session_pane(pane: &FocusedPane) -> Intent {
 #[must_use]
 pub fn select_session_tab(tab: SessionTab) -> Intent {
     command(ids::SESSION_LIST_SELECT_TAB, json!({ "tab": tab }))
+}
+
+/// Open the ACP transcript of the Fleet session `session_key`, or close the
+/// open one with `None`.
+///
+/// An ACP session has no tmux pane and no session list row, so its board card
+/// names it by the Fleet session key the frame carries.
+#[must_use]
+pub fn open_transcript(session_key: Option<&str>) -> Intent {
+    command(
+        ids::SESSION_LIST_OPEN_TRANSCRIPT,
+        json!({ "session_key": session_key }),
+    )
 }
 
 /// Persist the sessions pane layout a renderer just changed: the sidebar's
@@ -236,6 +252,14 @@ struct TabArgs {
     tab: SessionTab,
 }
 
+/// A present `session_key`, which may be null: a bare `Null` payload is not
+/// this, so the palette, which sends one, cannot run the row.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TranscriptArgs {
+    session_key: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LayoutArgs {
@@ -294,6 +318,8 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
         AppEvent::SessionListSelectTab(_) => {
             parse::<TabArgs>(args).map(|args| AppEvent::SessionListSelectTab(args.tab))
         }
+        AppEvent::SessionListOpenTranscript(_) => parse::<TranscriptArgs>(args)
+            .map(|args| AppEvent::SessionListOpenTranscript(args.session_key)),
         AppEvent::SaveSessionsPaneLayout { .. } => parse::<LayoutArgs>(args)
             .filter(|args| (0.0..=1.0).contains(&args.fraction))
             .map(|args| AppEvent::SaveSessionsPaneLayout {
