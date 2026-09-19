@@ -400,17 +400,18 @@ test("emphasis ranges are byte offsets, and the window draws them where they are
 });
 
 test("the keys the terminal answers move the reducer's offset, not the body", () => {
-  // Thirty rows in view, the body sitting at row 40 of 200.
-  assert.equal(keyRows("ArrowDown", 30, 40, 200), 1);
-  assert.equal(keyRows("ArrowUp", 30, 40, 200), -1);
-  assert.equal(keyRows("PageDown", 30, 40, 200), 30);
-  assert.equal(keyRows("PageUp", 30, 40, 200), -30);
-  // Home and End are relative, because the intent is a row COUNT: the reducer
-  // owns where the offset lands.
-  assert.equal(keyRows("Home", 30, 40, 200), -40);
-  assert.equal(keyRows("End", 30, 40, 200), 159);
-  assert.equal(keyRows("End", 30, 199, 200), 0, "already at the end asks for nothing");
-  assert.equal(keyRows("a", 30, 40, 200), null, "an ordinary key is not ours");
+  // Thirty rows in view.
+  assert.equal(keyRows("ArrowDown", 30), 1);
+  assert.equal(keyRows("ArrowUp", 30), -1);
+  assert.equal(keyRows("PageDown", 30), 30);
+  assert.equal(keyRows("PageUp", 30), -30);
+  // Home and End ask for an end, not a distance: this window counts the
+  // FRAME's rows and the reducer applies the delta to the MODEL's, so any
+  // arithmetic from a frame offset would be in the wrong space. The reducer
+  // saturates at both ends.
+  assert.ok(keyRows("Home", 30)! < -1_000_000, "Home asks for the top, whatever is above");
+  assert.ok(keyRows("End", 30)! > 1_000_000, "End asks for the bottom");
+  assert.equal(keyRows("a", 30), null, "an ordinary key is not ours");
 });
 
 test("the body takes focus and refuses the browser's own scrolling", async () => {
@@ -454,4 +455,40 @@ test("emphasis ranges out of order are drawn, not dropped", () => {
     { text: " beta ", emphasis: false },
     { text: "gamma", emphasis: true },
   ]);
+});
+
+test("the highlighted hunk is the one the frame's cursor names, past a collapsed file", async () => {
+  const body = section(
+    [
+      file("src/quiet.rs", [hunk(1, [row(1, "hidden one")]), hunk(9, [row(9, "hidden two")])], {
+        collapsed: true,
+      }),
+      file("src/open.rs", [hunk(1, [row(1, "first")]), hunk(20, [row(20, "second")])]),
+    ],
+    1,
+    {
+      review_ui: {
+        selected_file: 1,
+        sidebar_selected: 0,
+        collapsed_dirs: [],
+        collapsed_dirs_cut: 0,
+        scroll: 0,
+        scroll_cut: false,
+        current_hunk: 1,
+      },
+    },
+  );
+
+  const html = await rendered({ gitView: body, stale: false, onChoose() {} });
+
+  // A collapsed file draws its heading and none of its hunks, so the cursor's
+  // hunk 1 is the open file's SECOND hunk, and only that line is current.
+  const hunks = [...html.matchAll(/class="review-hunk([^"]*)"[^>]*>([^<]*)/g)].map((match) => [
+    match[1].includes("current"),
+    match[2].trim(),
+  ]);
+  assert.deepEqual(hunks, [
+    [false, "@@ -1 +1 @@"],
+    [true, "@@ -20 +20 @@"],
+  ], html);
 });
