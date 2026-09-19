@@ -14,7 +14,6 @@
 // row field fails the same gate a new frame field does.
 
 use crate::app::AppState;
-use crate::wire::frame::Frame;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -45,14 +44,6 @@ pub struct WebSessionRow {
 #[must_use]
 pub fn session_rows(state: &AppState) -> Vec<WebSessionRow> {
     rows_from_body(&crate::wire::every_session_json(state))
-}
-
-/// The web rows a Sessions frame describes. Any other section's frame has no
-/// workspaces and gives no rows. A frame carries only the rows its host's
-/// filter shows; [`session_rows`] reads every session.
-#[must_use]
-pub fn rows_from_frame(frame: &Frame) -> Vec<WebSessionRow> {
-    rows_from_body(frame.body())
 }
 
 /// The web rows a Sessions view body describes.
