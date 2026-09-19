@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 /// The two variables that decide where this crate believes home is.
 const OWNED: [&str; 2] = ["HOME", "AINB_HOME"];
 
-/// The only files allowed to write them: the guard, and this fence, which has
-/// to name the calls it forbids in order to find them.
+/// The only files allowed to write them: the guard, and this fence, which has to
+/// name the calls it forbids in order to find them. Nothing under `src` is on
+/// this list, and nothing should be: the crate's own unit tests reach the same
+/// guard through `crate::test_home`.
 const ALLOWED: [&str; 2] = ["tests/support/home.rs", "tests/home_env_fence.rs"];
 
 #[test]
