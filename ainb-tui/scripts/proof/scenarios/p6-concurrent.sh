@@ -8,7 +8,8 @@
 #         └───────┴──────────┴──▶ one daemon, one $HOME, one sessions table
 #
 # What it proves, per combination: a session the CLI creates reaches every
-# surface that is up; a session killed from the CLI leaves every surface; and
+# surface that is up (for a TUI, on its next list reload, which is a key the
+# operator presses, not a restart); a session killed from the CLI leaves every surface; and
 # an ASK answered from one surface folds on the others. The capability is dark
 # in a release build, so the binaries the harness builds carry `test-support`
 # and this scenario turns it on with AINB_TEST_WORKSPACE_SESSIONS=1 (the
@@ -57,6 +58,15 @@ p6_table_rows() { p6_cli_sessions | sort; }
 # (`tmux_repo-7d755792` runs on `agents/7d755792`).
 p6_row_needle() { printf '%s' "${1##*-}"; }
 
+# p6_tui_reload <session>: leave the session list and open it again, which is
+# where the TUI reloads its workspaces. Same process, no restart: the reload
+# is the operator's own key, and what it reads is the process's session source.
+p6_tui_reload() {
+  keys "$1" Escape
+  sleep 0.5
+  open_session_list "$1"
+}
+
 # p6_tui_has <session> <needle>: the TUI's session list shows it.
 p6_tui_has() { pane_text "$1" | grep -qF -- "$2"; }
 p6_tui_lacks() { ! p6_tui_has "$1" "$2"; }
@@ -104,6 +114,7 @@ p6_combination() {
   observe "$name: the CLI created $tmux_name ($created), listed as $row"
   check "$name: the CLI lists the session it created" p6_cli_has "$created"
   for i in "${sessions[@]}"; do
+    p6_tui_reload "$i"
     check "$name: the session the CLI created reached $i" \
       wait_for 60 p6_tui_has "$i" "$row"
   done
@@ -134,6 +145,7 @@ p6_combination() {
     || observe "$name: ainb kill said $(tail -1 "$PROOF_WORLD/p6-kill-$name.txt")"
   check "$name: the CLI no longer lists the killed session" wait_for 30 p6_cli_lacks "$created"
   for i in "${sessions[@]}"; do
+    p6_tui_reload "$i"
     check "$name: the killed session left $i" wait_for 90 p6_tui_lacks "$i" "$row"
   done
   if [[ "$web" == "1" ]]; then
