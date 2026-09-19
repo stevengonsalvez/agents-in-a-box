@@ -135,6 +135,8 @@ test("an edit that does not fit the row is not sent", () => {
   assert.equal(rowEdit(by("authentication.claude_provider"), 2), null, "an index past the options");
   assert.equal(rowEdit(by("authentication.claude_provider"), "api_key"), null, "a choice is an index");
   assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), "four"), null, "a number that does not parse");
+  assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), ""), null, "a cleared number input is not 0");
+  assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), "  "), null, "nor a blank one");
   assert.equal(rowEdit(by("workspace_defaults.scan_max_depth"), 1.5), null, "an integer row");
   assert.equal(rowEdit(by("ui_preferences.show_git_status"), "yes"), null, "a bool is a boolean");
   assert.equal(rowEdit(by("usage.plan.id"), "pro"), null, "a read-only row");
