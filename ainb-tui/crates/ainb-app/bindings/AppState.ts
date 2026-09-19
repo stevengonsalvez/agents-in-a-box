@@ -979,20 +979,6 @@ export type CloneProgress_Serialize = {
 	error: string | null,
 };
 
-/**  Transient UI state for the review surface (selection + scroll). */
-export type CodeReviewUi = {
-	/**  Index of the sidebar-selected file (mirrors the highlighted tree file). */
-	selected_file: number,
-	/**  Selected row in the flattened sidebar tree (files and folders). */
-	sidebar_selected: number,
-	/**  Directory paths the user has collapsed in the sidebar tree. */
-	collapsed_dirs: string[],
-	/**  First visible virtual-row index (diff body vertical scroll offset). */
-	scroll: number,
-	/**  Index of the hunk the `n`/`N` cursor is on (0-based, across all files). */
-	current_hunk: number,
-};
-
 /**
  *  Available Codex models for session.
  * 
@@ -2669,7 +2655,7 @@ export type GitViewFrame_Serialize = {
 	commits_cut: number,
 	selected_commit_index: number,
 	review: ReviewFrame_Serialize,
-	review_ui: CodeReviewUi,
+	review_ui: ReviewUiFrame,
 };
 
 export type GitViewView = GitViewView_Serialize;
@@ -3907,6 +3893,11 @@ export type ReviewFileFrame_Serialize = {
 	 *  to the byte budget.
 	 */
 	rows_cut: number,
+	/**
+	 *  Hunks this file lost. A hunk costs bytes with no rows in it at all, and
+	 *  a file rewritten line by line has one per line.
+	 */
+	hunks_cut: number,
 };
 
 /**  The review model as a frame carries it. */
@@ -3915,6 +3906,25 @@ export type ReviewFrame = ReviewFrame_Serialize;
 /**  The review model as a frame carries it. */
 export type ReviewFrame_Serialize = {
 	files: ReviewFileFrame_Serialize[],
+	/**
+	 *  Changed files the frame did not carry. A file costs bytes before any of
+	 *  its rows do, so twenty thousand empty ones pass the ceiling on their
+	 *  own.
+	 */
+	files_cut: number,
+};
+
+/**
+ *  What a surface has selected and scrolled to, brought inside the window the
+ *  frame kept.
+ */
+export type ReviewUiFrame = {
+	selected_file: number,
+	sidebar_selected: number,
+	/**  Sorted, for the reason [`GitViewFrame::expanded_folders`] is. */
+	collapsed_dirs: string[],
+	scroll: number,
+	current_hunk: number,
 };
 
 /**  The parts of a row's status that decide which entries its menu offers. */
