@@ -289,14 +289,13 @@ impl ConfigValue {
 /// resolves it against the row's own [`ConfigValue`] kind.
 ///
 /// It carries what the person chose and nothing the frame already holds: a
-/// choice is its option index, a secret is its reference (`$ENV_VAR` or
-/// `keychain:<service>`), never a literal. An edit whose kind does not fit the
-/// row is dropped, so a form cannot turn a choice into free text.
+/// choice is its option index. There is no secret edit: a secret row is not
+/// renderer-settable (`renderer_edit::SECRET_REASON`), so the wire cannot
+/// carry one. An edit whose kind does not fit the row is dropped with a
+/// notice, so a form cannot turn a choice into free text.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConfigRowEdit {
     Text(String),
-    /// A secret row's reference, exactly as config.toml would hold it.
-    Secret(String),
     Bool(bool),
     /// The index of the chosen option in the row's own list.
     Choice(usize),
