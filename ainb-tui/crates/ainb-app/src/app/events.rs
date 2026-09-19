@@ -7584,8 +7584,10 @@ fn run_catalog_search(
 mod catalog_search_tokio_guard {
     use super::run_catalog_search;
 
-    // Serialize env mutation against other env-touching tests in this binary.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Serialize env mutation against other env-touching tests in this binary,
+    // through the crate's one lock: a private mutex here ordered this test
+    // against itself only.
+    use crate::env_lock::ENV_LOCK;
 
     /// Regression: `run_catalog_search` must run the `reqwest::blocking`
     /// search off the runtime thread. Building a blocking client inside a
@@ -9370,20 +9372,10 @@ mod hangar_daemon_persist_tests {
     /// snapshot that other tests in this binary read. Serialised, because the
     /// environment is process-global and cargo runs tests in parallel.
     fn with_isolated_home<T>(body: impl FnOnce() -> T) -> T {
-        // The crate-wide lock, not a private one: sibling tests call
+        // The shared guard, which takes the crate-wide lock: sibling tests call
         // `AppConfig::load()` and `snapshot()`, which read this same HOME.
-        let _guard =
-            crate::config::tunables::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let previous = std::env::var_os("HOME");
-        std::env::set_var("HOME", dir.path());
-        let out = body();
-        match previous {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        out
+        let _home = crate::test_home::ScopedHome::new();
+        body()
     }
 
     /// Two Hangar-daemon edits confirmed inside one app tick must BOTH be

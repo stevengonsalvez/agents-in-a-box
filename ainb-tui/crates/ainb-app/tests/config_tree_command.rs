@@ -5,15 +5,16 @@
 // selection and the right pane's rows. A renderer keeps no selection of its
 // own, so two surfaces drawing one frame show the same rows.
 
+#[path = "support/home.rs"]
+mod home;
+
 use ainb_app::app::NoRenderer;
 use ainb_app::app::pointer;
 use ainb_app::app::screens::ids as screen_ids;
 use ainb_app::{AppState, Keymap, SectionId, dispatch};
 
 fn on_config() -> AppState {
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
-    std::mem::forget(home);
+    home::shared();
     let mut state = AppState::new();
     state.shell.current_screen = screen_ids::CONFIG.to_string();
     state

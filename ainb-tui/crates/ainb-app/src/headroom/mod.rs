@@ -456,10 +456,15 @@ fn try_kill(pid: u32) -> bool {
 /// Serializes every test that reads or mutates `AINB_HEADROOM_PORT`. Cargo runs
 /// tests in-process in parallel, so a setter in one test races a reader in
 /// another (e.g. `headroom_base_url()` in the session_manager tests). All such
-/// tests — in this module AND others — must hold this lock. See
+/// tests, in this module AND others, must hold this lock. See
 /// [reference: ENV_LOCK for parallel tests].
-#[cfg(any(test, feature = "test-support"))]
-pub static HEADROOM_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+///
+/// It is the crate's one environment lock under a second name. It used to be a
+/// mutex of its own, which ordered these tests against each other and against
+/// nothing else: a test holding it wrote `AINB_HOME` while a test holding
+/// `TEST_ENV_LOCK` wrote `HOME`, both at once, which is the race either lock was
+/// there to stop.
+pub use crate::env_lock::ENV_LOCK as HEADROOM_ENV_LOCK;
 
 #[cfg(test)]
 mod tests {

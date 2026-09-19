@@ -799,21 +799,11 @@ mod tests {
     use crate::app::state::ConfigValue;
     use crate::components::config_popup::ConfigPopupType;
 
-    /// Build under a scratch `HOME`, holding the crate's env lock and putting
-    /// the previous value back, the same way the reducer tests do.
+    /// Build under a home of this test's own, taken from the shared guard, which
+    /// holds the crate's env lock and puts the previous value back.
     fn with_scratch_home<T>(body: impl FnOnce() -> T) -> T {
-        let _guard = crate::config::tunables::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = tempfile::tempdir().expect("scratch home");
-        let previous = std::env::var_os("HOME");
-        std::env::set_var("HOME", dir.path());
-        let out = body();
-        match previous {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        out
+        let _home = crate::test_home::ScopedHome::new();
+        body()
     }
 
     /// #1131: a session's merged attention rides its row on the frame as

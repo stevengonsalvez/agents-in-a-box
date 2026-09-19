@@ -11,14 +11,18 @@
 #[path = "parity/support.rs"]
 mod support;
 
+#[path = "support/home.rs"]
+mod home;
+
+use home::ScopedHome;
+
 use std::path::Path;
 
 use support::ParityFixture;
 
 #[test]
 fn every_parity_fixture_builds_the_screen_it_names() {
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
+    let _home = ScopedHome::new();
 
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
     let fixtures = ParityFixture::all_in(&dir);

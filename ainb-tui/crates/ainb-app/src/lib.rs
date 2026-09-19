@@ -37,8 +37,21 @@ pub mod usage_cache;
 pub mod widgets;
 pub mod wire;
 
+pub mod env_lock;
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+
+// The crate's own unit tests reach the scoped home guard the same way the
+// integration tests do, so the guard file has one spelling for both.
+#[cfg(test)]
+extern crate self as ainb_app;
+
+/// The scoped home directory guard, shared with the integration tests by file
+/// so this process has one home lock rather than two.
+#[cfg(test)]
+#[path = "../tests/support/home.rs"]
+mod test_home;
 
 pub use app::{
     AppState, Btn, Chord, CommandId, Effect, Intent, Key, Keymap, Mods, Pos, SectionId, Versioned,

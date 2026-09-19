@@ -10,6 +10,9 @@
 // Enter in its popup. The verdicts are committed as a fixture so the page's
 // copy of the policy is diffed against the reducer's.
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::collections::BTreeSet;
 
 use ainb_app::app::NoRenderer;
@@ -69,9 +72,7 @@ const EXECUTABLE_LEAVES: &[&str] = &[
 /// The reducer on the Config screen with one synthetic row `key` of `value`
 /// on the right pane, selected.
 fn on_row(key: &str, value: ConfigValue) -> AppState {
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
-    std::mem::forget(home);
+    home::shared();
     let mut state = AppState::new();
     state.shell.current_screen = screen_ids::CONFIG.to_string();
     let screen = &mut state.config.config_screen_state;
