@@ -112,6 +112,10 @@ pub enum SessionSource {
     File,
 }
 
+/// How many times [`SessionSource::mutate`] reads a not-ready daemon before
+/// it gives up. Each wait is the daemon's own bounded first-pass wait.
+const NOT_READY_ATTEMPTS: u32 = 3;
+
 fn daemon_io_error(what: &str, error: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(format!("daemon session {what} failed: {error}"))
 }
@@ -187,15 +191,23 @@ impl SessionSource {
             Self::File => return Ok(SessionStore::load()),
             Self::Daemon(client) => client,
         };
+        Self::load_daemon(client).await?.ok_or_else(|| {
+            daemon_io_error(
+                "list",
+                "the daemon's sessions table is not ready (its reconcile pass has not committed)",
+            )
+        })
+    }
+
+    /// Read the whole store from the daemon. `None` means the daemon answered
+    /// not-ready: its first reconcile pass since boot has not committed.
+    async fn load_daemon(client: &DaemonClient) -> std::io::Result<Option<SessionStore>> {
         let res = client
             .workspace_session_list(WorkspaceSessionListParams::default())
             .await
             .map_err(|e| daemon_io_error("list", e))?;
         if !res.import_complete {
-            return Err(daemon_io_error(
-                "list",
-                "the daemon's sessions table is not ready (its reconcile pass has not committed)",
-            ));
+            return Ok(None);
         }
         if res.truncated {
             eprintln!(
@@ -212,7 +224,7 @@ impl SessionSource {
                 Err(why) => eprintln!("Warning: skipping {why}"),
             }
         }
-        Ok(store)
+        Ok(Some(store))
     }
 
     /// Apply `f` to the store and persist the difference.
@@ -226,9 +238,17 @@ impl SessionSource {
     /// lock is held across the whole read-modify-write so two CLI processes
     /// cannot interleave, as on the file path.
     ///
+    /// A daemon that is not ready (it restarted, and its first reconcile pass
+    /// has not committed) needs that same lock for the pass. So on a not-ready
+    /// read the lock is released, the daemon is asked again without it (the
+    /// daemon holds that request until its pass commits, bounded), and the
+    /// lock is retaken for a fresh read, at most [`NOT_READY_ATTEMPTS`] times.
+    /// No write is ever computed from a not-ready read.
+    ///
     /// # Errors
     ///
-    /// The first failed RPC, so a caller such as `ainb run` can roll back.
+    /// The first failed RPC, so a caller such as `ainb run` can roll back, or
+    /// a still-reconciling error once the attempts are spent.
     pub async fn mutate<F>(&self, f: F) -> std::io::Result<()>
     where
         F: FnOnce(&mut SessionStore),
@@ -249,8 +269,23 @@ impl SessionSource {
             }
             Self::Daemon(client) => client,
         };
-        let _guard = SessionStore::lock()?;
-        let mut store = self.load().await?;
+        let mut attempts = 0;
+        let (_guard, mut store) = loop {
+            let guard = SessionStore::lock()?;
+            if let Some(store) = Self::load_daemon(client).await? {
+                break (guard, store);
+            }
+            drop(guard);
+            attempts += 1;
+            if attempts >= NOT_READY_ATTEMPTS {
+                return Err(daemon_io_error(
+                    "list",
+                    "the daemon is still reconciling sessions.json; nothing was written, try again",
+                ));
+            }
+            // Asked without the lock, so the daemon's pass can take it.
+            let _ = Self::load_daemon(client).await?;
+        };
         let before = entries_by_id(&store);
         f(&mut store);
         let after = entries_by_id(&store);
