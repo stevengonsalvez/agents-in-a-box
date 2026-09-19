@@ -166,13 +166,7 @@
   },
   "plugins_host": {
     "plugin_captures_text": {},
-    "plugin_presence": {
-      "learnings": {
-        "abi": 0,
-        "registered": false,
-        "wedged": false
-      }
-    },
+    "plugin_presence": {},
     "plugin_render_errors": {}
   },
   "config": {
@@ -3224,7 +3218,7 @@
   "shell": {
     "async_operation_cancelled": false,
     "confirmation_dialog": null,
-    "current_screen": "learnings",
+    "current_screen": "analytics",
     "focused_pane": "Sessions",
     "help_visible": false,
     "home_screen_state": {
@@ -3282,6 +3276,131 @@
   "usage": {
     "absent": null,
     "failure": null,
-    "summary": null
+    "summary": {
+      "daily": [
+        {
+          "bucket": {
+            "cache_creation_tokens": 10000,
+            "cache_read_tokens": 300000,
+            "call_count": 100,
+            "cost_usd": 4.25,
+            "input_tokens": 40000,
+            "output_tokens": 15000,
+            "project_count": 2,
+            "reasoning_tokens": 1000,
+            "session_count": 4
+          },
+          "date": "2026-09-18"
+        },
+        {
+          "bucket": {
+            "cache_creation_tokens": 20000,
+            "cache_read_tokens": 600000,
+            "call_count": 210,
+            "cost_usd": null,
+            "input_tokens": 80000,
+            "output_tokens": 30000,
+            "project_count": 3,
+            "reasoning_tokens": 4000,
+            "session_count": 8
+          },
+          "date": "2026-09-19"
+        }
+      ],
+      "daily_cut": 0,
+      "detail": "codex session logs could not be fully read",
+      "models": [
+        {
+          "bucket": {
+            "cache_creation_tokens": 30000,
+            "cache_read_tokens": 900000,
+            "call_count": 220,
+            "cost_usd": 12.0,
+            "input_tokens": 90000,
+            "output_tokens": 38000,
+            "project_count": 3,
+            "reasoning_tokens": 0,
+            "session_count": 9
+          },
+          "name": "claude-opus-5"
+        },
+        {
+          "bucket": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "call_count": 60,
+            "cost_usd": null,
+            "input_tokens": 20000,
+            "output_tokens": 5000,
+            "project_count": 1,
+            "reasoning_tokens": 5000,
+            "session_count": 2
+          },
+          "name": "gpt-5.1-codex"
+        }
+      ],
+      "models_cut": 0,
+      "projects": [
+        {
+          "bucket": {
+            "cache_creation_tokens": 25000,
+            "cache_read_tokens": 800000,
+            "call_count": 280,
+            "cost_usd": 11.0,
+            "input_tokens": 100000,
+            "output_tokens": 40000,
+            "project_count": 1,
+            "reasoning_tokens": 5000,
+            "session_count": 10
+          },
+          "name": "box",
+          "repo": "stevengonsalvez/agents-in-a-box"
+        }
+      ],
+      "projects_cut": 0,
+      "providers": [
+        {
+          "bucket": {
+            "cache_creation_tokens": 30000,
+            "cache_read_tokens": 900000,
+            "call_count": 250,
+            "cost_usd": 12.5,
+            "input_tokens": 100000,
+            "output_tokens": 40000,
+            "project_count": 3,
+            "reasoning_tokens": 0,
+            "session_count": 10
+          },
+          "name": "claude"
+        },
+        {
+          "bucket": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "call_count": 60,
+            "cost_usd": null,
+            "input_tokens": 20000,
+            "output_tokens": 5000,
+            "project_count": 1,
+            "reasoning_tokens": 5000,
+            "session_count": 2
+          },
+          "name": "codex"
+        }
+      ],
+      "providers_cut": 0,
+      "state": "partial",
+      "totals": {
+        "cache_creation_tokens": 30000,
+        "cache_read_tokens": 900000,
+        "call_count": 310,
+        "cost_usd": 12.5,
+        "input_tokens": 120000,
+        "output_tokens": 45000,
+        "project_count": 3,
+        "reasoning_tokens": 5000,
+        "session_count": 12
+      }
+    }
   }
 }

@@ -36,6 +36,18 @@ fn every_parity_fixture_builds_the_screen_it_names() {
         let sessions: usize = state.sessions.workspaces.iter().map(|w| w.sessions.len()).sum();
         let expected: usize = fixture.workspaces.iter().map(|w| w.sessions.len()).sum();
         assert_eq!(sessions, expected, "{name}");
+        // A DOM-only fixture has no ratatui half, so no snapshot, and says why.
+        if let Some(reason) = &fixture.dom_only {
+            assert!(
+                !reason.trim().is_empty(),
+                "{name}: dom_only names no reason"
+            );
+            assert!(
+                !dir.join(format!("{name}.snap")).is_file(),
+                "{name} is DOM-only but has a ratatui snapshot"
+            );
+            continue;
+        }
         assert!(
             dir.join(format!("{name}.snap")).is_file(),
             "{name} has no committed snapshot"
@@ -65,9 +77,11 @@ fn missing<'a>(drawn: &str, list: &'a str) -> Vec<&'a str> {
 fn every_expected_fact_is_on_the_screen_the_ratatui_half_drew() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
     let mut checked = 0;
-    for (name, _) in ParityFixture::all_in(&dir) {
+    for (name, path) in ParityFixture::all_in(&dir) {
         let list = dir.join(format!("facts/{name}.txt"));
-        if !list.is_file() {
+        let fixture = ParityFixture::load(&path).unwrap_or_else(|error| panic!("{error}"));
+        // A DOM-only fixture's facts are the webview half's alone.
+        if !list.is_file() || fixture.dom_only.is_some() {
             continue;
         }
         let list = std::fs::read_to_string(&list).expect("the facts list");
