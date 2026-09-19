@@ -8,8 +8,10 @@ use ainb_app::app::intent::{Btn, Pos};
 use ainb_app::app::keymap::{HostAction, active_contexts};
 use ainb_app::app::state::WorkspaceRescan;
 use ainb_app::config::AppConfig;
+use ainb_app::fleet::agent_status_reader::{AgentStatusReader, Dialer};
 use ainb_app::wire::frame::{FrameBatch, HostId, Mirror, Subscription};
 use ainb_app::{AppState, CommandId, Effect, Intent, Keymap};
+use ainb_hangar_proto::connections::SurfaceKind;
 use serde::Serialize;
 
 use crate::intent::Refusal;
@@ -81,6 +83,26 @@ pub struct PaletteEntry {
     pub active: bool,
 }
 
+/// The dialer the desktop's agent status reader uses: the daemon client from
+/// the environment, announced as the desktop, so its reads are recorded as this
+/// surface's and never as a terminal this process never ran.
+#[must_use]
+pub fn agent_status_dialer() -> Dialer {
+    Box::new(|| ainb_app::fleet::bridge::daemon::surface_client(SurfaceKind::Desktop))
+}
+
+/// `[fleet.status] legacy_panel` as the desktop's own config sets it, with the
+/// same `AINB_FLEET_LEGACY_PANEL` override the terminal honours: both surfaces
+/// take the same read path (#1188).
+#[must_use]
+pub fn legacy_panel(config: &AppConfig) -> bool {
+    use ainb_app::config::tunables::{LEGACY_PANEL_ENV, resolved_bool};
+    resolved_bool(LEGACY_PANEL_ENV, config.fleet.status.legacy_panel)
+}
+
+/// The home sidebar's `select` row, the one Enter runs on a focused item.
+const HOME_SIDEBAR_SELECT: &str = "home.sidebar.select";
+
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
     state: AppState,
@@ -91,8 +113,9 @@ pub struct DesktopHost<S: FrameSink> {
     /// How the tick asks the state to keep the session list fresh: the
     /// cadence, and the floor under daemon news (#1156).
     rescan: WorkspaceRescan,
-    agent_status: crate::agent_status::AgentStatusPoll,
-    read_agent_status: fn(crate::agent_status::Reports),
+    /// The agent status reader both hosts share (#1188), once
+    /// [`Self::start_agent_status`] has started it.
+    agent_status: Option<AgentStatusReader>,
     /// Whether the tick starts the daemon attention poller. A test that is
     /// about the reducer turns it off: the poller is a thread on a real
     /// socket, and its first publish is news whenever it lands.
@@ -140,8 +163,7 @@ impl<S: FrameSink> DesktopHost<S> {
             mirror: Mirror::new(host_id, subscription),
             sink,
             rescan: WorkspaceRescan::default(),
-            agent_status: crate::agent_status::AgentStatusPoll::default(),
-            read_agent_status: crate::agent_status::read_on_worker,
+            agent_status: None,
             poll_attention: true,
         }
     }
@@ -162,32 +184,13 @@ impl<S: FrameSink> DesktopHost<S> {
         self
     }
 
-    /// Start agent status reads with `read` instead of a daemon read on a
-    /// worker. For tests, which stand in for the worker through
-    /// [`Self::agent_status_reports`].
-    #[must_use]
-    pub fn reading_agent_status_with(mut self, read: fn(crate::agent_status::Reports)) -> Self {
-        self.read_agent_status = read;
-        self
-    }
-
-    /// The inbox agent status reads report into.
-    #[must_use]
-    pub fn agent_status_reports(&self) -> crate::agent_status::Reports {
-        self.agent_status.reports()
-    }
-
-    /// The sidecar lost its daemon: the board's rows read unreachable, rather
-    /// than standing as if current, until [`Self::daemon_connected`].
-    pub fn daemon_lost(&mut self, reason: &str) {
-        let now_ms = ainb_app::fleet::daemons::heartbeat::now_ms();
-        self.agent_status.daemon_lost(&mut self.state, reason, now_ms);
-        self.pump();
-    }
-
-    /// The sidecar has its daemon again: read the agent status at once.
-    pub fn daemon_connected(&mut self) {
-        self.agent_status.daemon_connected();
+    /// Start the agent status reader that keeps section 20, the board, current:
+    /// the one reader both hosts run, on the daemon's Fleet subscription
+    /// (#1188). A dropped subscription reads unreachable and a reconnect resets
+    /// the section, so the host tracks no daemon liveness of its own. Must be
+    /// called inside a tokio runtime; the tick folds what it reports.
+    pub fn start_agent_status(&mut self, dialer: Dialer, legacy_panel: bool) {
+        self.agent_status = Some(AgentStatusReader::spawn(dialer, legacy_panel));
     }
 
     /// Never start the daemon attention poller on a tick. For tests: the
@@ -251,12 +254,10 @@ impl<S: FrameSink> DesktopHost<S> {
         // is open: the worker reports into the state, and this is the only
         // thing in this process that folds it.
         self.state.tick_surfaces(ainb_app::fleet::daemons::heartbeat::now_ms());
-        // Section 20, which the board draws: no other host feeds it here.
-        self.agent_status.tick(
-            &mut self.state,
-            ainb_app::fleet::daemons::heartbeat::now_ms(),
-            self.read_agent_status,
-        );
+        // Section 20, which the board draws, from the shared reader.
+        if let Some(reader) = &mut self.agent_status {
+            reader.drain_into(&mut self.state);
+        }
         let effects = self.state.take_effects();
         self.pump();
         effects
@@ -289,14 +290,21 @@ impl<S: FrameSink> DesktopHost<S> {
     ///
     /// The state starts on the home screen, where the session list's rows (a
     /// row click among them) are refused by the context gate. The move goes
-    /// through the home sidebar's own rows, two clicks on its Sessions item as
-    /// a double click opens it, so the host writes no state of its own.
+    /// through the home sidebar's own rows, so the host writes no state of its
+    /// own: a click on its Sessions item selects and focuses it, and the
+    /// sidebar's `select` row (Enter) opens it.
+    ///
+    /// Not two clicks: the reducer opens on a double click only inside the
+    /// double-click window, timed with the wall clock, so a host slow enough to
+    /// spend the window on the first click stayed on the home screen.
     pub fn open_sessions(&mut self, executor: &mut impl Executor) {
         use ainb_app::app::pointer::click_home_sidebar_item;
         use ainb_app::components::sidebar::SidebarItem;
-        for _ in 0..2 {
-            self.run(click_home_sidebar_item(SidebarItem::Sessions), executor);
-        }
+        self.run(click_home_sidebar_item(SidebarItem::Sessions), executor);
+        self.run(
+            Intent::Command(CommandId::new(HOME_SIDEBAR_SELECT), serde_json::Value::Null),
+            executor,
+        );
     }
 
     /// Every command the palette may offer, in the keymap's own order.
@@ -307,16 +315,17 @@ impl<S: FrameSink> DesktopHost<S> {
     /// row that cannot run. Each entry says whether it is active now.
     #[must_use]
     pub fn palette(&self) -> Vec<PaletteEntry> {
-        let contexts = ainb_app::app::keymap::command_contexts(&self.state);
-        self.keymap
-            .commands()
-            .filter(|(id, row)| crate::intent::palette_offers(&self.keymap, id, row))
-            .map(|(id, row)| PaletteEntry {
-                id,
+        // The reducer owns the row set (#1161); this surface narrows it by what
+        // a webview may send and by nothing else.
+        ainb_app::app::palette::rows(&self.state, &self.keymap)
+            .into_iter()
+            .filter(|row| !crate::intent::is_host_authored(&row.id))
+            .map(|row| PaletteEntry {
+                id: row.id,
                 doc: row.doc,
-                context: row.ctx.name(),
-                chord: row.chord.as_ref().map(|chord| chord.as_str().to_string()),
-                active: contexts.contains(&row.ctx),
+                context: row.context.name(),
+                chord: row.chord,
+                active: row.active,
             })
             .collect()
     }

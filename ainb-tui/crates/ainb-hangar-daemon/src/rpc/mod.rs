@@ -2041,6 +2041,14 @@ async fn message_cursor_for(
 }
 
 /// Project one persisted message onto the wire.
+///
+/// The body is scrubbed here, the one place a message leaves the daemon by
+/// (`fleet/message_list` and both `fleet/message_event` pushes), because an
+/// agent reply's body is the turn's final message, raw agent prose (#1211).
+/// The row keeps what was written, which the re-prime corpus reads back into
+/// the agent. `id`, `scope_key`,
+/// `origin_message_id` and `sender` are daemon-minted identity, not text, and
+/// pass through.
 fn message_wire(
     row: &ainb_hangar_store::repo::fleet_message::FleetMessageRow,
 ) -> ainb_hangar_proto::fleet::FleetMessage {
@@ -2056,7 +2064,7 @@ fn message_wire(
             "marker" => FleetMessageKind::Marker,
             _ => FleetMessageKind::User,
         },
-        body: row.body.clone(),
+        body: ainb_hangar_core::redact::scrub(&row.body),
         created_at: row.created_at,
     }
 }

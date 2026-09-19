@@ -303,6 +303,12 @@ fn get_git_credentials(url: &str) -> Option<(String, String)> {
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct CommitInfo {
     pub hash_short: String,
+    /// The commit author's display name (`author().name()`); the email is
+    /// never read. A frame carries it scrubbed, so a credential shape in it is
+    /// redacted (#1212). The name itself is kept by design: the Commits tab
+    /// shows who wrote each commit. Withholding it from remote hosts is #1244.
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub author: String,
     pub date: String,
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
