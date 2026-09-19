@@ -25,6 +25,7 @@ export const ROOT_SELECTORS = {
   /** The git view was withheld for being over the frame ceiling, so the review
    * tab is drawing a diff the host has already moved past. */
   gitViewStale: (store, host) => host !== undefined && store.state.stale[host]?.git_view === true,
+  usageStale: (store, host) => host !== undefined && store.state.stale[host]?.usage === true,
   workspacesLoading: (store, host) =>
     host !== undefined && store.section(host, "workspace_load")?.is_loading_workspaces === true,
   hostCount: (store) => Object.keys(store.state.hosts).length,
