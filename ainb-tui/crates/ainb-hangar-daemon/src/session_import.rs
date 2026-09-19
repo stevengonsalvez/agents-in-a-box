@@ -46,7 +46,7 @@ use ainb_hangar_proto::sessions::WorkspaceSessionEntry;
 use ainb_hangar_store::repo::sessions::{FileSession, ImportOutcome, SessionRow, SessionsRepo};
 use anyhow::{Context, Result, bail};
 use sqlx::SqlitePool;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 pub use ainb_hangar_store::repo::sessions::{ImportMarker, NameConflict, ReconcileOutcome};
@@ -57,8 +57,27 @@ pub use ainb_hangar_store::repo::sessions::{ImportMarker, NameConflict, Reconcil
 /// an RPC to this daemon can never deadlock the two.
 pub const SESSIONS_FLOCK_BOUND: Duration = Duration::from_secs(2);
 
-/// How often [`ReconcileWatch`] checks the file's mtime.
+/// How long a pass may spend in its store write while it holds the flock.
+///
+/// The pool's acquire and `busy_timeout` waits are tens of seconds, and every
+/// CLI writer blocks on the flock meanwhile. Cancelling at this bound is safe:
+/// the write is one transaction, so a cancelled pass changes nothing and the
+/// next one redoes it.
+pub const RECONCILE_STORE_BOUND: Duration = Duration::from_secs(5);
+
+/// How often [`ReconcileWatch`] checks whether the file changed.
 pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The `sessions.json` this daemon imports, reconciles and serves.
+///
+/// Every daemon site (the boot import, the watcher, the session RPCs) goes
+/// through here, so they cannot disagree on the file. It is resolved on each
+/// call rather than cached: `AINB_HOME` is read per call by every client too,
+/// and in-process test daemons change it between tests.
+#[must_use]
+pub fn daemon_sessions_path() -> PathBuf {
+    ainb_fleet_core::session_registry::sessions_json_path()
+}
 
 /// Serialises passes within this process. Two passes would otherwise take the
 /// flock on two descriptors and the second would time out.
@@ -133,7 +152,8 @@ pub async fn import_sessions_from(
 ///
 /// Returns an error, and leaves the marker as it was, when the flock is not
 /// free within [`SESSIONS_FLOCK_BOUND`], the file is over the cap, unreadable
-/// or unparseable, or the store write fails.
+/// or unparseable, or the store write fails or outlasts
+/// [`RECONCILE_STORE_BOUND`].
 pub async fn reconcile_sessions(
     pool: &SqlitePool,
     sessions_path: &Path,
@@ -151,23 +171,41 @@ pub async fn reconcile_sessions_from(
     sessions_path: &Path,
     max_bytes: u64,
 ) -> Result<ReconcileOutcome> {
-    reconcile_pass(pool, sessions_path, max_bytes).await.map(|(outcome, _)| outcome)
+    reconcile_sessions_bounded(pool, sessions_path, max_bytes, RECONCILE_STORE_BOUND).await
 }
 
-/// One pass, also returning the file's mtime as read under the flock.
+/// [`reconcile_sessions_from`] with an explicit store-write bound (the test
+/// seam for [`RECONCILE_STORE_BOUND`]).
+///
+/// # Errors
+///
+/// As [`reconcile_sessions`].
+pub async fn reconcile_sessions_bounded(
+    pool: &SqlitePool,
+    sessions_path: &Path,
+    max_bytes: u64,
+    store_bound: Duration,
+) -> Result<ReconcileOutcome> {
+    reconcile_pass(pool, sessions_path, max_bytes, store_bound)
+        .await
+        .map(|(outcome, _)| outcome)
+}
+
+/// One pass, also returning the file's stamp as read under the flock.
 async fn reconcile_pass(
     pool: &SqlitePool,
     sessions_path: &Path,
     max_bytes: u64,
-) -> Result<(ReconcileOutcome, Option<SystemTime>)> {
+    store_bound: Duration,
+) -> Result<(ReconcileOutcome, Option<FileStamp>)> {
     let _pass = PASS.lock().await;
     let dir = sessions_path.parent().context("sessions.json has no parent directory")?;
     let flock = acquire_sessions_flock(dir, SESSIONS_FLOCK_BOUND).await?;
 
     let path = sessions_path.to_path_buf();
-    let (mtime, content) = tokio::task::spawn_blocking(move || {
-        let mtime = file_mtime(&path);
-        read_capped(&path, max_bytes).map(|content| (mtime, content))
+    let (stamp, content) = tokio::task::spawn_blocking(move || {
+        let stamp = FileStamp::of(&path);
+        read_capped(&path, max_bytes).map(|content| (stamp, content))
     })
     .await
     .context("sessions.json read task")??;
@@ -178,9 +216,14 @@ async fn reconcile_pass(
     };
 
     let source = sessions_path.to_string_lossy().into_owned();
-    let outcome =
-        SessionsRepo::complete_reconcile(pool, &source, &sessions, rejected, SystemClock.now_ms())
-            .await?;
+    let write =
+        SessionsRepo::complete_reconcile(pool, &source, &sessions, rejected, SystemClock.now_ms());
+    let outcome = tokio::time::timeout(store_bound, write).await.map_err(|_| {
+        anyhow::anyhow!(
+            "sessions store write did not finish within {} ms",
+            store_bound.as_millis()
+        )
+    })??;
     drop(flock);
 
     for conflict in &outcome.conflicts {
@@ -191,7 +234,7 @@ async fn reconcile_pass(
             "sessions.json session not reconciled: its tmux name belongs to another session in the table"
         );
     }
-    Ok((outcome, mtime))
+    Ok((outcome, stamp))
 }
 
 /// Take the `sessions.json` flock in `dir`, retrying for at most `bound`.
@@ -237,8 +280,36 @@ pub struct ReconcileWatch {
 enum LastPass {
     /// No pass has run yet, or the last one failed: the next tick runs one.
     Due,
-    /// The last pass succeeded having read this mtime (`None`: no file).
-    Read(Option<SystemTime>),
+    /// The last pass succeeded having read this stamp (`None`: no file).
+    Read(Option<FileStamp>),
+}
+
+/// What says `sessions.json` changed: mtime, length and inode together.
+///
+/// mtime alone misses a rewrite that keeps it (`cp -p`, a restore, a
+/// filesystem with one-second granularity); the atomic temp-and-rename every
+/// writer does gives the file a new inode, and most edits change its length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    mtime: Option<SystemTime>,
+    len: u64,
+    inode: u64,
+}
+
+impl FileStamp {
+    /// The stamp of `path`, `None` when it cannot be read (a missing file).
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+        #[cfg(not(unix))]
+        let inode = 0;
+        Some(Self {
+            mtime: meta.modified().ok(),
+            len: meta.len(),
+            inode,
+        })
+    }
 }
 
 impl ReconcileWatch {
@@ -262,14 +333,14 @@ impl ReconcileWatch {
     /// last successful pass and nothing ran.
     pub async fn tick(&mut self, pool: &SqlitePool) -> Option<Result<ReconcileOutcome>> {
         let path = self.path.clone();
-        let now = tokio::task::spawn_blocking(move || file_mtime(&path)).await.ok()?;
+        let now = tokio::task::spawn_blocking(move || FileStamp::of(&path)).await.ok()?;
         if self.last == LastPass::Read(now) {
             return None;
         }
         Some(
-            match reconcile_pass(pool, &self.path, self.max_bytes).await {
-                Ok((outcome, mtime)) => {
-                    self.last = LastPass::Read(mtime);
+            match reconcile_pass(pool, &self.path, self.max_bytes, RECONCILE_STORE_BOUND).await {
+                Ok((outcome, stamp)) => {
+                    self.last = LastPass::Read(stamp);
                     Ok(outcome)
                 }
                 Err(e) => {
@@ -282,18 +353,34 @@ impl ReconcileWatch {
 
     /// Tick every [`RECONCILE_INTERVAL`] for the life of the process, logging
     /// each pass that ran.
+    ///
+    /// A failure is warned about once; the same failure on later ticks (a
+    /// file left malformed) is logged at debug, so it does not warn every
+    /// 30 s forever. A different failure, or a success, resets that.
     pub async fn run(mut self, pool: SqlitePool) {
         let mut every = tokio::time::interval(RECONCILE_INTERVAL);
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut warned: Option<String> = None;
         loop {
             every.tick().await;
             match self.tick(&pool).await {
                 None => {}
-                Some(Ok(outcome)) => log_reconcile(&outcome),
-                Some(Err(e)) => tracing::warn!(
-                    error = %format!("{e:#}"),
-                    "sessions.json reconcile failed; retrying on the next tick"
-                ),
+                Some(Ok(outcome)) => {
+                    warned = None;
+                    log_reconcile(&outcome);
+                }
+                Some(Err(e)) => {
+                    let error = format!("{e:#}");
+                    if warned.as_deref() == Some(error.as_str()) {
+                        tracing::debug!(%error, "sessions.json reconcile still failing");
+                    } else {
+                        tracing::warn!(
+                            %error,
+                            "sessions.json reconcile failed; retrying every tick, warned once"
+                        );
+                        warned = Some(error);
+                    }
+                }
             }
         }
     }
@@ -310,11 +397,6 @@ pub fn log_reconcile(outcome: &ReconcileOutcome) {
             "sessions.json reconciled into the sessions table"
         );
     }
-}
-
-/// The file's mtime, `None` when it cannot be read (a missing file).
-fn file_mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// Read `path` if it exists and is at most `max_bytes`. `Ok(None)` means no
