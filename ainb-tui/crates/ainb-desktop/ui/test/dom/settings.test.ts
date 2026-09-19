@@ -134,3 +134,68 @@ test("a setting row keeps its node and its widget across 50 frames", async () =>
   assert.ok(page.rows()[0] === row, "the row was rebuilt");
   assert.ok(row.querySelector("input, select") === widget, "the row's widget was rebuilt");
 });
+
+test("a tree click names the node's own id, not the key the list drew it under", async () => {
+  const page = await open();
+  // Every node, not just the first: the id in the intent must be the one the
+  // projection gave the node, whatever key the list drew it under.
+  for (const node of page.nodes()) {
+    const id = node.dataset.node;
+    const button = [...node.querySelectorAll<HTMLButtonElement>("button")].at(-1);
+    assert.ok(button && id);
+    button.click();
+    assert.deepEqual(
+      page.sent.at(-1),
+      { Command: ["config.select_node", { id }] },
+      `the click under key for ${id} named another node`,
+    );
+  }
+
+  // The chevron sends the same id through toggleNode.
+  const parent = page.nodes().find((node) => node.querySelector(".chevron"));
+  if (parent) {
+    const chevron = parent.querySelector<HTMLButtonElement>(".chevron");
+    assert.ok(chevron);
+    const before = page.sent.length;
+    chevron.click();
+    const sent = page.sent.slice(before);
+    // toggleNode selects the node, then asks the reducer to expand it; only
+    // the select carries an id, and it must be the node's own.
+    assert.deepEqual(sent[0], { Command: ["config.select_node", { id: parent.dataset.node }] });
+    assert.ok(sent.length > 1, "the chevron sent no expand");
+  }
+});
+
+test("an edit from a row's widget after 50 frames names that row", async () => {
+  const page = await open();
+  // A text row: its widget is an input the page sends edits from.
+  const row = page.rows().find((candidate) => {
+    const input = candidate.querySelector<HTMLInputElement>("input");
+    return input !== null && input.type === "text" && !candidate.classList.contains("readonly");
+  });
+  assert.ok(row, "no editable text row on the page");
+  const key = row.dataset.key;
+  const input = row.querySelector<HTMLInputElement>("input");
+  assert.ok(input && key);
+
+  for (let n = 0; n < 50; n += 1) {
+    page.setView(frames());
+    await settle();
+  }
+
+  assert.ok(input.isConnected, "the row's input is no longer on screen");
+  input.value = "edited-by-test";
+  input.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await settle();
+
+  const last = page.sent.at(-1);
+  assert.ok(last, "the edit sent nothing");
+  assert.ok(
+    JSON.stringify(last).includes("edited-by-test"),
+    `the edit did not carry the typed value: ${JSON.stringify(last)}`,
+  );
+  assert.ok(
+    JSON.stringify(last).includes(key.split("|").at(-1) ?? key),
+    `the edit named another row: ${JSON.stringify(last)} for key ${key}`,
+  );
+});
