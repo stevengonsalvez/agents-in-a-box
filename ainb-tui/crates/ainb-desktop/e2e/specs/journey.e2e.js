@@ -63,9 +63,11 @@ describe("the desktop shell", () => {
       timeout: 60_000,
       timeoutMsg: "the tab painted no bytes from its pane",
     });
-    // Past the fixed Board tab, which always has a title: this is the session's.
+    // Past the fixed tabs, which always have titles: this is the session's.
+    // Both have to be excluded by name; with only the board excluded this
+    // matched the Review tab, read "Review" and proved nothing.
     assert.ok(
-      (await $(".tab:not(.board-tab) .tab-title").getText()).length > 0,
+      (await $(".tab:not(.board-tab):not(.review-tab) .tab-title").getText()).length > 0,
       "the tab strip names the session",
     );
 

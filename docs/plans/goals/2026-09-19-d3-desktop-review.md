@@ -98,7 +98,7 @@ Four PRs: the amendment, the seams, the review tab, and settings with the journe
 · Gate: `cargo test -p ainb-app`, `cargo test -p ainb-core`, the tripwires, the excluded workspace's own `cargo test`, "TypeScript bindings freshness", "Contracts".
 
 **D3b, the review tab.**
-· Touches: `ainb-tui/crates/ainb-desktop/ui/src/review.ts`, `review.tsx`, `subscription.ts`, `main.tsx`, `shell.css`, `ui/package.json` for the editor dependency, `ui/src/*.test.ts`.
+· Touches: `ainb-tui/crates/ainb-desktop/ui/src/review.ts`, `review.tsx`, `subscription.ts`, `selectors.ts`, `main.tsx`, `shell.css`, `ui/src/*.test.ts`. No `ui/package.json`: the open question at the end of this goal answers the editor dependency with no.
 · Builds: the review tab over the framed `git_view` section, hunks and rows drawn from the reducer's own `ReviewModel` (`ainb-app/src/components/git_view.rs:44`), selection and scroll sent as `git_view.select_review_row` (`pointer.rs:46`) and the wheel rows `review_commands.rs` pins, no diffing and no hunk parsing in TypeScript.
 · Proof: `ui/` tests for the projection (a hunk renders its rows; a file with no hunks says so; a selection maps to the reducer's row id); a parity fixture `code_review` drawn by both renderers against one expected-facts list.
 · Gate: as D3a, plus `tsc --noEmit --strict` and the frontend tests.
@@ -167,7 +167,7 @@ The softer ones, measured and recorded rather than gated:
 · Never poll CI. The orchestrator brings the verdict; keep working on anything that does not depend on it.
 · Never touch `ainb-tui/crates/ainb-core/src/app/*`. Merge `origin/v2` before touching a file another lane is on, and name shared files in the PR body.
 · No plugin JSON on a frame without the D3·spec amendment that says how it is proved safe.
-· Tauri, SolidJS 1.9.15, TypeScript 5.6.3 and Node 22 stay pinned, every frontend dependency in a committed lockfile, CI installing with `npm ci`. A new editor dependency for the review tab is pinned the same way and justified on the PR.
+· Tauri, SolidJS 1.9.15, TypeScript 5.6.3 and Node 22 stay pinned, every frontend dependency in a committed lockfile, CI installing with `npm ci`. D3 adds no frontend dependency: the review tab paints the rows the reducer already split, as the open question answers. An editor arrives only when highlighting or folding is shown to fall short, pinned the same way and justified on its own PR.
 · The app builds headless in CI on both runners.
 · Disk ceiling 92 percent; `cargo clean` of the desktop target is allowed when it nears that.
 · Never kill a tmux server, never a bulk or wildcard kill; kill a session by exact name only.

@@ -1,0 +1,16 @@
+# What both renderers must show for the git_review fixture: one list, checked
+# against the ratatui snapshot (tests/parity.rs) and against the webview's own
+# render (ainb-desktop/ui/src/parity.test.ts). A fact deleted from either
+# renderer's output fails the suite, which is what keeps a stubbed half from
+# passing.
+#
+# Facts are renderer-neutral: what is shown, not how it is spaced or framed.
+src/auth/session.rs
+src/auth/mod.rs
+docs/auth.md
+fn token(header: &str) -> Option<&str> {
+let token = header.strip_prefix("Bearer ")?;
+(!token.is_empty()).then_some(token)
+pub mod session;
+pub mod refresh;
+A token is read from the header and checked for emptiness.

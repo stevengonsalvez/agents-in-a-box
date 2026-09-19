@@ -680,6 +680,7 @@ fn classified_contexts(state: &AppState) -> Vec<(KeyContext, bool)> {
         screen_ids::SKILLS => Some(screen_ids::SKILLS),
         screen_ids::SKILL_MANAGER => Some(screen_ids::SKILL_MANAGER),
         screen_ids::DAEMONS => Some(screen_ids::DAEMONS),
+        screen_ids::INBOX => Some(screen_ids::INBOX),
         screen_ids::ONBOARDING => Some(screen_ids::ONBOARDING),
         screen_ids::SETUP_MENU => Some(screen_ids::SETUP_MENU),
         screen_ids::AUTH_SETUP => Some(screen_ids::AUTH_SETUP),
@@ -1161,6 +1162,7 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::SessionTabNext
         | AppEvent::SessionTabPrev
         | AppEvent::SessionAskSend
+        | AppEvent::SessionAskPick { .. }
         | AppEvent::SessionTabComposerSend
         | AppEvent::SessionStartHangarDaemon
         | AppEvent::SessionListSelectRow { .. }
@@ -1190,6 +1192,8 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::LoginFinished { .. }
         | AppEvent::DaemonActionFinished { .. }
         | AppEvent::PersistFailed { .. }
+        | AppEvent::InboxMarkAllRead
+        | AppEvent::InboxMarkAllReadFinished { .. }
         | AppEvent::GitReviewSelectRow { .. }
         | AppEvent::GitViewScrollBy(..)
         | AppEvent::HomeSidebarClickItem { .. }

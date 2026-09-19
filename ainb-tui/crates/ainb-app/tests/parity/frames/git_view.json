@@ -162,6 +162,7 @@
         "collapsed_dirs_cut": 0,
         "current_hunk": 0,
         "scroll": 0,
+        "scroll_cut": false,
         "selected_file": 0,
         "sidebar_selected": 0
       },
@@ -290,7 +291,16 @@
   "mcp_pool": {
     "mcp_overlay": null
   },
-  "inbox": {},
+  "inbox": {
+    "absent": null,
+    "entries": [],
+    "received_at_ms": 0,
+    "recipient": "",
+    "rows_cut": 0,
+    "summaries_cut": 0,
+    "unreachable": null,
+    "unread": 0
+  },
   "plugins_host": {
     "plugin_captures_text": {},
     "plugin_presence": {},

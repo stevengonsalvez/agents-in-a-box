@@ -22,6 +22,9 @@ export const ROOT_SELECTORS = {
   errCount: ring("Err"),
   idleCount: (store, host) => (host === undefined ? 0 : idleCount(store.section(host, "sessions"))),
   sessionsStale: (store, host) => host !== undefined && store.state.stale[host]?.sessions === true,
+  /** The git view was withheld for being over the frame ceiling, so the review
+   * tab is drawing a diff the host has already moved past. */
+  gitViewStale: (store, host) => host !== undefined && store.state.stale[host]?.git_view === true,
   workspacesLoading: (store, host) =>
     host !== undefined && store.section(host, "workspace_load")?.is_loading_workspaces === true,
   hostCount: (store) => Object.keys(store.state.hosts).length,
