@@ -48,6 +48,7 @@
       "expanded_folders": [
         ""
       ],
+      "expanded_folders_cut": 0,
       "file_tree_items": [],
       "files_cut": 0,
       "is_dirty": false,
@@ -202,6 +203,7 @@
         "collapsed_dirs": [
           "docs"
         ],
+        "collapsed_dirs_cut": 0,
         "current_hunk": 0,
         "scroll": 0,
         "selected_file": 0,
