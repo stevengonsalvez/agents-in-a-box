@@ -13506,12 +13506,9 @@ async fn handle_session_list(
     } else {
         parse_params(req, "{ workspace_name?, limit? }")?
     };
-    // P6e: nothing is served from the table until this boot's first
-    // reconcile pass has committed. Past the wait, the answer is an explicit
-    // not-ready: no rows and `import_complete: false`, which sends the client
-    // to the file.
-    if !crate::session_import::first_pass_done_within(crate::session_import::FIRST_PASS_WAIT).await
-    {
+    // Past the first-pass wait, the list's not-ready answer is no rows and
+    // `import_complete: false`, which sends the client to the file.
+    if !sessions_table_ready().await {
         return to_value(&WorkspaceSessionListResult {
             sessions: Vec::new(),
             truncated: false,
@@ -13537,6 +13534,28 @@ async fn handle_session_list(
     })
 }
 
+/// Whether the sessions table may be touched: this boot's first reconcile
+/// pass has committed, waited for up to
+/// [`FIRST_PASS_WAIT`](crate::session_import::FIRST_PASS_WAIT).
+///
+/// P6e: every session RPC that reads or writes the table waits on this, so
+/// none acts on rows the boot has not reconciled. The list answers not-ready
+/// in its own shape; a mutation answers [`sessions_not_ready`].
+async fn sessions_table_ready() -> bool {
+    crate::session_import::first_pass_done_within(crate::session_import::FIRST_PASS_WAIT).await
+}
+
+/// The not-ready answer of a session mutation: [`STORE_UNAVAILABLE`], the code
+/// a client already reads as "the store is busy, nothing was written".
+fn sessions_not_ready() -> RpcError {
+    RpcError {
+        code: STORE_UNAVAILABLE,
+        message: "sessions table not ready: this boot's first reconcile pass has not committed"
+            .to_string(),
+        data: None,
+    }
+}
+
 /// Upsert a session. The entry is validated first (canonical UUID id, tmux
 /// name charset, absolute path, byte caps), and a tmux name already bound to
 /// another session id is refused rather than taken over.
@@ -13549,6 +13568,9 @@ async fn handle_session_upsert(
     let params: ainb_hangar_proto::sessions::WorkspaceSessionUpsertParams =
         parse_params(req, "{ session }")?;
     params.session.validate().map_err(|why| invalid_params(&why))?;
+    if !sessions_table_ready().await {
+        return Err(sessions_not_ready());
+    }
     let row = session_entry_to_row(params.session);
     match SessionsRepo::upsert(pool, &row).await.map_err(|e| store_err(&e))? {
         UpsertOutcome::Written => {}
@@ -13600,6 +13622,9 @@ async fn handle_session_delete(
 
     let params: ainb_hangar_proto::sessions::WorkspaceSessionDeleteParams =
         parse_params(req, "{ session_id?, tmux_session_name? }")?;
+    if !sessions_table_ready().await {
+        return Err(sessions_not_ready());
+    }
     let deleted = if let Some(id) = params.session_id.as_deref() {
         if !is_canonical_uuid(id) {
             return Err(invalid_params("session_id must be a canonical UUID"));
