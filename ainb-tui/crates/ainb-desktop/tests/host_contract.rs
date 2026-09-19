@@ -821,15 +821,24 @@ mod transcript {
     }
 }
 
-/// Section 20, which the board draws: the host reads it, folds each read
-/// through the section's reducer, and reads it unreachable while the sidecar
-/// has no daemon.
+/// Section 20, which the board draws: the desktop runs the one agent status
+/// reader both hosts share (#1188), on the Fleet subscription, and folds what
+/// it reports on the tick. Driven against a fake daemon on a scratch socket.
 mod agent_status {
     use super::*;
-    use ainb_desktop::agent_status::StatusOutcome;
+    use ainb_app::fleet::agent_status_reader::Dialer;
+    use ainb_app::fleet::agent_status_reader::fake_daemon::{Fake, listen};
+    use ainb_desktop::host::FrameSink;
+    use ainb_hangar_proto::connections::{SurfaceInfo, SurfaceKind};
     use ainb_hangar_proto::status_view::ViewHealth;
+    use std::time::{Duration, Instant};
 
-    /// A host framing section 20 only, whose reads the test stands in for.
+    /// The joined read the fake answers: one ACP session.
+    fn roster() -> serde_json::Value {
+        serde_json::json!({ "result": serde_json::to_value(acp_roster()).expect("roster") })
+    }
+
+    /// A host framing section 20 only, with no workspace rescans in the way.
     fn status_host(frames: &Rc<RefCell<usize>>) -> DesktopHost<impl FnMut(FrameBatch)> {
         scratch_home();
         let frames = Rc::clone(frames);
@@ -840,48 +849,99 @@ mod agent_status {
             Subscription::only(&[SectionId::AgentStatus]),
             move |batch: FrameBatch| *frames.borrow_mut() += batch.frames.len(),
         )
-        .rescanning_every(std::time::Duration::from_secs(600))
-        .reading_agent_status_with(|_| {})
+        .rescanning_every(Duration::from_secs(600))
+        .without_attention_poll()
     }
 
-    fn deliver(host: &DesktopHost<impl FnMut(FrameBatch)>, outcome: StatusOutcome) {
-        host.agent_status_reports().lock().expect("inbox").push(outcome);
+    /// Dial the fake as the desktop does.
+    fn dialer(socket: std::path::PathBuf) -> Dialer {
+        Box::new(move || {
+            let mut client = ainb_app::fleet::bridge::daemon::DaemonClient::with_parts(
+                socket.clone(),
+                "t".to_string(),
+            );
+            client.set_surface(SurfaceInfo {
+                kind: SurfaceKind::Desktop,
+                pid: std::process::id(),
+            });
+            Ok(client)
+        })
     }
 
-    fn health(host: &DesktopHost<impl FnMut(FrameBatch)>) -> Option<ViewHealth> {
+    fn health<S: FrameSink>(host: &DesktopHost<S>) -> Option<ViewHealth> {
         host.state().agent_status.view.as_ref().map(|view| view.health.clone())
+    }
+
+    /// Tick until `done`, for up to five seconds.
+    fn tick_until<S: FrameSink>(
+        host: &mut DesktopHost<S>,
+        what: &str,
+        done: impl Fn(&DesktopHost<S>) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done(host) {
+            assert!(Instant::now() < deadline, "{what}: {:?}", health(host));
+            std::thread::sleep(Duration::from_millis(20));
+            let _ = host.tick();
+        }
     }
 
     #[test]
     fn a_read_reaches_the_board_on_the_tick() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let _runtime = runtime.enter();
+        let dir = tempfile::tempdir().expect("socket dir");
+        let socket = listen(&dir.path().join("hangar.sock"), |_| {
+            Fake::joined(|_, _| roster())
+        });
         let frames = Rc::new(RefCell::new(0));
         let mut host = status_host(&frames);
-        let _ = host.tick();
-        *frames.borrow_mut() = 0;
+        host.start_agent_status(dialer(socket), false);
 
-        deliver(&host, StatusOutcome::Read(acp_roster()));
-        let _ = host.tick();
-
+        tick_until(&mut host, "the read lands", |host| {
+            health(host) == Some(ViewHealth::Live)
+        });
         let view = host.state().agent_status.view.as_ref().expect("a view");
         assert!(view.cards.contains_key("acp:s-1"));
-        assert_eq!(health(&host), Some(ViewHealth::Live));
         assert!(*frames.borrow() > 0, "and the section framed");
     }
 
+    /// The sidecar hook used to mark the board unreachable as soon as the
+    /// sidecar saw the daemon go, surfacing on the next frame. The shared
+    /// reader must do no worse: a dropped subscription reads unreachable on the
+    /// first tick after it drops, at the desktop's own tick cadence.
     #[test]
-    fn a_failed_read_keeps_the_cards_and_reads_unreachable() {
+    fn a_dropped_subscription_reads_unreachable_on_the_first_tick_after() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let _runtime = runtime.enter();
+        let dir = tempfile::tempdir().expect("socket dir");
+        let path = dir.path().join("hangar.sock");
+        let hang_up = std::sync::Arc::new(tokio::sync::Notify::new());
+        let cue = std::sync::Arc::clone(&hang_up);
+        let socket = listen(&path, move |_| {
+            let mut fake = Fake::joined(|_, _| roster());
+            fake.hang_up = Some(std::sync::Arc::clone(&cue));
+            fake
+        });
         let frames = Rc::new(RefCell::new(0));
         let mut host = status_host(&frames);
-        deliver(&host, StatusOutcome::Read(acp_roster()));
+        host.start_agent_status(dialer(socket.clone()), false);
+        tick_until(&mut host, "the read lands", |host| {
+            health(host) == Some(ViewHealth::Live)
+        });
+
+        // The daemon dies: its socket goes and the subscription hangs up.
+        std::fs::remove_file(&socket).expect("remove the socket");
+        hang_up.notify_one();
+        let tick = Duration::from_millis(AppConfig::default().ui.app_tick_ms);
+        std::thread::sleep(tick);
         let _ = host.tick();
 
-        deliver(&host, StatusOutcome::Failed("socket gone".to_string()));
-        let _ = host.tick();
-
-        assert!(matches!(
-            health(&host),
-            Some(ViewHealth::Unreachable { .. })
-        ));
+        assert!(
+            matches!(health(&host), Some(ViewHealth::Unreachable { .. })),
+            "unreachable on the first tick after the drop: {:?}",
+            health(&host)
+        );
         assert!(
             host.state()
                 .agent_status
@@ -889,55 +949,36 @@ mod agent_status {
                 .as_ref()
                 .expect("a view")
                 .cards
-                .contains_key("acp:s-1")
+                .contains_key("acp:s-1"),
+            "the cards stay, frozen"
         );
     }
 
+    /// `[fleet.status] legacy_panel` is honoured on the desktop as on the
+    /// terminal: the two pre-section reads, never the joined one.
     #[test]
-    fn a_lost_daemon_reads_unreachable_until_it_is_back() {
+    fn the_legacy_panel_flag_takes_the_two_reads_here_too() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let _runtime = runtime.enter();
+        let dir = tempfile::tempdir().expect("socket dir");
+        let fake = Fake::joined(|method, _| match method {
+            "fleet/snapshot" => serde_json::json!({"result": {"head_revision": 2, "sessions": []}}),
+            "fleet/status" => serde_json::json!({"result": {"rows": [], "head_revision": 2}}),
+            _ => roster(),
+        });
+        let observed = fake.clone();
+        let socket = listen(&dir.path().join("hangar.sock"), move |_| fake.clone());
         let frames = Rc::new(RefCell::new(0));
         let mut host = status_host(&frames);
-        deliver(&host, StatusOutcome::Read(acp_roster()));
-        let _ = host.tick();
 
-        host.daemon_lost("reconnecting");
-        assert!(matches!(
-            health(&host),
-            Some(ViewHealth::Unreachable { .. })
-        ));
-        // A read that lands while the daemon is gone is not shown as current.
-        deliver(&host, StatusOutcome::Read(acp_roster()));
-        let _ = host.tick();
-        assert!(matches!(
-            health(&host),
-            Some(ViewHealth::Unreachable { .. })
-        ));
-
-        host.daemon_connected();
-        deliver(&host, StatusOutcome::Read(acp_roster()));
-        let _ = host.tick();
-        assert_eq!(health(&host), Some(ViewHealth::Live));
-    }
-
-    #[test]
-    fn a_read_from_before_the_outage_never_folds_after_it() {
-        let frames = Rc::new(RefCell::new(0));
-        let mut host = status_host(&frames);
-        deliver(&host, StatusOutcome::Read(acp_roster()));
-        let _ = host.tick();
-        // Stands in for a worker started before the outage: it keeps the inbox
-        // it was handed, whatever the host does with its own after.
-        let before = host.agent_status_reports();
-        host.daemon_lost("reconnecting");
-        host.daemon_connected();
-
-        // It lands after the reconnect, into the inbox it was started with.
-        before.lock().expect("inbox").push(StatusOutcome::Read(acp_roster()));
-        let _ = host.tick();
-
-        assert!(
-            matches!(health(&host), Some(ViewHealth::Unreachable { .. })),
-            "the pre-outage read is not shown as current"
-        );
+        let mut config = AppConfig::default();
+        config.fleet.status.legacy_panel = true;
+        host.start_agent_status(dialer(socket), ainb_desktop::host::legacy_panel(&config));
+        tick_until(&mut host, "the two reads land", |host| {
+            host.state().agent_status.view.is_some()
+        });
+        assert_eq!(observed.reads_of("fleet/roster_status"), 0);
+        assert_eq!(observed.reads_of("fleet/snapshot"), 1);
+        assert!(!ainb_desktop::host::legacy_panel(&AppConfig::default()));
     }
 }

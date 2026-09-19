@@ -15,20 +15,16 @@ EXPECT="a question raised by a separate hook process reaches the open desktop wi
 QUESTION="Ship the d2 board to which environment?"
 PROVIDER_ID="proof-d2-board"
 
-# sql_text <value>: <value> as an SQL string literal, its quotes doubled.
-sql_text() { printf "'%s'" "${1//\'/\'\'}"; }
-
-# answered_row <id>: state, answered_by and answer of one attention row, read
-# from the daemon's store by a separate process.
-answered_row() {
-  sqlite3 "$AINB_HANGAR_HOME/hangar.db" \
-    "SELECT state || '|' || COALESCE(answered_by, '') || '|' || COALESCE(answer, '') FROM attention WHERE id = $(sql_text "$1");" \
-    2>/dev/null
-}
-
-# answered_state_is <id> <state>: the row's state, read the same way.
-answered_state_is() {
-  test "$(sqlite3 "$AINB_HANGAR_HOME/hangar.db" "SELECT state FROM attention WHERE id = $(sql_text "$1");" 2>/dev/null)" = "$2"
+# attention_answered <id>: the daemon no longer lists the row in its open
+# feed, read through its own `attention/list` (#1193). A row leaves the feed
+# the instant its answer is recorded, so this is the daemon's word that the
+# row is answered; the winner is read from the refusal a later answer gets.
+# False when the call fails, so a daemon that is down reads as not answered.
+attention_answered() {
+  local rows
+  rows="$(rpc_call 1 1 attention/list '{"fleet": true}' | tail -1)" || return 1
+  jq -e --arg id "$1" '(.result.attention // empty) | map(select(.id == $id)) | length == 0' \
+    <<<"$rows" >/dev/null 2>&1
 }
 
 waiting_at_least() {
@@ -40,16 +36,7 @@ waiting_at_least() {
 waiting_is() { test "$(applied_cards waiting)" = "$1"; }
 
 scenario() {
-  if [[ ! -x "$DESKTOP_BIN" ]]; then
-    check "the desktop shell is built at $DESKTOP_BIN" false
-    return
-  fi
-  if ! command -v xvfb-run >/dev/null; then
-    # Not a failure: a box with no headless X server has falsified nothing
-    # about the window, so the result says why the node could not run.
-    skip "xvfb-run is not installed, so the window has no display to open on"
-    return
-  fi
+  desktop_ready || return
 
   fixture_session || { check "the CLI seeded a session before the window opened" false; return; }
 
@@ -85,22 +72,18 @@ scenario() {
   # typed line is the proof it arrived.
   check "the answer reached the agent's pane" wait_for 30 fixture_says "beta"
 
-  wait_for 30 answered_state_is "$id" answered
-  local row
-  row="$(answered_row "$id")"
-  observe "the daemon's record of $id: $row"
-  # `<surface>@<host>`: the surface is the one that answered.
-  check "the daemon recorded the web as the surface that answered" \
-    grep -qE '^answered\|web@[^|]*\|beta$' <<<"$row"
-
-  # A third surface on the same daemon reads the same winner: its own answer
-  # to the same question loses to the web's.
+  # The daemon's record, read through its own RPC by a process that is not
+  # the window: the row has left the open feed, and a third surface's answer
+  # to the same question loses to the web's, the refusal naming the winner.
+  check "the daemon dropped the row from its open feed once answered" \
+    wait_for 30 attention_answered "$id"
   rpc_call 1 1 attention/answer \
     "$(jq -nc --arg id "$id" '{attention_id: $id, answer: "alpha", answered_by: "tui", is_answer: true}')" \
     | tail -1 >"$NODE_DIR/third-surface.json"
   CAPTURES+=("third-surface.json")
   observe "a third surface's answer to $id: $(jq -c '.result' "$NODE_DIR/third-surface.json" 2>/dev/null)"
-  check "the third surface reads the web as the winner" \
+  # `<surface>@<host>`: the surface is the one that answered.
+  check "the daemon recorded the web as the winner, read by the third surface" \
     grep -qE '^already_answered\|web@' <<<"$(jq -r '.result.outcome + "|" + .result.by' "$NODE_DIR/third-surface.json" 2>/dev/null)"
 
   # The window draws the waiting column again without the answered card.

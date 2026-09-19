@@ -107,16 +107,6 @@ impl<S: FrameSink> Shell<S> {
         self.core().host.host_id().clone()
     }
 
-    /// The sidecar lost its daemon; see [`DesktopHost::daemon_lost`].
-    pub fn daemon_lost(&self, reason: &str) {
-        self.core().host.daemon_lost(reason);
-    }
-
-    /// The sidecar has its daemon; see [`DesktopHost::daemon_connected`].
-    pub fn daemon_connected(&self) {
-        self.core().host.daemon_connected();
-    }
-
     /// Re-pin the host every frame names; see [`DesktopHost::set_host`].
     pub fn set_host(&self, host_id: HostId) -> bool {
         self.core().host.set_host(host_id)
