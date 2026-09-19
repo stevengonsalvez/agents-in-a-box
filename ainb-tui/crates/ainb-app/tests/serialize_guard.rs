@@ -197,6 +197,9 @@ fn every_serialisation_call_site_outside_the_wire_seam_is_triaged() {
             "# Serialisation call sites outside ainb-app/src/wire, locked by tests/serialize_guard.rs.\n\
              # Each writes a disk file, a CLI's own output, a plugin or daemon RPC body, or (ainb-web\n\
              # routes.rs) the web client's daemon attention stream; none is an AppState section.\n\
+             # fleet/agent_status_reader.rs is its fake_daemon (test and test-support builds only):\n\
+             # the JSON-RPC reply frame a fake daemon writes to the reader under test, a\n\
+             # serde_json::Value the test builds from json! literals, never a section or moved type.\n\
              # A new line is triaged first: frames go through wire::serialize_section only.\n\
              # Regenerate: UPDATE_SERIALIZE_CALL_SITES=1 cargo test -p ainb-app --test serialize_guard\n",
         );
