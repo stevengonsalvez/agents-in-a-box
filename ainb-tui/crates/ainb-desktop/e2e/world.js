@@ -109,9 +109,18 @@ function freshBundle() {
   if (!existsSync(dist)) throw new Error(`the webview is not built: ${dist}`);
   const built = statSync(dist).mtimeMs;
   const src = resolve(HERE, "../ui/src");
-  const newest = readdirSync(src, { recursive: true })
-    .map((entry) => statSync(join(src, entry)).mtimeMs)
-    .reduce((a, b) => Math.max(a, b), 0);
+  // The sources, and the files outside them that change what a build
+  // produces: the page the bundle is injected into, the manifest, the
+  // lockfile a dependency bump moves, and the build's own config.
+  const inputs = readdirSync(src, { recursive: true })
+    .map((entry) => join(src, entry))
+    .concat(
+      ["index.html", "package.json", "package-lock.json", "vite.config.ts"].map((name) =>
+        resolve(HERE, "../ui", name),
+      ),
+    )
+    .filter((path) => existsSync(path));
+  const newest = inputs.map((path) => statSync(path).mtimeMs).reduce((a, b) => Math.max(a, b), 0);
   if (newest > built) {
     throw new Error(
       `the webview bundle is older than ui/src (${new Date(built).toISOString()} vs ${new Date(newest).toISOString()}): run npm run build in ui/`,
