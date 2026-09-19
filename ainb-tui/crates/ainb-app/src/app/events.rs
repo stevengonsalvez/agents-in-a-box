@@ -142,6 +142,14 @@ pub enum AppEvent {
     SessionTabPrev,
     /// `Enter` on the `ask` tab: send the selected answer.
     SessionAskSend,
+    /// `session_list.ask.pick`: answer with the option labelled `label`, in
+    /// one step. A surface that cannot press keys on the reducer's cursor
+    /// names its pick, and the reducer resolves it against the options it
+    /// holds: a banner that counted cursor moves off its frame sent a
+    /// different option when a frame landed mid-sequence (#1191).
+    SessionAskPick {
+        label: String,
+    },
     /// `Enter` on a composer tab (`thread` / `pal`): send the message.
     SessionTabComposerSend,
     /// `Enter` on the `pal` tab while it is offering to start the hangar
@@ -1973,6 +1981,36 @@ impl EventHandler {
             .or(Some(AppEvent::ToggleHelp))
     }
 
+    /// Send the `ask` pane's current answer for `chip`, the state already
+    /// pointed at it, and show why when nothing went out.
+    fn send_selected_answer(
+        state: &mut AppState,
+        chip: &crate::fleet::attention::SessionAttention,
+    ) {
+        // The row's own identity for the verified send: the provider session
+        // id is not knowable here, so the tmux name is the identity the send
+        // path correlates on, with the worktree as the cwd its ambiguity
+        // guard checks.
+        let (session_id, cwd) = state.get_selected_session().map_or_else(
+            || (String::new(), String::new()),
+            |session| {
+                (
+                    session.tmux_session_name.clone().unwrap_or_default(),
+                    session.workspace_path.clone(),
+                )
+            },
+        );
+        // Read before the send borrows the Fleet section: the answer is
+        // recorded under the surface this process is, whichever that is.
+        let surface = state.host.surface;
+        if let Err(refusal) = state.fleet.ask_state.send(chip, &session_id, &cwd, surface) {
+            // Refusals are shown, never swallowed: a send that silently does
+            // nothing is the failure mode this screen exists to remove.
+            state.add_info_notification(refusal);
+        }
+        state.shell.ui_needs_refresh = true;
+    }
+
     fn route_session_ask_move(delta: isize, state: &mut AppState) -> Option<AppEvent> {
         let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
         state.fleet.ask_state.retarget(&chip);
@@ -3318,31 +3356,26 @@ impl EventHandler {
                     state.add_info_notification("nothing is waiting on an answer here".to_string());
                     return;
                 };
-                // The row's own identity for the verified send: the provider
-                // session id is not knowable here, so the tmux name is the
-                // identity the send path correlates on, with the worktree as
-                // the cwd its ambiguity guard checks.
-                let (session_id, cwd) = state.get_selected_session().map_or_else(
-                    || (String::new(), String::new()),
-                    |session| {
-                        (
-                            session.tmux_session_name.clone().unwrap_or_default(),
-                            session.workspace_path.clone(),
-                        )
-                    },
-                );
-                // Read before the send borrows the Fleet section: the answer is
-                // recorded under the surface this process is, whichever that is.
-                let surface = state.host.surface;
                 state.fleet.ask_state.retarget(&chip);
-                if let Err(refusal) = state.fleet.ask_state.send(&chip, &session_id, &cwd, surface)
-                {
-                    // Refusals are shown, never swallowed: a send that silently
-                    // does nothing is the failure mode this screen exists to
-                    // remove.
-                    state.add_info_notification(refusal);
+                Self::send_selected_answer(state, &chip);
+            }
+            AppEvent::SessionAskPick { label } => {
+                let Some(chip) = crate::components::session_tabs::selected_blocking(state).cloned()
+                else {
+                    state.add_info_notification("nothing is waiting on an answer here".to_string());
+                    return;
+                };
+                state.fleet.ask_state.retarget(&chip);
+                // The cursor is put on the named option and the send fires in
+                // the same step, so nothing can move it in between. A label
+                // the question does not offer sends nothing, and says so.
+                match state.fleet.ask_state.pick(&chip, &label) {
+                    Ok(()) => Self::send_selected_answer(state, &chip),
+                    Err(refusal) => {
+                        state.add_info_notification(refusal);
+                        state.shell.ui_needs_refresh = true;
+                    }
                 }
-                state.shell.ui_needs_refresh = true;
             }
             // The composer tabs fire their own send through the chat reducer,
             // which is reached by the key routing above. Reaching here means
