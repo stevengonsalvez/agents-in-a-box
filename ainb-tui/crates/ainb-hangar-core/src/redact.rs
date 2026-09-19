@@ -49,7 +49,7 @@ static SLACK_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
 /// chars (`<user-id>.<timestamp>.<hmac>`). The middle (timestamp) segment is a
 /// BOUNDED RANGE, not a fixed 6, because newer Discord tokens widen it (a
 /// 7-char middle is already in the wild) and a fixed `{6}` silently failed to
-/// redact those — leaking the token into `last_error`/logs. The `6,12` ceiling
+/// redact those, leaking the token into `last_error`/logs. The `6,12` ceiling
 /// keeps it conservative so it still won't eat a short dotted version string.
 static DISCORD_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[\w-]{24,}\.[\w-]{6,12}\.[\w-]{27,}").expect("valid discord token regex")
@@ -63,7 +63,7 @@ static PEM_PRIVATE_KEY: LazyLock<Regex> = LazyLock::new(|| {
 /// Anthropic API and admin keys.
 static ANTHROPIC_KEY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"sk-ant-[A-Za-z0-9_-]{20,}").expect("valid anthropic key regex"));
-/// OpenAI keys, legacy `sk-…` and project, service-account and admin
+/// openai keys, legacy `sk-…` and project, service-account and admin
 /// forms. Word-anchored: without `\b` a session id like `ainb-task-<uuid>`
 /// or a branch like `fix-risk-assessment-…` matched from the `sk-` inside it.
 static OPENAI_KEY: LazyLock<Regex> = LazyLock::new(|| {
@@ -86,7 +86,7 @@ static STRIPE_KEY: LazyLock<Regex> = LazyLock::new(|| {
 /// npm access tokens.
 static NPM_TOKEN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bnpm_[A-Za-z0-9]{36}\b").expect("valid npm token regex"));
-/// PyPI upload tokens (a macaroon, always `pypi-AgEIcHlwaS5vcmc…`).
+/// pypi upload tokens (a macaroon, always `pypi-AgEIcHlwaS5vcmc…`).
 static PYPI_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}").expect("valid pypi token regex")
 });
@@ -94,11 +94,11 @@ static PYPI_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
 static HUGGING_FACE_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bhf_[A-Za-z0-9]{34,}\b").expect("valid hugging face token regex")
 });
-/// DigitalOcean personal access tokens.
+/// digitalocean personal access tokens.
 static DIGITALOCEAN_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bdo[por]_v1_[a-f0-9]{64}\b").expect("valid digitalocean token regex")
 });
-/// SendGrid API keys: `SG.<22>.<43>`.
+/// sendgrid API keys: `SG.<22>.<43>`.
 static SENDGRID_KEY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b").expect("valid sendgrid key regex")
 });
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn does_not_redact_innocuous_colon_numbers() {
-        // A short `id:value` like an http status or a chat id must NOT be eaten —
+        // A short `id:value` like an http status or a chat id must NOT be eaten:
         // the bare-token rule requires >=6 leading digits AND a >=20-char tail.
         let clean = "sendMessage HTTP 400: chat_id 42 not found";
         assert_eq!(scrub_secrets(clean), clean);
