@@ -57,15 +57,8 @@ fn a_pointer_command_run_without_its_payload_changes_nothing() {
         let row = keymap.command(&CommandId::new(*id)).expect("row resolves");
         if row.action.with_args(&serde_json::Value::Null).is_some() {
             // The rows that take no payload.
-            // Mark all read takes no payload either: the verb sweeps the
-            // whole inbox, so there is no row to name.
             assert!(
-                [
-                    ids::SKILL_MANAGER_ALL_SOURCES,
-                    ids::INBOX_MARK_ALL_READ,
-                    reports::ids::DETACHED
-                ]
-                .contains(id),
+                [ids::SKILL_MANAGER_ALL_SOURCES, reports::ids::DETACHED].contains(id),
                 "{id} runs bare"
             );
             continue;
