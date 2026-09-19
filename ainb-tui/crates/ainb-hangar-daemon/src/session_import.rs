@@ -68,6 +68,10 @@ pub const RECONCILE_STORE_BOUND: Duration = Duration::from_secs(5);
 /// How often [`ReconcileWatch`] checks whether the file changed.
 pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
+/// How soon [`ReconcileWatch`] retries after a failed pass, doubling on each
+/// further failure up to [`RECONCILE_INTERVAL`].
+pub const RECONCILE_RETRY_FIRST: Duration = Duration::from_secs(1);
+
 /// The `sessions.json` this daemon imports, reconciles and serves.
 ///
 /// Every daemon site (the boot import, the watcher, the session RPCs) goes
@@ -393,23 +397,29 @@ impl ReconcileWatch {
         )
     }
 
-    /// Tick every [`RECONCILE_INTERVAL`] for the life of the process, logging
-    /// each pass that ran.
+    /// Tick for the life of the process, logging each pass that ran.
+    ///
+    /// The first tick is immediate. After a success, or an unchanged file,
+    /// the next is [`RECONCILE_INTERVAL`] later. After a failure the next
+    /// comes sooner, [`RECONCILE_RETRY_FIRST`] doubling up to the interval:
+    /// until the first pass commits, every session read waits on the gate,
+    /// so a boot pass that lost a race for the flock is retried in seconds,
+    /// not half a minute.
     ///
     /// A failure is warned about once; the same failure on later ticks (a
     /// file left malformed) is logged at debug, so it does not warn every
     /// 30 s forever. A different failure, or a success, resets that.
     pub async fn run(mut self, pool: SqlitePool) {
-        let mut every = tokio::time::interval(RECONCILE_INTERVAL);
-        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut warned: Option<String> = None;
+        let mut retry = RECONCILE_RETRY_FIRST;
         loop {
-            every.tick().await;
-            match self.tick(&pool).await {
-                None => {}
+            let next = match self.tick(&pool).await {
+                None => RECONCILE_INTERVAL,
                 Some(Ok(outcome)) => {
                     warned = None;
+                    retry = RECONCILE_RETRY_FIRST;
                     log_reconcile(&outcome);
+                    RECONCILE_INTERVAL
                 }
                 Some(Err(e)) => {
                     let error = format!("{e:#}");
@@ -418,12 +428,16 @@ impl ReconcileWatch {
                     } else {
                         tracing::warn!(
                             %error,
-                            "sessions.json reconcile failed; retrying every tick, warned once"
+                            "sessions.json reconcile failed; retrying with backoff, warned once"
                         );
                         warned = Some(error);
                     }
+                    let wait = retry;
+                    retry = retry.saturating_mul(2).min(RECONCILE_INTERVAL);
+                    wait
                 }
-            }
+            };
+            tokio::time::sleep(next).await;
         }
     }
 }
