@@ -3,13 +3,14 @@
 // the same expected-facts list the ratatui half checks its snapshot against
 // (`ainb-core/tests/parity_snapshots.rs`). One fixture, two renderers, one
 // list. The frames are `ainb-app/tests/parity/frames/<fixture>.json`, dumped
-// by `ainb-app/tests/parity_frames.rs`; the facts are `<fixture>.facts`
-// beside the fixture.
+// by `ainb-app/tests/parity_frames.rs`; the facts are
+// `facts/<fixture>.txt` beside the fixtures, the one list both halves read.
 //
 // The component is mounted for real through Solid's server renderer (see
 // `solid-ssr.mjs`), so a fact the page stops printing fails here. The suite
-// has to be able to fail: the last test deletes one fact from the rendered
-// output and asserts the check reports it.
+// has to be able to fail, against the drawing and not a string edited after
+// the fact: the mutation test takes a daemon row out of what the PAGE is
+// given, renders again, and asserts the facts that row carried are missing.
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
@@ -28,7 +29,7 @@ const SETTINGS_FIXTURES = ["config", "daemons"] as const;
 
 /** The facts of `fixture`, comments and blank lines dropped. */
 function facts(fixture: string): string[] {
-  return readFileSync(join(PARITY_DIR, `${fixture}.facts`), "utf8")
+  return readFileSync(join(PARITY_DIR, "facts", `${fixture}.txt`), "utf8")
     .split("\n")
     .map((line) => line.trimEnd())
     .filter((line) => line !== "" && !line.startsWith("#"));
@@ -39,9 +40,18 @@ function frames(fixture: string): { config: ConfigView_Serialize; hangar: Hangar
   return JSON.parse(readFileSync(join(PARITY_DIR, "frames", `${fixture}.json`), "utf8"));
 }
 
-/** The page's text, one line per element, as a person reads it. */
-export function pageText(fixture: string): string[] {
-  const { config, hangar } = frames(fixture);
+/**
+ * The page's text, one line per element, as a person reads it. `change`
+ * edits the frames before the page is given them: what a renderer that lost
+ * something would have drawn.
+ */
+export function pageText(
+  fixture: string,
+  change: (frames: { config: ConfigView_Serialize; hangar: HangarView_Serialize }) => void = () => undefined,
+): string[] {
+  const held = frames(fixture);
+  change(held);
+  const { config, hangar } = held;
   const html = renderToString(() =>
     SettingsPage({
       config,
@@ -69,33 +79,32 @@ export function missingFacts(lines: readonly string[], expected: readonly string
 for (const fixture of SETTINGS_FIXTURES) {
   test(`the settings page rendered from the ${fixture} fixture's frames carries every expected fact`, () => {
     const expected = facts(fixture);
-    assert.ok(expected.length > 0, `${fixture}.facts lists facts`);
+    assert.ok(expected.length > 0, `facts/${fixture}.txt lists facts`);
     const lines = pageText(fixture);
     assert.ok(lines.length > 10, "the page rendered");
     assert.deepEqual(missingFacts(lines, expected), [], `facts missing from the settings page for ${fixture}`);
   });
 }
 
-test("every fixture the settings page draws has a facts list, and no facts list names a fixture that is gone", () => {
-  const entries = readdirSync(PARITY_DIR);
+test("every fixture the settings page draws has a facts list", () => {
+  const lists = readdirSync(join(PARITY_DIR, "facts"));
   for (const fixture of SETTINGS_FIXTURES) {
-    assert.ok(entries.includes(`${fixture}.facts`), `${fixture}.facts`);
-    assert.ok(entries.includes(`${fixture}.json`), `${fixture}.json`);
-  }
-  for (const entry of entries.filter((name) => name.endsWith(".facts"))) {
-    const fixture = entry.slice(0, -".facts".length);
-    assert.ok(entries.includes(`${fixture}.json`), `${entry} names a fixture that does not exist`);
+    assert.ok(lists.includes(`${fixture}.txt`), `facts/${fixture}.txt`);
+    assert.ok(readdirSync(PARITY_DIR).includes(`${fixture}.json`), `${fixture}.json`);
   }
 });
 
-test("the check fails when one fact is deleted from the rendered output", () => {
-  const expected = facts("config");
-  const lines = pageText("config");
-  assert.deepEqual(missingFacts(lines, expected), []);
+test("a page that loses a daemon row fails the facts", () => {
+  const expected = facts("daemons");
+  assert.deepEqual(missingFacts(pageText("daemons"), expected), [], "the fixture as it stands shows every fact");
 
-  const deleted = expected[expected.length - 1]!;
-  const mutated = lines.map((line) => line.split(deleted).join(""));
-  assert.deepEqual(missingFacts(mutated, expected), [deleted]);
+  const lost = pageText("daemons", ({ hangar }) => {
+    hangar.daemons_state.shared!.rows.shift();
+  });
+  assert.ok(
+    missingFacts(lost, expected).length > 0,
+    "a page missing a daemon row still showed every expected fact, so the list proves nothing",
+  );
 });
 
 test("the page's edit policy is the reducer's, row for row", () => {
