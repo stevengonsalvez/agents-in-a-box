@@ -7,23 +7,7 @@
 EXPECT="the desktop window renders the sessions sidebar from framed sections, over the daemon a separate CLI call finds, holding exactly one desktop connection row while it runs and none after it closes, and a session the CLI creates reaches the open sidebar without a restart"
 
 scenario() {
-  if [[ ! -x "$DESKTOP_BIN" ]]; then
-    # No webview libraries means the shell cannot be built on this box at all,
-    # which falsifies nothing about the window. With them present, a missing
-    # binary is a real gap: `run.sh --build` builds it there.
-    if ! pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
-      skip "webkit2gtk-4.1 is not installed, so the desktop shell cannot be built on this box"
-      return
-    fi
-    check "the desktop shell is built at $DESKTOP_BIN" false
-    return
-  fi
-  if ! command -v xvfb-run >/dev/null; then
-    # Not a failure: a box with no headless X server has falsified nothing
-    # about the window, so the result says why the node could not run.
-    skip "xvfb-run is not installed, so the window has no display to open on"
-    return
-  fi
+  desktop_ready || return
 
   fixture_session || { check "the CLI seeded a session before the window opened" false; return; }
 

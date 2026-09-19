@@ -288,6 +288,8 @@ pub mod scheduler;
 /// `hangar.db` and assert live rows render.
 #[cfg(any(test, feature = "test-support"))]
 pub mod seed;
+/// One-time idempotent boot import of sessions.json (spec P6d, #1166).
+pub mod session_import;
 /// The daemon's shutdown seam: which signal stopped it, and how far to tear
 /// down.
 ///
@@ -932,6 +934,37 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // sweep + serve — so it is logged and swallowed here.
         if let Err(e) = crate::default_home::ensure_default_home(store.pool()).await {
             tracing::warn!(error = %e, "fresh-home boot seed failed (daemon continues)");
+        }
+
+        // One-time boot import of sessions.json (spec P6d, #1166). A failure
+        // writes no marker: the daemon keeps running, `workspace/session_list`
+        // answers `import_complete: false`, and the CLI keeps reading the file,
+        // so a failed import never hides a populated file behind an empty table.
+        let sessions_path = ainb_fleet_core::session_registry::sessions_json_path();
+        match crate::session_import::import_sessions_if_needed(store.pool(), &sessions_path).await {
+            Ok(crate::session_import::ImportReport::Completed(marker)) => {
+                if marker.rejected > 0 {
+                    tracing::warn!(
+                        imported = marker.imported,
+                        skipped = marker.skipped,
+                        rejected = marker.rejected,
+                        "sessions.json imported; rejected records stay in the file only"
+                    );
+                } else {
+                    tracing::info!(
+                        imported = marker.imported,
+                        skipped = marker.skipped,
+                        "sessions.json imported into the sessions table"
+                    );
+                }
+            }
+            Ok(crate::session_import::ImportReport::AlreadyCompleted) => {}
+            Err(e) => {
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "sessions.json import failed; clients keep reading the file until it succeeds"
+                );
+            }
         }
 
         // P8.5: the in-memory health stats collector — shared between the RPC server

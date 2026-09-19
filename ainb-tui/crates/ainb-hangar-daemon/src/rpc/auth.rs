@@ -392,6 +392,36 @@ async fn minted_host_id(pool: &SqlitePool) -> Option<String> {
     }
 }
 
+/// Test-only switch that adds the dark sessions capability to hello.
+///
+/// P6d ships the sessions table and its RPCs dark: `CAP_WORKSPACE_SESSIONS`
+/// is not in the catalogue, so a production daemon never advertises it and
+/// the CLI stays on `sessions.json`. Tests turn it on here to drive the
+/// daemon path against the real handlers. It does not exist outside
+/// `test`/`test-support` builds.
+#[cfg(any(test, feature = "test-support"))]
+static ADVERTISE_WORKSPACE_SESSIONS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Advertise (or stop advertising) the dark sessions capability on hello.
+/// Process-wide; test builds only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn advertise_workspace_sessions_for_tests(on: bool) {
+    ADVERTISE_WORKSPACE_SESSIONS.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The capabilities a hello reply carries: the catalogue, plus the dark
+/// sessions capability when a test has switched it on.
+fn advertised_capabilities() -> Vec<String> {
+    #[allow(unused_mut)]
+    let mut capabilities = catalogue_strings();
+    #[cfg(any(test, feature = "test-support"))]
+    if ADVERTISE_WORKSPACE_SESSIONS.load(std::sync::atomic::Ordering::SeqCst) {
+        capabilities.push(ainb_hangar_proto::protocol::CAP_WORKSPACE_SESSIONS.to_string());
+    }
+    capabilities
+}
+
 /// The success envelope echoing `id`, carrying what this daemon speaks.
 ///
 /// A pre-W0-wire client deserializes this as the empty struct it always did
@@ -401,7 +431,7 @@ fn ack(id: RpcId, selected: u32, host_id: Option<String>) -> RpcResponse {
     let result = HelloResult {
         protocol: ProtocolRange::supported(),
         selected: Some(selected),
-        capabilities: catalogue_strings(),
+        capabilities: advertised_capabilities(),
         daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         host_id,
     };
@@ -460,6 +490,14 @@ fn unauthorized(id: RpcId, message: &str) -> RpcResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P6d is dark: a daemon's hello does not advertise the sessions
+    /// capability unless a test switches it on.
+    #[test]
+    fn hello_keeps_the_sessions_capability_dark() {
+        let cap = ainb_hangar_proto::protocol::CAP_WORKSPACE_SESSIONS;
+        assert!(!advertised_capabilities().iter().any(|c| c == cap));
+    }
     use ainb_hangar_store::Store;
 
     /// The gate's three outcomes stay three. The regression this pins is the

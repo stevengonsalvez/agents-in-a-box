@@ -34,10 +34,11 @@ pub const PARENT_ENV: &str = "AINB_PARENT_SESSION";
 
 /// One session to register, matching the persisted `SessionMetadata` shape.
 ///
-/// Only the REQUIRED fields the CLI's `SessionStore` reads are modelled; the
-/// `#[serde(default)]` fields `SessionMetadata` carries (`agent_type`,
-/// `headroom_enabled`, `rtk_enabled`) are intentionally omitted and default on
-/// read-back.
+/// Carries the required fields plus what the daemon knows about the launch
+/// (`agent_type`, `skip_permissions`, `model`, `model_source`). The
+/// `#[serde(default)]` fields it cannot know (`headroom_enabled`,
+/// `rtk_enabled`, the Codex thread) are omitted and default on read-back; the
+/// daemon enables neither.
 #[derive(Debug, Clone, Serialize)]
 pub struct AinbSessionRecord {
     /// A fresh session identity (the daemon's task ids are ULIDs, not the UUIDs
@@ -53,6 +54,21 @@ pub struct AinbSessionRecord {
     pub workspace_name: String,
     /// Registration time, so the store sorts newest-first like `ainb run` entries.
     pub created_at: DateTime<Utc>,
+    /// The `SessionAgentType` variant name of the provider running in the
+    /// pane (`Claude`, `Codex`, `Copilot`, `Antigravity`). Written so a
+    /// daemon-spawned Codex session never reads back as the Claude default.
+    pub agent_type: String,
+    /// Whether the provider was launched with its permission prompts
+    /// bypassed. `None` means unknown, which the reader treats as legacy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_permissions: Option<bool>,
+    /// The model the provider was launched with, verbatim; `None` means the
+    /// provider default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// `Raw` when `model` is a provider model id passed through unchanged,
+    /// `LegacyTyped` otherwise (the `ModelSource` variant names).
+    pub model_source: String,
 }
 
 impl AinbSessionRecord {
@@ -70,7 +86,33 @@ impl AinbSessionRecord {
             worktree_path,
             workspace_name: workspace_name.into(),
             created_at: Utc::now(),
+            agent_type: "Claude".to_string(),
+            skip_permissions: None,
+            model: None,
+            model_source: "LegacyTyped".to_string(),
         }
+    }
+
+    /// Record what was actually launched: the provider, whether its
+    /// permission prompts are bypassed, and the model override. A `Some`
+    /// model is a raw provider id, so `model_source` becomes `Raw`.
+    #[must_use]
+    pub fn with_launch(
+        mut self,
+        agent_type: impl Into<String>,
+        skip_permissions: Option<bool>,
+        model: Option<String>,
+    ) -> Self {
+        self.agent_type = agent_type.into();
+        self.skip_permissions = skip_permissions;
+        self.model_source = if model.is_some() {
+            "Raw"
+        } else {
+            "LegacyTyped"
+        }
+        .to_string();
+        self.model = model;
+        self
     }
 }
 
@@ -219,6 +261,21 @@ mod tests {
         assert_eq!(entry["worktree_path"], "/work/abc");
         assert_eq!(entry["workspace_name"], "proj");
         assert_eq!(entry["session_id"], rec.session_id.to_string());
+    }
+
+    #[test]
+    fn register_writes_what_was_launched() {
+        let home = TempDir::new().unwrap();
+        let path = home.path().join("sessions.json");
+        let rec = AinbSessionRecord::new("tmux_hangar-cx", PathBuf::from("/work/cx"), "proj")
+            .with_launch("Codex", Some(true), Some("gpt-5-codex".to_string()));
+        register_session_at(&path, &rec).unwrap();
+
+        let entry = &read(&path)["sessions"]["tmux_hangar-cx"];
+        assert_eq!(entry["agent_type"], "Codex");
+        assert_eq!(entry["skip_permissions"], true);
+        assert_eq!(entry["model"], "gpt-5-codex");
+        assert_eq!(entry["model_source"], "Raw");
     }
 
     #[test]
