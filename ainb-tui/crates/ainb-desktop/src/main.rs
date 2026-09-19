@@ -75,15 +75,21 @@ struct Window {
 }
 
 /// What the renderer applied, for the proof harness to read from the log: the
-/// sections of a batch, how many session rows the sidebar holds, and how many
-/// cards each board column draws. Names and counts only, never a body.
+/// sections of a batch, how many session rows the sidebar holds, how many
+/// cards each board column draws, and the inbox's rows and unread count.
+/// Names and counts only, never a body.
 ///
 /// The names arrive as a `Subscription`, which deserializes from the wire
 /// names and drops anything else, so the line is bounded by the sections that
 /// exist and a renderer cannot name one it never applied. The columns arrive
 /// as `AgentState`s, so they are bounded the same way: one per state at most.
 #[tauri::command]
-fn renderer_applied(sections: Subscription, sessions: usize, board: Vec<(AgentState, usize)>) {
+fn renderer_applied(
+    sections: Subscription,
+    sessions: usize,
+    board: Vec<(AgentState, usize)>,
+    inbox: (usize, i64),
+) {
     let named: Vec<&str> = sections.sections().map(ainb_app::wire::section_name).collect();
     let (board, dropped) = ainb_desktop::shell::board_columns(&board);
     if dropped > 0 {
@@ -94,7 +100,17 @@ fn renderer_applied(sections: Subscription, sessions: usize, board: Vec<(AgentSt
             "renderer applied: the board list ran past the states"
         );
     }
-    tracing::info!(sections = ?named, sessions, board = ?board, "renderer applied");
+    // The inbox pair is rows then unread (D3p-d): what section 16 holds in
+    // the window, for the proof to read against the daemon's own count.
+    let (inbox_rows, inbox_unread) = inbox;
+    tracing::info!(
+        sections = ?named,
+        sessions,
+        board = ?board,
+        inbox_rows,
+        inbox_unread,
+        "renderer applied"
+    );
 }
 
 /// The terminal's copy: put the selection on the platform clipboard.
