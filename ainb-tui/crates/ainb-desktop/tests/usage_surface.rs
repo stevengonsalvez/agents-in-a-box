@@ -1,7 +1,8 @@
 //! Section 21, which the stats tab draws (D3p-e): the desktop reads the
 //! daemon's `fleet/usage_summary` through the shared usage reader, started on
-//! the first subscription that names `usage`, so a window that never opens the
-//! tab never asks the daemon. Driven against a fake daemon on a scratch socket.
+//! the first subscription that names `usage`, so a renderer that does not
+//! subscribe to it costs the daemon no read. Driven against a fake daemon on a
+//! scratch socket.
 
 use std::cell::RefCell;
 use std::rc::Rc;
