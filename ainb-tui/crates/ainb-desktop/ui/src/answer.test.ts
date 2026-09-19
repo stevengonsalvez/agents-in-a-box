@@ -155,18 +155,23 @@ test("the four phases read from the reducer's own record for the request on scre
   );
 });
 
-test("picking option two moves the reducer's cursor from where it is, then sends", () => {
+test("picking option two sends one pick naming it by label, wherever the cursor is", () => {
+  // No cursor move and no Enter: a frame landing between two intents could
+  // reorder the options under a counted cursor (#1191). The reducer resolves
+  // the label against the options it holds when the pick runs.
   const question = questionFor(sessions(mark()))!;
-  assert.deepEqual(commands(pickIntents(question, ask({ cursor: 0 }), 1)), [
-    "session_list.select_row",
-    "session_list.select_tab",
-    "session_list.ask.next",
-    "session_list.ask.enter",
-  ]);
-  assert.deepEqual(commands(pickIntents(question, ask({ cursor: 2 }), 1)).slice(2), [
-    "session_list.ask.previous",
-    "session_list.ask.enter",
-  ]);
+  const intents = pickIntents(question, ask({ cursor: 2 }), 1);
+  assert.deepEqual(commands(intents), ["session_list.select_row", "session_list.select_tab", "session_list.ask.pick"]);
+  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { label: "production" });
+  assert.deepEqual(commands(pickIntents(question, ask({ cursor: 0 }), 1)), commands(intents));
+  assert.deepEqual(pickIntents(question, ask(), 3), [], "an index off the list picks nothing");
+});
+
+test("a pick sends the label as the frame carried it, not as the banner trims it", () => {
+  const long = "x".repeat(120);
+  const question = questionFor(sessions(mark({ options: [{ label: long, description: "" }] })))!;
+  const intents = pickIntents(question, ask(), 0);
+  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { label: long });
 });
 
 test("a typed answer moves to the composer row, clears it in one step, types, sends", () => {
@@ -182,9 +187,9 @@ test("a typed answer moves to the composer row, clears it in one step, types, se
   ]);
 });
 
-test("a refused step stops the sequence, so Enter is never sent on the wrong option", async () => {
+test("a refused step stops the sequence, so Enter is never sent on the wrong row", async () => {
   const question = questionFor(sessions(mark()))!;
-  const intents = pickIntents(question, ask({ cursor: 0 }), 1);
+  const intents = typedIntents(question, ask({ cursor: 0 }), "qa");
   const sent: string[] = [];
   const refusal: Refusal = { command: "session_list.ask.next", reason: "not from the window" };
   const stopped = await sendInOrder(intents, async (intent) => {
