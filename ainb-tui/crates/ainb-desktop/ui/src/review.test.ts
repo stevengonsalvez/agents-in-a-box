@@ -2,6 +2,9 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { createServer } from "vite";
+import solid from "vite-plugin-solid";
 import type {
   DiffRow_Serialize,
   GitViewView_Serialize,
@@ -176,4 +179,72 @@ test("a section that has not arrived draws nothing rather than throwing", () => 
   assert.equal(openFile(undefined), undefined);
   assert.deepEqual(bodyLines(undefined), []);
   assert.equal(sectionCut(undefined), undefined);
+});
+
+// The tests below render for real, through Vite's SSR loader and the Solid
+// plugin, so a row invented in `review.tsx` rather than taken from the frame
+// fails here.
+
+/** Server-render `Review` with `props` and return its HTML. */
+async function rendered(props: Record<string, unknown>): Promise<string> {
+  const server = await createServer({
+    configFile: false,
+    root: fileURLToPath(new URL("..", import.meta.url)),
+    plugins: [solid({ ssr: true })],
+    server: { middlewareMode: true, hmr: false },
+    appType: "custom",
+    // As the sidebar's test: Vite resolves Solid itself, so the component and
+    // `renderToString` share one server build.
+    ssr: { noExternal: ["solid-js"] },
+    logLevel: "silent",
+  });
+  try {
+    const { Review } = await server.ssrLoadModule("/src/review.tsx");
+    const { renderToString } = await server.ssrLoadModule("solid-js/web");
+    return renderToString(() => Review(props));
+  } finally {
+    await server.close();
+  }
+}
+
+test("the tab draws the frame's files and the open file's rows", async () => {
+  const body = section(
+    [
+      file("src/lib.rs", [hunk(1, [row(1, "kept one"), row(2, "kept two")])]),
+      file("README.md", [hunk(1, [row(1, "not drawn")])]),
+    ],
+    0,
+  );
+
+  const html = await rendered({ gitView: body, stale: false, onChoose() {} });
+
+  const drawn = [...html.matchAll(/data-file="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(drawn, ["src/lib.rs", "README.md"], html);
+  assert.equal(html.match(/aria-current="true"/g)?.length, 1, html);
+  assert.match(html, /kept one/, html);
+  assert.match(html, /kept two/, html);
+  assert.doesNotMatch(html, /not drawn/, "only the open file's rows are drawn");
+});
+
+test("a withheld section says so rather than drawing a stale diff silently", async () => {
+  const body = section([file("src/lib.rs", [hunk(1, [row(1, "last one that fitted")])])]);
+
+  const html = await rendered({ gitView: body, stale: true, onChoose() {} });
+
+  assert.match(html, /review-withheld/, html);
+  assert.match(html, /too large to send/, html);
+});
+
+test("a binary file says why its body is empty", async () => {
+  const body = section([file("assets/logo.png", [], { binary: true })]);
+
+  const html = await rendered({ gitView: body, stale: false, onChoose() {} });
+
+  assert.match(html, /Binary file/, html);
+});
+
+test("a section that never arrived draws its own loading line", async () => {
+  const html = await rendered({ gitView: undefined, stale: false, onChoose() {} });
+
+  assert.match(html, /Loading the review/, html);
 });
