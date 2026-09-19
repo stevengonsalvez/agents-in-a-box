@@ -11,7 +11,7 @@ use ainb_app::wire::frame::HostId;
 use ainb_app::wire::section_json;
 use ainb_app::wire::usage::{
     USAGE_DETAIL_MAX_BYTES, USAGE_FRAME_MAX_BYTES, USAGE_MAX_BREAKDOWN, USAGE_MAX_DAILY,
-    USAGE_MAX_NAME_CHARS, USAGE_REASON_MAX_CHARS,
+    USAGE_MAX_NAME_CHARS, USAGE_REASON_MAX_CHARS, UsageView,
 };
 use ainb_hangar_proto::fleet::{
     FleetUsageBucket, FleetUsageDailyBucket, FleetUsageModelBucket, FleetUsageProjectBucket,
@@ -78,9 +78,12 @@ fn a_read_frames_its_totals_days_and_breakdowns_as_the_daemon_counted_them() {
     assert!(state.apply_usage_read(ready(), 42));
     let body = framed(&state);
     let summary = &body["summary"];
-    assert_eq!(body["received_at_ms"], 42);
     assert_eq!(summary["state"], "ready");
-    assert_eq!(summary["generated_at"], 1_700_000_000_000_i64);
+    // Nothing draws the clocks, so none of them crosses (#1260 review).
+    assert!(body.get("received_at_ms").is_none(), "{body}");
+    for clock in ["generated_at", "start_at", "end_at"] {
+        assert!(summary.get(clock).is_none(), "{clock} crossed: {summary}");
+    }
     assert_eq!(summary["totals"]["input_tokens"], 100);
     assert_eq!(summary["totals"]["cost_usd"], 1.25);
     assert_eq!(summary["daily"][0]["date"], "2026-09-19");
@@ -400,4 +403,31 @@ fn keys_that_fold_to_one_label_merge_into_one_row() {
     );
     assert!(projects[1]["repo"].is_null(), "a repo on one only: none");
     assert_eq!(body["summary"]["projects_cut"], 0, "a merge is not a cut");
+}
+
+/// The ceiling is enforced, not only claimed: a section that would encode past
+/// it frames its totals and says what it dropped, rather than trusting that no
+/// reply can reach it.
+#[test]
+fn a_section_past_the_byte_ceiling_is_cut_to_fit() {
+    let mut state = AppState::new();
+    let mut reply = ready();
+    reply.models = (0..10)
+        .map(|n| FleetUsageModelBucket {
+            model: format!("model-{n}"),
+            bucket: bucket(1, None),
+        })
+        .collect();
+    state.apply_usage_read(reply, 1);
+    let whole = serde_json::to_vec(&UsageView::within(&state.usage, usize::MAX)).unwrap().len();
+    let tight = UsageView::within(&state.usage, whole / 2);
+    let body = serde_json::to_value(&tight).unwrap();
+    assert!(
+        serde_json::to_vec(&body).unwrap().len() <= whole / 2,
+        "{body}"
+    );
+    let summary = &body["summary"];
+    assert_eq!(summary["totals"]["input_tokens"], 100, "the totals stay");
+    assert_eq!(summary["models"].as_array().unwrap().len(), 0);
+    assert_eq!(summary["models_cut"], 10, "what was dropped is counted");
 }
