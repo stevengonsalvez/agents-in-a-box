@@ -370,7 +370,7 @@ fn sessions_file(path: &Path, sessions: &[(&str, &str, &str)]) {
                 "tmux_session_name": tmux,
                 "worktree_path": format!("/home/user/work/{tmux}"),
                 "workspace_name": ws,
-                "created_at": 1757937600000i64,
+                "created_at": 1_757_937_600_000_i64,
                 "agent_type": "Claude"
             }),
         );
