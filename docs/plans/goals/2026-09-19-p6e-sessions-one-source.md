@@ -33,7 +33,7 @@
 
 · Locked decisions. A node PR does not reopen one.
   - The daemon owns durable session state (base spec `:71`, `:286`, `:318`). After this node the table is the only store every surface reads and writes.
-  - One source per process, decided once (P6d, `SessionSource` in a `OnceCell`), and a daemon failure after the decision is an error, never a silent switch to the file.
+  - One source per process, decided once (P6d, `SessionSource` in a `OnceCell`), and a daemon failure after the decision is an error, never a silent switch to the file. P6e adds exactly one transition, `Degraded` to `Daemon` ("Daemon down at startup").
   - The import is one-time per file, keyed by the marker row; a failed import writes no marker and keeps clients on the file (P6d `session_import.rs`). The reconcile that follows it is repeatable ("Mixed versions"); only the first import is one-time.
   - The RPC boundary validates every entry and never evicts a session that holds a tmux name (P6d `sessions.rs:174`, `repo/sessions.rs:186`).
   - No destructive migration: the import only reads `sessions.json`; a user who downgrades still has their sessions (parent goal `:121`).
@@ -56,6 +56,16 @@
 · The whole seam is `SessionSource`. P6e does not add a second resolver: every `SessionStore::load`, `lock` and `mutate` call in the list above becomes `load_session_store` / `mutate_session_store` (or their async forms), so the TUI, the desktop, the CLI and, through `ainb list --frame`, the web read one decision per process.
 · The flip is a one-line change: append `CAP_WORKSPACE_SESSIONS` to `CAPABILITY_CATALOGUE` and to `capabilities.catalogue`. It is the LAST commit of the node, after every reader and writer has moved and the reconciliation has landed, so no intermediate commit on `v2` has a surface on the table while another is on the file.
 · Reconciliation happens in the daemon, in the same shape as the P6d import (a marker row, one transaction, clients on the file until the first pass completes), but it is repeatable, not one-time: see "Mixed versions" below.
+
+─ DAEMON DOWN AT STARTUP ─
+
+· On P6d, `resolve` answers `File` on any dial or hello failure (`util.rs:133`, `:148`) and `session_source` caches that answer for the life of the process (`util.rs:280`). A TUI or desktop started before the daemon would then write the file for hours while the CLI and the web read the table. P6e defines that case instead of inheriting it.
+· A build that advertises the capability but cannot reach a daemon that advertises it (dial fails, hello fails, or `import_complete` is false) resolves to a third variant, `SessionSource::Degraded`:
+  - Reads and writes go to the file under the flock, exactly as `File` does. Nothing is refused, so a user without a daemon keeps working.
+  - A visible notice says sessions are on the local file until the daemon is up: a banner in the TUI and the desktop, one stderr line from a CLI command.
+  - A long-lived process (TUI, desktop, `ainb web`) re-resolves on a bounded schedule, the P6a cadence of 1 s, 4 s, 16 s and then every 16 s, each attempt bounded by the RPC deadline. A CLI command does not re-resolve; it ends.
+  - When a re-resolve reaches a daemon that advertises the capability, the surface asks it to reconcile (a new `workspace/session_reconcile` RPC in the workspace family) and waits for that pass to complete, then switches to `Daemon` for the rest of the process. The writes it made while degraded are in the file, so that pass inserts them.
+· The only transition is `Degraded` to `Daemon`, once. There is no transition back: a daemon failure after the switch stays an error, as on P6d. This amends P6d's "decided once per process" rule for exactly this case, by the orchestrator's decision on #1210.
 
 ─ MIXED VERSIONS, AND WHY THE FILE STAYS WRITTEN ─
 
@@ -89,7 +99,9 @@
 
 7. Mixed versions, both directions. Daemon state: a post-flip daemon up with import and reconcile complete, and a previous-release `ainb` built from the P6d merge commit. (a) New writer, old reader: a session created through the new CLI and one killed through it are, respectively, listed and not listed by the previous release's `ainb list` against the same home, and a new write whose table step is made to fail leaves the file unchanged. (b) Old writer, new reader: a session the previous release's `ainb run` creates appears in the new `ainb list` after at most one reconcile interval, and a session the previous release kills stays listed by the new stack, pinning the stated limitation.
 
-8. The programme row `docs/plans/2026-09-12-desktop-programme.md:126` is flipped to done with the PR numbers and the proof run id, in the implementation PR.
+8. Daemon down at startup. Daemon state: none when the TUI starts, then one started. A TUI started with no daemon resolves to `Degraded` and shows the notice; a session it creates lands in the file; a daemon is then started; within the re-resolve bound (at most 16 s after the daemon's hello succeeds, plus the reconcile) the TUI leaves `Degraded`, the session created while degraded is in the table, a CLI resolved to `Daemon` lists it, and a session the TUI creates after the switch is in both the table and the file. The test fails if the TUI stays on the file after the daemon is up, or if the degraded-time session is missing from the table.
+
+9. The programme row `docs/plans/2026-09-12-desktop-programme.md:126` is flipped to done with the PR numbers and the proof run id, in the implementation PR.
 
 ─ WHICH EXISTING TESTS MUST STAY GREEN ─
 
