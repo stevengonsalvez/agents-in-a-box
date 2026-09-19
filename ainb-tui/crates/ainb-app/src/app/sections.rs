@@ -1059,7 +1059,7 @@ pub struct HostOnlyState {
     /// the same list writes nothing, so a host that rescans on a timer does not
     /// reframe the whole Sessions section, reset the selection or raise a
     /// notice every time; the first one always applies.
-    pub workspaces_applied: bool,
+    pub(crate) workspaces_applied: bool,
     pub preview_update_task: Option<tokio::task::JoinHandle<()>>,
     // A changed selection must settle before starting a read-only client.
     pub(crate) observer_pending: Option<(String, Instant)>,
@@ -1077,9 +1077,9 @@ pub struct HostOnlyState {
     // never looks it up. A raw name, only ever compared: a session tmux accepts
     // but `TmuxSessionName` refuses must still match its own row.
     pub(crate) host_tmux_session: Option<String>,
-    pub workspace_load_started: Option<Instant>,
+    pub(crate) workspace_load_started: Option<Instant>,
     /// Channel receiver for background workspace loading results
-    pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
+    pub(crate) workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
     /// When a host's rescan cadence runs from: the end of the last workspace
     /// scan, or the state's creation before any has finished.
     pub(crate) workspace_rescan_from: Instant,
