@@ -1,9 +1,9 @@
 //! Integration tests for daemon boot import of sessions.json (spec P6d, #1166).
 
-use std::fs;
 use ainb_hangar_daemon::session_import::import_sessions_if_needed;
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::sessions::SessionsRepo;
+use std::fs;
 
 /// 1. A fresh home imports nothing (file does not exist or has empty sessions).
 #[tokio::test]
@@ -62,7 +62,11 @@ async fn test_populated_file_imports_every_record_once() {
             }
         }
     });
-    fs::write(&sessions_path, serde_json::to_string_pretty(&sample_json).unwrap()).unwrap();
+    fs::write(
+        &sessions_path,
+        serde_json::to_string_pretty(&sample_json).unwrap(),
+    )
+    .unwrap();
 
     let count = import_sessions_if_needed(pool, &sessions_path).await.unwrap();
     assert_eq!(count, 2, "must import every record once");
@@ -94,7 +98,10 @@ async fn test_populated_file_imports_every_record_once() {
     assert_eq!(beta.codex_thread_id.as_deref(), Some("thread-xyz"));
 
     // Verify file is still in place
-    assert!(sessions_path.exists(), "import must leave sessions.json in place");
+    assert!(
+        sessions_path.exists(),
+        "import must leave sessions.json in place"
+    );
 }
 
 /// 3. A second boot imports nothing further.
@@ -117,7 +124,11 @@ async fn test_second_boot_imports_nothing_further() {
             }
         }
     });
-    fs::write(&sessions_path, serde_json::to_string_pretty(&sample_json).unwrap()).unwrap();
+    fs::write(
+        &sessions_path,
+        serde_json::to_string_pretty(&sample_json).unwrap(),
+    )
+    .unwrap();
 
     // First boot: imports 1
     let first = import_sessions_if_needed(pool, &sessions_path).await.unwrap();
