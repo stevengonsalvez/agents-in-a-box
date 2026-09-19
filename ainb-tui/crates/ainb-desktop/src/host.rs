@@ -156,6 +156,12 @@ impl<S: FrameSink> DesktopHost<S> {
         // this window is recorded as the desktop's. The sidecar already tells
         // the daemon the same thing about this process (`sidecar::surface`).
         state.host.surface = ainb_hangar_proto::connections::SurfaceKind::Desktop;
+        // The window shows every row. The persisted filter is the terminal's
+        // (Shift+F), and this shell draws no filter indicator and offers no
+        // control, so a filter seeded here would hide rows with nothing on
+        // screen to say why (#1208). Until the desktop has its own filter chip
+        // it starts on All, and the reducer refuses to cycle it from here.
+        state.sessions.session_filter = ainb_app::app::state::SessionFilter::All;
         Self {
             state,
             keymap,
