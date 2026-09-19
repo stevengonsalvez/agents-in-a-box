@@ -96,6 +96,9 @@ pub fn metadata_to_entry(meta: &SessionMetadata) -> WorkspaceSessionEntry {
 ///             anything else ─────────────────────────────▶ File
 /// ```
 ///
+/// While P6d is dark, [`resolve`](Self::resolve) always answers
+/// [`File`](Self::File); see [`CAP_WORKSPACE_SESSIONS`].
+///
 /// Decided once per process by [`session_source`], so one command cannot
 /// read from the table and write to the file. On [`Daemon`](Self::Daemon)
 /// the table is authoritative and `sessions.json` is never written; a daemon
@@ -115,7 +118,16 @@ fn daemon_io_error(what: &str, error: impl std::fmt::Display) -> std::io::Error 
 
 impl SessionSource {
     /// Decide against the daemon named by the environment.
+    ///
+    /// While P6d is dark this build does not advertise
+    /// `CAP_WORKSPACE_SESSIONS`, so the answer is [`File`](Self::File)
+    /// without dialing: every CLI reader and writer behaves as before the
+    /// table existed. P6e turns it on by adding the capability to the
+    /// catalogue, together with the TUI's readers and writers.
     pub async fn resolve() -> Self {
+        if !ainb_hangar_proto::protocol::advertises(CAP_WORKSPACE_SESSIONS) {
+            return Self::File;
+        }
         match DaemonClient::from_env() {
             Ok(client) => Self::resolve_with(client).await,
             Err(_) => Self::File,
@@ -123,6 +135,9 @@ impl SessionSource {
     }
 
     /// Decide against the daemon at `socket` with `token` (the test seam).
+    ///
+    /// Unlike [`resolve`](Self::resolve) this asks the daemon even while the
+    /// capability is dark, so tests can drive the daemon path.
     pub async fn resolve_at(socket: PathBuf, token: String) -> Self {
         Self::resolve_with(DaemonClient::with_parts(socket, token)).await
     }
