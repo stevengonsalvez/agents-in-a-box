@@ -803,19 +803,54 @@ body {
   min-height: 0;
 }
 
-.settings-categories {
+.settings-search {
+  flex: 1;
+  margin: 0 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 3px 8px;
+}
+
+.settings-search.active {
+  border-color: var(--gold);
+}
+
+.settings-tree {
   display: flex;
   flex-direction: column;
+  gap: 2px;
+}
+
+.settings-node {
+  display: flex;
+  align-items: center;
   gap: 4px;
 }
 
-.settings-categories button {
+.settings-node button {
   text-align: left;
+  flex: 1;
 }
 
-.settings-categories button.active {
+.settings-node .chevron,
+.settings-node .chevron-gap {
+  flex: 0 0 22px;
+  width: 22px;
+  padding: 2px 0;
+  text-align: center;
+  border: none;
+  color: var(--muted);
+}
+
+.settings-node button.active {
   border-color: var(--gold);
   color: var(--gold);
+}
+
+.settings-row.current {
+  border-color: var(--green);
 }
 
 .settings-rows {
