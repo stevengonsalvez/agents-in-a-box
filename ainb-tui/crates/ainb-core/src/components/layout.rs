@@ -307,6 +307,18 @@ pub struct LayoutComponent {
     screens: ScreenRegistry,
 }
 
+/// The unread count the daemon reported on the inbox section, as the badge
+/// after the `b inbox` hint, or nothing while it is zero.
+fn inbox_badge(state: &AppState) -> Option<Span<'static>> {
+    let unread = state.inbox.get().unread;
+    (unread > 0).then(|| {
+        Span::styled(
+            format!(" {unread}"),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        )
+    })
+}
+
 impl LayoutComponent {
     pub fn new() -> Self {
         let mut screens = ScreenRegistry::new();
@@ -945,7 +957,9 @@ impl LayoutComponent {
             desc(" commit"),
         ];
 
-        // Line 3: Tools
+        // Line 3: Tools + system. The legend's own keys sit here so line 4
+        // has room for the unread badge at the 80-column floor (see
+        // `menu_bar_keys_not_truncated_at_80_cols`).
         let line3_spans = vec![
             key("c", WARNING_ORANGE),
             desc("laude "),
@@ -955,24 +969,22 @@ impl LayoutComponent {
             desc(" filter "),
             sep(),
             key("u", MUTED_GRAY),
-            desc(" re-auth "),
+            desc(" re-auth"),
+            sep(),
+            key("⇧M", GOLD),
+            desc(" expand/collapse "),
+            key("?/H", CORNFLOWER_BLUE),
+            desc(" help"),
         ];
 
-        // Line 4: Panels + System. Every panel screen mirrors its
-        // home-menu letter here (the session-list key handler binds the
-        // same set), and closing a panel returns to this screen.
+        // Line 4: Panels + home. Every panel screen mirrors its home-menu
+        // letter here (the session-list key handler binds the same set), and
+        // closing a panel returns to this screen.
         //
         // The `b inbox` hint is back with the inbox screen (D3-prime), its
         // badge the unread count the daemon reported on the inbox section.
-        let mut line4_spans = Vec::new();
-        line4_spans.extend([key("b", GOLD), desc(" inbox")]);
-        let unread = state.inbox.get().unread;
-        if unread > 0 {
-            line4_spans.push(Span::styled(
-                format!(" {unread}"),
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-            ));
-        }
+        let mut line4_spans = vec![key("b", GOLD), desc(" inbox")];
+        line4_spans.extend(inbox_badge(state));
         line4_spans.extend([
             desc(" "),
             key("i", GOLD),
@@ -986,10 +998,6 @@ impl LayoutComponent {
             key("t", GOLD),
             desc(" abtop"),
             sep(),
-            key("⇧M", GOLD),
-            desc(" expand/collapse "),
-            key("?/H", CORNFLOWER_BLUE),
-            desc(" help "),
             key("q", CORNFLOWER_BLUE),
             desc(" home"),
         ]);
@@ -1069,8 +1077,13 @@ impl LayoutComponent {
         ];
 
         // ── Right column: panels, views & navigation ─────────────────────
-        let mut row1 = Vec::new();
+        // The inbox hint and its unread badge lead the panels here as they
+        // do on the stacked legend: the key works at every width, so it is
+        // named at every width.
+        let mut row1 = vec![key("b", GOLD), desc(" inbox")];
+        row1.extend(inbox_badge(state));
         row1.extend([
+            desc("  "),
             key("i", GOLD),
             desc(" stats  "),
             key("w", GOLD),
@@ -2456,6 +2469,78 @@ mod notification_render_tests {
         assert!(
             painted.contains("17a4b207"),
             "the tail of the path never reached the screen:\n{painted}"
+        );
+    }
+}
+
+/// The session-list legend names every key it binds at every width it is
+/// drawn at: the stacked legend at the 80-column floor with the widest unread
+/// badge the section can carry, and the two-column legend from 110 columns.
+#[cfg(test)]
+mod menu_bar_width_tests {
+    use super::*;
+    use crate::app::state::AppState;
+    use ainb_hangar_proto::snapshots::InboxListResult;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn legend(width: u16, unread: i64) -> Vec<String> {
+        let mut state = AppState::default();
+        state.apply_inbox_read(
+            InboxListResult {
+                entries: vec![],
+                unread,
+            },
+            1,
+        );
+        let layout = LayoutComponent::new();
+        let mut terminal = Terminal::new(TestBackend::new(width, 6)).expect("test terminal");
+        terminal
+            .draw(|frame| layout.render_menu_bar(frame, frame.area(), &state))
+            .expect("draw legend");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    const PANEL_TOKENS: [&str; 6] = [
+        "b inbox", "i stats", "w witr", "k skills", "m memory", "t abtop",
+    ];
+
+    #[test]
+    fn menu_bar_keys_not_truncated_at_80_cols() {
+        let lines = legend(80, i64::MAX);
+        let badge = format!("b inbox {}", i64::MAX);
+        for token in
+            PANEL_TOKENS
+                .iter()
+                .chain(&[badge.as_str(), "q home", "?/H help", "⇧M expand/collapse"])
+        {
+            assert!(
+                lines.iter().any(|line| line.contains(token)),
+                "{token:?} is clipped or missing at 80 columns:\n{}",
+                lines.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_column_legend_names_the_inbox_and_its_badge() {
+        let lines = legend(110, 7);
+        for token in PANEL_TOKENS.iter().chain(&["b inbox 7", "q home", "?/H help"]) {
+            assert!(
+                lines.iter().any(|line| line.contains(token)),
+                "{token:?} is missing from the two-column legend:\n{}",
+                lines.join("\n")
+            );
+        }
+        assert!(
+            lines.iter().any(|line| line.contains("│")),
+            "110 columns draws the two-column legend"
+        );
+        assert!(
+            !legend(110, 0).iter().any(|line| line.contains("b inbox 0")),
+            "no badge while nothing is unread"
         );
     }
 }
