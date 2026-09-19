@@ -28,6 +28,7 @@ const view = (over: Partial<InboxView_Serialize> = {}): InboxView_Serialize => (
   rows_cut: 0,
   summaries_cut: 0,
   received_at_ms: 1,
+  scroll: 0,
   ...over,
 });
 
