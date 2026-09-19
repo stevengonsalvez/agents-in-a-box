@@ -16,7 +16,9 @@ interface Props {
  *
  * Each chunk is drawn with its kind (the agent's message, its thinking, a tool
  * call, a plan, a permission it asked for), as the daemon's own classifier
- * renders it and scrubbed on the host. Read-only: answering a permission goes
+ * renders it and scrubbed on the host. The prompt echo and the usage report,
+ * which that classifier leaves silent, arrive with the host's card text
+ * (`acp_card_text`): what the operator asked, and the context and cost. Read-only: answering a permission goes
  * through the board's attention list, as every other question does.
  */
 export function AcpCard(props: Props) {
