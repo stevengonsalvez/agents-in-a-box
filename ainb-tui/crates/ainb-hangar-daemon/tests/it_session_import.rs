@@ -444,17 +444,16 @@ async fn a_pass_never_overwrites_a_table_row_with_its_file_row() {
     assert_eq!(table(pool).await, vec![current]);
 }
 
-/// KNOWN GAP, pinned until P6e-2 and P6e-4: a delete through the real
-/// `workspace/session_delete` RPC removes the table row only, so the file row
-/// survives and the next reconcile pass brings the session back.
-///
-/// The handler cannot remove the file row itself: the CLI's daemon path holds
-/// the `sessions.json` flock across this RPC (`ainb-app/src/cli/util.rs`),
-/// so a handler waiting on that flock would time out every delete. The goal's
-/// fix is on the client, which deletes the file row under the flock it
-/// already holds and then calls this RPC. When that lands, this test turns
-/// red and is rewritten to assert the session stays deleted. It is reachable
-/// only through the dark capability until then.
+/// A delete through the bare `workspace/session_delete` RPC removes the
+/// table row only, so the file row survives and the next reconcile pass
+/// brings the session back. This is the handler's contract, not a gap: the
+/// handler cannot take the `sessions.json` flock, because the client holds
+/// it across this RPC. Since P6e-2 the client removes the file row under
+/// that flock before it calls the RPC, so a delete through `SessionSource`
+/// stays deleted (`ainb-core/tests/session_resolver.rs`,
+/// `a_delete_through_the_daemon_is_not_brought_back_by_the_next_pass`).
+/// What this pins is that the pass trusts the file: a caller that deletes a
+/// table row and leaves its file row gets it back.
 #[tokio::test]
 async fn a_table_only_delete_comes_back_until_clients_delete_the_file_row() {
     use ainb_hangar_daemon::events::EventBroker;
@@ -495,14 +494,14 @@ async fn a_table_only_delete_comes_back_until_clients_delete_the_file_row() {
     assert_eq!(ids(&table(pool).await), vec![kept]);
     assert!(
         fs::read_to_string(&sessions_path).unwrap().contains("ainb-gone"),
-        "the RPC now removes the file row: the gap is closed, rewrite this test"
+        "the RPC now removes the file row: update this test and its doc"
     );
 
     reconcile_sessions(pool, &sessions_path).await.unwrap();
     assert_eq!(
         ids(&table(pool).await),
         vec![gone, kept],
-        "the pass no longer brings the session back: the gap is closed, rewrite this test"
+        "the pass no longer trusts the file row: update this test and its doc"
     );
 }
 
