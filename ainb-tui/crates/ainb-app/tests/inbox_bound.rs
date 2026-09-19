@@ -44,7 +44,10 @@ fn read(rows: Vec<InboxEntryRow>) -> InboxListResult {
 
 fn state_with(rows: Vec<InboxEntryRow>) -> AppState {
     let mut state = AppState::new();
-    assert!(state.apply_inbox_read(read(rows), NOW), "the first read changes the section");
+    assert!(
+        state.apply_inbox_read(read(rows), NOW),
+        "the first read changes the section"
+    );
     state
 }
 
@@ -61,8 +64,14 @@ fn the_bounds_sit_below_the_daemons_cap_and_the_frame_ceiling() {
     // The daemon returns at most 200 rows (`INBOX_LIST_LIMIT`); a row cap at
     // or above it would never fire, and the cut path would go untested on a
     // real daemon.
-    assert!(MAX_INBOX_ROWS < 200, "the row cap must sit below the daemon's own");
-    assert!(MAX_INBOX_BYTES < MAX_FRAME_BYTES, "the budget must sit under the ceiling");
+    assert!(
+        MAX_INBOX_ROWS < 200,
+        "the row cap must sit below the daemon's own"
+    );
+    assert!(
+        MAX_INBOX_BYTES < MAX_FRAME_BYTES,
+        "the budget must sit under the ceiling"
+    );
 }
 
 #[test]
@@ -70,7 +79,10 @@ fn rows_past_the_cap_are_cut_and_counted() {
     let rows: Vec<_> = (0..MAX_INBOX_ROWS + 37).map(|n| row(n, "New issue: x")).collect();
     let state = state_with(rows);
     let frame = view_of(&state);
-    assert_eq!(frame["entries"].as_array().map(Vec::len), Some(MAX_INBOX_ROWS));
+    assert_eq!(
+        frame["entries"].as_array().map(Vec::len),
+        Some(MAX_INBOX_ROWS)
+    );
     assert_eq!(frame["rows_cut"], 37);
     assert_eq!(frame["summaries_cut"], 0);
     // Newest first is the daemon's order and the cut keeps the head, so the
@@ -84,7 +96,10 @@ fn a_long_summary_is_cut_with_a_marker_and_counted() {
     let state = state_with(vec![row(0, &long), row(1, "short")]);
     let frame = view_of(&state);
     let cut = frame["entries"][0]["summary"].as_str().expect("summary");
-    assert!(cut.ends_with(INBOX_SUMMARY_CUT_MARKER), "cut summary carries the marker: {cut}");
+    assert!(
+        cut.ends_with(INBOX_SUMMARY_CUT_MARKER),
+        "cut summary carries the marker: {cut}"
+    );
     assert_eq!(
         cut.chars().count(),
         MAX_INBOX_SUMMARY_CHARS + INBOX_SUMMARY_CUT_MARKER.chars().count()
@@ -122,14 +137,21 @@ fn a_row_whose_id_is_not_an_id_is_dropped_and_counted() {
 fn a_long_reason_is_scrubbed_and_cut_and_the_frame_stays_inside_the_budget() {
     // The daemon's error text is as long as the client accepts (4 MiB);
     // a reason that blanked the section is the failure the budget stops.
-    let reason = format!("connect: sk-{} {}", "k".repeat(48), "e".repeat(4 * 1024 * 1024));
+    let reason = format!(
+        "connect: sk-{} {}",
+        "k".repeat(48),
+        "e".repeat(4 * 1024 * 1024)
+    );
     let mut state = AppState::new();
     assert!(state.inbox_absent(reason.clone()));
     let frame = view_of(&state);
     let absent = frame["absent"].as_str().unwrap();
     assert!(absent.ends_with(INBOX_SUMMARY_CUT_MARKER));
     assert!(absent.chars().count() <= MAX_INBOX_REASON_CHARS + INBOX_SUMMARY_CUT_MARKER.len());
-    assert!(!absent.contains(&"k".repeat(48)), "the key survived: {absent}");
+    assert!(
+        !absent.contains(&"k".repeat(48)),
+        "the key survived: {absent}"
+    );
     assert!(encoded_len(&frame) < MAX_INBOX_BYTES);
     // The same for a failure after rows landed.
     let mut state = state_with(vec![row(0, "a")]);
@@ -188,21 +210,25 @@ fn the_worst_case_read_frames_inside_the_budget_and_says_what_it_cut() {
 fn a_credential_past_the_cut_does_not_survive_and_the_marker_draws() {
     // Scrub runs before the cut: a token whose head is inside the cut and whose
     // tail is past it would otherwise frame as a plausible-looking prefix.
-    let token = format!(
-        "{}.{}.{}",
-        "A".repeat(30),
-        "B".repeat(8),
-        "C".repeat(40)
-    );
+    let token = format!("{}.{}.{}", "A".repeat(30), "B".repeat(8), "C".repeat(40));
     // The token starts inside the cut window and ends past it; the text
     // after it is what makes the cut happen once the token has shrunk to
     // the redaction marker.
     let summary = format!("{} {token} {}", "x".repeat(200), "y".repeat(400));
     let state = state_with(vec![row(0, &summary)]);
     let cut = view_of(&state)["entries"][0]["summary"].as_str().unwrap().to_string();
-    assert!(!cut.contains(&"A".repeat(30)), "the token's head survived the frame: {cut}");
-    assert!(!cut.contains("AAAA"), "no fragment of the token survives the cut: {cut}");
-    assert!(cut.contains("<redacted>"), "the redaction marker is drawn: {cut}");
+    assert!(
+        !cut.contains(&"A".repeat(30)),
+        "the token's head survived the frame: {cut}"
+    );
+    assert!(
+        !cut.contains("AAAA"),
+        "no fragment of the token survives the cut: {cut}"
+    );
+    assert!(
+        cut.contains("<redacted>"),
+        "the redaction marker is drawn: {cut}"
+    );
     assert!(cut.ends_with(INBOX_SUMMARY_CUT_MARKER));
 }
 
@@ -211,7 +237,10 @@ fn a_credential_inside_the_cut_is_scrubbed_on_the_frame() {
     let summary = format!("Task started: sk-{}", "k".repeat(48));
     let state = state_with(vec![row(0, &summary)]);
     let drawn = view_of(&state)["entries"][0]["summary"].as_str().unwrap().to_string();
-    assert!(!drawn.contains(&"k".repeat(48)), "the key survived: {drawn}");
+    assert!(
+        !drawn.contains(&"k".repeat(48)),
+        "the key survived: {drawn}"
+    );
 }
 
 #[test]
@@ -246,7 +275,10 @@ fn an_absent_daemon_frames_the_reason_and_no_rows() {
     let frame = view_of(&state);
     assert_eq!(frame["absent"], "daemon has no hangar/inbox_list");
     assert_eq!(frame["entries"].as_array().map(Vec::len), Some(0));
-    assert!(!state.inbox_absent("daemon has no hangar/inbox_list"), "same reason, no change");
+    assert!(
+        !state.inbox_absent("daemon has no hangar/inbox_list"),
+        "same reason, no change"
+    );
 }
 
 #[test]
@@ -258,7 +290,12 @@ fn mark_all_read_folds_the_daemons_count_and_never_stamps_a_local_clock() {
     assert_eq!(frame["unread"], 0);
     // The stamps are the daemon's: they arrive with the read after the sweep.
     assert_eq!(
-        frame["entries"].as_array().unwrap().iter().filter(|e| e["read_at"].is_i64()).count(),
+        frame["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["read_at"].is_i64())
+            .count(),
         1,
         "no row was stamped locally: {frame}"
     );
