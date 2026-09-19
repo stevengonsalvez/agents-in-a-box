@@ -14,6 +14,7 @@ use crate::components::code_review::render::ReviewRowId;
 use crate::components::session_tabs::SessionTab;
 use crate::components::sidebar::SidebarItem;
 use crate::components::skill_manager_screen::FocusedSkillPane;
+use crate::config::settings_model::ConfigRowEdit;
 
 /// Command ids of the pointer rows, `<context>.<row id>` like every keymap
 /// command. Each row is unbound: its payload only a hit-test can supply.
@@ -48,6 +49,8 @@ pub mod ids {
     pub const GIT_VIEW_SELECT_REVIEW_ROW: &str = "git_view.select_review_row";
     /// `{"lines": i32}`, down when positive.
     pub const GIT_VIEW_SCROLL: &str = "git_view.scroll";
+    /// `{"key": String, "value": ConfigRowEdit}`, the row by its registry key.
+    pub const CONFIG_SET_ROW: &str = "config.set_row";
 
     /// Every pointer command id.
     pub const ALL: &[&str] = &[
@@ -66,6 +69,7 @@ pub mod ids {
         HOME_CLICK_SIDEBAR_ITEM,
         GIT_VIEW_SELECT_REVIEW_ROW,
         GIT_VIEW_SCROLL,
+        CONFIG_SET_ROW,
     ];
 }
 
@@ -208,6 +212,15 @@ pub fn scroll_git_view(lines: i32) -> Intent {
     command(ids::GIT_VIEW_SCROLL, json!({ "lines": lines }))
 }
 
+/// Set the settings row `key` to what a form chose, and write that one key.
+///
+/// The row is named by its registry key, so a form resolved against one frame
+/// edits the same row after the rows were reordered or filtered.
+#[must_use]
+pub fn set_config_row(key: &str, edit: ConfigRowEdit) -> Intent {
+    command(ids::CONFIG_SET_ROW, json!({ "key": key, "value": edit }))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewRowArgs {
@@ -218,6 +231,13 @@ struct ReviewRowArgs {
 #[serde(deny_unknown_fields)]
 struct LinesArgs {
     lines: i32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RowEditArgs {
+    key: String,
+    value: ConfigRowEdit,
 }
 
 #[derive(Deserialize)]
@@ -356,6 +376,12 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
         AppEvent::GitViewScrollBy(_) => parse::<LinesArgs>(args)
             .filter(|args| args.lines != 0)
             .map(|args| AppEvent::GitViewScrollBy(args.lines)),
+        AppEvent::ConfigSetRow { .. } => parse::<RowEditArgs>(args)
+            .filter(|args| !args.key.is_empty())
+            .map(|args| AppEvent::ConfigSetRow {
+                key: args.key,
+                edit: args.value,
+            }),
         _ => return None,
     })
 }
