@@ -1545,6 +1545,28 @@ pub fn defaults() -> Vec<Binding> {
             },
             "Say that a store the host was asked to write could not be saved",
         ),
+        unbound(
+            Context::Global,
+            "inbox_mark_all_read_finished",
+            AppEvent::InboxMarkAllReadFinished {
+                outcome: crate::fleet::inbox_write::MarkAllReadOutcome {
+                    op_id: String::new(),
+                    ok: false,
+                    marked: 0,
+                    unread: 0,
+                    error: None,
+                },
+            },
+            "Fold how a mark-all-read sweep of the inbox ended",
+        ),
+        // The inbox's one write (D3-prime): a whole-inbox sweep, so it is
+        // named for what it does. Unbound here; the inbox screen binds it.
+        unbound(
+            Context::screen("inbox"),
+            "mark_all_read",
+            AppEvent::InboxMarkAllRead,
+            "Mark every entry in the inbox read",
+        ),
     ]);
 
     rows
