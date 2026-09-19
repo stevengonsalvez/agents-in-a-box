@@ -1218,7 +1218,10 @@ impl HeldUsage {
             }
         }
         let name = USAGE_MAX_NAME_CHARS + USAGE_SCRUB_WINDOW;
-        let daily_cut = keep(&mut reply.daily, USAGE_MAX_DAILY);
+        // `daily` is oldest first: the cut drops the oldest, so the frame keeps
+        // the thirty days that end today.
+        let daily_cut = reply.daily.len().saturating_sub(USAGE_MAX_DAILY);
+        reply.daily.drain(..daily_cut);
         let providers_cut = keep(&mut reply.providers, USAGE_MAX_BREAKDOWN);
         let models_cut = keep(&mut reply.models, USAGE_MAX_BREAKDOWN);
         let projects_cut = keep(&mut reply.projects, USAGE_MAX_BREAKDOWN);
@@ -1226,6 +1229,7 @@ impl HeldUsage {
         reply.providers.iter_mut().for_each(|row| clip(&mut row.provider, name));
         reply.models.iter_mut().for_each(|row| clip(&mut row.model, name));
         for row in &mut reply.projects {
+            row.project = project_label(&row.project);
             clip(&mut row.project, name);
             if let Some(repo) = &mut row.repo {
                 clip(repo, name);
@@ -1242,6 +1246,47 @@ impl HeldUsage {
             projects_cut,
         }
     }
+}
+
+/// A project's aggregation key as a label that names no home.
+///
+/// The producer keys a provider that records a working directory by that path
+/// with its separators dashed (`-home-<user>-src-app`, `parsers/codex.rs`), so
+/// the raw key carries the operator's home. This host's home is stripped
+/// whole; another user's `home` or `Users` prefix is dropped with the one
+/// segment after it (a username with a dash in it leaves its tail, which is a
+/// word, not a path); a slash path keeps only its leaf. A key that is nothing
+/// but a home reads `home`.
+fn project_label(key: &str) -> String {
+    if key.contains('/') {
+        return key
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .unwrap_or("home")
+            .to_string();
+    }
+    if let Some(home) = dirs::home_dir() {
+        let dashed = home.to_string_lossy().replace('/', "-");
+        for prefix in [dashed.as_str(), dashed.trim_start_matches('-')] {
+            if key == prefix {
+                return "home".to_string();
+            }
+            if let Some(rest) = key.strip_prefix(prefix).and_then(|rest| rest.strip_prefix('-')) {
+                if !rest.is_empty() {
+                    return rest.to_string();
+                }
+            }
+        }
+    }
+    for root in ["-home-", "home-", "-Users-", "Users-"] {
+        if let Some(rest) = key.strip_prefix(root) {
+            return match rest.split_once('-') {
+                Some((_, tail)) if !tail.is_empty() => tail.to_string(),
+                _ => "home".to_string(),
+            };
+        }
+    }
+    key.to_string()
 }
 
 impl UsageSection {
@@ -1262,9 +1307,10 @@ impl UsageSection {
         true
     }
 
-    /// The read failed for `reason`; the held summary stays.
+    /// The read failed for `reason`; the held summary stays. The reason is
+    /// scrubbed and cut to the shared reason cap, as the inbox's is.
     pub fn mark_read_failed(&mut self, reason: impl Into<String>) -> bool {
-        let reason = reason.into();
+        let reason = bound_reason(&reason.into());
         if self.failure.as_deref() == Some(reason.as_str()) {
             return false;
         }
@@ -1272,9 +1318,10 @@ impl UsageSection {
         true
     }
 
-    /// The daemon cannot serve a summary, for `reason`: nothing is held.
+    /// The daemon cannot serve a summary, for `reason`: nothing is held. The
+    /// reason is scrubbed and cut as a failure's is.
     pub fn mark_absent(&mut self, reason: impl Into<String>) -> bool {
-        let reason = reason.into();
+        let reason = bound_reason(&reason.into());
         let changed = self.summary.is_some()
             || self.failure.is_some()
             || self.absent.as_deref() != Some(reason.as_str());
