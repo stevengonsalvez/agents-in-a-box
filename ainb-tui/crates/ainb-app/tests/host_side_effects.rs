@@ -530,7 +530,8 @@ fn no_module_in_the_crate_owns_the_plugin_runtime() {
 }
 
 /// The workspace load and the token refresh are policy the state owns
-/// (#1107): hosts call `start_workspace_load` and `refresh_oauth_tokens_if_due`,
+/// (#1107): hosts call `start_workspace_load`, `pace_workspace_load` and
+/// `refresh_oauth_tokens_if_due`,
 /// and the pieces under them stay private so no host re-implements the timeout
 /// or calls the Docker probe from a draw path.
 #[test]
@@ -545,6 +546,8 @@ fn the_workspace_load_and_token_refresh_pieces_stay_private() {
         "pub async fn is_docker_available(",
         "pub async fn refresh_oauth_tokens(",
         "pub fn start_background_workspace_loading(",
+        "pub fn check_workspace_loading_complete(",
+        "pub const fn workspace_rescan_floor(",
     ]
     .into_iter()
     .filter(|signature| state.contains(signature))
