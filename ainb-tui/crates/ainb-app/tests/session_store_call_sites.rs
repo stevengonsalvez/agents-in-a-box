@@ -1,17 +1,17 @@
-// ABOUTME: Keeps every sessions read and write on the resolver (P6e). A direct
-// `SessionStore::load`, `lock` or `mutate` outside the resolver's `File` and
-// `Degraded` paths reads or writes `sessions.json` whatever this process's
-// session source is, which is the split brain P6e exists to remove.
-//
-// The committed list is what is still direct. It only shrinks: P6e-3 moved
-// the readers, P6e-4 moves the writers. A new direct call fails here until it
-// goes through `cli::util::{load,mutate}_session_store` instead, or is
-// triaged onto the list with a reason.
-//
-// The scan is literal text, like `serialize_guard.rs`: it finds the calls
-// spelled out on one line. `Self::load()` inside `impl SessionStore` is the
-// store itself and is not matched. The runtime proof is the resolver's
-// tests; this list backs it, it does not replace it.
+//! Keeps every sessions read and write on the resolver (P6e). A direct
+//! `SessionStore::load`, `lock` or `mutate` outside the resolver's `File` and
+//! `Degraded` paths reads or writes `sessions.json` whatever this process's
+//! session source is, which is the split brain P6e exists to remove.
+//!
+//! The committed list is what is still direct. It only shrinks: P6e-3 moved
+//! the readers, P6e-4 moves the writers. A new direct call fails here until it
+//! goes through `cli::util::{load,mutate}_session_store` instead, or is
+//! triaged onto the list with a reason.
+//!
+//! The scan is literal text, like `serialize_guard.rs`: it finds the calls
+//! spelled out on one line. `Self::load()` inside `impl SessionStore` is the
+//! store itself and is not matched. The runtime proof is the resolver's
+//! tests; this list backs it, it does not replace it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
