@@ -112,6 +112,10 @@ pub async fn first_pass_done_within(wait: Duration) -> bool {
     waited.is_ok_and(|seen| seen.is_ok())
 }
 
+/// How long a pass waits for another pass in this process to finish: the
+/// most one pass can hold [`PASS`] for, its flock wait plus its store write.
+const PASS_WAIT: Duration = SESSIONS_FLOCK_BOUND.saturating_add(RECONCILE_STORE_BOUND);
+
 /// Serialises passes within this process. Two passes would otherwise take the
 /// flock on two descriptors and the second would time out.
 static PASS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -231,7 +235,9 @@ async fn reconcile_pass(
     max_bytes: u64,
     store_bound: Duration,
 ) -> Result<(ReconcileOutcome, Option<FileStamp>)> {
-    let _pass = PASS.lock().await;
+    let _pass = tokio::time::timeout(PASS_WAIT, PASS.lock())
+        .await
+        .map_err(|_| anyhow::anyhow!("another sessions reconcile pass is still running"))?;
     let dir = sessions_path.parent().context("sessions.json has no parent directory")?;
     let flock = acquire_sessions_flock(dir, SESSIONS_FLOCK_BOUND).await?;
 
