@@ -238,9 +238,9 @@ fn kill_switch_says_file() -> bool {
         Ok(value) if value == "file" => true,
         Ok(value) if !value.is_empty() => {
             IGNORED.call_once(|| {
-                eprintln!(
+                say(&format!(
                     "Warning: ignoring {SESSION_SOURCE_ENV}={value:?}; only \"file\" is read."
-                );
+                ));
             });
             false
         }
@@ -277,11 +277,40 @@ pub fn advertise_workspace_sessions_for_tests(on: bool) {
     TEST_ADVERTISES.store(on, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Set once a long-lived surface (the TUI, the desktop host) owns the
+/// terminal or has no terminal at all: from then on the resolver's notices go
+/// to the log, never to raw stderr, which would draw over the TUI's
+/// alternate screen. A CLI command never sets it and keeps its stderr lines.
+static LONG_LIVED_SURFACE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Mark this process as a long-lived surface (see [`LONG_LIVED_SURFACE`]).
+/// The TUI and desktop host call it before their first session read.
+pub fn mark_long_lived_surface() {
+    LONG_LIVED_SURFACE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether the resolver's notices go to the log rather than stderr.
+#[must_use]
+pub fn notices_go_to_the_log() -> bool {
+    LONG_LIVED_SURFACE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// One notice from the resolver: a stderr line for a CLI command, a log line
+/// for a long-lived surface.
+fn say(line: &str) {
+    if notices_go_to_the_log() {
+        tracing::warn!("{line}");
+    } else {
+        eprintln!("{line}");
+    }
+}
+
 /// Say once per process that sessions are on the file for now.
 fn degraded_notice() {
     static SAID: std::sync::Once = std::sync::Once::new();
     SAID.call_once(|| {
-        eprintln!("Notice: sessions are on the local sessions.json until the hangar daemon is up.");
+        say("Notice: sessions are on the local sessions.json until the hangar daemon is up.");
     });
 }
 
@@ -381,10 +410,10 @@ impl SessionSource {
             return Ok(None);
         }
         if res.truncated {
-            eprintln!(
+            say(&format!(
                 "Warning: the daemon returned only the newest {} sessions.",
                 res.sessions.len()
-            );
+            ));
         }
         let mut store = SessionStore::default();
         for entry in &res.sessions {
@@ -392,7 +421,7 @@ impl SessionSource {
                 Ok(meta) => {
                     store.sessions.insert(meta.tmux_session_name.clone(), meta);
                 }
-                Err(why) => eprintln!("Warning: skipping {why}"),
+                Err(why) => say(&format!("Warning: skipping {why}")),
             }
         }
         Ok(Some(store))
@@ -461,7 +490,7 @@ impl SessionSource {
             drop(guard);
             attempts += 1;
             if attempts == 1 {
-                eprintln!("Notice: the hangar daemon is reconciling sessions; waiting.");
+                say("Notice: the hangar daemon is reconciling sessions; waiting.");
             }
             if attempts >= NOT_READY_ATTEMPTS {
                 return Err(daemon_io_error(
@@ -710,6 +739,69 @@ pub async fn reresolve_while_degraded() {
         if leave_degraded().await {
             return;
         }
+    }
+}
+
+/// A change in where this process's sessions live that a long-lived surface
+/// shows the operator (the TUI and, through the mirrored notifications, the
+/// desktop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSourceNotice {
+    /// Sessions are on the local file until the daemon is up.
+    Degraded,
+    /// The daemon is up and has reconciled: sessions are back on it.
+    Recovered,
+}
+
+impl SessionSourceNotice {
+    /// The line a surface shows.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::Degraded => {
+                "Sessions are on the local sessions.json until the hangar daemon is up."
+            }
+            Self::Recovered => "The hangar daemon is up: sessions are back on it.",
+        }
+    }
+}
+
+/// What [`session_source_notice`] last reported: 0 nothing yet, 1 degraded,
+/// 2 recovered.
+static NOTICE_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The notice this process's surface owes, if any, each at most once: the
+/// first time it is seen degraded, and the move back to the daemon after
+/// that. A process that was never degraded owes none.
+pub async fn session_source_notice() -> Option<SessionSourceNotice> {
+    use std::sync::atomic::Ordering;
+    let degraded = session_source().await.is_degraded();
+    match (NOTICE_STATE.load(Ordering::SeqCst), degraded) {
+        (0, true) => {
+            NOTICE_STATE.store(1, Ordering::SeqCst);
+            Some(SessionSourceNotice::Degraded)
+        }
+        (1, false) => {
+            NOTICE_STATE.store(2, Ordering::SeqCst);
+            Some(SessionSourceNotice::Recovered)
+        }
+        _ => None,
+    }
+}
+
+/// Start [`reresolve_while_degraded`] once per process, if it is degraded.
+///
+/// Spawned on the current tokio runtime, for a long-lived surface's load
+/// path; a no-op outside a runtime and on every call after the first.
+pub async fn watch_degraded_session_source() {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !session_source().await.is_degraded()
+        || STARTED.swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(reresolve_while_degraded());
     }
 }
 
