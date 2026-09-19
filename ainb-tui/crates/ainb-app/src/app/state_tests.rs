@@ -2978,22 +2978,75 @@ mod tests {
 
     /// The desktop's counterpart of the terminal's attach: the reducer asking
     /// the window to open or bring forward a session's tab puts the pane in
-    /// front of the person, so what was already there stops nagging. The next
-    /// refresh stamps that instant as the clear point through the same fold
-    /// the terminal's detach uses (the baseline keeps one writer); a question
-    /// raised after it still marks, which is what the banner needs (#1272).
+    /// front of the person. Focus clears attention the person has SEEN: an
+    /// approval still owed is not that, so a blocking chip older than the
+    /// focus stays, with the waiting entry and the banner it feeds, until the
+    /// agent is unblocked; only then is the focus instant folded.
     #[test]
-    fn on_the_desktop_bringing_a_tab_forward_sets_the_clear_point() {
+    fn on_the_desktop_a_blocking_approval_older_than_the_focus_survives() {
         use crate::app::events::{AppEvent, EventHandler};
-        use crate::app::versioned::SectionId;
-        let cwd = "/work/desktop-focus";
-        let mut state = state_with_session_at(cwd, Some("tmux_focus"));
+        use crate::fleet::attention::{AttentionKind, DaemonAttention, SessionAttention};
+        let cwd = "/work/desktop-blocked";
+        let mut state = state_with_session_at(cwd, Some("tmux_blocked"));
         state.host.surface = ainb_hangar_proto::connections::SurfaceKind::Desktop;
         let id = state.sessions.workspaces[0].sessions[0].id;
         state.sessions.selected_workspace_index = Some(0);
         state.sessions.selected_session_index = Some(0);
-        let fleet = |state: &AppState| state.versions()[SectionId::Fleet.index()];
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Approve, 1_000, "att-approve".into()),
+        );
 
+        // Double-click: the tab comes forward to answer it.
+        EventHandler::process_event(AppEvent::AttachTmuxSession, &mut state);
+        let _ = state.take_effects();
+        for now in [2_000, 3_000] {
+            state.merge_attention(now);
+            let chips = &state.sessions.workspaces[0].sessions[0].live_attention;
+            assert_eq!(chips.len(), 1, "the approval is still owed at {now}");
+            assert_eq!(chips[0].kind, AttentionKind::Approve);
+            assert_eq!(
+                state.fleet.attention_baseline.get(&id),
+                None,
+                "focus does not clear a question still owed"
+            );
+        }
+        assert_eq!(state.host.attention_focus_at.get(&id), Some(&2_000));
+
+        // Answered: the agent is unblocked, and the focus instant folds.
+        *state.fleet.daemon_attention.lock().unwrap() =
+            DaemonAttention::up(std::collections::HashMap::new());
+        state.merge_attention(4_000);
+        assert!(state.sessions.workspaces[0].sessions[0].live_attention.is_empty());
+        assert_eq!(
+            state.fleet.attention_baseline.get(&id),
+            Some(&2_000),
+            "the clear point is the instant the tab came forward, not the fold"
+        );
+        assert!(state.host.attention_focus_at.is_empty());
+    }
+
+    /// Attention that blocks nobody and predates the focus is what the person
+    /// has seen by looking: the focus instant folds on the very refresh, and
+    /// a hook event from before it no longer marks while one after it does.
+    #[test]
+    fn on_the_desktop_non_blocking_attention_older_than_the_focus_clears() {
+        use crate::app::events::{AppEvent, EventHandler};
+        use crate::app::versioned::SectionId;
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let cwd = "/work/desktop-seen";
+        let mut state = state_with_session_at(cwd, Some("tmux_seen"));
+        state.host.surface = ainb_hangar_proto::connections::SurfaceKind::Desktop;
+        let id = state.sessions.workspaces[0].sessions[0].id;
+        state.sessions.selected_workspace_index = Some(0);
+        state.sessions.selected_session_index = Some(0);
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Done, 1_000, "att-done".into()),
+        );
+        let fleet = |state: &AppState| state.versions()[SectionId::Fleet.index()];
         state.merge_attention(1_000);
         assert_eq!(state.fleet.attention_baseline.get(&id), None);
         let before = fleet(&state);
@@ -3004,7 +3057,7 @@ mod tests {
         assert_eq!(
             state.fleet.attention_baseline.get(&id),
             Some(&2_000),
-            "the refresh after the tab came forward is the clear point"
+            "nothing on the row blocks, so the focus instant is the clear point"
         );
         assert_ne!(fleet(&state), before, "folded once, so Fleet bumped once");
         let folded = fleet(&state);
@@ -3012,18 +3065,23 @@ mod tests {
         assert_eq!(state.fleet.attention_baseline.get(&id), Some(&2_000));
         assert_eq!(fleet(&state), folded, "and is not written again");
 
-        // What the clear point does: a question from before the tab came
-        // forward is one the person has seen; one raised after still marks.
+        // What the clear point does to the hook scan. The event below was not
+        // in the window at fold time (had it been, its WAIT chip would have
+        // held the fold, as the test above shows); the scan breaks at the
+        // clear point, so an event at or before it does not mark and one
+        // after it does.
         let baseline = state.attention_clear_point(id);
-        let seen = vec![rec("claude", cwd, "PermissionRequest", 1_500)];
+        let seen = vec![rec("claude", cwd, "Notification:idle_prompt", 1_500)];
         assert_eq!(
             AppState::attention_for_session(cwd, Some("claude"), false, baseline, 4_000, &seen),
-            None
+            None,
+            "an event at or before the clear point does not mark"
         );
-        let fresh = vec![rec("claude", cwd, "PermissionRequest", 2_500)];
+        let fresh = vec![rec("claude", cwd, "Notification:idle_prompt", 2_500)];
         assert!(
             AppState::attention_for_session(cwd, Some("claude"), false, baseline, 4_000, &fresh)
-                .is_some()
+                .is_some(),
+            "one raised after it still marks"
         );
 
         // Bringing the tab forward again moves it again.
@@ -3055,6 +3113,7 @@ mod tests {
         EventHandler::process_event(AppEvent::AttachTmuxSession, &mut state);
         let _ = state.take_effects();
         assert!(state.host.attention_focus_pending.is_empty());
+        assert!(state.host.attention_focus_at.is_empty());
         // The scan has not seen it attached yet: nothing folds.
         state.sessions.workspaces[0].sessions[0].is_attached = false;
         state.merge_attention(2_000);
