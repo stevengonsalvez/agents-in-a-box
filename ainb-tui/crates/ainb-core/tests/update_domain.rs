@@ -176,6 +176,191 @@ fn desktop_bundles_inside_assets_would_be_installed_by_a_shipped_cli() {
     );
 }
 
+/// The current struct reads the `desktop` key: one entry per bundle with its
+/// format and signed flag, looked up by target and format, and validated by
+/// the same archive and checksum rules as `assets[]`.
+#[test]
+fn the_current_struct_reads_desktop_bundles_by_target_and_format() {
+    let bytes = manifest_with_desktop_key();
+    let signing_key = SigningKey::from_bytes(&[12; 32]);
+    let signature = signing_key.sign(bytes.as_bytes());
+    let manifest = verify_manifest_with_key(
+        bytes.as_bytes(),
+        &STANDARD.encode(signature.to_bytes()),
+        &STANDARD.encode(signing_key.verifying_key().as_bytes()),
+    )
+    .unwrap();
+    assert_eq!(manifest.desktop.len(), 4);
+    let dmg = manifest
+        .desktop_bundle_for("aarch64-apple-darwin", "dmg")
+        .expect("the arm64 dmg");
+    assert_eq!(dmg.archive, "ainb-desktop-1.29.0-aarch64-apple-darwin.dmg");
+    assert!(!dmg.signed);
+    let appimage = manifest
+        .desktop_bundle_for("x86_64-unknown-linux-gnu", "appimage")
+        .expect("the appimage");
+    assert!(appimage.archive.ends_with(".AppImage"));
+    assert!(manifest.desktop_bundle_for("x86_64-unknown-linux-gnu", "dmg").is_none());
+    assert!(manifest.next_root.is_none());
+}
+
+/// A desktop entry with an unsafe archive name fails the whole manifest, as an
+/// unsafe `assets[]` entry does.
+#[test]
+fn signed_manifest_rejects_unsafe_desktop_bundle_metadata() {
+    let signing_key = SigningKey::from_bytes(&[13; 32]);
+    let sha = "0".repeat(64);
+    let bytes = format!(
+        r#"{{"version":"1.29.0","assets":[],"desktop":[{{"target":"aarch64-apple-darwin","format":"dmg","archive":"../evil.dmg","sha256":"{sha}","signed":false}}]}}"#
+    );
+    let signature = signing_key.sign(bytes.as_bytes());
+    assert!(
+        verify_manifest_with_key(
+            bytes.as_bytes(),
+            &STANDARD.encode(signature.to_bytes()),
+            &STANDARD.encode(signing_key.verifying_key().as_bytes()),
+        )
+        .is_err()
+    );
+}
+
+/// `next_root` is honoured only as an `https://` root with a host and no
+/// query or fragment; anything else fails verification, so a client keeps
+/// the root it had.
+#[test]
+fn next_root_must_be_an_https_root_with_a_host() {
+    use ainb::cli::update::validate_next_root;
+    assert!(validate_next_root("https://github.com/acme/new-home/releases/latest/download").is_ok());
+    assert!(validate_next_root("https://example.org").is_ok());
+    for bad in [
+        "http://github.com/acme/new-home",
+        "https://",
+        "https:///path",
+        "https://github.com/x?y=1",
+        "https://github.com/x#frag",
+        "github.com/x",
+        "https://exa mple.org",
+        "",
+    ] {
+        assert!(validate_next_root(bad).is_err(), "{bad} was accepted");
+    }
+
+    let signing_key = SigningKey::from_bytes(&[14; 32]);
+    let good = br#"{"version":"1.29.0","assets":[],"next_root":"https://example.org/releases"}"#;
+    let signature = signing_key.sign(good);
+    let verified = verify_manifest_with_key(
+        good,
+        &STANDARD.encode(signature.to_bytes()),
+        &STANDARD.encode(signing_key.verifying_key().as_bytes()),
+    )
+    .unwrap();
+    assert_eq!(verified.next_root.as_deref(), Some("https://example.org/releases"));
+
+    let bad = br#"{"version":"1.29.0","assets":[],"next_root":"http://example.org"}"#;
+    let signature = signing_key.sign(bad);
+    assert!(
+        verify_manifest_with_key(
+            bad,
+            &STANDARD.encode(signature.to_bytes()),
+            &STANDARD.encode(signing_key.verifying_key().as_bytes()),
+        )
+        .is_err()
+    );
+}
+
+/// A verified `next_root` lands in the persisted state so the next check
+/// starts there; a manifest without one leaves the root alone.
+#[test]
+fn a_verified_next_root_is_persisted_into_the_release_state() {
+    let mut manifest = ReleaseManifest::for_test("1.29.0");
+    manifest.next_root = Some("https://example.org/releases".to_string());
+    let state = ReleaseState::from_manifest("1.28.2", &manifest, 1_700_000_000_000).unwrap();
+    assert_eq!(state.root.as_deref(), Some("https://example.org/releases"));
+
+    let plain = ReleaseManifest::for_test("1.29.0");
+    let state = ReleaseState::from_manifest("1.28.2", &plain, 1_700_000_000_000).unwrap();
+    assert!(state.root.is_none());
+
+    // The field is optional on disk, so a state written before it exists loads.
+    let old: ReleaseState = serde_json::from_str(
+        r#"{"checked_at_ms":1,"latest_version":"1.28.2","availability":"current_or_newer"}"#,
+    )
+    .unwrap();
+    assert!(old.root.is_none());
+}
+
+/// The prerelease channel lifts the stable-only rule and nothing else:
+/// ordering is semver's, and `stable` still refuses.
+#[test]
+fn prereleases_are_eligible_only_when_the_caller_allows_them() {
+    let manifest = ReleaseManifest::for_test("1.29.0-rc2");
+    assert!(ReleaseState::from_manifest("1.29.0-rc1", &manifest, 1).is_err());
+    let state = ReleaseState::from_manifest_with("1.29.0-rc1", &manifest, 1, true).unwrap();
+    assert_eq!(state.availability, UpdateAvailability::Available);
+    assert_eq!(state.available_version.as_deref(), Some("1.29.0-rc2"));
+    let state = ReleaseState::from_manifest_with("1.29.0", &manifest, 1, true).unwrap();
+    assert_eq!(state.availability, UpdateAvailability::CurrentOrNewer);
+    let stable = ReleaseManifest::for_test("1.29.0");
+    let state = ReleaseState::from_manifest_with("1.28.2", &stable, 1, true).unwrap();
+    assert_eq!(state.available_version.as_deref(), Some("1.29.0"));
+}
+
+/// The manifest and its signature are fetched from exactly `<root>/release-manifest.json`
+/// and `<root>/release-manifest.sig`, whatever the root is, and from nowhere
+/// else: this is what lets the prerelease channel and a moved repository use
+/// the same code as `stable`.
+#[tokio::test]
+async fn the_manifest_is_fetched_from_the_given_root_and_nothing_else() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let signing_key = SigningKey::from_bytes(&[15; 32]);
+    let body = br#"{"version":"1.29.0","assets":[]}"#.to_vec();
+    let sig = STANDARD.encode(signing_key.sign(&body).to_bytes());
+    let (paths_tx, paths_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(2) {
+            let mut stream = stream.unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let path = request.lines().next().unwrap_or("").split(' ').nth(1).unwrap_or("").to_string();
+            let payload: Vec<u8> = if path.ends_with("/release-manifest.json") {
+                body.clone()
+            } else if path.ends_with("/release-manifest.sig") {
+                sig.as_bytes().to_vec()
+            } else {
+                Vec::new()
+            };
+            let status = if payload.is_empty() { "404 Not Found" } else { "200 OK" };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            let _ = stream.write_all(&payload);
+            let _ = paths_tx.send(path);
+        }
+    });
+    let root = format!("http://127.0.0.1:{port}/acme/releases/download/v1.29.0-rc1");
+    let (bytes, signature) = ainb::cli::update::fetch_manifest_bytes_at(&root).await.unwrap();
+    assert_eq!(bytes, body_of(&signing_key));
+    assert_eq!(signature.trim(), sig);
+    let mut paths: Vec<String> = paths_rx.try_iter().collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        vec![
+            "/acme/releases/download/v1.29.0-rc1/release-manifest.json".to_string(),
+            "/acme/releases/download/v1.29.0-rc1/release-manifest.sig".to_string(),
+        ]
+    );
+}
+
+fn body_of(_key: &SigningKey) -> Vec<u8> {
+    br#"{"version":"1.29.0","assets":[]}"#.to_vec()
+}
+
 #[test]
 fn local_newer_than_manifest_never_downgrades() {
     let manifest = ReleaseManifest::for_test("1.22.5");
