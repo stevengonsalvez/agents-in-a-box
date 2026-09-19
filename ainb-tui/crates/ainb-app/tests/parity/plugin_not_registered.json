@@ -1,0 +1,8 @@
+{
+  "width": 100,
+  "height": 30,
+  "screen": {
+    "kind": "plugin",
+    "screen": "learnings"
+  }
+}
