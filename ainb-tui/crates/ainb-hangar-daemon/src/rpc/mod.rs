@@ -13461,8 +13461,8 @@ async fn handle_session_list(
     use ainb_hangar_proto::sessions::{SESSION_LIST_MAX, WorkspaceSessionListResult};
     use ainb_hangar_store::repo::sessions::SessionsRepo;
 
-    let params: ainb_hangar_proto::sessions::WorkspaceSessionListParams = if req.params.is_null() {
-        Default::default()
+    let params = if req.params.is_null() {
+        ainb_hangar_proto::sessions::WorkspaceSessionListParams::default()
     } else {
         parse_params(req, "{ workspace_name?, limit? }")?
     };
