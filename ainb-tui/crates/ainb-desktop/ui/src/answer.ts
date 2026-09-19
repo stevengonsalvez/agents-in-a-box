@@ -106,6 +106,38 @@ export function questionFor(sessions: SessionsView_Serialize | undefined): Quest
 }
 
 /**
+ * The question the banner shows, latched on its request: the frame's question
+ * when the frame carries one; otherwise the one `kept` from the last frame,
+ * for as long as the reducer's answer state still names its request.
+ *
+ * A frame can carry the selected row with no chip for a moment (a scan apply
+ * before the next attention merge was one source, #1263). A banner that
+ * followed every frame unmounted then, and the next frame mounted a new one
+ * with new elements under a click. The reducer's `ask_state.request` is not
+ * written by such a frame, so it says whether the question is still the one
+ * being answered: moved on, cleared, or absent means the banner goes.
+ */
+export function latchQuestion(
+  kept: Question | null,
+  current: Question | null,
+  ask: AskState_Serialize | undefined,
+): Question | null {
+  if (current !== null) return current;
+  if (kept !== null && ask !== undefined && ask.request === kept.request) return kept;
+  return null;
+}
+
+/**
+ * What the banner list is keyed on: the request id, one banner per open
+ * request. Strings key by value in `For`, so every frame that carries the
+ * same request keeps the same banner element, and a new request mounts a new
+ * one, with a fresh draft.
+ */
+export function bannerKeys(question: Question | null): string[] {
+  return question === null ? [] : [question.request];
+}
+
+/**
  * What a banner shows of a question, as one string: a repaint is due when
  * this changes. The request, the title, whether it can be answered, and the
  * labels in order; a hook that rewrites its options under one id reaches the
