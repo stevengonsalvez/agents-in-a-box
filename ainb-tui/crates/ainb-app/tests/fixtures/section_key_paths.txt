@@ -417,7 +417,7 @@ git_view.git_view_state.selected_commit_index
 git_view.git_view_state.selected_file_index
 git_view.git_view_state.selected_tree_index
 git_view.git_view_state.tree_items_cut
-git_view.git_view_state.worktree_path
+git_view.git_view_state.worktree_name
 git_view.is_current_dir_git_repo
 git_view.quick_commit_cursor
 git_view.quick_commit_message_len
