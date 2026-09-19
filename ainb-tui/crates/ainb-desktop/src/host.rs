@@ -378,16 +378,17 @@ impl<S: FrameSink> DesktopHost<S> {
     /// row that cannot run. Each entry says whether it is active now.
     #[must_use]
     pub fn palette(&self) -> Vec<PaletteEntry> {
-        let contexts = ainb_app::app::keymap::command_contexts(&self.state);
-        self.keymap
-            .commands()
-            .filter(|(id, row)| crate::intent::palette_offers(&self.keymap, id, row))
-            .map(|(id, row)| PaletteEntry {
-                id,
+        // The reducer owns the row set (#1161); this surface narrows it by what
+        // a webview may send and by nothing else.
+        ainb_app::app::palette::rows(&self.state, &self.keymap)
+            .into_iter()
+            .filter(|row| !crate::intent::is_host_authored(&row.id))
+            .map(|row| PaletteEntry {
+                id: row.id,
                 doc: row.doc,
-                context: row.ctx.name(),
-                chord: row.chord.as_ref().map(|chord| chord.as_str().to_string()),
-                active: contexts.contains(&row.ctx),
+                context: row.context.name(),
+                chord: row.chord,
+                active: row.active,
             })
             .collect()
     }

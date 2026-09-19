@@ -963,7 +963,10 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
             status: GitFileStatus::Modified,
             insertions: 1,
             deletions: 0,
-            language: None,
+            // Not seeded text: the parser picks it from its own table, so a
+            // literal is the only value this field can hold, and filling it is
+            // what lets the leak checks read the field at all.
+            language: Some("rust"),
             collapsed: false,
             binary: false,
             hunks: vec![Hunk {
