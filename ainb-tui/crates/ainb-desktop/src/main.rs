@@ -80,13 +80,29 @@ struct Window {
 #[tauri::command]
 fn renderer_applied(sections: Subscription, sessions: usize, board: Vec<(AgentState, usize)>) {
     let named: Vec<&str> = sections.sections().map(ainb_app::wire::section_name).collect();
-    let board: Vec<String> = board
+    let (board, dropped) = board_columns(&board);
+    if dropped > 0 {
+        // Said, not swallowed: a proof reading the line below would otherwise
+        // take a renderer that drew no board for one that drew five columns.
+        tracing::warn!(dropped, "renderer applied: the board list ran past the states");
+    }
+    tracing::info!(sections = ?named, sessions, board = ?board, "renderer applied");
+}
+
+/// One column per agent state: the most entries a board line carries.
+const BOARD_COLUMNS: usize = 5;
+
+/// The board's columns as the log prints them, `state=cards` each, and how
+/// many entries past [`BOARD_COLUMNS`] were dropped. Five states, so a longer
+/// list is a renderer that drew no board it could name; the extra entries are
+/// not printed, and the count says they were there.
+fn board_columns(board: &[(AgentState, usize)]) -> (Vec<String>, usize) {
+    let columns = board
         .iter()
-        // Five states, so a longer list is a renderer that drew no board.
-        .take(5)
+        .take(BOARD_COLUMNS)
         .map(|(state, cards)| format!("{}={cards}", state.as_str()))
         .collect();
-    tracing::info!(sections = ?named, sessions, board = ?board, "renderer applied");
+    (columns, board.len().saturating_sub(BOARD_COLUMNS))
 }
 
 /// The terminal's copy: put the selection on the platform clipboard.
@@ -514,4 +530,32 @@ fn main() {
             eprintln!("ainb desktop failed to start: {error}");
             std::process::exit(1);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_board_line_holds_one_entry_per_state_and_counts_the_rest() {
+        let five = [
+            (AgentState::Working, 1),
+            (AgentState::Waiting, 2),
+            (AgentState::Idle, 0),
+            (AgentState::Exited, 3),
+            (AgentState::Unverifiable, 4),
+        ];
+        let (columns, dropped) = board_columns(&five);
+        assert_eq!(
+            columns,
+            ["working=1", "waiting=2", "idle=0", "exited=3", "unverifiable=4"]
+        );
+        assert_eq!(dropped, 0);
+
+        let mut over = five.to_vec();
+        over.extend([(AgentState::Waiting, 9), (AgentState::Idle, 9)]);
+        let (columns, dropped) = board_columns(&over);
+        assert_eq!(columns.len(), BOARD_COLUMNS, "the line stays bounded");
+        assert_eq!(dropped, 2, "and the drop is counted, not silent");
+    }
 }
