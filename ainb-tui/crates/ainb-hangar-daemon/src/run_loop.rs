@@ -47,6 +47,7 @@ use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::task::state::TaskState;
 use ainb_hangar_store::bootstrap::RuntimeArrival;
+use ainb_hangar_store::repo::sessions::{SessionRow, SessionsRepo, UpsertOutcome};
 use ainb_hangar_store::repo::task::{Task, TaskRepo};
 use ainb_hangar_store::service::claim::{ClaimTaskService, ClaimedTask};
 use ainb_hangar_store::service::complete::{CompleteParams, CompleteTaskService};
@@ -1677,6 +1678,52 @@ fn interactive_command(runner: &Runner, dispatch: &ResolvedDispatch) -> (PathBuf
     runner.provider_command(dispatch.backend, &dispatch.invocation, dispatch.mode)
 }
 
+/// Flags that bypass a provider's permission prompts, one per provider.
+const PERMISSION_BYPASS_FLAGS: &[&str] = &[
+    "--dangerously-skip-permissions",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--full-auto",
+    "--allow-all-tools",
+    "--yolo",
+];
+
+/// What an interactive pane was launched with, in the session registry's
+/// vocabulary: the `SessionAgentType` name, whether the argv bypasses the
+/// provider's permission prompts, and the model override.
+fn interactive_launch(
+    backend: Backend,
+    model: Option<&str>,
+    argv: &[String],
+) -> (&'static str, Option<bool>, Option<String>) {
+    let agent_type = match backend {
+        Backend::Claude => "Claude",
+        Backend::Codex => "Codex",
+        Backend::Copilot => "Copilot",
+        Backend::Antigravity => "Antigravity",
+    };
+    let skip = argv.iter().any(|arg| PERMISSION_BYPASS_FLAGS.contains(&arg.as_str()));
+    (agent_type, Some(skip), model.map(str::to_string))
+}
+
+/// The `sessions` table row for a registry record.
+fn session_row_for(record: &ainb_fleet_core::session_registry::AinbSessionRecord) -> SessionRow {
+    SessionRow {
+        session_id: record.session_id.to_string(),
+        tmux_session_name: record.tmux_session_name.clone(),
+        worktree_path: record.worktree_path.to_string_lossy().into_owned(),
+        workspace_name: record.workspace_name.clone(),
+        created_at: record.created_at.timestamp_millis(),
+        agent_type: record.agent_type.clone(),
+        headroom_enabled: false,
+        rtk_enabled: false,
+        skip_permissions: record.skip_permissions,
+        model: record.model.clone(),
+        model_source: record.model_source.clone(),
+        codex_model: None,
+        codex_thread_id: None,
+    }
+}
+
 /// Launch a task's provider inside a REAL, attachable tmux session and await
 /// its completion (ccc / D6 interactive mode).
 ///
@@ -1804,30 +1851,38 @@ async fn run_interactive(
     // pipeline (mechanism a) alone. Best-effort: the session is already live and
     // recorded on the row, so a registry write fault is logged and ignored rather
     // than failing the run (the external-dep / degrade rule).
-    let record = ainb_fleet_core::session_registry::AinbSessionRecord::new(
+    //
+    // P6d: the same record is written to the daemon's `sessions` table, with
+    // what was actually launched (provider, permission bypass, model) rather
+    // than the Claude defaults. A retry of the task reuses the tmux name, so it
+    // reuses the id already bound to that name instead of colliding with it.
+    let (agent_type, skip_permissions, model) = interactive_launch(
+        dispatch.backend,
+        dispatch.invocation.model.as_deref(),
+        &argv,
+    );
+    let mut record = ainb_fleet_core::session_registry::AinbSessionRecord::new(
         session_name.clone(),
         cwd.to_path_buf(),
         ws_slug.to_string(),
-    );
-    let session_row = ainb_hangar_store::repo::sessions::SessionRow {
-        session_id: record.session_id.to_string(),
-        tmux_session_name: record.tmux_session_name.clone(),
-        worktree_path: record.worktree_path.to_string_lossy().to_string(),
-        workspace_name: record.workspace_name.clone(),
-        created_at: record.created_at.timestamp_millis(),
-        agent_type: "Claude".to_string(),
-        headroom_enabled: false,
-        rtk_enabled: false,
-        skip_permissions: None,
-        model: None,
-        model_source: "LegacyTyped".to_string(),
-        codex_model: None,
-        codex_thread_id: None,
-    };
-    if let Err(e) =
-        ainb_hangar_store::repo::sessions::SessionsRepo::upsert(pool, &session_row).await
-    {
-        tracing::warn!(task_id = %task.id, error = %e, "sessions table write failed");
+    )
+    .with_launch(agent_type, skip_permissions, model);
+    match SessionsRepo::get_by_tmux_name(pool, &session_name).await {
+        Ok(Some(row)) => match uuid::Uuid::parse_str(&row.session_id) {
+            Ok(id) => record.session_id = id,
+            Err(_) => {
+                tracing::warn!(task_id = %task.id, "sessions row for this pane has a non-UUID id; minting a new one");
+            }
+        },
+        Ok(None) => {}
+        Err(e) => tracing::warn!(task_id = %task.id, error = %e, "sessions table read failed"),
+    }
+    match SessionsRepo::upsert(pool, &session_row_for(&record)).await {
+        Ok(UpsertOutcome::Written) => {}
+        Ok(UpsertOutcome::TmuxNameTaken { holder }) => {
+            tracing::warn!(task_id = %task.id, %holder, "sessions table already binds this pane to another session");
+        }
+        Err(e) => tracing::warn!(task_id = %task.id, error = %e, "sessions table write failed"),
     }
     if let Err(e) = ainb_fleet_core::session_registry::register_session(&record) {
         tracing::warn!(task_id = %task.id, error = %e, "session registry write failed");
@@ -3136,6 +3191,57 @@ fn warn_danger_access(task: &Task, provider: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P6d: the daemon's own registration records the provider it launched,
+    /// not the Claude default. A Codex pane must never read back as Claude.
+    #[test]
+    fn interactive_launch_names_the_backend_model_and_bypass() {
+        let argv = |flags: &[&str]| flags.iter().map(|f| (*f).to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            interactive_launch(
+                Backend::Codex,
+                Some("gpt-5-codex"),
+                &argv(&["--full-auto", "--", "brief"])
+            ),
+            ("Codex", Some(true), Some("gpt-5-codex".to_string()))
+        );
+        assert_eq!(
+            interactive_launch(
+                Backend::Claude,
+                None,
+                &argv(&["--dangerously-skip-permissions", "--", "brief"])
+            ),
+            ("Claude", Some(true), None)
+        );
+        assert_eq!(
+            interactive_launch(Backend::Copilot, None, &argv(&["-i", "brief"])),
+            ("Copilot", Some(false), None)
+        );
+        assert_eq!(
+            interactive_launch(Backend::Antigravity, None, &argv(&[])).0,
+            "Antigravity"
+        );
+    }
+
+    /// The table row carries every field of the registry record.
+    #[test]
+    fn session_row_for_carries_the_launch() {
+        let record = ainb_fleet_core::session_registry::AinbSessionRecord::new(
+            "tmux_hangar-01J",
+            PathBuf::from("/work/x"),
+            "ws",
+        )
+        .with_launch("Codex", Some(true), Some("o3".to_string()));
+        let row = session_row_for(&record);
+        assert_eq!(row.session_id, record.session_id.to_string());
+        assert_eq!(row.agent_type, "Codex");
+        assert_eq!(row.skip_permissions, Some(true));
+        assert_eq!(row.model.as_deref(), Some("o3"));
+        assert_eq!(row.model_source, "Raw");
+        assert_eq!(row.worktree_path, "/work/x");
+        assert!(ainb_hangar_proto::sessions::is_canonical_uuid(&row.session_id));
+    }
 
     /// A daemon started with no `HANGAR_TASK_EXECUTOR`: the floor every test
     /// below dispatches against, so an agent's own `task_executor` is the only
