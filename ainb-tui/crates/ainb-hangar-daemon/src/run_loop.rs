@@ -1705,8 +1705,8 @@ fn interactive_launch(
     (agent_type, Some(skip), model.map(str::to_string))
 }
 
-/// Bound on the P6d shadow write of a registration into the `sessions` table,
-/// so a saturated pool cannot hold up an interactive run.
+/// Bound on the write of a registration into the `sessions` table, so a
+/// saturated pool cannot hold up an interactive run.
 const SHADOW_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Mirror `record` into the `sessions` table, matching the file.
@@ -1732,6 +1732,65 @@ async fn shadow_write_session(
             row.tmux_session_name
         ))),
     }
+}
+
+/// Register a daemon-launched session in `sessions.json` and the `sessions`
+/// table under ONE flock: the file row first, then the table row.
+///
+/// Holding the flock across both keeps a surface's read-modify-write of the
+/// file (a `Persist::SessionHeadroom` compare-and-set, say) from landing
+/// between them. Every wait is bounded (the flock by `SESSIONS_FLOCK_BOUND`,
+/// the table by [`SHADOW_WRITE_TIMEOUT`]) so an interactive run is never held
+/// up, and every failure is only logged: the session is already live. A table
+/// write that fails leaves the file row for the next reconcile pass to insert.
+async fn register_interactive_session(
+    pool: &SqlitePool,
+    sessions_path: &std::path::Path,
+    record: &ainb_fleet_core::session_registry::AinbSessionRecord,
+    task_id: &str,
+) {
+    use crate::session_import::{SESSIONS_FLOCK_BOUND, acquire_sessions_flock};
+
+    let Some(dir) = sessions_path.parent() else {
+        tracing::warn!(
+            task_id,
+            "sessions.json has no parent directory; session not registered"
+        );
+        return;
+    };
+    let flock = match acquire_sessions_flock(dir, SESSIONS_FLOCK_BOUND).await {
+        Ok(flock) => flock,
+        Err(e) => {
+            tracing::warn!(task_id, error = %format!("{e:#}"), "session not registered");
+            return;
+        }
+    };
+
+    let (path, file_record) = (sessions_path.to_path_buf(), record.clone());
+    let written = tokio::task::spawn_blocking(move || {
+        let written =
+            ainb_fleet_core::session_registry::register_session_locked(&path, &file_record, &flock);
+        (flock, written)
+    })
+    .await;
+    let flock = match written {
+        Ok((flock, Ok(()))) => flock,
+        Ok((flock, Err(e))) => {
+            tracing::warn!(task_id, error = %e, "session registry write failed");
+            flock
+        }
+        Err(e) => {
+            tracing::warn!(task_id, error = %e, "session registry write task failed");
+            return;
+        }
+    };
+
+    match tokio::time::timeout(SHADOW_WRITE_TIMEOUT, shadow_write_session(pool, record)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(task_id, error = %e, "sessions table write failed"),
+        Err(_) => tracing::warn!(task_id, "sessions table write timed out"),
+    }
+    drop(flock);
 }
 
 /// The `sessions` table row for a registry record.
@@ -1881,11 +1940,10 @@ async fn run_interactive(
     // recorded on the row, so a registry write fault is logged and ignored rather
     // than failing the run (the external-dep / degrade rule).
     //
-    // P6d: after the v2 file write, the same record is shadow-written to the
-    // daemon's `sessions` table with what was actually launched (provider,
-    // permission bypass, model). While the capability is dark the file is the
-    // registration every reader sees, so it goes first and the shadow write is
-    // best-effort, bounded by SHADOW_WRITE_TIMEOUT, and only ever logged.
+    // P6d: the record carries what was actually launched (provider,
+    // permission bypass, model) into both the file and the `sessions` table.
+    // P6e: both writes happen under one sessions.json flock; see
+    // `register_interactive_session`.
     let (agent_type, skip_permissions, model) = interactive_launch(
         dispatch.backend,
         dispatch.invocation.model.as_deref(),
@@ -1897,18 +1955,13 @@ async fn run_interactive(
         ws_slug.to_string(),
     )
     .with_launch(agent_type, skip_permissions, model);
-    if let Err(e) = ainb_fleet_core::session_registry::register_session(&record) {
-        tracing::warn!(task_id = %task.id, error = %e, "session registry write failed");
-    }
-    match tokio::time::timeout(SHADOW_WRITE_TIMEOUT, shadow_write_session(pool, &record)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            tracing::warn!(task_id = %task.id, error = %e, "sessions table shadow write failed");
-        }
-        Err(_) => {
-            tracing::warn!(task_id = %task.id, "sessions table shadow write timed out");
-        }
-    }
+    register_interactive_session(
+        pool,
+        &ainb_fleet_core::session_registry::sessions_json_path(),
+        &record,
+        &task.id,
+    )
+    .await;
 
     // a54: the session was registered for the shutdown reap right after spawn
     // (above). Unregister once `wait` returns — a naturally reaped session needs
@@ -3240,6 +3293,64 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session_id, retry.session_id.to_string());
         assert_eq!(rows[0].agent_type, "Codex");
+    }
+
+    /// P6e: the registration's table write happens while the sessions.json
+    /// flock is still held. The table write is made to wait on a held SQLite
+    /// write lock; the file row is already written, and the flock must still
+    /// be taken. Moving the table write back outside the flock makes the
+    /// try-lock succeed here.
+    #[tokio::test]
+    async fn registration_holds_the_flock_across_the_table_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool().clone();
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("sessions.json");
+        let record = ainb_fleet_core::session_registry::AinbSessionRecord::new(
+            "tmux_hangar-flock",
+            PathBuf::from("/work/flock"),
+            "ws",
+        );
+
+        let mut blocker = pool.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *blocker).await.unwrap();
+
+        let task = {
+            let (pool, path, record) = (pool.clone(), path.clone(), record.clone());
+            tokio::spawn(async move {
+                register_interactive_session(&pool, &path, &record, "task-flock").await;
+            })
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while !std::fs::read_to_string(&path).is_ok_and(|s| s.contains("tmux_hangar-flock")) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "file row never written"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            ainb_fleet_core::session_registry::try_lock_sessions_store_at(home.path())
+                .unwrap()
+                .is_none(),
+            "the flock was released before the table write"
+        );
+
+        sqlx::query("ROLLBACK").execute(&mut *blocker).await.unwrap();
+        drop(blocker);
+        task.await.unwrap();
+        let rows = SessionsRepo::list(&pool, None, 10).await.unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the table write lands once the SQLite lock is free"
+        );
+        assert!(
+            ainb_fleet_core::session_registry::try_lock_sessions_store_at(home.path())
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// P6d: the daemon's own registration records the provider it launched,
