@@ -801,10 +801,6 @@ const TYPE_ALLOW: &[(&str, &str)] = &[
         "env var names with every value `<redacted>` in frame",
     ),
     (
-        "PluginsHostView.plugin_render_errors",
-        "plugin render failures keyed by screen id, scrubbed",
-    ),
-    (
         "RepositoryPreset.environment",
         "env var names with every value `<redacted>` in frame",
     ),

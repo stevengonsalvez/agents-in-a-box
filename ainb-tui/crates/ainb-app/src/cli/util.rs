@@ -435,7 +435,7 @@ impl SessionSource {
         let client = match self {
             Self::File | Self::Degraded(_) => {
                 let _guard = lock_within_deadline().await?;
-                let mut store = SessionStore::load();
+                let (mut store, _) = load_file_for_write()?;
                 let before = snapshot(&store);
                 {
                     let _mark = HeldLockMark::enter();
@@ -530,24 +530,7 @@ fn write_file_rows(
     removed: &[Uuid],
     written: &[&WorkspaceSessionEntry],
 ) -> std::io::Result<Option<Vec<u8>>> {
-    let path = SessionStore::storage_path();
-    let before = match std::fs::read(&path) {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
-    // `SessionStore::load` answers an empty store for a file it cannot parse,
-    // and saving that would cut a corrupt file down to the touched rows. Such
-    // a file is refused, untouched, before anything is written.
-    if let Some(bytes) = &before {
-        if let Err(e) = serde_json::from_slice::<SessionStore>(bytes) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("sessions.json does not parse ({e}); refusing to rewrite it"),
-            ));
-        }
-    }
-    let mut file = SessionStore::load();
+    let (mut file, before) = load_file_for_write()?;
     for id in removed {
         file.remove_by_session_id(*id);
     }
@@ -558,6 +541,32 @@ fn write_file_rows(
     }
     file.save()?;
     Ok(before)
+}
+
+/// Load `sessions.json` for a write, under the caller's lock, with the bytes
+/// it was read from (`None`: no file).
+///
+/// `SessionStore::load` answers an empty store for a file it cannot parse,
+/// which is right for a read and wrong for a write: saving that store would
+/// cut a corrupt file down to the rows the write touched. So a file that
+/// does not parse is refused here, untouched, before anything is written, on
+/// every source.
+fn load_file_for_write() -> std::io::Result<(SessionStore, Option<Vec<u8>>)> {
+    let path = SessionStore::storage_path();
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((SessionStore::default(), None));
+        }
+        Err(e) => return Err(e),
+    };
+    match serde_json::from_slice::<SessionStore>(&bytes) {
+        Ok(store) => Ok((store, Some(bytes))),
+        Err(e) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("sessions.json does not parse ({e}); refusing to rewrite it"),
+        )),
+    }
 }
 
 /// Put `sessions.json` back to `before` (`None`: remove it), under the

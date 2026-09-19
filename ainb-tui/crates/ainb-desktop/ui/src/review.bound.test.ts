@@ -90,6 +90,7 @@ function atTheBound(): GitViewView_Serialize {
     commits: [],
     commits_cut: 0,
     selected_commit_index: 0,
+    selected_commit_cut: false,
     review: { files, files_cut: 0 },
     review_ui: {
       selected_file: 0,

@@ -596,3 +596,30 @@ fn a_reverted_multi_row_write_leaves_nothing_after_the_next_pass() {
     assert_eq!(reconcile(&hangar, &homes), 1);
     assert_eq!(table_names(&hangar), vec!["sess-kept"]);
 }
+
+/// The file and degraded sources refuse a corrupt `sessions.json` too, rather
+/// than save the empty store `SessionStore::load` reads it as.
+#[test]
+fn a_corrupt_file_is_refused_on_the_file_and_degraded_paths() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let homes = Homes::new();
+    fs::write(homes.sessions_json(), b"{ \"sessions\": { not json").unwrap();
+    let before = fs::read(homes.sessions_json()).unwrap();
+    let rt = rt();
+
+    for source in [SessionSource::File, SessionSource::Degraded(None)] {
+        let err = rt
+            .block_on(source.mutate(|s| s.upsert(make_session("sess-new"))))
+            .expect_err("a corrupt file must refuse the write");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData,
+            "{source:?}: {err}"
+        );
+        assert_eq!(
+            fs::read(homes.sessions_json()).unwrap(),
+            before,
+            "{source:?}"
+        );
+    }
+}

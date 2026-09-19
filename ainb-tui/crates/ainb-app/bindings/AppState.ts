@@ -2672,7 +2672,13 @@ export type GitViewFrame_Serialize = {
 	commits: CommitInfo_Serialize[],
 	/**  Commits the frame did not carry. */
 	commits_cut: number,
+	/**  Brought inside the commits the frame carries. */
 	selected_commit_index: number,
+	/**
+	 *  The commit the reducer is on was not sent (past the list, or past the
+	 *  cut), so `selected_commit_index` is the last one that was.
+	 */
+	selected_commit_cut: boolean,
 	review: ReviewFrame_Serialize,
 	review_ui: ReviewUiFrame,
 };
@@ -3766,7 +3772,7 @@ export type PluginsHostView = PluginsHostView_Serialize;
 export type PluginsHostView_Serialize = {
 	plugin_captures_text: { [key in string]: boolean },
 	plugin_presence: { [key in string]: PluginPresence },
-	plugin_render_errors: { [key in string]: string },
+	plugin_render_errors: { [key in string]: RenderErrorFrame },
 };
 
 /**
@@ -3836,6 +3842,15 @@ export type RecoveryViewMode =
 
 export type RecoveryView_Serialize = {
 	session_recovery_state: SessionRecoveryState_Serialize,
+};
+
+/**
+ *  One plugin's render error as a frame carries it: scrubbed, then cut to
+ *  [`RENDER_ERROR_MAX_CHARS`], with `cut` saying whether it was.
+ */
+export type RenderErrorFrame = {
+	text: string,
+	cut: boolean,
 };
 
 /**

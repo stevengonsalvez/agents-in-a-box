@@ -1,0 +1,30 @@
+╭ [ learnings unavailable ] ───────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│  This screen is owned by the `learnings` plugin, which isn't loaded.                             │
+│                                                                                                  │
+│  Check whether plugins are disabled in this session:                                             │
+│                                                                                                  │
+│    • AINB_DISABLE_PLUGINS=1     — all plugins off (kill switch)                                  │
+│    • AINB_DISABLE_PLUGIN=learnings   — this plugin denylisted by env                             │
+│    • AINB_ONLY_PLUGINS=…        — env allowlist excludes it                                      │
+│    • config.toml [plugins]     — persistent allow/disable list                                   │
+│                                                                                                  │
+│  To restore it: unset the env var(s) and/or edit ~/.agents-in-a-box/config/config.toml           │
+│  Logs: ~/.agents-in-a-box/logs/agents-in-a-box-*.jsonl — search `applying plugin filter`.        │
+│                                                                                                  │
+│  See docs/plugins.md → Configuration → Enable/disable plugins.                                   │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

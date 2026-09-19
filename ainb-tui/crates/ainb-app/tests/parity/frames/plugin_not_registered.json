@@ -34,189 +34,7 @@
     "ssh_sessions_expanded": true
   },
   "git_view": {
-    "git_view_state": {
-      "active_tab": "Review",
-      "can_push": false,
-      "changed_files": [],
-      "commit_message_cursor": 0,
-      "commit_message_len": null,
-      "commits": [],
-      "commits_cut": 0,
-      "diff_content": [],
-      "diff_lines_cut": 0,
-      "diff_scroll_offset": 0,
-      "expanded_folders": [
-        ""
-      ],
-      "expanded_folders_cut": 0,
-      "file_tree_items": [],
-      "files_cut": 0,
-      "is_dirty": false,
-      "markdown_content": [],
-      "markdown_lines_cut": 0,
-      "markdown_scroll_offset": 0,
-      "review": {
-        "files": [
-          {
-            "binary": false,
-            "collapsed": false,
-            "deletions": 1,
-            "hunks": [
-              {
-                "expanded_after": 0,
-                "expanded_before": 0,
-                "gap_after": 0,
-                "gap_before": 0,
-                "new_start": 1,
-                "old_start": 1,
-                "rows": [
-                  {
-                    "emphasis": [],
-                    "kind": "Context",
-                    "new_lineno": 1,
-                    "old_lineno": 1,
-                    "raw": "fn token(header: &str) -> Option<&str> {"
-                  },
-                  {
-                    "emphasis": [],
-                    "kind": "Removed",
-                    "new_lineno": null,
-                    "old_lineno": 2,
-                    "raw": "    header.strip_prefix(\"Bearer \")"
-                  },
-                  {
-                    "emphasis": [],
-                    "kind": "Added",
-                    "new_lineno": 2,
-                    "old_lineno": null,
-                    "raw": "    let token = header.strip_prefix(\"Bearer \")?;"
-                  },
-                  {
-                    "emphasis": [],
-                    "kind": "Added",
-                    "new_lineno": 3,
-                    "old_lineno": null,
-                    "raw": "    (!token.is_empty()).then_some(token)"
-                  },
-                  {
-                    "emphasis": [],
-                    "kind": "Context",
-                    "new_lineno": 4,
-                    "old_lineno": 3,
-                    "raw": "}"
-                  }
-                ]
-              }
-            ],
-            "hunks_cut": 0,
-            "insertions": 2,
-            "language": null,
-            "path": "src/auth/session.rs",
-            "rows_cut": 0,
-            "status": "Modified"
-          },
-          {
-            "binary": false,
-            "collapsed": false,
-            "deletions": 0,
-            "hunks": [
-              {
-                "expanded_after": 0,
-                "expanded_before": 0,
-                "gap_after": 0,
-                "gap_before": 0,
-                "new_start": 1,
-                "old_start": 1,
-                "rows": [
-                  {
-                    "emphasis": [],
-                    "kind": "Added",
-                    "new_lineno": 1,
-                    "old_lineno": null,
-                    "raw": "pub mod session;"
-                  },
-                  {
-                    "emphasis": [],
-                    "kind": "Added",
-                    "new_lineno": 2,
-                    "old_lineno": null,
-                    "raw": "pub mod refresh;"
-                  }
-                ]
-              }
-            ],
-            "hunks_cut": 0,
-            "insertions": 2,
-            "language": null,
-            "path": "src/auth/mod.rs",
-            "rows_cut": 0,
-            "status": "Added"
-          },
-          {
-            "binary": false,
-            "collapsed": false,
-            "deletions": 1,
-            "hunks": [
-              {
-                "expanded_after": 0,
-                "expanded_before": 0,
-                "gap_after": 0,
-                "gap_before": 0,
-                "new_start": 1,
-                "old_start": 1,
-                "rows": [
-                  {
-                    "emphasis": [],
-                    "kind": "Context",
-                    "new_lineno": 1,
-                    "old_lineno": 1,
-                    "raw": "# Auth"
-                  },
-                  {
-                    "emphasis": [],
-                    "kind": "Removed",
-                    "new_lineno": null,
-                    "old_lineno": 2,
-                    "raw": "A token is read from the header."
-                  },
-                  {
-                    "emphasis": [],
-                    "kind": "Added",
-                    "new_lineno": 2,
-                    "old_lineno": null,
-                    "raw": "A token is read from the header and checked for emptiness."
-                  }
-                ]
-              }
-            ],
-            "hunks_cut": 0,
-            "insertions": 1,
-            "language": null,
-            "path": "docs/auth.md",
-            "rows_cut": 0,
-            "status": "Modified"
-          }
-        ],
-        "files_cut": 0
-      },
-      "review_ui": {
-        "collapsed_dirs": [
-          "docs"
-        ],
-        "collapsed_dirs_cut": 0,
-        "current_hunk": 0,
-        "scroll": 0,
-        "scroll_cut": false,
-        "selected_file": 0,
-        "sidebar_selected": 0
-      },
-      "selected_commit_cut": false,
-      "selected_commit_index": 0,
-      "selected_file_index": 0,
-      "selected_tree_index": 0,
-      "tree_items_cut": 0,
-      "worktree_name": "repo"
-    },
+    "git_view_state": null,
     "is_current_dir_git_repo": false,
     "quick_commit_cursor": 0,
     "quick_commit_message_len": null
@@ -348,7 +166,13 @@
   },
   "plugins_host": {
     "plugin_captures_text": {},
-    "plugin_presence": {},
+    "plugin_presence": {
+      "learnings": {
+        "abi": 0,
+        "registered": false,
+        "wedged": false
+      }
+    },
     "plugin_render_errors": {}
   },
   "config": {
@@ -3400,7 +3224,7 @@
   "shell": {
     "async_operation_cancelled": false,
     "confirmation_dialog": null,
-    "current_screen": "git_view",
+    "current_screen": "learnings",
     "focused_pane": "Sessions",
     "help_visible": false,
     "home_screen_state": {

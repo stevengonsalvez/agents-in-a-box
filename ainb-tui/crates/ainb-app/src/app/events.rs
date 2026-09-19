@@ -143,13 +143,14 @@ pub enum AppEvent {
     /// `Enter` on the `ask` tab: send the selected answer.
     SessionAskSend,
     /// `session_list.ask.pick`: answer the question `request` names with the
-    /// option labelled `label`, in one step. A surface that cannot press keys
+    /// option at `index`, whose label the person read as `label`, in one step. A surface that cannot press keys
     /// on the reducer's cursor names its pick, and the reducer resolves it
     /// against the options it holds: a banner that counted cursor moves off
     /// its frame sent a different option when a frame landed mid-sequence
     /// (#1191). Refused when the question to answer is not `request`.
     SessionAskPick {
         request: String,
+        index: usize,
         label: String,
     },
     /// `Enter` on a composer tab (`thread` / `pal`): send the message.
@@ -3471,7 +3472,11 @@ impl EventHandler {
                 state.fleet.ask_state.retarget(&chip);
                 Self::send_selected_answer(state, &chip);
             }
-            AppEvent::SessionAskPick { request, label } => {
+            AppEvent::SessionAskPick {
+                request,
+                index,
+                label,
+            } => {
                 let Some(chip) = crate::components::session_tabs::selected_blocking(state).cloned()
                 else {
                     state.add_info_notification("nothing is waiting on an answer here".to_string());
@@ -3489,9 +3494,10 @@ impl EventHandler {
                 }
                 state.fleet.ask_state.retarget(&chip);
                 // The cursor is put on the named option and the send fires in
-                // the same step, so nothing can move it in between. A label
-                // the question does not offer sends nothing, and says so.
-                match state.fleet.ask_state.pick(&chip, &label) {
+                // the same step, so nothing can move it in between. An index
+                // past the list, or one whose option no longer reads as the
+                // label the person saw, sends nothing and says so.
+                match state.fleet.ask_state.pick(&chip, index, &label) {
                     Ok(()) => Self::send_selected_answer(state, &chip),
                     Err(refusal) => {
                         state.add_info_notification(refusal);
@@ -3941,16 +3947,12 @@ impl EventHandler {
             }
             AppEvent::GitViewNextCommit => {
                 if let Some(ref mut git_state) = state.git_view.git_view_state {
-                    if git_state.selected_commit_index < git_state.commits.len().saturating_sub(1) {
-                        git_state.selected_commit_index += 1;
-                    }
+                    git_state.move_commit_selection(1);
                 }
             }
             AppEvent::GitViewPrevCommit => {
                 if let Some(ref mut git_state) = state.git_view.git_view_state {
-                    if git_state.selected_commit_index > 0 {
-                        git_state.selected_commit_index -= 1;
-                    }
+                    git_state.move_commit_selection(-1);
                 }
             }
             AppEvent::GitViewShowCommitDiff => {
