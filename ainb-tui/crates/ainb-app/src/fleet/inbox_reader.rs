@@ -56,8 +56,8 @@ impl Default for Timing {
 pub enum InboxUpdate {
     /// A read landed, received at this local epoch-ms clock.
     Read(InboxListResult, i64),
-    /// A read failed for this reason, at this local clock.
-    Failed(String, i64),
+    /// A read failed for this reason.
+    Failed(String),
     /// The daemon cannot serve `hangar/inbox_list`.
     Absent(String),
 }
@@ -109,7 +109,7 @@ impl InboxReader {
         if !self.stop_reported && self.task.is_finished() {
             self.stop_reported = true;
             tracing::warn!("inbox: the reader task stopped");
-            changed |= state.inbox_read_failed(READER_STOPPED, now_ms());
+            changed |= state.inbox_read_failed(READER_STOPPED);
         }
         changed
     }
@@ -125,7 +125,7 @@ impl Drop for InboxReader {
 pub fn apply(state: &mut AppState, update: InboxUpdate) -> bool {
     match update {
         InboxUpdate::Read(read, received_at_ms) => state.apply_inbox_read(read, received_at_ms),
-        InboxUpdate::Failed(reason, now_ms) => state.inbox_read_failed(reason, now_ms),
+        InboxUpdate::Failed(reason) => state.inbox_read_failed(reason),
         InboxUpdate::Absent(reason) => state.inbox_absent(reason),
     }
 }
@@ -162,19 +162,12 @@ fn read_through(dialer: Dialer) -> Read {
     })
 }
 
-pub(crate) fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| {
-        i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
-    })
-}
-
 async fn run(read: Read, tx: mpsc::UnboundedSender<InboxUpdate>, timing: Timing) {
     let mut backoff = timing.backoff_initial;
     loop {
         let wait = match read().await {
             Ok(result) => {
-                if tx.send(InboxUpdate::Read(result, now_ms())).is_err() {
+                if tx.send(InboxUpdate::Read(result, crate::fleet::daemons::heartbeat::now_ms())).is_err() {
                     return;
                 }
                 backoff = timing.backoff_initial;
@@ -188,7 +181,7 @@ async fn run(read: Read, tx: mpsc::UnboundedSender<InboxUpdate>, timing: Timing)
                 timing.backoff_max
             }
             Err(error) => {
-                if tx.send(InboxUpdate::Failed(error.to_string(), now_ms())).is_err() {
+                if tx.send(InboxUpdate::Failed(error.to_string())).is_err() {
                     return;
                 }
                 let wait = backoff;
