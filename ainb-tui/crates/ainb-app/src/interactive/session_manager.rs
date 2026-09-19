@@ -1032,12 +1032,14 @@ pub async fn rollback_failed_interactive_launch(
         }
     }
 
-    if let Err(error) = crate::cli::util::mutate_session_store(|store| {
+    if let Err(error) = crate::cli::util::mutate_session_store_async(|store| {
         if let Some(tmux_name) = exact_tmux_name {
             store.remove_by_tmux_name(tmux_name);
         }
         store.remove_by_session_id(session_id);
-    }) {
+    })
+    .await
+    {
         warn!("Failed to purge failed launch metadata for {session_id}: {error}");
     }
 }
@@ -1675,7 +1677,9 @@ impl InteractiveSessionManager {
         };
         // Locked RMW so a concurrent `ainb kill` / recovery / daemon register
         // can't lost-update this upsert (pu4).
-        if let Err(e) = crate::cli::util::mutate_session_store(|store| store.upsert(metadata)) {
+        if let Err(e) =
+            crate::cli::util::mutate_session_store_async(|store| store.upsert(metadata)).await
+        {
             warn!("Failed to persist session metadata: {}", e);
             // Continue anyway - session is still usable, just won't survive restarts gracefully
         }
@@ -1946,7 +1950,9 @@ impl InteractiveSessionManager {
             codex_thread_id: codex_remote.and_then(|remote| remote.thread_id),
         };
         // Locked RMW (pu4): serialise against concurrent kill/recovery writers.
-        if let Err(e) = crate::cli::util::mutate_session_store(|store| store.upsert(metadata)) {
+        if let Err(e) =
+            crate::cli::util::mutate_session_store_async(|store| store.upsert(metadata)).await
+        {
             warn!("Failed to persist session metadata: {}", e);
         }
 
@@ -2599,20 +2605,26 @@ impl InteractiveSessionManager {
         // under its bounded lock. A failure is logged and the removal goes on
         // (the tmux session and worktree are already gone); the reap below is
         // then skipped, since what remains is unknown.
-        let mut remaining_headroom = None;
-        if let Err(e) = crate::cli::util::mutate_session_store_async(|store| {
+        let mut counted = None;
+        let removal = crate::cli::util::mutate_session_store_async(|store| {
             if let Some(ref name) = tmux_session_name {
                 store.remove_by_tmux_name(name);
             }
             store.remove_by_session_id(session_id); // Also remove by ID in case tmux name changed
-            remaining_headroom =
-                Some(store.sessions.values().filter(|m| m.headroom_enabled).count());
+            counted = Some(store.sessions.values().filter(|m| m.headroom_enabled).count());
         })
-        .await
-        {
-            warn!("Failed to update sessions.json after removal: {}", e);
-            // Continue anyway - removal was successful
-        }
+        .await;
+        // What the closure counted is only true of a write that landed: a
+        // failed save or table write leaves the store as it was, so the reap
+        // below must not act on it.
+        let remaining_headroom = match removal {
+            Ok(()) => counted,
+            Err(e) => {
+                warn!("Failed to update sessions.json after removal: {}", e);
+                // Continue anyway - removal was successful
+                None
+            }
+        };
 
         // Idle-reap: if no Headroom-enabled sessions remain, stop the shared
         // proxy so it doesn't linger after the last consumer is gone.
