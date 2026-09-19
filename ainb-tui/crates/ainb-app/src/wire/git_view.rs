@@ -306,9 +306,13 @@ pub fn project_within(
         markdown_content,
         markdown_lines_cut,
         selected_commit_index: within(state.selected_commit_index, commits.len()),
-        // Flagged as the review rows' `scroll_cut` is: an empty list has
-        // nothing to be off, and index 0 is where the reducer is.
-        selected_commit_cut: !commits.is_empty() && state.selected_commit_index >= commits.len(),
+        // Flagged as the review rows' `scroll_cut` is. Guarded on the model's
+        // list, not the framed one: when the list budget frames zero commits
+        // out of many, the selection is off what the frame carries and the
+        // flag must say so. An empty model list has nothing to be off, and
+        // index 0 is where the reducer is.
+        selected_commit_cut: !state.commits.is_empty()
+            && state.selected_commit_index >= commits.len(),
         commits_cut,
         commits,
         review_ui: ReviewUiFrame {
