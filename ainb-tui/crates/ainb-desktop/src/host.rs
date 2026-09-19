@@ -100,6 +100,9 @@ pub fn legacy_panel(config: &AppConfig) -> bool {
     resolved_bool(LEGACY_PANEL_ENV, config.fleet.status.legacy_panel)
 }
 
+/// The home sidebar's `select` row, the one Enter runs on a focused item.
+const HOME_SIDEBAR_SELECT: &str = "home.sidebar.select";
+
 /// One `AppState` hosted for the desktop renderer.
 pub struct DesktopHost<S: FrameSink> {
     state: AppState,
@@ -287,14 +290,21 @@ impl<S: FrameSink> DesktopHost<S> {
     ///
     /// The state starts on the home screen, where the session list's rows (a
     /// row click among them) are refused by the context gate. The move goes
-    /// through the home sidebar's own rows, two clicks on its Sessions item as
-    /// a double click opens it, so the host writes no state of its own.
+    /// through the home sidebar's own rows, so the host writes no state of its
+    /// own: a click on its Sessions item selects and focuses it, and the
+    /// sidebar's `select` row (Enter) opens it.
+    ///
+    /// Not two clicks: the reducer opens on a double click only inside the
+    /// double-click window, timed with the wall clock, so a host slow enough to
+    /// spend the window on the first click stayed on the home screen.
     pub fn open_sessions(&mut self, executor: &mut impl Executor) {
         use ainb_app::app::pointer::click_home_sidebar_item;
         use ainb_app::components::sidebar::SidebarItem;
-        for _ in 0..2 {
-            self.run(click_home_sidebar_item(SidebarItem::Sessions), executor);
-        }
+        self.run(click_home_sidebar_item(SidebarItem::Sessions), executor);
+        self.run(
+            Intent::Command(CommandId::new(HOME_SIDEBAR_SELECT), serde_json::Value::Null),
+            executor,
+        );
     }
 
     /// Every command the palette may offer, in the keymap's own order.
