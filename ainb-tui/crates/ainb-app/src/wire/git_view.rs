@@ -31,7 +31,6 @@
 
 use crate::components::code_review::model::{DiffRow, ReviewFile};
 use crate::components::git_view::{ChangedFile, FileTreeItem, GitTab, GitViewState, MarkdownLine};
-use crate::fleet::bridge::redact::scrub_lines;
 
 /// The most raw diff lines a frame carries.
 pub const MAX_DIFF_LINES: usize = 2_000;
@@ -464,7 +463,7 @@ where
 }
 
 /// Whether `cost` fits what is left of `budget`, and spends it if it does.
-fn afford(cost: usize, budget: &mut usize) -> bool {
+const fn afford(cost: usize, budget: &mut usize) -> bool {
     if cost > *budget {
         return false;
     }
