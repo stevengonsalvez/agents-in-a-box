@@ -891,9 +891,10 @@ impl InboxSection {
     /// may be stale. Without rows the section is absent for `reason`.
     pub fn mark_read_failed(&mut self, reason: impl Into<String>) -> bool {
         let reason = bound_reason(&reason.into());
-        // Before any read lands the section is absent, and a repeated failure
-        // replaces that one reason rather than adding a second.
-        if self.entries.is_empty() && self.received_at_ms == 0 {
+        // With no rows to keep there is nothing to be unreachable from: the
+        // section is absent, and a repeated failure replaces that one reason
+        // rather than adding a second beside it.
+        if self.entries.is_empty() {
             return self.mark_absent(reason);
         }
         let changed = self.unreachable.as_deref() != Some(reason.as_str());
@@ -911,6 +912,8 @@ impl InboxSection {
         self.unread = 0;
         self.rows_cut = 0;
         self.summaries_cut = 0;
+        // No read is on screen once the section is absent, so no stamp either.
+        self.received_at_ms = 0;
         self.unreachable = None;
         self.absent = Some(reason);
         changed
@@ -1070,6 +1073,28 @@ mod inbox_section_tests {
         assert!(!super::id_like("ctl\u{1}"));
         assert!(!super::id_like("é"));
         assert!(!super::id_like(&"a".repeat(super::MAX_INBOX_ID_CHARS + 1)));
+    }
+
+    #[test]
+    fn absent_after_a_read_then_a_failure_carries_one_reason_and_no_rows() {
+        let mut section = InboxSection::default();
+        section.apply_read(
+            InboxListResult {
+                entries: vec![row("a")],
+                unread: 1,
+            },
+            "member:me",
+            5,
+        );
+        assert!(section.mark_absent("daemon has no inbox_list"));
+        assert!(section.mark_read_failed("connect: refused"));
+        assert_eq!(section.absent.as_deref(), Some("connect: refused"));
+        assert!(
+            section.unreachable.is_none(),
+            "never both reasons with zero rows"
+        );
+        assert!(section.entries.is_empty());
+        assert_eq!(section.received_at_ms, 0);
     }
 
     #[test]
@@ -1503,6 +1528,11 @@ pub struct HostOnlyState {
     /// sweep: a second press while it is in flight emits nothing, and the
     /// report clears it.
     pub inbox_mark_in_flight: bool,
+    /// The inbox screen's first drawn row, an index into
+    /// `InboxSection::entries`. Owned by the reducer, bounded by it: a new
+    /// read that shrinks the list pulls it back, so the screen never draws
+    /// from past the end. Host-only, the desktop's list scrolls in the DOM.
+    pub inbox_scroll: usize,
     /// When each attached session was last seen attached by
     /// `AppState::refresh_attention`.
     ///
@@ -1554,6 +1584,7 @@ impl Default for HostOnlyState {
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             inbox_mark_in_flight: false,
+            inbox_scroll: 0,
             attention_attached_at: HashMap::new(),
         }
     }

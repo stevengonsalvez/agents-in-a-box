@@ -110,9 +110,18 @@ fn kill_session(session: &str) {
     let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
-fn launch_to_home(session: &str, home: &Path) {
+fn launch_to_home(session: &str, home: &Path, width: u16) {
     let status = Command::new("tmux")
-        .args(["new-session", "-d", "-s", session, "-x", "200", "-y", "50"])
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-x",
+            &width.to_string(),
+            "-y",
+            "50",
+        ])
         .status()
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
@@ -136,16 +145,18 @@ fn launch_to_home(session: &str, home: &Path) {
     }
 }
 
-#[test]
-fn session_list_legend_advertises_every_panel() {
+/// The legend has two shapes, two columns from 110 columns and stacked below
+/// it, and a hint that is only on one of them is a key the other width's
+/// operator never learns; so the check runs at both.
+fn session_list_legend_advertises_every_panel_at(width: u16) {
     if !tmux_available() {
         eprintln!("SKIP: tmux not available");
         return;
     }
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_isolated_home(home_tmp.path());
-    let session = format!("tripwire-legend-{}", std::process::id());
-    launch_to_home(&session, home_tmp.path());
+    let session = format!("tripwire-legend-{width}-{}", std::process::id());
+    launch_to_home(&session, home_tmp.path(), width);
 
     // The panel line renders the six shortcuts together; wait for the
     // whole group so we don't race a half-painted legend.
@@ -162,24 +173,30 @@ fn session_list_legend_advertises_every_panel() {
     // pairs as the legend paints them (key span + description span are
     // adjacent in the capture). A missing token means a panel is
     // reachable but undiscoverable from the session list.
-    for token in ["i stats", "w witr", "k skills", "m memory", "t abtop"] {
+    // `b inbox` is back with the inbox screen (D3-prime): a key that opens a
+    // screen and is named nowhere is one the operator never learns.
+    for token in [
+        "b inbox", "i stats", "w witr", "k skills", "m memory", "t abtop",
+    ] {
         assert!(
             final_cap.contains(token),
-            "session-list legend missing panel shortcut {token:?}:\n---\n{final_cap}\n---"
+            "session-list legend at {width} columns missing panel shortcut {token:?}:\n---\n{final_cap}\n---"
         );
     }
-    // And the retired one is really retired. A legend advertising a key that
-    // opens nothing is worse than one that omits it: the operator presses it,
-    // nothing happens, and they learn to distrust the whole line.
-    assert!(
-        !final_cap.contains("b inbox"),
-        "the Inbox screen is gone; its shortcut must not still be advertised:\n\
-         ---\n{final_cap}\n---"
-    );
     assert!(
         final_cap.contains("log"),
-        "its replacement, the `log` tab, must be on screen:\n---\n{final_cap}\n---"
+        "the `log` tab must be on screen:\n---\n{final_cap}\n---"
     );
+}
+
+#[test]
+fn session_list_legend_advertises_every_panel_in_two_columns() {
+    session_list_legend_advertises_every_panel_at(200);
+}
+
+#[test]
+fn session_list_legend_advertises_every_panel_stacked() {
+    session_list_legend_advertises_every_panel_at(100);
 }
 
 #[test]
@@ -191,7 +208,7 @@ fn help_overlay_documents_panels_section() {
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_isolated_home(home_tmp.path());
     let session = format!("tripwire-help-{}", std::process::id());
-    launch_to_home(&session, home_tmp.path());
+    launch_to_home(&session, home_tmp.path(), 200);
 
     // `?` opens the global help overlay. Re-send during the bounded startup
     // window because the terminal can paint before its first key is accepted.
