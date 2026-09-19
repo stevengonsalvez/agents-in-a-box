@@ -27,6 +27,7 @@ pub mod mutation;
 pub mod pr_status;
 pub mod protocol;
 pub mod reprime;
+pub mod sessions;
 pub mod settings;
 pub mod snapshots;
 pub mod status_topic;

@@ -8,9 +8,8 @@ use serde::Serialize;
 use std::io::{self, Write};
 use std::process::Command;
 
-use super::util::find_session;
+use super::util::{find_session, mutate_session_store};
 use super::{KillArgs, OutputFormat, StatusArgs};
-use crate::interactive::session_manager::SessionStore;
 use crate::tmux::ClaudeProcessDetector;
 
 /// JSON output structure for status command
@@ -134,8 +133,8 @@ pub async fn kill(args: KillArgs) -> Result<()> {
         println!("Session '{workspace_name}' is not running (tmux session not found).");
         println!("Removing from session store...");
 
-        // Still remove from store (locked RMW — pu4)
-        SessionStore::mutate(|store| store.remove_by_session_id(session.session_id))
+        // Still remove from store (locked RMW: pu4)
+        mutate_session_store(|store| store.remove_by_session_id(session.session_id))
             .context("Failed to save session store")?;
 
         println!("Session removed.");
@@ -178,8 +177,8 @@ pub async fn kill(args: KillArgs) -> Result<()> {
         println!("Tmux session killed.");
     }
 
-    // Remove from session store (locked RMW — pu4)
-    SessionStore::mutate(|store| store.remove_by_session_id(session.session_id))
+    // Remove from session store (locked RMW: pu4)
+    mutate_session_store(|store| store.remove_by_session_id(session.session_id))
         .context("Failed to save session store")?;
 
     println!("Session '{workspace_name}' removed.");

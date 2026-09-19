@@ -23,6 +23,24 @@ pub const WORKSPACE_SUBSCRIBE: &str = "workspace/subscribe";
 /// Params: `{}`. Result: `{ workspaces: [...] }`.
 pub const WORKSPACE_LIST: &str = "workspace/list";
 
+/// `workspace/session_list`: list durable sessions.
+///
+/// Params: [`crate::sessions::WorkspaceSessionListParams`].
+/// Result: [`crate::sessions::WorkspaceSessionListResult`].
+pub const WORKSPACE_SESSION_LIST: &str = "workspace/session_list";
+
+/// `workspace/session_upsert`: create or update a durable session.
+///
+/// Params: [`crate::sessions::WorkspaceSessionUpsertParams`].
+/// Result: [`crate::sessions::WorkspaceSessionUpsertResult`].
+pub const WORKSPACE_SESSION_UPSERT: &str = "workspace/session_upsert";
+
+/// `workspace/session_delete`: remove a durable session.
+///
+/// Params: [`crate::sessions::WorkspaceSessionDeleteParams`].
+/// Result: [`crate::sessions::WorkspaceSessionDeleteResult`].
+pub const WORKSPACE_SESSION_DELETE: &str = "workspace/session_delete";
+
 /// `hangar/issues_list` — snapshot the issues of a workspace.
 ///
 /// Params: `{ workspace_id: String }`. Result: `{ issues: [IssueRow, ...] }`
@@ -1705,6 +1723,9 @@ pub const PING: &str = "ping";
 pub const ALL_METHODS: &[&str] = &[
     WORKSPACE_SUBSCRIBE,
     WORKSPACE_LIST,
+    WORKSPACE_SESSION_LIST,
+    WORKSPACE_SESSION_UPSERT,
+    WORKSPACE_SESSION_DELETE,
     HANGAR_ISSUES_LIST,
     HANGAR_ISSUES_SEARCH,
     HANGAR_SEARCH,
@@ -1962,6 +1983,9 @@ mod tests {
     fn workspace_methods_namespaced() {
         assert!(WORKSPACE_SUBSCRIBE.starts_with("workspace/"));
         assert!(WORKSPACE_LIST.starts_with("workspace/"));
+        assert!(WORKSPACE_SESSION_LIST.starts_with("workspace/"));
+        assert!(WORKSPACE_SESSION_UPSERT.starts_with("workspace/"));
+        assert!(WORKSPACE_SESSION_DELETE.starts_with("workspace/"));
     }
 
     /// The control-plane attention methods live under the `attention/` namespace.
@@ -2074,6 +2098,9 @@ mod tests {
         let declared: &[&str] = &[
             WORKSPACE_SUBSCRIBE,
             WORKSPACE_LIST,
+            WORKSPACE_SESSION_LIST,
+            WORKSPACE_SESSION_UPSERT,
+            WORKSPACE_SESSION_DELETE,
             HANGAR_ISSUES_LIST,
             HANGAR_ISSUES_SEARCH,
             HANGAR_SEARCH,
