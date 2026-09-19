@@ -12,7 +12,10 @@ use std::time::Duration;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarState, daemon_pid};
 use ainb_hangar_client::DaemonClient;
 use ainb_hangar_proto::connections::SurfaceKind;
+use ainb_hangar_proto::protocol::ProtocolRange;
 use tokio::sync::watch;
+
+mod skew_support;
 
 /// A cold runner needs time to migrate a fresh store and mint the token.
 const BOOT_BUDGET: Duration = Duration::from_secs(90);
@@ -382,5 +385,43 @@ async fn a_child_that_never_owned_the_home_is_stopped() {
     assert!(
         String::from_utf8_lossy(&strays.stdout).trim().is_empty(),
         "a child that never owned the home is still running"
+    );
+}
+
+/// A daemon that owns the home and refuses this build's protocol range is
+/// answered today by a spawn: the child loses the flock and exits 0, the
+/// supervisor polls hello for the whole budget against a daemon that keeps
+/// refusing, and the app degrades with "no daemon answered", which is the
+/// wrong sentence for a daemon that answered every time. Pinned as it stands
+/// so the fix is a visible diff.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusing_daemon_is_answered_by_a_spawn_then_degraded() {
+    let world = World::new();
+    let _daemon = skew_support::listen(
+        &world.home(),
+        skew_support::Hello::Refuse {
+            protocol: ProtocolRange { min: 5, max: 6 },
+            daemon_version: Some("9.9.9".into()),
+        },
+    );
+    let spawned = world.dir.path().join("spawned");
+    let mut config = world.config();
+    config.daemon_bin = skew_support::recording_daemon(world.dir.path(), &spawned);
+    config.grace = Duration::from_millis(300);
+    config.hello_budget = Duration::from_secs(1);
+    let sidecar = Sidecar::start(config);
+    let mut state = sidecar.state();
+
+    let SidecarState::Degraded { error, .. } = wait_for(&mut state, "degraded", |state| {
+        matches!(state, SidecarState::Degraded { .. })
+    })
+    .await
+    else {
+        unreachable!("matched degraded");
+    };
+    assert!(error.contains("no daemon answered"), "{error}");
+    assert!(
+        spawned.is_file(),
+        "the bundled daemon was spawned against a daemon that answered"
     );
 }
