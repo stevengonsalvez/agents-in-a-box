@@ -183,12 +183,7 @@ export function wheelRows(
  * keyboard is the only way to move it for anyone not holding a wheel: these
  * are the keys the terminal's own review already answers.
  */
-export function keyRows(
-  key: string,
-  rowsPerPage: number,
-  scroll: number,
-  rows: number,
-): number | null {
+export function keyRows(key: string, rowsPerPage: number): number | null {
   switch (key) {
     case "ArrowDown":
       return 1;
@@ -198,14 +193,23 @@ export function keyRows(
       return rowsPerPage;
     case "PageUp":
       return -rowsPerPage;
+    // Ends, not distances. The intent is a delta the reducer applies to ITS
+    // own offset over the whole model, and this window only knows the frame's
+    // rows: `scroll - frameRows` would be an arithmetic in the wrong space.
+    // The reducer saturates at both ends (`review_scroll_up`,
+    // `review_scroll_down`, `components/git_view.rs:191-200`), so a delta past
+    // either end lands exactly on it.
     case "Home":
-      return -scroll;
+      return -ENDS;
     case "End":
-      return Math.max(rows - 1 - scroll, 0);
+      return ENDS;
     default:
       return null;
   }
 }
+
+/// A delta no review is longer than, for the keys that mean "the end".
+const ENDS = 1_000_000_000;
 
 /** A run of a row's text, and whether the reducer marked it as changed. */
 export interface Segment {
