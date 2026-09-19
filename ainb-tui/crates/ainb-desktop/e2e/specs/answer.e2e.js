@@ -24,6 +24,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { click } from "../support.js";
 import { AINB_BIN, env, hook, paneText, run, seeded } from "../world.js";
 
 const QUESTION = "Ship to which environment?";
@@ -79,28 +80,6 @@ function desktopLog() {
   }
 }
 
-/**
- * Click `selector` as a person does: through the driver, so the click passes
- * WebDriver's own actionability checks (displayed, enabled, not covered),
- * which a click the page runs on itself never proves. The banner's buttons
- * are reconciled by label across frames, so the element the driver found is
- * the one it clicks; should a frame replace it in between, the driver says
- * so as a stale element and the click is looked up again, a few times.
- */
-async function clickAsPerson(selector, attempts = 5) {
-  let last = null;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      await $(selector).click();
-      return;
-    } catch (error) {
-      if (!/stale element/i.test(String(error))) throw error;
-      last = error;
-    }
-  }
-  throw last;
-}
-
 /** Wait for `condition`, failing with what `explain` says at the deadline. */
 async function settle(condition, timeout, explain) {
   try {
@@ -136,7 +115,7 @@ describe("answering from the window", () => {
     hook(askLine(`e2e-ask-row-${stamp}`, "", target.cwd));
 
     // The board: the agent the id names sits in the waiting column.
-    await $(".board-tab .tab-title").click();
+    await click(".board-tab .tab-title");
     const card = `.board-column[data-state="waiting"] .board-card[data-card="claude:${provider}"]`;
     await $(card).waitForExist({
       timeout: 60_000,
@@ -145,7 +124,7 @@ describe("answering from the window", () => {
 
     // The banner: the session's row carries the question, and selecting it
     // puts the question in front of the person.
-    await $(`.session-row[data-session="${target.id}"]`).click();
+    await click(`.session-row[data-session="${target.id}"]`);
     await $(".answer-banner[data-request]").waitForExist({
       timeout: 60_000,
       timeoutMsg: "the banner never showed the question",
@@ -166,7 +145,7 @@ describe("answering from the window", () => {
     // banner reads is the frame's `fleet.ask_state.phases` entry for this
     // request.
     const sentBefore = intentsSent().length;
-    await clickAsPerson(`.answer-banner .answer-option[data-option="${PICK}"]`);
+    await click(`.answer-banner .answer-option[data-option="${PICK}"]`);
     let phase = "";
     await settle(
       async () => {
@@ -246,7 +225,7 @@ describe("answering from the window", () => {
     // be both the banner's and the card's, and this would read answered.
     // Selecting the row opened its terminal tab, so the board is brought back
     // to be read.
-    await $(".board-tab .tab-title").click();
+    await click(".board-tab .tab-title");
     await $(card).waitForExist({
       timeout: 30_000,
       timeoutMsg: "the card for the unanswered row left the waiting column (#1049 keeps it there)",
