@@ -641,6 +641,28 @@ DESKTOP_DAEMON_BIN="${AINB_DESKTOP_DAEMON_BIN:-${CARGO_TARGET_DIR:-$AINB_TUI_DIR
 
 DESKTOP_LOG=""
 
+# desktop_ready: whether this box can open the desktop window. When it cannot,
+# the node's result says why, and the caller returns (`desktop_ready || return`).
+#
+# No webview libraries means the shell cannot be built on this box at all, and
+# no headless X server means the window has nowhere to open. Neither falsifies
+# anything about the window, so both skip. With webkit present, a missing binary
+# is a real gap, because `run.sh --build` builds it there, so that one fails.
+desktop_ready() {
+  if [[ ! -x "$DESKTOP_BIN" ]]; then
+    if ! pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+      skip "webkit2gtk-4.1 is not installed, so the desktop shell cannot be built on this box"
+      return 1
+    fi
+    check "the desktop shell is built at $DESKTOP_BIN" false
+    return 1
+  fi
+  if ! command -v xvfb-run >/dev/null; then
+    skip "xvfb-run is not installed, so the window has no display to open on"
+    return 1
+  fi
+}
+
 # start_desktop: the window in a harness pane, under a headless X server,
 # waited on until its renderer has applied a batch.
 start_desktop() {
