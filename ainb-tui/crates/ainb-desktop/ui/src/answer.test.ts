@@ -2,13 +2,24 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createRoot, createSignal } from "solid-js";
 import type {
   AnswerPhase_Serialize,
   AskState_Serialize,
   AttentionMark_Serialize,
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
-import { phaseOf, pickIntents, questionFor, type Refusal, selectedSession, sendInOrder, typedIntents } from "./answer.ts";
+import {
+  drawnQuestion,
+  phaseOf,
+  pickIntents,
+  type Question,
+  questionFor,
+  type Refusal,
+  selectedSession,
+  sendInOrder,
+  typedIntents,
+} from "./answer.ts";
 
 function mark(over: Partial<AttentionMark_Serialize> = {}): AttentionMark_Serialize {
   return {
@@ -212,4 +223,33 @@ test("with nothing refused, every intent goes out in order", async () => {
   });
   assert.equal(stopped, null);
   assert.deepEqual(sent, commands(intents));
+});
+
+test("a click on the banner drawn before the question moved on sends nothing", () => {
+  // The banner reads the question as painted. A frame moves the question on
+  // (att-8, the same labels) before the next paint: the old banner's click
+  // names att-7, which the new answer state refuses. After the paint the
+  // banner is att-8's, and its click answers att-8.
+  const paints: (() => void)[] = [];
+  const { current, setCurrent, drawn, dispose } = createRoot((dispose) => {
+    const [current, setCurrent] = createSignal<Question>(questionFor(sessions(mark()))!);
+    return { current, setCurrent, drawn: drawnQuestion(current, (paint) => paints.push(paint)), dispose };
+  });
+  try {
+    paints.splice(0).forEach((paint) => paint());
+    assert.equal(drawn().request, "att-7");
+    assert.equal(commands(pickIntents(drawn(), ask(), 0)).at(-1), "session_list.ask.pick");
+
+    setCurrent(questionFor(sessions(mark({ request: "att-8" })))!);
+    assert.equal(current().request, "att-8", "the frame has moved on");
+    assert.equal(drawn().request, "att-7", "the banner has not repainted");
+    assert.deepEqual(pickIntents(drawn(), ask({ request: "att-8" }), 0), [], "the old banner's click sends nothing");
+
+    paints.splice(0).forEach((paint) => paint());
+    assert.equal(drawn().request, "att-8", "the paint brought the banner to the new question");
+    const intents = pickIntents(drawn(), ask({ request: "att-8" }), 0);
+    assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-8", label: "staging" });
+  } finally {
+    dispose();
+  }
 });
