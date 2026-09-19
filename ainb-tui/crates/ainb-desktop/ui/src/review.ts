@@ -156,18 +156,55 @@ export interface Wheel {
  *
  * Accumulated rather than truncated per event: a trackpad sends deltas of a
  * pixel or two and a line-mode mouse sends 3, and truncating each one on its
- * own rounds every single one of them to no rows at all.
+ * own rounds every single one of them to no rows at all. A page is what the
+ * body can show, `rowsPerPage`, rather than a number picked here.
  */
-export function wheelRows(pending: number, wheel: Wheel): { rows: number; pending: number } {
+export function wheelRows(
+  pending: number,
+  wheel: Wheel,
+  rowsPerPage: number,
+): { rows: number; pending: number } {
   const pixels =
     wheel.deltaMode === 1
       ? wheel.deltaY * ROW_PX
       : wheel.deltaMode === 2
-        ? wheel.deltaY * ROW_PX * 20
+        ? wheel.deltaY * rowsPerPage * ROW_PX
         : wheel.deltaY;
   const total = pending + pixels;
   const rows = Math.trunc(total / ROW_PX);
   return { rows, pending: total - rows * ROW_PX };
+}
+
+/**
+ * How many rows `key` asks the reducer to move by, or null when it is not a
+ * key this tab answers.
+ *
+ * The body takes focus and the browser's own scrolling is refused, so a
+ * keyboard is the only way to move it for anyone not holding a wheel: these
+ * are the keys the terminal's own review already answers.
+ */
+export function keyRows(
+  key: string,
+  rowsPerPage: number,
+  scroll: number,
+  rows: number,
+): number | null {
+  switch (key) {
+    case "ArrowDown":
+      return 1;
+    case "ArrowUp":
+      return -1;
+    case "PageDown":
+      return rowsPerPage;
+    case "PageUp":
+      return -rowsPerPage;
+    case "Home":
+      return -scroll;
+    case "End":
+      return Math.max(rows - 1 - scroll, 0);
+    default:
+      return null;
+  }
 }
 
 /** A run of a row's text, and whether the reducer marked it as changed. */
@@ -209,7 +246,10 @@ export function segments(row: DiffRow_Serialize): Segment[] {
   if (row.emphasis.length === 0) return [{ text: row.raw, emphasis: false }];
   const runs: Segment[] = [];
   let at = 0;
-  for (const [from, to] of row.emphasis) {
+  // Sorted, because nothing promises the reducer emitted them in order and an
+  // out-of-order range used to be dropped without a word.
+  const ranges = [...row.emphasis].sort((left, right) => left[0] - right[0]);
+  for (const [from, to] of ranges) {
     const start = utf16Index(row.raw, from);
     const end = utf16Index(row.raw, to);
     if (end <= start || start < at) continue;
