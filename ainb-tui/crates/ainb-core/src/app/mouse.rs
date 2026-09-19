@@ -420,8 +420,10 @@ mod tests {
         let on_pal = press(&state, &mut ui, Pos { x: 72, y: 3 }, Btn::Left);
         assert_eq!(on_pal, Some(pointer::select_session_tab(SessionTab::Pal)));
 
+        // Between the labels: no tab at all, not merely neither neighbour.
         let on_bar = press(&state, &mut ui, Pos { x: 76, y: 3 }, Btn::Left);
-        assert_ne!(on_bar, Some(pointer::select_session_tab(SessionTab::Pal)));
-        assert_ne!(on_bar, Some(pointer::select_session_tab(SessionTab::Log)));
+        for tab in crate::components::session_tabs::ALL_TABS {
+            assert_ne!(on_bar, Some(pointer::select_session_tab(tab)), "{tab:?}");
+        }
     }
 }
