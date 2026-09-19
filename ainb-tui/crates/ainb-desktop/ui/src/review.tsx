@@ -4,6 +4,8 @@ import {
   bodyLines,
   fileRows,
   gitView,
+  keyRows,
+  ROW_PX,
   scrollIntent,
   sectionCut,
   segments,
@@ -41,10 +43,13 @@ export function Review(props: Props) {
   const body = () => bodyLines(props.gitView);
   const cut = () => sectionCut(props.gitView);
   const scroll = () => gitView(props.gitView)?.review_ui.scroll ?? 0;
+  const scrollCut = () => gitView(props.gitView)?.review_ui.scroll_cut === true;
 
   let bodyElement: HTMLDivElement | undefined;
   /** Pixels a wheel has sent that have not yet made a whole row. */
   let pending = 0;
+  /** Rows the body can show at once, for a page key and a page wheel. */
+  const rowsPerPage = () => Math.max(Math.floor((bodyElement?.clientHeight ?? 0) / ROW_PX), 1);
 
   // The offset is the reducer's, so the body is put where the frame says
   // rather than wherever the last wheel left it: the terminal and this window
@@ -56,8 +61,15 @@ export function Review(props: Props) {
     const element = bodyElement;
     if (element === undefined) return;
     const row = element.querySelector<HTMLElement>(`[data-vrow="${first}"]`);
-    element.scrollTop = row === undefined || row === null ? 0 : row.offsetTop - element.offsetTop;
+    // A row the frame does not carry leaves the body where it is: jumping to
+    // the top would lose the place over a frame that simply cut something.
+    if (row === null) return;
+    element.scrollTop = row.offsetTop - element.offsetTop;
   });
+
+  const move = (rows: number) => {
+    if (rows !== 0) props.onChoose(scrollIntent(rows));
+  };
 
   return (
     <section
@@ -67,9 +79,9 @@ export function Review(props: Props) {
         // The browser must not scroll the body as well: one source of the
         // offset, and it is the reducer.
         event.preventDefault();
-        const step = wheelRows(pending, event);
+        const step = wheelRows(pending, event, rowsPerPage());
         pending = step.pending;
-        if (step.rows !== 0) props.onChoose(scrollIntent(step.rows));
+        move(step.rows);
       }}
     >
       <Show when={props.stale}>
@@ -78,6 +90,11 @@ export function Review(props: Props) {
         </p>
       </Show>
       <Show when={cut()}>{(line) => <p class="review-cut" role="status">{line()}</p>}</Show>
+      <Show when={scrollCut()}>
+        <p class="review-cut" role="status">
+          The row the terminal is on was not sent; this is the nearest one that was.
+        </p>
+      </Show>
 
       <Show
         when={files().length > 0}
@@ -107,7 +124,22 @@ export function Review(props: Props) {
             </For>
           </ul>
 
-          <div class="review-body" ref={bodyElement}>
+          {/* The body takes focus and answers the keys the terminal's review
+              answers, because the wheel is refused and a keyboard is the only
+              other way to move an offset the reducer owns. */}
+          <div
+            class="review-body"
+            ref={bodyElement}
+            tabIndex={0}
+            role="region"
+            aria-label="Diff"
+            onKeyDown={(event) => {
+              const rows = keyRows(event.key, rowsPerPage(), scroll(), body().length);
+              if (rows === null) return;
+              event.preventDefault();
+              move(rows);
+            }}
+          >
             <Show
               when={body().length > 0}
               fallback={<p class="empty">Nothing to show for these changes</p>}
