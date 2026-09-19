@@ -68,6 +68,10 @@ pub fn execute<'t>(
             spawn_daemon_action(daemon, action, generation);
             Work::Done(Vec::new())
         }
+        Effect::InboxMarkAllRead => {
+            spawn_inbox_mark_all_read();
+            Work::Done(Vec::new())
+        }
         Effect::Persist(store) => Work::Done(match crate::config::persist::write(&store) {
             Ok(()) => Vec::new(),
             Err(error) => vec![reports::persist_failed(store.store_id(), &error)],
@@ -200,6 +204,33 @@ fn spawn_daemon_action(
             local: None,
         };
         let _ = tx.send(reports::daemon_action_finished(&report));
+    }
+}
+
+/// Sweep the inbox read on a worker thread, as the terminal, and report how
+/// it ended. The op id is minted once inside and held across the retry
+/// (`ainb_app::fleet::inbox_write`).
+fn spawn_inbox_mark_all_read() {
+    use ainb_hangar_proto::connections::SurfaceKind;
+    let tx = deferred().0.clone();
+    let spawned = std::thread::Builder::new().name("ainb-inbox-mark-read".into()).spawn({
+        let tx = tx.clone();
+        move || {
+            let outcome = ainb_app::fleet::inbox_write::mark_all_read_blocking(|| {
+                ainb_app::fleet::bridge::daemon::surface_client(SurfaceKind::Tui)
+            });
+            let _ = tx.send(reports::inbox_mark_all_read_finished(&outcome));
+        }
+    });
+    if let Err(error) = spawned {
+        let outcome = ainb_app::fleet::inbox_write::MarkAllReadOutcome {
+            op_id: String::new(),
+            ok: false,
+            marked: 0,
+            unread: 0,
+            error: Some(format!("the worker did not start: {error}")),
+        };
+        let _ = tx.send(reports::inbox_mark_all_read_finished(&outcome));
     }
 }
 
