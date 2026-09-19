@@ -698,3 +698,38 @@ fn a_markdown_key_block_across_a_scrub_chunk_is_redacted_whole() {
     assert_eq!(lines[62], "line 62");
     assert_eq!(lines[68], "after the key");
 }
+
+/// A worktree's directory name is only neutral when it names a project. At
+/// the home directory it is the operator's username, and at the root or a
+/// path ending in `..` there is no name at all, which framed as an empty
+/// string. Both frame one fixed label instead (#1212 review).
+#[test]
+fn a_worktree_at_home_or_with_no_name_frames_a_neutral_label() {
+    let home = dirs::home_dir().expect("a home directory");
+    for path in [home.clone(), PathBuf::from("/"), PathBuf::from("/work/..")] {
+        let mut state = state_with(1, 1, "a changed line");
+        {
+            let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+            git.worktree_path = path.clone();
+        }
+        let body = framed(&state)["git_view_state"].clone();
+        assert_eq!(
+            body["worktree_name"],
+            "worktree",
+            "{} frames the label",
+            path.display()
+        );
+    }
+    if let Some(user) = home.file_name().and_then(|name| name.to_str()).map(str::to_string) {
+        let mut state = state_with(1, 1, "a changed line");
+        {
+            let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+            git.worktree_path = home;
+        }
+        let text = serde_json::to_string(&framed(&state)["git_view_state"]).expect("encodes");
+        assert!(
+            !text.contains(&format!("\"{user}\"")),
+            "the username never frames: {text}"
+        );
+    }
+}
