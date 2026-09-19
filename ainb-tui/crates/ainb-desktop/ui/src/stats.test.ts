@@ -21,9 +21,6 @@ const bucket = (input: number, cost: number | null = null): UsageBucketFrame => 
 
 const summary = (over: Partial<UsageSummaryFrame> = {}): UsageSummaryFrame => ({
   state: "ready",
-  generated_at: 1,
-  start_at: 0,
-  end_at: 1,
   totals: bucket(1000, 12.5),
   daily: [
     { date: "2026-09-18", bucket: bucket(10) },
@@ -43,7 +40,6 @@ const summary = (over: Partial<UsageSummaryFrame> = {}): UsageSummaryFrame => ({
 const view = (over: Partial<UsageView> = {}): UsageView => ({
   absent: null,
   failure: null,
-  received_at_ms: 1,
   summary: summary(),
   ...over,
 });
@@ -123,7 +119,7 @@ test("absent, failed and not yet read each say why, in the host's words", () => 
   assert.match(failedHeld.status ?? "", /last read failed: daemon not reachable/);
 
   assert.equal(statsView(undefined).state, "waiting");
-  assert.equal(statsView(view({ summary: null, received_at_ms: null })).state, "waiting");
+  assert.equal(statsView(view({ summary: null })).state, "waiting");
 });
 
 test("what the frame cut is one line of its own counters", () => {
