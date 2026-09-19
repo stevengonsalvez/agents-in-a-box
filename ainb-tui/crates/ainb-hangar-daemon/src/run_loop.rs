@@ -3296,9 +3296,9 @@ mod tests {
     }
 
     /// P6e: the registration's table write happens while the sessions.json
-    /// flock is still held. The table write is made to wait on a held SQLite
-    /// write lock; the file row is already written, and the flock must still
-    /// be taken. Moving the table write back outside the flock makes the
+    /// flock is still held. The table write is made to wait on a held
+    /// database write lock; the file row is already written, and the flock
+    /// must still be taken. Moving the table write back outside the flock makes the
     /// try-lock succeed here.
     #[tokio::test]
     async fn registration_holds_the_flock_across_the_table_write() {
