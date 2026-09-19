@@ -89,7 +89,7 @@ ALL_NODES=(
   p1-app-extraction p2-effects p3-hangar-host p4-review-screens
   w0-wire t0-daemon issue-963-presence issue-962-fleet-panel
   t0-section issue-983-redaction issue-1094-own-session issue-1173-select-tab
-  d1-shell
+  d1-shell d2-board
 )
 if ((${#ONLY[@]})); then NODES=("${ONLY[@]}"); else NODES=("${ALL_NODES[@]}"); fi
 for node in "${NODES[@]}"; do

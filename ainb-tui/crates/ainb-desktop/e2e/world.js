@@ -124,6 +124,10 @@ export function up(sessions = 2) {
     TMUX_TMPDIR: join(root, "tmux"),
     // A debug build takes its sidecar from here; a release build never does.
     AINB_DESKTOP_DAEMON_BIN: DAEMON_BIN,
+    // The daemon lists live sessions through this CLI to find where an answer
+    // goes. Unset, it runs its own binary, which has no `list`, finds no
+    // session and delivers nothing.
+    AINB_BIN,
     PATH: `${bin}:${dirname(AINB_BIN)}:${process.env.PATH ?? ""}`,
     [WORLD_ENV]: JSON.stringify({ root, seeded: [] }),
   });
@@ -157,6 +161,23 @@ export function seed() {
   };
   if (!session.tmux) throw new Error(`ainb run created no session:\n${out}`);
   return session;
+}
+
+/**
+ * Append one hook event to the daemon's ingest file, from a separate process,
+ * exactly as an agent's hook does: the daemon tails this file and raises what
+ * the line announces.
+ *
+ * Written directly rather than through `ainb fleet atc hook`, because that
+ * command refuses a line with no session id, and the sidebar only takes a
+ * question raised with none (#1049). The line carries no `raw_payload_ref`:
+ * the hook sets one only beside a payload file it wrote, and a ref with no
+ * file, or one that is not the line's own event id, holds the daemon's ingest
+ * on a retry for good. With none, the daemon reads the inline payload.
+ */
+export function hook(line) {
+  const file = join(env().AINB_HANGAR_HOME, "events.jsonl");
+  run("sh", ["-c", 'printf \'%s\\n\' "$1" >> "$2"', "hook", JSON.stringify(line), file]);
 }
 
 /** The sessions seeded before the app launched. */

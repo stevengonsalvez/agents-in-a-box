@@ -262,8 +262,24 @@ fn group_by_cwd(rows: &[WireRow]) -> HashMap<String, Vec<SessionAttention>> {
 /// walks the known shapes and gives up rather than inventing a line: a chip
 /// with no detail renders as the chip alone, which is honest. A fabricated
 /// "waiting for input" would read as something the agent actually said.
+/// The most characters any hook-written text keeps on a chip. The payload is
+/// whatever a hook wrote, so it is bounded here, where it is parsed, before it
+/// can reach a frame.
+const MAX_CHIP_TEXT_CHARS: usize = 512;
+
+/// The most options a chip offers, for the same reason.
+const MAX_CHIP_OPTIONS: usize = 16;
+
+/// `text`, cut to [`MAX_CHIP_TEXT_CHARS`].
+fn bounded(text: &str) -> String {
+    text.chars().take(MAX_CHIP_TEXT_CHARS).collect()
+}
+
 fn question_of(payload: &serde_json::Value) -> Option<String> {
     const PATHS: &[&str] = &[
+        // What the daemon stores for an ASK its hook ingest raised: the
+        // `NeedsContext` it classified, `{"kind":"ASK","context":{..}}`.
+        "/context/question",
         // Claude AskUserQuestion, first question.
         "/tool_input/questions/0/question",
         "/payload/tool_input/questions/0/question",
@@ -276,13 +292,14 @@ fn question_of(payload: &serde_json::Value) -> Option<String> {
     PATHS
         .iter()
         .find_map(|path| payload.pointer(path).and_then(serde_json::Value::as_str))
-        .map(|found| found.trim().to_string())
+        .map(|found| bounded(found.trim()))
         .filter(|found| !found.is_empty())
 }
 
 /// The structured options an ASK offers, or empty for free text.
 fn options_of(payload: &serde_json::Value) -> Vec<AttentionOption> {
     const PATHS: &[&str] = &[
+        "/context/options",
         "/tool_input/questions/0/options",
         "/payload/tool_input/questions/0/options",
     ];
@@ -292,15 +309,17 @@ fn options_of(payload: &serde_json::Value) -> Vec<AttentionOption> {
         .map(|options| {
             options
                 .iter()
+                .take(MAX_CHIP_OPTIONS)
                 .filter_map(|option| {
                     let label = option.get("label").and_then(serde_json::Value::as_str)?;
                     Some(AttentionOption {
-                        label: label.to_string(),
-                        description: option
-                            .get("description")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
+                        label: bounded(label),
+                        description: bounded(
+                            option
+                                .get("description")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default(),
+                        ),
                     })
                 })
                 .collect()
@@ -347,6 +366,78 @@ mod tests {
             channels: ainb_hangar_proto::ChannelSet::default(),
             version: 1,
         }
+    }
+
+    /// The row the daemon's hook ingest writes is the classified context, not
+    /// the hook's tool input, and the chip still carries its question and
+    /// options: without them the banner has nothing to offer.
+    #[test]
+    fn an_ask_the_hook_ingest_raised_carries_its_question_and_options() {
+        let row = wire(
+            "a",
+            "ask_user_question",
+            "/w",
+            serde_json::json!({
+                "kind": "ASK",
+                "context": {
+                    "question": "Ship to which environment?",
+                    "options": [{ "label": "staging" }, { "label": "prod" }],
+                    "multi_select": false
+                }
+            }),
+        );
+        let chip = &group_by_cwd(&[row])["/w"][0];
+        assert_eq!(chip.detail.as_deref(), Some("Ship to which environment?"));
+        assert_eq!(
+            chip.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(),
+            ["staging", "prod"]
+        );
+    }
+
+    /// Whatever a hook wrote, a chip carries at most 512 characters of any
+    /// text and 16 options, so a runaway payload cannot fill a frame.
+    #[test]
+    fn a_hook_written_question_and_its_options_are_bounded() {
+        let long = "x".repeat(MAX_CHIP_TEXT_CHARS * 4);
+        let options: Vec<_> = (0..40)
+            .map(|i| serde_json::json!({ "label": format!("{i}{long}"), "description": long }))
+            .collect();
+        let row = wire(
+            "a",
+            "ask_user_question",
+            "/w",
+            serde_json::json!({ "kind": "ASK", "context": { "question": long, "options": options } }),
+        );
+        let chip = &group_by_cwd(&[row])["/w"][0];
+        assert_eq!(
+            chip.detail.as_deref().map(|d| d.chars().count()),
+            Some(MAX_CHIP_TEXT_CHARS)
+        );
+        assert_eq!(chip.options.len(), MAX_CHIP_OPTIONS);
+        assert!(
+            chip.options.iter().all(|o| o.label.chars().count() == MAX_CHIP_TEXT_CHARS
+                && o.description.chars().count() == MAX_CHIP_TEXT_CHARS)
+        );
+    }
+
+    /// The cut counts characters, not bytes: a multi-byte question straddling
+    /// the bound keeps exactly 512 whole characters and never splits one.
+    #[test]
+    fn a_multi_byte_question_is_cut_on_a_character_boundary() {
+        // Two-byte and four-byte characters, so the byte offset at the bound
+        // falls inside a character for any byte-based cut.
+        let text: String = "é🦀".repeat(MAX_CHIP_TEXT_CHARS);
+        let row = wire(
+            "a",
+            "ask_user_question",
+            "/w",
+            serde_json::json!({ "kind": "ASK", "context": { "question": text, "options": [{ "label": text }] } }),
+        );
+        let chip = &group_by_cwd(&[row])["/w"][0];
+        let detail = chip.detail.as_deref().expect("a question");
+        assert_eq!(detail.chars().count(), MAX_CHIP_TEXT_CHARS);
+        assert!(detail.ends_with('🦀'), "the last kept character is whole");
+        assert_eq!(chip.options[0].label.chars().count(), MAX_CHIP_TEXT_CHARS);
     }
 
     #[test]

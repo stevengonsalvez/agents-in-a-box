@@ -644,6 +644,52 @@ fn a_desktop_tick_frames_the_open_conversation() {
     );
 }
 
+/// A status read holding one ACP card, `acp:s-1`.
+fn acp_roster() -> ainb_hangar_proto::agent_status::RosterStatusResult {
+    use ainb_hangar_proto::agent_status as status;
+    use ainb_hangar_proto::fleet;
+    let session = fleet::FleetSession {
+        session_key: "acp:s-1".to_string(),
+        provider: fleet::FleetProvider::Acp,
+        provider_session_id: None,
+        tmux_target: None,
+        pane_binding: fleet::PaneBinding::PaneUnbound,
+        process_start_fingerprint: None,
+        cwd: "/w".to_string(),
+        display_name: None,
+        lifecycle: fleet::LifecycleState::Running,
+        active_work_count: 0,
+        attention: fleet::AttentionState::None,
+        current_request_fingerprint: None,
+        current_request: None,
+        management: fleet::ManagementState::Managed,
+        transport_health: fleet::TransportHealth::Healthy,
+        capabilities: fleet::FleetCapabilities::default(),
+        provenance: fleet::FleetProvenance::Authoritative,
+        confidence: fleet::FleetConfidence::High,
+        discovered_at: 1,
+        last_observed_at: 1,
+        lifecycle_updated_at: 1,
+        attention_updated_at: 1,
+        model: None,
+        reasoning_effort: None,
+        model_updated_at: 0,
+        version: 1,
+        updated_revision: 1,
+    };
+    let row = status::status_row_with_tier(&session, false, None);
+    status::RosterStatusResult {
+        rows: vec![status::RosterStatusRow {
+            session,
+            status: row,
+            read_revision: 1,
+        }],
+        read_revision: 1,
+        unknown_events: Vec::new(),
+        read_at_ms: 0,
+    }
+}
+
 /// An ACP session's transcript: opened from the board by its Fleet session
 /// key, paged by the host's own tick, framed on Fleet.
 mod transcript {
@@ -655,52 +701,8 @@ mod transcript {
     /// A state whose status read holds the ACP card `acp:s-1`: the host opens
     /// a transcript only for a card it holds.
     fn holding_acp_card() -> ainb_app::AppState {
-        use ainb_hangar_proto::agent_status as status;
-        use ainb_hangar_proto::fleet;
-        let session = fleet::FleetSession {
-            session_key: "acp:s-1".to_string(),
-            provider: fleet::FleetProvider::Acp,
-            provider_session_id: None,
-            tmux_target: None,
-            pane_binding: fleet::PaneBinding::PaneUnbound,
-            process_start_fingerprint: None,
-            cwd: "/w".to_string(),
-            display_name: None,
-            lifecycle: fleet::LifecycleState::Running,
-            active_work_count: 0,
-            attention: fleet::AttentionState::None,
-            current_request_fingerprint: None,
-            current_request: None,
-            management: fleet::ManagementState::Managed,
-            transport_health: fleet::TransportHealth::Healthy,
-            capabilities: fleet::FleetCapabilities::default(),
-            provenance: fleet::FleetProvenance::Authoritative,
-            confidence: fleet::FleetConfidence::High,
-            discovered_at: 1,
-            last_observed_at: 1,
-            lifecycle_updated_at: 1,
-            attention_updated_at: 1,
-            model: None,
-            reasoning_effort: None,
-            model_updated_at: 0,
-            version: 1,
-            updated_revision: 1,
-        };
-        let row = status::status_row_with_tier(&session, false, None);
         let mut state = ainb_app::AppState::with_config(AppConfig::default());
-        state.apply_agent_status_read(
-            status::RosterStatusResult {
-                rows: vec![status::RosterStatusRow {
-                    session,
-                    status: row,
-                    read_revision: 1,
-                }],
-                read_revision: 1,
-                unknown_events: Vec::new(),
-                read_at_ms: 0,
-            },
-            1,
-        );
+        state.apply_agent_status_read(acp_roster(), 1);
         state
     }
 
@@ -815,6 +817,127 @@ mod transcript {
         assert!(
             sizes.borrow().is_empty(),
             "and a closed transcript frames nothing after"
+        );
+    }
+}
+
+/// Section 20, which the board draws: the host reads it, folds each read
+/// through the section's reducer, and reads it unreachable while the sidecar
+/// has no daemon.
+mod agent_status {
+    use super::*;
+    use ainb_desktop::agent_status::StatusOutcome;
+    use ainb_hangar_proto::status_view::ViewHealth;
+
+    /// A host framing section 20 only, whose reads the test stands in for.
+    fn status_host(frames: &Rc<RefCell<usize>>) -> DesktopHost<impl FnMut(FrameBatch)> {
+        scratch_home();
+        let frames = Rc::clone(frames);
+        DesktopHost::new(
+            AppConfig::default(),
+            Keymap::defaults(),
+            HostId::local(),
+            Subscription::only(&[SectionId::AgentStatus]),
+            move |batch: FrameBatch| *frames.borrow_mut() += batch.frames.len(),
+        )
+        .rescanning_every(std::time::Duration::from_secs(600))
+        .reading_agent_status_with(|_| {})
+    }
+
+    fn deliver(host: &DesktopHost<impl FnMut(FrameBatch)>, outcome: StatusOutcome) {
+        host.agent_status_reports().lock().expect("inbox").push(outcome);
+    }
+
+    fn health(host: &DesktopHost<impl FnMut(FrameBatch)>) -> Option<ViewHealth> {
+        host.state().agent_status.view.as_ref().map(|view| view.health.clone())
+    }
+
+    #[test]
+    fn a_read_reaches_the_board_on_the_tick() {
+        let frames = Rc::new(RefCell::new(0));
+        let mut host = status_host(&frames);
+        let _ = host.tick();
+        *frames.borrow_mut() = 0;
+
+        deliver(&host, StatusOutcome::Read(acp_roster()));
+        let _ = host.tick();
+
+        let view = host.state().agent_status.view.as_ref().expect("a view");
+        assert!(view.cards.contains_key("acp:s-1"));
+        assert_eq!(health(&host), Some(ViewHealth::Live));
+        assert!(*frames.borrow() > 0, "and the section framed");
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_cards_and_reads_unreachable() {
+        let frames = Rc::new(RefCell::new(0));
+        let mut host = status_host(&frames);
+        deliver(&host, StatusOutcome::Read(acp_roster()));
+        let _ = host.tick();
+
+        deliver(&host, StatusOutcome::Failed("socket gone".to_string()));
+        let _ = host.tick();
+
+        assert!(matches!(
+            health(&host),
+            Some(ViewHealth::Unreachable { .. })
+        ));
+        assert!(
+            host.state()
+                .agent_status
+                .view
+                .as_ref()
+                .expect("a view")
+                .cards
+                .contains_key("acp:s-1")
+        );
+    }
+
+    #[test]
+    fn a_lost_daemon_reads_unreachable_until_it_is_back() {
+        let frames = Rc::new(RefCell::new(0));
+        let mut host = status_host(&frames);
+        deliver(&host, StatusOutcome::Read(acp_roster()));
+        let _ = host.tick();
+
+        host.daemon_lost("reconnecting");
+        assert!(matches!(
+            health(&host),
+            Some(ViewHealth::Unreachable { .. })
+        ));
+        // A read that lands while the daemon is gone is not shown as current.
+        deliver(&host, StatusOutcome::Read(acp_roster()));
+        let _ = host.tick();
+        assert!(matches!(
+            health(&host),
+            Some(ViewHealth::Unreachable { .. })
+        ));
+
+        host.daemon_connected();
+        deliver(&host, StatusOutcome::Read(acp_roster()));
+        let _ = host.tick();
+        assert_eq!(health(&host), Some(ViewHealth::Live));
+    }
+
+    #[test]
+    fn a_read_from_before_the_outage_never_folds_after_it() {
+        let frames = Rc::new(RefCell::new(0));
+        let mut host = status_host(&frames);
+        deliver(&host, StatusOutcome::Read(acp_roster()));
+        let _ = host.tick();
+        // Stands in for a worker started before the outage: it keeps the inbox
+        // it was handed, whatever the host does with its own after.
+        let before = host.agent_status_reports();
+        host.daemon_lost("reconnecting");
+        host.daemon_connected();
+
+        // It lands after the reconnect, into the inbox it was started with.
+        before.lock().expect("inbox").push(StatusOutcome::Read(acp_roster()));
+        let _ = host.tick();
+
+        assert!(
+            matches!(health(&host), Some(ViewHealth::Unreachable { .. })),
+            "the pre-outage read is not shown as current"
         );
     }
 }

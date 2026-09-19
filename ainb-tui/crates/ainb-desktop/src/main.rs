@@ -23,6 +23,7 @@ use ainb_desktop::intent::{Refusal, RendererIntent};
 use ainb_desktop::shell::Shell;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarState, SidecarView};
 use ainb_desktop::terminal::{TabEvents, TabsView, Terminals, Tmux};
+use ainb_hangar_proto::agent_status::AgentState;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Emitter, Manager};
 
@@ -69,16 +70,23 @@ struct Window {
 }
 
 /// What the renderer applied, for the proof harness to read from the log: the
-/// sections of a batch and how many session rows the sidebar holds. Names and
-/// counts only, never a body.
+/// sections of a batch, how many session rows the sidebar holds, and how many
+/// cards each board column draws. Names and counts only, never a body.
 ///
 /// The names arrive as a `Subscription`, which deserializes from the wire
 /// names and drops anything else, so the line is bounded by the sections that
-/// exist and a renderer cannot name one it never applied.
+/// exist and a renderer cannot name one it never applied. The columns arrive
+/// as `AgentState`s, so they are bounded the same way: one per state at most.
 #[tauri::command]
-fn renderer_applied(sections: Subscription, sessions: usize) {
+fn renderer_applied(sections: Subscription, sessions: usize, board: Vec<(AgentState, usize)>) {
     let named: Vec<&str> = sections.sections().map(ainb_app::wire::section_name).collect();
-    tracing::info!(sections = ?named, sessions, "renderer applied");
+    let board: Vec<String> = board
+        .iter()
+        // Five states, so a longer list is a renderer that drew no board.
+        .take(5)
+        .map(|(state, cards)| format!("{}={cards}", state.as_str()))
+        .collect();
+    tracing::info!(sections = ?named, sessions, board = ?board, "renderer applied");
 }
 
 /// The terminal's copy: put the selection on the platform clipboard.
@@ -233,10 +241,26 @@ fn subscribe(
 /// is not applied, and the answer says which row and why, for a toast.
 #[tauri::command]
 fn dispatch(window: tauri::State<'_, Window>, intent: RendererIntent) -> Option<Refusal> {
-    match Intent::try_from(intent) {
+    // What the webview asked for and what became of it, so a reader of the log
+    // can tell what the window authored and what the host actually applied: a
+    // command's id, never its arguments, and never a key's chord or a text's
+    // characters, which are what a person typed.
+    let asked = match &intent {
+        RendererIntent::Command(id, _) => id.as_str().to_string(),
+        RendererIntent::Key(_) => "key".to_string(),
+        RendererIntent::Text(text) => format!("text({} chars)", text.chars().count()),
+    };
+    let refusal = match Intent::try_from(intent) {
         Ok(intent) => window.shell.dispatch_renderer(intent),
         Err(refusal) => Some(refusal),
-    }
+    };
+    let outcome = if refusal.is_some() {
+        "refused"
+    } else {
+        "dispatched"
+    };
+    tracing::info!(command = %asked, outcome, "renderer intent");
+    refusal
 }
 
 /// Where the daemon connection stands, for the banner on first paint.
@@ -412,13 +436,24 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    let (view, connected) = {
+                    let (view, connected, lost) = {
                         let state = states.borrow_and_update();
+                        let lost = match &*state {
+                            SidecarState::Reconnecting { error }
+                            | SidecarState::Degraded { error, .. } => Some(error.clone()),
+                            _ => None,
+                        };
                         (
                             state.view(),
                             matches!(*state, SidecarState::Connected { .. }),
+                            lost,
                         )
                     };
+                    // The board's rows are only as current as the daemon they
+                    // came from: while it is gone they read unreachable.
+                    if let Some(reason) = &lost {
+                        handle.state::<Window>().shell.daemon_lost(reason);
+                    }
                     // A connected sidecar has completed a hello, so the daemon
                     // may now have named its host (#1066). The webview hears the
                     // new id first, then the mirror re-pins and reframes under
@@ -436,6 +471,7 @@ fn main() {
                             }
                             window.shell.set_host(host_id);
                         }
+                        window.shell.daemon_connected();
                     }
                     if let Err(error) = handle.emit("sidecar", view) {
                         tracing::warn!(%error, "sidecar state not delivered to the webview");

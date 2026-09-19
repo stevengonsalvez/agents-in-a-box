@@ -230,6 +230,13 @@ Six PRs. Each is mergeable alone, targets `v2`, and carries its own proof. The a
 · Wires the journey into `.github/workflows/desktop.yml`: the Linux leg real under `xvfb-run` beside the existing `:162` step, the macOS leg on the recorded substitute declared by `MACOS_E2E_LEG` (`:42`) with the named step at `:191` recording which leg ran and failing if neither reported one.
 · Flips the D2 row in the programme doc with the run ids, in this PR (programme `:194`).
 · Gate: the three success criteria below, all green.
+· As built (D2e):
+  - The question is raised through the daemon's real hook ingest (two lines appended to `events.jsonl` by a separate process), not the `seed_control_center` example: that seeder starts a daemon of its own and names a session and worktree no world pane owns.
+  - Two lines, not one, because of #1049. A Claude session row never learns its provider session id, so the sidebar and banner take only a question raised with no session id, matched by its unique worktree. The board's waiting card needs one raised with the id its Fleet session carries. The row with the id is never answered, so its card is asserted still waiting at the end, not answered. Closing #1049 is what lets one question do both.
+  - The desktop host never fed section 20, so the D2b board drew no cards in the window. `ainb-desktop/src/agent_status.rs` reads `fleet/roster_status` on the host's tick through the same reducer path the terminal uses, and reads the rows unreachable while the sidecar reconnects. #1188 unifies it with the terminal's reader once #1166 lands.
+  - A daemon ASK chip carried no question and no options: the daemon stores the classified `{"kind":"ASK","context":{..}}`, and `attention_poll::question_of` and `options_of` read only `tool_input` paths. Fixed in D2e.
+  - #1160 is closed by refusal, not by a world per worker: the embedded driver spawns the app once, from the launcher's `onPrepare`, before any worker exists. `wdio.conf.js` refuses multiremote, more than one capability, or more than one worker.
+  - The second surface that reads the winner is the web dashboard: its `POST /api/answer` on the same question returns `already_answered` naming the desktop. `answered_by` is `desktop@<host>`.
 
 ─ WHICH EXISTING TESTS MUST STAY GREEN ─
 
