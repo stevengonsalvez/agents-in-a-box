@@ -61,9 +61,18 @@ export function Review(props: Props) {
    */
   const [rowsPerPage, setRowsPerPage] = createSignal(40);
   onMount(() => {
+    // The window is the outer bound, not the body: measured in the running
+    // app, `.review` reports 8,090 px inside a work area of 762 px, because
+    // this WebKit resolves `.review-panes`'s `minmax(0, 1fr)` row against its
+    // content when the grid sits in a flex item (`shell.css`). The body then
+    // measures the diff it just drew and asks for it again. The viewport
+    // cannot grow with the content, and the cap holds whatever is left.
     const measure = () =>
       setRowsPerPage(
-        Math.min(Math.max(Math.floor((bodyElement?.clientHeight ?? 0) / ROW_PX), 1), MAX_PAGE_ROWS),
+        Math.min(
+          Math.max(Math.floor(Math.min(bodyElement?.clientHeight ?? 0, window.innerHeight) / ROW_PX), 1),
+          MAX_PAGE_ROWS,
+        ),
       );
     measure();
     // The body, not the window: a pane that grows because the sidebar
