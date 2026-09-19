@@ -614,9 +614,12 @@ async fn run_tui_loop(
         // and its version is what a mirrored surface subscribes to.
         agent_status.drain_into(&mut app.state);
         agent_status.publish(&app.state, app.plugin_runtime());
-        // Section 16: started when the inbox screen is entered, stopped when
-        // it is left, drained every tick in between.
-        inbox_host.tick(&mut app.state);
+        // Section 16: read for the TUI's whole life, slowly while the inbox
+        // screen is closed and at the normal cadence while it is open; the
+        // legend's badge and the screen both draw from it, so a fold repaints.
+        if inbox_host.tick(&mut app.state) {
+            needs_redraw = true;
+        }
 
         // Drive plugin-owned screens before every paint. Pushes any
         // host-side state into each plugin and drains its painted
