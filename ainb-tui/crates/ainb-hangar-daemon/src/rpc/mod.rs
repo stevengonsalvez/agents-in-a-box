@@ -13617,6 +13617,7 @@ async fn handle_session_reconcile(pool: &SqlitePool) -> Result<serde_json::Value
         imported: marker.imported,
         skipped: marker.skipped,
         rejected: marker.rejected,
+        deleted: i64::try_from(outcome.deleted.len()).unwrap_or(i64::MAX),
         completed_at: marker.completed_at,
     })
 }
@@ -16936,12 +16937,19 @@ mod tests {
         let imported_only =
             session_rpc(pool, methods::WORKSPACE_SESSION_LIST, serde_json::json!({})).await;
         assert_eq!(imported_only.result.unwrap()["import_complete"], false);
+        // The file holds both sessions: before the flip the file decides
+        // which sessions exist, so a pass over an empty file would delete them.
+        let in_file: Vec<_> = ainb_hangar_store::repo::sessions::SessionsRepo::list(pool, None, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| ainb_hangar_store::repo::sessions::FileSession {
+                row,
+                id_minted: false,
+            })
+            .collect();
         ainb_hangar_store::repo::sessions::SessionsRepo::complete_reconcile(
-            pool,
-            &source,
-            &[],
-            0,
-            2,
+            pool, &source, &in_file, 0, 2,
         )
         .await
         .unwrap();
