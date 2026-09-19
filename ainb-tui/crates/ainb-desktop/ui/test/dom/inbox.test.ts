@@ -40,6 +40,7 @@ function frame(over: Partial<InboxView_Serialize> = {}): InboxView_Serialize {
     rows_cut: 0,
     summaries_cut: 0,
     received_at_ms: READ_AT,
+    scroll: 0,
     ...over,
   };
 }
