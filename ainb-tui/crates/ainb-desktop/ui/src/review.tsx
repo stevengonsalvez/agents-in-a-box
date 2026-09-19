@@ -3,7 +3,6 @@ import type { GitViewView_Serialize } from "../../../ainb-app/bindings/AppState"
 import {
   bodyLines,
   fileRows,
-  openFile,
   scrollIntent,
   sectionCut,
   selectFileIntent,
@@ -34,7 +33,7 @@ interface Props {
  */
 export function Review(props: Props) {
   const files = () => fileRows(props.gitView);
-  const open = () => openFile(props.gitView);
+  const body = () => bodyLines(props.gitView);
   const cut = () => sectionCut(props.gitView);
 
   return (
@@ -83,16 +82,23 @@ export function Review(props: Props) {
 
           <div class="review-body">
             <Show
-              when={bodyLines(open()).length > 0}
-              fallback={
-                <p class="empty">
-                  {open()?.binary ? "Binary file, nothing to show" : "Nothing to show for this file"}
-                </p>
-              }
+              when={body().length > 0}
+              fallback={<p class="empty">Nothing to show for these changes</p>}
             >
-              <For each={bodyLines(open())}>
+              <For each={body()}>
                 {(line) =>
-                  line.kind === "hunk" ? (
+                  line.kind === "file" ? (
+                    <p class="review-file-head" classList={{ open: line.open }} data-head={line.file.path}>
+                      <span class="review-path">{line.file.path}</span>
+                      <span class="review-counts">
+                        +{line.file.insertions} −{line.file.deletions}
+                      </span>
+                      <span class="review-status">{line.file.status}</span>
+                      <Show when={line.file.binary}>
+                        <span class="review-hidden">binary, nothing to show</span>
+                      </Show>
+                    </p>
+                  ) : line.kind === "hunk" ? (
                     <p class="review-hunk">
                       {line.header}
                       <Show when={line.hidden > 0}>
