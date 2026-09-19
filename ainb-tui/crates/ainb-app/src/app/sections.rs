@@ -1089,7 +1089,10 @@ mod inbox_section_tests {
         assert!(section.mark_absent("daemon has no inbox_list"));
         assert!(section.mark_read_failed("connect: refused"));
         assert_eq!(section.absent.as_deref(), Some("connect: refused"));
-        assert!(section.unreachable.is_none(), "never both reasons with zero rows");
+        assert!(
+            section.unreachable.is_none(),
+            "never both reasons with zero rows"
+        );
         assert!(section.entries.is_empty());
         assert_eq!(section.received_at_ms, 0);
     }
