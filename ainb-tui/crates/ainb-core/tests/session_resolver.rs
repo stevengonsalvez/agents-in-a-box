@@ -341,3 +341,16 @@ fn a_delete_through_the_daemon_is_not_brought_back_by_the_next_pass() {
     );
     assert!(!SessionStore::load().sessions.contains_key("sess-gone"));
 }
+
+/// The client's RPC deadline must outlast the daemon's first-pass wait: a
+/// daemon that has just restarted holds a read for that long before it
+/// answers not-ready, and that answer has to arrive before the client gives
+/// up, or a retry reads as a timeout.
+#[test]
+fn the_rpc_deadline_outlasts_the_daemons_first_pass_wait() {
+    assert!(
+        SESSION_RPC_DEADLINE > ainb_hangar_daemon::session_import::FIRST_PASS_WAIT,
+        "SESSION_RPC_DEADLINE {SESSION_RPC_DEADLINE:?} must exceed FIRST_PASS_WAIT {:?}",
+        ainb_hangar_daemon::session_import::FIRST_PASS_WAIT
+    );
+}
