@@ -175,6 +175,25 @@ pub enum DaemonError {
     /// The daemon's result payload did not match the expected shape.
     #[error("decoding daemon reply: {0}")]
     Decode(String),
+    /// The daemon refused `auth/hello` because the two protocol ranges do not
+    /// overlap (`PROTOCOL_INCOMPATIBLE`), decoded from the `HelloResult` the
+    /// daemon puts in the error's `data`.
+    ///
+    /// Its own variant rather than an [`Self::Rpc`] with a code, because a
+    /// supervisor has to tell "a daemon is serving this home and cannot serve
+    /// this build" from every other refusal without parsing a sentence: the
+    /// remedy is a different binary on one side, never a second daemon.
+    #[error("{message}")]
+    Incompatible {
+        /// What the daemon speaks.
+        daemon: ainb_hangar_proto::protocol::ProtocolRange,
+        /// What this build offered.
+        client: ainb_hangar_proto::protocol::ProtocolRange,
+        /// The daemon's build version, for the banner only. Never branched on.
+        daemon_version: Option<String>,
+        /// The daemon's own sentence, which names the fix.
+        message: String,
+    },
 }
 
 impl DaemonError {
@@ -205,9 +224,40 @@ impl DaemonError {
     pub const fn means_not_running(&self) -> bool {
         match self {
             Self::Token(_) | Self::Connect { .. } => true,
-            Self::NoHome | Self::Io(_) | Self::Timeout(_) | Self::Rpc { .. } | Self::Decode(_) => {
-                false
+            Self::NoHome
+            | Self::Io(_)
+            | Self::Timeout(_)
+            | Self::Rpc { .. }
+            | Self::Decode(_)
+            | Self::Incompatible { .. } => false,
+        }
+    }
+
+    /// The error an `auth/hello` refusal decodes to: [`Self::Incompatible`]
+    /// when the code is `PROTOCOL_INCOMPATIBLE` and `data` carries the
+    /// daemon's `HelloResult`, else [`Self::Rpc`]. `client` is the range this
+    /// build sent, which the refusal echoes only in its sentence.
+    #[must_use]
+    pub fn from_hello_error(
+        error: ainb_hangar_proto::RpcError,
+        client: ainb_hangar_proto::protocol::ProtocolRange,
+    ) -> Self {
+        if error.code == ainb_hangar_proto::protocol::PROTOCOL_INCOMPATIBLE {
+            if let Some(hello) = error
+                .data
+                .and_then(|data| serde_json::from_value::<auth::HelloResult>(data).ok())
+            {
+                return Self::Incompatible {
+                    daemon: hello.protocol,
+                    client,
+                    daemon_version: hello.daemon_version,
+                    message: error.message,
+                };
             }
+        }
+        Self::Rpc {
+            code: error.code,
+            message: error.message,
         }
     }
 }
@@ -918,10 +968,10 @@ impl DaemonClient {
         write_frame(&mut writer, methods::AUTH_HELLO, hello_params, 1).await?;
         let reply = read_response(&mut reader).await?;
         if let Some(error) = reply.error {
-            return Err(DaemonError::Rpc {
-                code: error.code,
-                message: error.message,
-            });
+            return Err(DaemonError::from_hello_error(
+                error,
+                ainb_hangar_proto::protocol::ProtocolRange::supported(),
+            ));
         }
         let hello: auth::HelloResult = serde_json::from_value(
             reply
