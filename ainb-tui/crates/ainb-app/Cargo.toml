@@ -143,5 +143,18 @@ ainb-skill-core = { path = "../ainb-skill-core", version = "0.1.0", features = [
 ainb-hangar-daemon = { path = "../ainb-hangar-daemon", features = ["test-support"] }
 tempfile = "3"
 
+[[test]]
+name = "config_screen_keys"
+required-features = ["test-support"]
+
+[[test]]
+name = "config_screen_merge_save"
+required-features = ["test-support"]
+
+[[test]]
+name = "persistence"
+required-features = ["test-support"]
+
 [lints]
 workspace = true
+

@@ -598,3 +598,392 @@ fn what_the_worst_case_projection_costs() {
 
     println!("worst case: project {projected:?}, encode {encoded:?}, {bytes} bytes");
 }
+
+/// The reducer counts rows over the whole model; the frame carries a cut of
+/// it, so the frame translates the offset into its own rows rather than
+/// sending a number that names different content on each side of the wire.
+///
+/// `flatten` (`components/code_review/render.rs:112`) counts a row per file
+/// heading and a row per code line, so in a two-file state of ten rows each
+/// the model's row 12 is the second file's first line.
+#[test]
+fn the_frames_scroll_is_its_own_row_and_says_when_the_reducers_row_was_cut() {
+    let mut state = state_with(2, 10, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.scroll = 12;
+    }
+
+    let view = &framed(&state)["git_view_state"]["review_ui"];
+
+    assert_eq!(
+        view["scroll"].as_u64(),
+        Some(12),
+        "nothing was cut, so nothing moved"
+    );
+    assert_eq!(view["scroll_cut"].as_bool(), Some(false));
+}
+
+#[test]
+fn a_row_past_the_per_file_cap_frames_as_the_last_row_that_survived_it() {
+    // 500 rows a file, cut to MAX_ROWS_PER_FILE 400: the model's row 450 is
+    // inside the first file and past what the frame carries of it.
+    let mut state = state_with(2, 500, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.scroll = 450;
+    }
+
+    let view = &framed(&state)["git_view_state"]["review_ui"];
+
+    // The first file frames its heading and 400 rows: rows 0 to 400.
+    assert_eq!(
+        view["scroll"].as_u64(),
+        Some(400),
+        "the last row of that file that was sent"
+    );
+    assert_eq!(
+        view["scroll_cut"].as_bool(),
+        Some(true),
+        "and the frame says the row the terminal is on is not in it"
+    );
+}
+
+#[test]
+fn a_row_in_a_file_the_budget_dropped_frames_at_what_follows_it() {
+    // Twelve files of 400 rows: the total row cap (4,000) stops the frame part
+    // way, so a model row inside a file that was never framed has to land
+    // somewhere honest.
+    let mut state = state_with(12, 400, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        // Inside the last file, which the row budget never reached.
+        git.review_ui.scroll = 11 * 401 + 5;
+    }
+
+    let body = framed(&state);
+    let view = &body["git_view_state"]["review_ui"];
+    let framed_rows: u64 = body["git_view_state"]["review"]["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .map(|file| {
+            1 + file["hunks"]
+                .as_array()
+                .expect("hunks")
+                .iter()
+                .map(|hunk| hunk["rows"].as_array().expect("rows").len() as u64)
+                .sum::<u64>()
+        })
+        .sum();
+
+    // Ten files of 400 rows fill MAX_ROWS_TOTAL, so they frame a heading and
+    // 400 rows each (4,010 rows), and the last two frame their heading alone:
+    // 4,012 rows, indices up to 4,011. The person is inside the last file, so
+    // the nearest row the frame has is that file's heading, the last row of
+    // all. One past it would be the arithmetic saturating on the row COUNT
+    // rather than on the sum.
+    assert_eq!(view["scroll_cut"].as_bool(), Some(true));
+    assert_eq!(
+        framed_rows, 4_012,
+        "the frame's rows, as the caps leave them"
+    );
+    assert_eq!(
+        view["scroll"].as_u64(),
+        Some(4_011),
+        "the last row the frame carries, not one past it"
+    );
+}
+
+#[test]
+fn the_current_hunk_is_the_frames_hunk_too() {
+    let mut state = state_with(3, 10, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.current_hunk = 2;
+    }
+
+    let body = framed(&state);
+    let hunks: usize = body["git_view_state"]["review"]["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .map(|file| file["hunks"].as_array().expect("hunks").len())
+        .sum();
+
+    let current = usize::try_from(
+        body["git_view_state"]["review_ui"]["current_hunk"]
+            .as_u64()
+            .expect("a hunk cursor"),
+    )
+    .expect("a cursor that fits an index");
+    assert!(
+        current < hunks,
+        "the cursor names a hunk the frame carries: {current} of {hunks}"
+    );
+}
+
+/// The projection counts the model's rows the way `flatten` does, or the
+/// offset it sends names the wrong line. The probe is an uncut state: put the
+/// reducer on the last row the model has, and the frame must name that same
+/// row and say nothing was cut.
+#[test]
+fn the_projection_counts_the_model_rows_flatten_counts() {
+    use ainb_app::components::code_review::model::Hunk;
+    use ainb_app::components::code_review::render::flatten;
+
+    let mut state = state_with(2, 3, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        // A hunk with hidden context above and below it, and one with no rows
+        // at all, which is the shape the counts disagree over.
+        git.review.files[0].hunks[0].gap_before = 6;
+        git.review.files[0].hunks.push(Hunk {
+            old_start: 40,
+            new_start: 40,
+            gap_before: 5,
+            gap_after: 5,
+            expanded_before: 0,
+            expanded_after: 0,
+            rows: Vec::new(),
+        });
+        git.review.files[1].hunks[0].gap_after = 4;
+
+        let rows = flatten(&git.review).len();
+        git.review_ui.scroll = rows - 1;
+    }
+
+    let view = &framed(&state)["git_view_state"]["review_ui"];
+
+    assert_eq!(
+        view["scroll_cut"].as_bool(),
+        Some(false),
+        "nothing was cut, so the last model row is a row the frame has"
+    );
+}
+
+/// A collapsed file draws its heading and nothing else, so its hunks are not
+/// on the screen to be counted: counting them would shift every later file's
+/// hunk cursor by that many.
+#[test]
+fn a_collapsed_file_ahead_of_an_open_one_does_not_shift_the_hunk_cursor() {
+    let mut state = state_with(2, 4, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review.files[0].collapsed = true;
+        // The model's hunk 0 is the open file's only hunk: the collapsed file
+        // ahead of it contributes none.
+        git.review_ui.current_hunk = 0;
+        git.review_ui.selected_file = 1;
+    }
+
+    let body = framed(&state);
+    let view = &body["git_view_state"]["review_ui"];
+    let files = body["git_view_state"]["review"]["files"].as_array().expect("files");
+
+    assert_eq!(files[0]["collapsed"].as_bool(), Some(true));
+    assert_eq!(
+        view["current_hunk"].as_u64(),
+        Some(0),
+        "the cursor is the open file's hunk, not one counted inside the collapsed file"
+    );
+}
+
+/// A hunk truncated part way still frames the gap below it, so a row past the
+/// cut must not be placed on that gap row: counting rows alone it would be, a
+/// row off and reporting that nothing was left out.
+#[test]
+fn a_row_past_a_part_way_cut_says_it_was_cut() {
+    use ainb_app::components::code_review::render::flatten;
+
+    // One file of 500 rows with a gap below it, cut to MAX_ROWS_PER_FILE 400.
+    let mut state = state_with(1, 500, "a changed line");
+    let (first_cut, last_kept) = {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review.files[0].hunks[0].gap_after = 9;
+        let rows = flatten(&git.review);
+        // Heading, then the rows: the model's row 401 is the 401st code line,
+        // the first the frame does not carry.
+        assert!(rows.len() > 402, "the fixture has rows past the cap");
+        (401, 400)
+    };
+
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.scroll = last_kept;
+    }
+    let kept = &framed(&state)["git_view_state"]["review_ui"];
+    assert_eq!(kept["scroll"].as_u64(), Some(400));
+    assert_eq!(
+        kept["scroll_cut"].as_bool(),
+        Some(false),
+        "the last row that was sent"
+    );
+
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.scroll = first_cut;
+    }
+    let cut = &framed(&state)["git_view_state"]["review_ui"];
+    assert_eq!(
+        cut["scroll"].as_u64(),
+        Some(400),
+        "the nearest row that was sent, not the gap row below the cut"
+    );
+    assert_eq!(
+        cut["scroll_cut"].as_bool(),
+        Some(true),
+        "and it says the row the terminal is on is not in the frame"
+    );
+
+    // The gap below the hunk is the same gap however many rows were sent:
+    // hidden context does not shrink with them. The model draws it under row
+    // 500, the frame under row 400, and the person on it is on a row the frame
+    // DID send.
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.review_ui.scroll = 501;
+    }
+    let gap = &framed(&state)["git_view_state"]["review_ui"];
+    assert_eq!(gap["scroll"].as_u64(), Some(401), "the frame's own gap row");
+    assert_eq!(
+        gap["scroll_cut"].as_bool(),
+        Some(false),
+        "a row the frame drew is not a row it cut"
+    );
+}
+
+/// #1212: the worktree crosses as its directory name, never its absolute
+/// path. The seam denies paths on the wire for remote surfaces, and nothing
+/// that draws the git view reads more than the name (the #1097 rule for the
+/// web rows). A credential-shaped directory name is scrubbed like any text.
+#[test]
+fn the_worktree_crosses_as_its_name_not_its_absolute_path() {
+    let mut state = state_with(1, 1, "a changed line");
+    let token = format!("ghp_{}", "C".repeat(36));
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.worktree_path = PathBuf::from("/home/sample/.worktrees/sample-repo");
+    }
+    let body = framed(&state)["git_view_state"].clone();
+    let text = serde_json::to_string(&body).expect("encodes");
+    assert!(!text.contains("/home/"), "no absolute path: {text}");
+    assert!(
+        body.get("worktree_path").is_none(),
+        "the path field is gone: {text}"
+    );
+    assert_eq!(body["worktree_name"], "sample-repo");
+
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.worktree_path = PathBuf::from(format!("/work/{token}"));
+    }
+    let text = serde_json::to_string(&framed(&state)["git_view_state"]).expect("encodes");
+    assert!(
+        !text.contains(&token),
+        "a credential-shaped name is scrubbed: {text}"
+    );
+}
+
+/// #1212: a commit's author is git config text, and people paste tokens into
+/// it as readily as into a message, so it is scrubbed like the message.
+#[test]
+fn a_commit_author_is_scrubbed() {
+    use ainb_app::git::operations::CommitInfo;
+
+    let token = format!("ghp_{}", "C".repeat(36));
+    let mut state = state_with(1, 1, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.commits = vec![CommitInfo {
+            hash_short: "abc1234".to_string(),
+            author: format!("Sample Dev {token}"),
+            date: "2026-09-19".to_string(),
+            message: "fix the thing".to_string(),
+        }];
+    }
+    let body = framed(&state)["git_view_state"].clone();
+    let text = serde_json::to_string(&body).expect("encodes");
+    assert!(!text.contains(&token), "the author's token left: {text}");
+    assert_eq!(body["commits"][0]["author"], "Sample Dev <redacted>");
+}
+
+/// #1212: markdown is scrubbed as one document before any cut. The scrub runs
+/// a chunk at a time so a spent budget stops it, and a key block whose header
+/// sits on the last line of one chunk must still redact the body in the next.
+#[test]
+fn a_markdown_key_block_across_a_scrub_chunk_is_redacted_whole() {
+    use ainb_app::components::git_view::{MarkdownLine, MarkdownStyle};
+
+    let body_line = "MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeK";
+    let mut document: Vec<String> = (0..63).map(|n| format!("line {n}")).collect();
+    document.push("-----BEGIN RSA PRIVATE KEY-----".to_string());
+    document.extend((0..3).map(|_| body_line.to_string()));
+    document.push("-----END RSA PRIVATE KEY-----".to_string());
+    document.push("after the key".to_string());
+    let mut state = state_with(1, 1, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.markdown_content = document
+            .iter()
+            .map(|content| MarkdownLine {
+                content: content.clone(),
+                style: MarkdownStyle::Paragraph,
+            })
+            .collect();
+    }
+    let body = framed(&state)["git_view_state"].clone();
+    let text = serde_json::to_string(&body).expect("encodes");
+    assert!(
+        !text.contains(body_line),
+        "the key body crossed the chunk: {text}"
+    );
+    let lines: Vec<&str> = body["markdown_content"]
+        .as_array()
+        .expect("markdown")
+        .iter()
+        .map(|line| line["content"].as_str().expect("text"))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        document.len(),
+        "one framed line per line, styles aligned"
+    );
+    assert_eq!(lines[62], "line 62");
+    assert_eq!(lines[68], "after the key");
+}
+
+/// A worktree's directory name is only neutral when it names a project. At
+/// the home directory it is the operator's username, and at the root or a
+/// path ending in `..` there is no name at all, which framed as an empty
+/// string. Both frame one fixed label instead (#1212 review).
+#[test]
+fn a_worktree_at_home_or_with_no_name_frames_a_neutral_label() {
+    let home = dirs::home_dir().expect("a home directory");
+    for path in [home.clone(), PathBuf::from("/"), PathBuf::from("/work/..")] {
+        let mut state = state_with(1, 1, "a changed line");
+        {
+            let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+            git.worktree_path = path.clone();
+        }
+        let body = framed(&state)["git_view_state"].clone();
+        assert_eq!(
+            body["worktree_name"],
+            "worktree",
+            "{} frames the label",
+            path.display()
+        );
+    }
+    if let Some(user) = home.file_name().and_then(|name| name.to_str()).map(str::to_string) {
+        let mut state = state_with(1, 1, "a changed line");
+        {
+            let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+            git.worktree_path = home;
+        }
+        let text = serde_json::to_string(&framed(&state)["git_view_state"]).expect("encodes");
+        assert!(
+            !text.contains(&format!("\"{user}\"")),
+            "the username never frames: {text}"
+        );
+    }
+}

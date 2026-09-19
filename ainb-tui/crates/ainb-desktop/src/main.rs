@@ -80,12 +80,15 @@ struct Window {
 #[tauri::command]
 fn renderer_applied(sections: Subscription, sessions: usize, board: Vec<(AgentState, usize)>) {
     let named: Vec<&str> = sections.sections().map(ainb_app::wire::section_name).collect();
-    let board: Vec<String> = board
-        .iter()
-        // Five states, so a longer list is a renderer that drew no board.
-        .take(5)
-        .map(|(state, cards)| format!("{}={cards}", state.as_str()))
-        .collect();
+    let (board, dropped) = ainb_desktop::shell::board_columns(&board);
+    if dropped > 0 {
+        // Said, not swallowed: a proof reading the line below would otherwise
+        // take a renderer that drew no board for one that drew five columns.
+        tracing::warn!(
+            dropped,
+            "renderer applied: the board list ran past the states"
+        );
+    }
     tracing::info!(sections = ?named, sessions, board = ?board, "renderer applied");
 }
 

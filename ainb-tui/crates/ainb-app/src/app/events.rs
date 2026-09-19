@@ -2607,6 +2607,16 @@ impl EventHandler {
                 state.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
             }
             AppEvent::CycleSessionFilter => {
+                // The desktop draws no filter indicator and offers no control,
+                // so it shows every row and never persists a filter; the
+                // persisted value is the terminal's (#1208).
+                if state.host.surface == ainb_hangar_proto::connections::SurfaceKind::Desktop {
+                    state.add_info_notification(
+                        "the desktop shows every session; the filter is the terminal's".to_string(),
+                    );
+                    state.shell.ui_needs_refresh = true;
+                    return;
+                }
                 state.cycle_session_filter();
                 let label = match state.sessions.session_filter {
                     crate::app::state::SessionFilter::All => "all sessions",
