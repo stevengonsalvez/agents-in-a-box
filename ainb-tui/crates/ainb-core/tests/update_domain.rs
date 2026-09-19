@@ -399,7 +399,10 @@ async fn the_manifest_is_fetched_from_the_given_root_and_nothing_else() {
         }
     });
     let root = format!("http://127.0.0.1:{port}/acme/releases/download/v1.29.0-rc1");
-    let (bytes, signature) = ainb::cli::update::fetch_manifest_bytes_at(&root).await.unwrap();
+    // The plain-loopback seam exists for tests only; the production fetch
+    // pins https (see the_manifest_fetch_pins_https).
+    let (bytes, signature) =
+        ainb::cli::update::fetch_manifest_bytes_at_plain_loopback(&root).await.unwrap();
     assert_eq!(bytes, body_of(&signing_key));
     assert_eq!(signature.trim(), sig);
     let mut paths: Vec<String> = paths_rx.try_iter().collect();
@@ -415,6 +418,253 @@ async fn the_manifest_is_fetched_from_the_given_root_and_nothing_else() {
 
 fn body_of(_key: &SigningKey) -> Vec<u8> {
     br#"{"version":"1.29.0","assets":[]}"#.to_vec()
+}
+
+/// One canned HTTP response: status line, extra headers, body.
+struct Canned {
+    status: &'static str,
+    headers: Vec<String>,
+    body: Vec<u8>,
+}
+
+/// A loopback responder that answers each request by its path, records the
+/// paths asked, and closes the connection. `Content-Length` is the body's
+/// unless a header overrides it.
+fn respond(
+    handler: impl Fn(&str) -> Canned + Send + 'static,
+) -> (u16, std::sync::mpsc::Receiver<String>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (paths_tx, paths_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(8) {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let path =
+                request.lines().next().unwrap_or("").split(' ').nth(1).unwrap_or("").to_string();
+            let canned = handler(&path);
+            let has_length = canned
+                .headers
+                .iter()
+                .any(|h| h.to_ascii_lowercase().starts_with("content-length:"));
+            let mut head = format!("HTTP/1.1 {}\r\nConnection: close\r\n", canned.status);
+            if !has_length {
+                head.push_str(&format!("Content-Length: {}\r\n", canned.body.len()));
+            }
+            for header in &canned.headers {
+                head.push_str(header);
+                head.push_str("\r\n");
+            }
+            head.push_str("\r\n");
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&canned.body);
+            let _ = paths_tx.send(path);
+        }
+    });
+    (port, paths_rx)
+}
+
+/// A persisted root is data on disk, so it is validated on the way back in
+/// too: a state file rewritten to point at plain HTTP does not redirect the
+/// next check.
+#[test]
+fn a_persisted_root_that_is_not_https_is_refused_on_load() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("update-state.json");
+    std::fs::write(
+        &path,
+        r#"{"checked_at_ms":1,"latest_version":"1.28.2","availability":"current_or_newer","root":"http://evil.example/releases"}"#,
+    )
+    .unwrap();
+    let err = ReleaseState::load_from(&path).unwrap_err();
+    assert!(err.to_string().contains("https"), "{err:#}");
+    std::fs::write(
+        &path,
+        r#"{"checked_at_ms":1,"latest_version":"1.28.2","availability":"current_or_newer","root":"https://example.org/releases"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        ReleaseState::load_from(&path).unwrap().root.as_deref(),
+        Some("https://example.org/releases")
+    );
+}
+
+/// The production fetch and download refuse anything but `https://` before
+/// any connection is made.
+#[tokio::test]
+async fn the_manifest_fetch_and_the_download_pin_https() {
+    let err = ainb::cli::update::fetch_manifest_bytes_at("http://127.0.0.1:9/acme")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("https"), "{err:#}");
+    let temp = tempfile::tempdir().unwrap();
+    let err = ainb::cli::update::download_to(
+        "http://127.0.0.1:9/acme/bundle.dmg",
+        &temp.path().join("bundle.dmg"),
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("https"), "{err:#}");
+    assert!(!temp.path().join("bundle.dmg").exists());
+}
+
+/// The manifest and the signature are small files; a body past the cap is
+/// refused rather than buffered.
+#[tokio::test]
+async fn an_oversized_manifest_is_refused() {
+    let (port, _) = respond(|path| {
+        if path.ends_with("/release-manifest.json") {
+            Canned {
+                status: "200 OK",
+                headers: vec![],
+                body: vec![b'{'; 300 * 1024],
+            }
+        } else {
+            Canned {
+                status: "200 OK",
+                headers: vec![],
+                body: b"sig".to_vec(),
+            }
+        }
+    });
+    let root = format!("http://127.0.0.1:{port}/acme");
+    let err = ainb::cli::update::fetch_manifest_bytes_at_plain_loopback(&root)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("large"), "{err:#}");
+}
+
+/// A redirect is followed only within the host the request started on (or
+/// the release host's own asset hosts); a cross-host redirect is refused.
+#[tokio::test]
+async fn a_cross_host_redirect_is_refused_and_a_same_host_one_is_followed() {
+    let (port, paths) = respond(move |path| {
+        if path == "/elsewhere/release-manifest.json" {
+            Canned {
+                status: "302 Found",
+                headers: vec![format!(
+                    "Location: http://localhost:{port}/acme/release-manifest.json"
+                )],
+                body: vec![],
+            }
+        } else if path == "/moved/release-manifest.json" {
+            Canned {
+                status: "302 Found",
+                headers: vec![format!(
+                    "Location: http://127.0.0.1:{port}/acme/release-manifest.json"
+                )],
+                body: vec![],
+            }
+        } else if path == "/moved/release-manifest.sig" {
+            Canned {
+                status: "302 Found",
+                headers: vec![format!(
+                    "Location: http://127.0.0.1:{port}/acme/release-manifest.sig"
+                )],
+                body: vec![],
+            }
+        } else if path.ends_with("/release-manifest.json") {
+            Canned {
+                status: "200 OK",
+                headers: vec![],
+                body: br#"{"version":"1.29.0","assets":[]}"#.to_vec(),
+            }
+        } else {
+            Canned {
+                status: "200 OK",
+                headers: vec![],
+                body: b"sig".to_vec(),
+            }
+        }
+    });
+    let err = ainb::cli::update::fetch_manifest_bytes_at_plain_loopback(&format!(
+        "http://127.0.0.1:{port}/elsewhere"
+    ))
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().to_lowercase().contains("redirect"),
+        "{err:#}"
+    );
+    let (bytes, sig) = ainb::cli::update::fetch_manifest_bytes_at_plain_loopback(&format!(
+        "http://127.0.0.1:{port}/moved"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(bytes, br#"{"version":"1.29.0","assets":[]}"#);
+    assert_eq!(sig, "sig");
+    let asked: Vec<String> = paths.try_iter().collect();
+    assert!(
+        !asked
+            .iter()
+            .any(|p| p.starts_with("/acme") && asked.iter().filter(|q| *q == p).count() > 2),
+        "{asked:?}"
+    );
+}
+
+/// A bundle is streamed to disk under a cap and hashed as it streams; a
+/// declared length past the cap is refused before a byte of body is read.
+#[tokio::test]
+async fn a_download_streams_hashes_and_refuses_an_oversized_body() {
+    use sha2::{Digest, Sha256};
+    let body: Vec<u8> = (0..(100 * 1024)).map(|i| (i % 251) as u8).collect();
+    let expected = format!("{:x}", Sha256::digest(&body));
+    let served = body.clone();
+    let (port, _) = respond(move |path| {
+        if path == "/bundle.dmg" {
+            Canned {
+                status: "200 OK",
+                headers: vec![],
+                body: served.clone(),
+            }
+        } else {
+            Canned {
+                status: "200 OK",
+                headers: vec!["Content-Length: 900000000".to_string()],
+                body: b"tiny".to_vec(),
+            }
+        }
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("bundle.dmg");
+    let mut seen_total = None;
+    let hash = ainb::cli::update::download_to_plain_loopback(
+        &format!("http://127.0.0.1:{port}/bundle.dmg"),
+        &path,
+        &mut |_received, total| seen_total = total,
+    )
+    .await
+    .unwrap();
+    assert_eq!(hash, expected);
+    assert_eq!(std::fs::read(&path).unwrap(), body);
+    assert_eq!(seen_total, Some(body.len() as u64));
+
+    let big = temp.path().join("big.dmg");
+    let err = ainb::cli::update::download_to_plain_loopback(
+        &format!("http://127.0.0.1:{port}/big.dmg"),
+        &big,
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("large"), "{err:#}");
+    assert!(!big.exists());
+}
+
+/// One source for the release host: the prerelease root is formed from the
+/// same constant the stable root is.
+#[test]
+fn the_release_host_is_derived_from_the_download_root() {
+    use ainb::cli::update::{RELEASE_DOWNLOAD_ROOT, release_host};
+    assert_eq!(
+        format!("{}/releases/latest/download", release_host()),
+        RELEASE_DOWNLOAD_ROOT
+    );
+    assert!(release_host().starts_with("https://"));
 }
 
 #[test]
