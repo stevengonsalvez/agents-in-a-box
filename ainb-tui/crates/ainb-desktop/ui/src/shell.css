@@ -855,7 +855,10 @@ body {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
-  overflow: auto;
+  /* Hidden, not auto: a scrollbar or a touch drag would move the body without
+     telling the reducer, and the next frame would drag it back. scrollTop is
+     still settable, which is how the frame's own offset is applied. */
+  overflow: hidden;
   font-family: ui-monospace, SFMono-Regular, monospace;
   font-size: 12px;
 }
@@ -883,7 +886,7 @@ body {
   margin: 0;
   padding: 4px 10px;
   background: var(--highlight);
-  color: var(--border);
+  color: var(--muted);
 }
 
 .review-hunk.current {
