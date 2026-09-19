@@ -4,7 +4,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
 import { createFrameStore } from "./store.ts";
-import { shellAgentStatus, shellFleet, shellSessions, SUBSCRIBED } from "./subscription.ts";
+import { shellAgentStatus, shellConfig, shellFleet, shellHangar, shellSessions, SUBSCRIBED } from "./subscription.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
 import { AcpCard } from "./acp.tsx";
@@ -16,6 +16,9 @@ import { Board } from "./board.tsx";
 import { boardColumns } from "./board.ts";
 import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
+import { SettingsPage } from "./settings.tsx";
+import { CLOSE_SETTINGS, OPEN_SETTINGS } from "./settings.ts";
+import type { SetupView, SetupWrite } from "../../bindings/Desktop.ts";
 import {
   accelerator,
   openRowIntent,
@@ -90,6 +93,12 @@ function Shell() {
   // The ACP session whose transcript card holds the work area, if any. It has
   // no tmux pane, so the card stands where its terminal would.
   const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
+  // The settings page: the config section as a form, the daemons panel and
+  // the Setup panel (D3d). Opening it walks the reducer onto the Config
+  // screen, where the form's row edits are in context; closing walks it back
+  // to the session list the sidebar is.
+  const [settings, setSettings] = createSignal(false);
+  const [setup, setSetup] = createSignal<SetupView | null>(null);
   const focusers = new Map<string, () => void>();
   const tabKeys = createMemo(
     () => tabs().map((tab) => tab.key),
@@ -103,6 +112,7 @@ function Shell() {
     if (key !== null) {
       setBoard(false);
       closeTranscript();
+      closeSettings();
     }
     if (key !== null) requestAnimationFrame(() => focusers.get(key)?.());
   };
@@ -151,6 +161,23 @@ function Shell() {
   };
   /** Select a session-list row and attach it, so the reducer marks it attached. */
   const openRow = (row: RowId) => dispatch(openRowIntent(row));
+  const refreshSetup = () => void invoke<SetupView>("setup_status").then(setSetup);
+  const openSettings = () => {
+    closeTranscript();
+    setSettings(true);
+    void run(OPEN_SETTINGS);
+    refreshSetup();
+  };
+  const closeSettings = () => {
+    if (!settings()) return;
+    setSettings(false);
+    void run(CLOSE_SETTINGS);
+  };
+  /** The shell confirms in its own dialog, runs the write, and toasts the outcome. */
+  const setupWrite = (write: SetupWrite) =>
+    void invoke<boolean>("setup_write", { write }).then((ran) => {
+      if (ran) refreshSetup();
+    });
 
   // The palette is mounted only while it is open: each opening lists the
   // commands afresh, with the host's answer for which of them run now.
@@ -282,6 +309,8 @@ function Shell() {
   const loading = createMemo(() => ROOT_SELECTORS.workspacesLoading(store, host()));
   const elsewhere = createMemo(() => ROOT_SELECTORS.attentionElsewhere(store, host()));
   const shell = () => (host() ? store.section(host()!, "shell") : undefined);
+  const config = () => shellConfig(store, host());
+  const hangar = () => shellHangar(store, host());
   const ask = () => fleet()?.ask_state;
   const question = createMemo(() => questionFor(sessions()));
 
@@ -359,8 +388,13 @@ function Shell() {
             </span>
           </Show>
         </span>
-        {/* ponytail: the settings page is D3; the entry is drawn and inert until then. */}
-        <button type="button" class="settings" disabled title="Settings">
+        <button
+          type="button"
+          class="settings"
+          title="Settings"
+          aria-pressed={settings()}
+          onClick={() => (settings() ? closeSettings() : openSettings())}
+        >
           ⚙
         </button>
       </header>
@@ -482,7 +516,21 @@ function Shell() {
               />
             )}
           </Show>
-          <Show when={board() && transcriptKey() === null}>
+          <Show when={settings()}>
+            <SettingsPage
+              config={config()}
+              hangar={hangar()}
+              setup={setup()}
+              onEdit={dispatch}
+              onSetupWrite={setupWrite}
+              onRefreshSetup={refreshSetup}
+              onClose={() => {
+                closeSettings();
+                setBoard(true);
+              }}
+            />
+          </Show>
+          <Show when={board() && transcriptKey() === null && !settings()}>
             <Board
               agentStatus={agentStatus()}
               fleet={fleet()}
@@ -492,7 +540,7 @@ function Shell() {
               onOpenTranscript={openTranscript}
             />
           </Show>
-          <Show when={!board() && transcriptKey() === null && tabs().length === 0}>
+          <Show when={!board() && transcriptKey() === null && !settings() && tabs().length === 0}>
             <p class="empty">Choose a session to open its terminal</p>
           </Show>
           {/* Keyed by tab key, not by the tab object each event replaces: a
