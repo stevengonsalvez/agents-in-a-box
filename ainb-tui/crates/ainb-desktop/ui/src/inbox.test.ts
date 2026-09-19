@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { InboxRowFrame_Serialize, InboxView_Serialize } from "../../../ainb-app/bindings/AppState";
-import { inboxView, MARK_ALL_READ, unreadCount } from "./inbox.ts";
+import { CLOSE_INBOX, inboxView, MARK_ALL_READ, OPEN_INBOX, unreadCount } from "./inbox.ts";
 
 const row = (n: number, read: number | null = null): InboxRowFrame_Serialize => ({
   id: `01J0INBOX00000000000000000${n}`,
@@ -78,4 +78,13 @@ test("what the fold cut is one line of its own counters", () => {
     "4 older entries not sent, 1 summary shortened",
   );
   assert.equal(inboxView(view({ rows_cut: 1 })).cut, "1 older entry not sent");
+});
+
+test("the page opens and closes the reducer's inbox screen, the rows the terminal uses", () => {
+  // `tests/inbox_surface.rs` runs exactly these through the host.
+  assert.deepEqual(OPEN_INBOX, [
+    { Command: ["global.go_home", null] },
+    { Command: ["home.inbox", null] },
+  ]);
+  assert.deepEqual(CLOSE_INBOX, [{ Command: ["inbox.back", null] }]);
 });
