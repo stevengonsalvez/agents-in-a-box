@@ -1789,6 +1789,63 @@ async fn a_cursored_transcript_subscribe_replays_the_gap() {
     );
 }
 
+/// A CURSORED `fleet/transcript_list` is bounded in bytes as well as rows.
+///
+/// A chunk's payload has no ceiling of its own, so a row cap alone lets one
+/// page carry `FLEET_TRANSCRIPT_LIST_MAX` verbatim tool updates. The walk
+/// takes the same byte budget as the tail and simply stops early:
+/// `next_after_order` already tells the caller where to resume, so nothing is
+/// lost and `truncated` stays false. One row larger than the whole budget is
+/// still returned on its own rather than stalling the walk on an empty page.
+#[tokio::test]
+async fn a_cursored_transcript_read_is_bounded_in_bytes_too() {
+    use ainb_hangar_proto::fleet::FLEET_TRANSCRIPT_LIST_MAX_BYTES;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    let fat = serde_json::json!({ "text": "x".repeat(200 * 1024) }).to_string();
+    for index in 0..4 {
+        seed_transcript_payload(&store, "acp:mine", &format!("fat-{index}"), &fat).await;
+    }
+    let huge =
+        serde_json::json!({ "text": "y".repeat(FLEET_TRANSCRIPT_LIST_MAX_BYTES + 1) }).to_string();
+    seed_transcript_payload(&store, "acp:mine", "huge", &huge).await;
+
+    let mut client = Client::authed(dir.path(), &socket).await;
+    let mut after = 0;
+    let mut pages = Vec::new();
+    while pages.len() < 10 {
+        let page = client
+            .call(
+                methods::FLEET_TRANSCRIPT_LIST,
+                serde_json::json!({ "session_key": "acp:mine", "after_order": after, "limit": 10 }),
+            )
+            .await;
+        let result = &page["result"];
+        assert_eq!(
+            result["truncated"], false,
+            "a cursored walk has nothing to admit"
+        );
+        let ids: Vec<String> = result["chunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chunk| chunk["event_id"].as_str().unwrap().to_string())
+            .collect();
+        if ids.is_empty() {
+            break;
+        }
+        after = result["next_after_order"].as_i64().unwrap();
+        pages.push(ids);
+    }
+    assert_eq!(
+        pages,
+        [vec!["fat-0", "fat-1"], vec!["fat-2", "fat-3"], vec!["huge"],],
+        "each page stops at the byte budget, the walk still reaches every row in order, \
+         and a row over the whole budget comes alone"
+    );
+}
+
 /// A credential in a stored transcript payload never leaves the daemon (#1199).
 ///
 /// The ledger keeps what the provider sent, and every client renders what the
