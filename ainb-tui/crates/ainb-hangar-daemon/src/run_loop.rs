@@ -3240,7 +3240,9 @@ mod tests {
         assert_eq!(row.model.as_deref(), Some("o3"));
         assert_eq!(row.model_source, "Raw");
         assert_eq!(row.worktree_path, "/work/x");
-        assert!(ainb_hangar_proto::sessions::is_canonical_uuid(&row.session_id));
+        assert!(ainb_hangar_proto::sessions::is_canonical_uuid(
+            &row.session_id
+        ));
     }
 
     /// A daemon started with no `HANGAR_TASK_EXECUTOR`: the floor every test
