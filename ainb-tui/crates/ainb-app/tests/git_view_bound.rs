@@ -987,3 +987,91 @@ fn a_worktree_at_home_or_with_no_name_frames_a_neutral_label() {
         );
     }
 }
+
+fn commits(n: usize) -> Vec<ainb_app::git::operations::CommitInfo> {
+    (0..n)
+        .map(|i| ainb_app::git::operations::CommitInfo {
+            hash_short: format!("c{i:06}"),
+            author: "dev".to_string(),
+            date: "2026-09-19".to_string(),
+            message: format!("commit {i}"),
+        })
+        .collect()
+}
+
+/// A commit selection the projection clamps is flagged, as the review rows'
+/// `scroll_cut` is, so a surface that draws the Commits list can say the
+/// commit the terminal is on is not the one it highlights (#1252).
+#[test]
+fn a_commit_selection_past_the_list_frames_as_the_last_and_says_so() {
+    let mut state = state_with(1, 1, "a changed line");
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.commits = commits(3);
+        git.selected_commit_index = 1;
+    }
+    let view = &framed(&state)["git_view_state"];
+    assert_eq!(view["selected_commit_index"].as_u64(), Some(1));
+    assert_eq!(
+        view["selected_commit_cut"].as_bool(),
+        Some(false),
+        "inside the list, nothing moved"
+    );
+
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.selected_commit_index = 7;
+    }
+    let view = &framed(&state)["git_view_state"];
+    assert_eq!(
+        view["selected_commit_index"].as_u64(),
+        Some(2),
+        "the last commit the frame carries"
+    );
+    assert_eq!(
+        view["selected_commit_cut"].as_bool(),
+        Some(true),
+        "and the frame says the selection was not in it"
+    );
+
+    {
+        let git = state.git_view.get_mut().git_view_state.as_mut().expect("the git view");
+        git.commits.clear();
+        git.selected_commit_index = 0;
+    }
+    let view = &framed(&state)["git_view_state"];
+    assert_eq!(view["selected_commit_index"].as_u64(), Some(0));
+    assert_eq!(
+        view["selected_commit_cut"].as_bool(),
+        Some(false),
+        "an empty list has nothing to be off; index 0 is where the reducer is"
+    );
+}
+
+/// One bound for the commit selection, whichever way it moves: the scroll and
+/// the next/previous events share it, so neither can run past the list (#1252).
+#[test]
+fn the_commit_selection_has_one_bound_for_scroll_and_keys() {
+    let mut git = GitViewState::new(PathBuf::from("/repo"));
+    git.commits = commits(3);
+    git.active_tab = ainb_app::components::git_view::GitTab::Commits;
+
+    git.move_commit_selection(5);
+    assert_eq!(git.selected_commit_index, 2, "clamped to the last commit");
+    git.move_commit_selection(-9);
+    assert_eq!(git.selected_commit_index, 0, "clamped to the first");
+    git.scroll_active_tab_by(2);
+    assert_eq!(
+        git.selected_commit_index, 2,
+        "the scroll moves the same selection"
+    );
+    git.scroll_active_tab_by(-1);
+    assert_eq!(git.selected_commit_index, 1);
+
+    git.commits.clear();
+    git.move_commit_selection(1);
+    assert_eq!(
+        git.selected_commit_index, 0,
+        "an empty list pins the selection at 0"
+    );
+}
