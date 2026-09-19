@@ -158,6 +158,10 @@ home.witr|home|w|false
 inbox.back_q|inbox|q|false
 inbox.back|inbox|esc|false
 inbox.mark_all_read|inbox|r|false
+inbox.scroll_down_arrow|inbox|down|false
+inbox.scroll_down|inbox|j|false
+inbox.scroll_up_arrow|inbox|up|false
+inbox.scroll_up|inbox|k|false
 log_history.back|log_history|esc|false
 log_history.cleanup_upper|log_history|C|false
 log_history.cleanup|log_history|c|false
