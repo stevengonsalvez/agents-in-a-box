@@ -1,0 +1,16 @@
+# What the webview's stats tab must show for the stats fixture: a DOM-half
+# fixture only (tests/parity/stats.json names why), checked against the
+# webview's own render (ainb-desktop/ui/src/parity.test.ts). A fact deleted
+# from its output fails the suite.
+#
+# Facts are renderer-neutral: what is shown, not how it is spaced or framed.
+The daemon could not read every source
+codex session logs could not be fully read
+$12.50
+claude
+codex
+claude-opus-5
+gpt-5.1-codex
+agents-in-a-box
+stevengonsalvez/agents-in-a-box
+not priced

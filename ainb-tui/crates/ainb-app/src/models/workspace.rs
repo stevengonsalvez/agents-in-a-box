@@ -122,3 +122,14 @@ pub fn same_scan_workspaces(held: &[Workspace], found: &[Workspace]) -> bool {
     held.len() == found.len()
         && held.iter().zip(found).all(|(held, found)| held.same_scan_fields(found))
 }
+
+/// Carry the host's fields from the rows of `held` onto the rows of `found`
+/// with the same session id, wherever the scan now lists them
+/// ([`super::session::carry_host_rows`]).
+pub fn carry_host_rows(held: &[Workspace], found: &mut [Workspace]) {
+    let previous: Vec<Session> =
+        held.iter().flat_map(|workspace| workspace.sessions.iter().cloned()).collect();
+    for workspace in found {
+        super::session::carry_host_rows(&previous, &mut workspace.sessions);
+    }
+}

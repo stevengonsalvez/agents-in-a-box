@@ -1306,6 +1306,62 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
         section.absent = Some(seed.text("agent_status.absent", Captured));
     }
 
+    // ---- usage (section 21) --------------------------------------------------------------------
+    {
+        use ainb_hangar_proto::fleet::{
+            FleetUsageBucket, FleetUsageDailyBucket, FleetUsageModelBucket,
+            FleetUsageProjectBucket, FleetUsageProviderBucket, FleetUsageSummaryResult,
+            FleetUsageSummaryState,
+        };
+        let bucket = FleetUsageBucket {
+            input_tokens: 1,
+            cache_creation_tokens: 2,
+            cache_read_tokens: 3,
+            output_tokens: 4,
+            reasoning_tokens: 5,
+            call_count: 6,
+            session_count: 7,
+            project_count: 8,
+            cost_usd: Some(0.5),
+        };
+        let reply = FleetUsageSummaryResult {
+            state: FleetUsageSummaryState::Partial,
+            generated_at: Some(10),
+            start_at: Some(1),
+            end_at: Some(11),
+            totals: Some(bucket.clone()),
+            daily: vec![FleetUsageDailyBucket {
+                date: seed.text("usage.daily.date", Captured),
+                bucket: bucket.clone(),
+            }],
+            providers: vec![FleetUsageProviderBucket {
+                provider: seed.text("usage.providers.name", Captured),
+                bucket: bucket.clone(),
+            }],
+            models: vec![FleetUsageModelBucket {
+                model: seed.text("usage.models.name", Captured),
+                bucket: bucket.clone(),
+            }],
+            projects: vec![FleetUsageProjectBucket {
+                // Path-shaped, as a working-directory key arrives: the frame
+                // must carry the label, never the dashed home before it.
+                project: format!(
+                    "-home-sample-src-{}",
+                    seed.text("usage.projects.name", Captured)
+                ),
+                repo: Some(seed.text("usage.projects.repo", Captured)),
+                bucket,
+            }],
+            detail: Some(seed.text("usage.detail", Captured)),
+        };
+        let section = state.usage.get_mut();
+        section.apply_read(reply, 12);
+        // Absent and failed are never both beside a summary in a live
+        // section; the sample sets them so every text field is read.
+        section.failure = Some(seed.text("usage.failure", Captured));
+        section.absent = Some(seed.text("usage.absent", Captured));
+    }
+
     // ---- inbox (section 16) ----------------------------------------------------------------
     {
         // Set directly rather than through `apply_read`, which scrubs before it
