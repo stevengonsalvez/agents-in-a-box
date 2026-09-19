@@ -185,13 +185,15 @@ pub enum DaemonError {
     /// remedy is a different binary on one side, never a second daemon.
     #[error("{message}")]
     Incompatible {
-        /// What the daemon speaks.
-        daemon: ainb_hangar_proto::protocol::ProtocolRange,
+        /// What the daemon speaks; `None` when the refusal's `data` did not
+        /// say (the code alone decides the variant).
+        daemon: Option<ainb_hangar_proto::protocol::ProtocolRange>,
         /// What this build offered.
         client: ainb_hangar_proto::protocol::ProtocolRange,
         /// The daemon's build version, for the banner only. Never branched on.
         daemon_version: Option<String>,
-        /// The daemon's own sentence, which names the fix.
+        /// The daemon's own sentence, which names the fix; bounded and
+        /// stripped of control characters before it is kept.
         message: String,
     },
 }
@@ -234,32 +236,54 @@ impl DaemonError {
     }
 
     /// The error an `auth/hello` refusal decodes to: [`Self::Incompatible`]
-    /// when the code is `PROTOCOL_INCOMPATIBLE` and `data` carries the
-    /// daemon's `HelloResult`, else [`Self::Rpc`]. `client` is the range this
-    /// build sent, which the refusal echoes only in its sentence.
+    /// whenever the code is `PROTOCOL_INCOMPATIBLE`, else [`Self::Rpc`].
+    ///
+    /// The code alone decides. `data` is read best-effort for the daemon's
+    /// range and version, so a refusal that carries none, or one this build
+    /// cannot decode, is still "a daemon is serving and cannot serve this
+    /// build" with the blanks left blank, never a generic error that a
+    /// supervisor would answer with a spawn. `client` is the range this build
+    /// sent, which the refusal echoes only in its sentence.
     #[must_use]
     pub fn from_hello_error(
         error: ainb_hangar_proto::RpcError,
         client: ainb_hangar_proto::protocol::ProtocolRange,
     ) -> Self {
-        if error.code == ainb_hangar_proto::protocol::PROTOCOL_INCOMPATIBLE {
-            if let Some(hello) = error
-                .data
-                .and_then(|data| serde_json::from_value::<auth::HelloResult>(data).ok())
-            {
-                return Self::Incompatible {
-                    daemon: hello.protocol,
-                    client,
-                    daemon_version: hello.daemon_version,
-                    message: error.message,
-                };
-            }
+        if error.code != ainb_hangar_proto::protocol::PROTOCOL_INCOMPATIBLE {
+            return Self::Rpc {
+                code: error.code,
+                message: error.message,
+            };
         }
-        Self::Rpc {
-            code: error.code,
-            message: error.message,
+        let hello = error
+            .data
+            .and_then(|data| serde_json::from_value::<auth::HelloResult>(data).ok());
+        Self::Incompatible {
+            daemon: hello.as_ref().map(|hello| hello.protocol),
+            client,
+            daemon_version: hello
+                .and_then(|hello| hello.daemon_version)
+                .map(|version| bounded(&version, MAX_VERSION_CHARS)),
+            message: bounded(&error.message, MAX_REFUSAL_CHARS),
         }
     }
+}
+
+/// The most of a daemon's refusal sentence a client keeps: it is logged and
+/// framed to a banner, and the daemon is a peer, not a trusted source.
+const MAX_REFUSAL_CHARS: usize = 512;
+/// The most of a daemon's version string a client keeps.
+const MAX_VERSION_CHARS: usize = 64;
+
+/// `text` with control characters dropped and cut to `max` characters, with
+/// an ellipsis when it was cut.
+fn bounded(text: &str, max: usize) -> String {
+    let mut chars = text.chars().filter(|c| !c.is_control());
+    let mut out: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
 }
 
 /// The daemon unix socket path.
