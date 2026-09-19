@@ -16,10 +16,10 @@ import {
   bodyLines,
   fileCut,
   fileRows,
-  openFile,
   ROW_PX,
   scrollIntent,
   sectionCut,
+  segments,
   selectFileIntent,
   wheelRows,
 } from "./review.ts";
@@ -136,13 +136,12 @@ test("a file with no hunks is still named, with nothing under it", () => {
     "the file is drawn; it simply has no hunks",
   );
   assert.equal(lines[0].kind === "file" && lines[0].file.binary, true);
-  assert.equal(openFile(body)?.path, "assets/logo.png");
+  assert.equal(lines[0].kind === "file" && lines[0].file.path, "assets/logo.png");
 });
 
 test("the open file is the one the reducer says is open", () => {
   const body = section([file("a.rs", []), file("b.rs", [])], 1);
 
-  assert.equal(openFile(body)?.path, "b.rs");
   assert.deepEqual(
     fileRows(body).map((file) => [file.path, file.open]),
     [
@@ -191,7 +190,6 @@ test("the section says what the budget cost it, or says nothing at all", () => {
 
 test("a section that has not arrived draws nothing rather than throwing", () => {
   assert.deepEqual(fileRows(undefined), []);
-  assert.equal(openFile(undefined), undefined);
   assert.deepEqual(bodyLines(undefined), []);
   assert.equal(sectionCut(undefined), undefined);
 });
@@ -351,4 +349,38 @@ test("the banners say what the frame left out", async () => {
   assert.match(drawn, /too large to send/, "the withheld banner");
   assert.match(drawn, /7 changed paths, 120 diff lines, 3 commits not sent/, drawn);
   assert.match(drawn, /40 rows and 2 hunks not sent/, "the file says what it lost");
+});
+
+test("emphasis ranges are byte offsets, and the window draws them where they are", () => {
+  const plain = { ...row(1, "let token = value;"), emphasis: [[4, 9] as [number, number]] };
+  assert.deepEqual(segments(plain), [
+    { text: "let ", emphasis: false },
+    { text: "token", emphasis: true },
+    { text: " = value;", emphasis: false },
+  ]);
+
+  // "héllo" is six BYTES and five UTF-16 units: a window that sliced by the
+  // byte offsets would cut a character short.
+  const accented = { ...row(1, "héllo world"), emphasis: [[0, 6] as [number, number]] };
+  assert.deepEqual(segments(accented), [
+    { text: "héllo", emphasis: true },
+    { text: " world", emphasis: false },
+  ]);
+
+  // An emoji is four bytes and two units.
+  const emoji = { ...row(1, "🔐 key"), emphasis: [[0, 4] as [number, number]] };
+  assert.deepEqual(segments(emoji), [
+    { text: "🔐", emphasis: true },
+    { text: " key", emphasis: false },
+  ]);
+
+  // The common case: the projection drops the ranges whenever it changed the
+  // text, so most rows are one run and no work.
+  assert.deepEqual(segments(row(1, "untouched")), [{ text: "untouched", emphasis: false }]);
+  // And a range past the end of the text takes what there is, not a crash.
+  const over = { ...row(1, "short"), emphasis: [[2, 99] as [number, number]] };
+  assert.deepEqual(segments(over), [
+    { text: "sh", emphasis: false },
+    { text: "ort", emphasis: true },
+  ]);
 });
