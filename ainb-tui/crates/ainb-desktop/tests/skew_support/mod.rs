@@ -66,6 +66,8 @@ pub fn listen(home: &Path, hello: Hello) -> Listener {
     // The plain socket: the versioned alias is the daemon's to publish, and
     // `socket_path_in` falls back to this one when it is absent.
     let socket = home.join("hangar.sock");
+    // A listener this test dropped earlier leaves its socket file behind.
+    let _ = std::fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket).expect("bind the fixture socket");
     let task = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
