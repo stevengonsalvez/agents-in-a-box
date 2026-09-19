@@ -1,0 +1,35 @@
+{
+  "width": 120,
+  "height": 36,
+  "dom_only": "the terminal's stats is burndown's plugin paint on analytics; a second built-in beside it is the drift the section set stops (spec, D3-prime parity amendment)",
+  "screen": {
+    "kind": "stats",
+    "usage": {
+      "state": "partial",
+      "generated_at": 1758240000000,
+      "start_at": 1755648000000,
+      "end_at": 1758240000000,
+      "totals": {
+        "input_tokens": 120000, "cache_creation_tokens": 30000, "cache_read_tokens": 900000,
+        "output_tokens": 45000, "reasoning_tokens": 5000, "call_count": 310,
+        "session_count": 12, "project_count": 3, "cost_usd": 12.5
+      },
+      "daily": [
+        {"date": "2026-09-18", "bucket": {"input_tokens": 40000, "cache_creation_tokens": 10000, "cache_read_tokens": 300000, "output_tokens": 15000, "reasoning_tokens": 1000, "call_count": 100, "session_count": 4, "project_count": 2, "cost_usd": 4.25}},
+        {"date": "2026-09-19", "bucket": {"input_tokens": 80000, "cache_creation_tokens": 20000, "cache_read_tokens": 600000, "output_tokens": 30000, "reasoning_tokens": 4000, "call_count": 210, "session_count": 8, "project_count": 3}}
+      ],
+      "providers": [
+        {"provider": "claude", "bucket": {"input_tokens": 100000, "cache_creation_tokens": 30000, "cache_read_tokens": 900000, "output_tokens": 40000, "reasoning_tokens": 0, "call_count": 250, "session_count": 10, "project_count": 3, "cost_usd": 12.5}},
+        {"provider": "codex", "bucket": {"input_tokens": 20000, "cache_creation_tokens": 0, "cache_read_tokens": 0, "output_tokens": 5000, "reasoning_tokens": 5000, "call_count": 60, "session_count": 2, "project_count": 1}}
+      ],
+      "models": [
+        {"model": "claude-opus-5", "bucket": {"input_tokens": 90000, "cache_creation_tokens": 30000, "cache_read_tokens": 900000, "output_tokens": 38000, "reasoning_tokens": 0, "call_count": 220, "session_count": 9, "project_count": 3, "cost_usd": 12.0}},
+        {"model": "gpt-5.1-codex", "bucket": {"input_tokens": 20000, "cache_creation_tokens": 0, "cache_read_tokens": 0, "output_tokens": 5000, "reasoning_tokens": 5000, "call_count": 60, "session_count": 2, "project_count": 1}}
+      ],
+      "projects": [
+        {"project": "agents-in-a-box", "repo": "stevengonsalvez/agents-in-a-box", "bucket": {"input_tokens": 100000, "cache_creation_tokens": 25000, "cache_read_tokens": 800000, "output_tokens": 40000, "reasoning_tokens": 5000, "call_count": 280, "session_count": 10, "project_count": 1, "cost_usd": 11.0}}
+      ],
+      "detail": "codex session logs could not be fully read"
+    }
+  }
+}
