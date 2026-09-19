@@ -367,8 +367,9 @@ async fn reconcile_inserts_missing_rows_and_the_table_wins_on_an_id() {
     assert_eq!(all, vec![missing, table_row]);
 }
 
-/// A file session whose tmux name the table binds to another id is skipped,
-/// counted, and reported; the table row is unchanged.
+/// A file session whose tmux name the table binds to another id that the
+/// file ALSO has (under a different name there; the table wins on contents)
+/// is skipped, counted, and reported; the table row is unchanged.
 #[tokio::test]
 async fn reconcile_skips_and_counts_a_tmux_name_conflict() {
     let dir = tempfile::tempdir().unwrap();
@@ -390,9 +391,19 @@ async fn reconcile_skips_and_counts_a_tmux_name_conflict() {
         1500,
     );
 
-    let out = SessionsRepo::complete_reconcile(pool, source, &[from_file(&rival)], 2, 7)
-        .await
-        .unwrap();
+    // The file still has the holder, renamed there; the table keeps its row.
+    let mut holder_in_file = holder.clone();
+    holder_in_file.tmux_session_name = "ainb-s1-renamed".to_string();
+    let out = SessionsRepo::complete_reconcile(
+        pool,
+        source,
+        &[from_file(&holder_in_file), from_file(&rival)],
+        2,
+        7,
+    )
+    .await
+    .unwrap();
+    assert!(out.deleted.is_empty(), "{:?}", out.deleted);
     assert_eq!(
         out.marker,
         ImportMarker {
@@ -491,4 +502,77 @@ async fn reconcile_marker_carries_the_latest_pass() {
     );
     let import = SessionsRepo::import_marker(pool, source).await.unwrap().unwrap();
     assert_eq!(import.completed_at, 1);
+}
+
+/// Until the flip the file is the authority on which sessions exist: a table
+/// row whose session the file does not have is deleted by the pass, and
+/// returned in `deleted`, while a row the file has keeps its table contents.
+#[tokio::test]
+async fn reconcile_deletes_table_rows_the_file_does_not_have() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/u/.agents-in-a-box/sessions.json";
+
+    let kept = test_session(
+        "00000000-0000-0000-0000-000000000001",
+        "ainb-kept",
+        "ws",
+        1000,
+    );
+    let gone = test_session(
+        "00000000-0000-0000-0000-000000000002",
+        "ainb-gone",
+        "ws",
+        2000,
+    );
+    SessionsRepo::upsert(pool, &kept).await.unwrap();
+    SessionsRepo::upsert(pool, &gone).await.unwrap();
+    let mut stale = kept.clone();
+    stale.workspace_name = "file-ws".to_string();
+
+    let out = SessionsRepo::complete_reconcile(pool, source, &[from_file(&stale)], 0, 3)
+        .await
+        .unwrap();
+    assert_eq!(out.deleted, vec![gone.session_id.clone()]);
+    assert_eq!(out.marker.imported, 0);
+    assert_eq!(
+        SessionsRepo::list(pool, None, 100).await.unwrap(),
+        vec![kept]
+    );
+}
+
+/// A tmux name the table binds to an id the file no longer has moves to the
+/// file's session: the stale row is deleted first, then the file's inserted.
+#[tokio::test]
+async fn reconcile_gives_a_tmux_name_to_the_files_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/u/.agents-in-a-box/sessions.json";
+
+    let old = test_session(
+        "00000000-0000-0000-0000-000000000001",
+        "ainb-s1",
+        "ws",
+        1000,
+    );
+    SessionsRepo::upsert(pool, &old).await.unwrap();
+    let new = test_session(
+        "00000000-0000-0000-0000-000000000009",
+        "ainb-s1",
+        "ws",
+        1500,
+    );
+
+    let out = SessionsRepo::complete_reconcile(pool, source, &[from_file(&new)], 0, 4)
+        .await
+        .unwrap();
+    assert_eq!(out.deleted, vec![old.session_id.clone()]);
+    assert_eq!(out.marker.imported, 1);
+    assert!(out.conflicts.is_empty());
+    assert_eq!(
+        SessionsRepo::list(pool, None, 100).await.unwrap(),
+        vec![new]
+    );
 }

@@ -1734,63 +1734,85 @@ async fn shadow_write_session(
     }
 }
 
-/// Register a daemon-launched session in `sessions.json` and the `sessions`
-/// table: the file row first, then the table row, under ONE flock when it can
-/// be had.
+/// The pauses between attempts at a registration's file write. Short, and
+/// bounded: the lock itself is waited for inside each attempt, so these only
+/// space out retries of a write that failed for another reason.
+const REGISTRY_FILE_RETRIES: [Duration; 3] = [
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(4),
+];
+
+/// Register a daemon-launched session: its `sessions.json` row first, then
+/// its `sessions` table row, and the table row ONLY once the file row is
+/// written.
 ///
-/// Holding the flock across both keeps a surface's read-modify-write of the
-/// file (a `Persist::SessionHeadroom` compare-and-set, say) from landing
-/// between them. The flock wait is bounded by `flock_bound` so the common
-/// path never stalls; when the flock is still held after it, the file row is
-/// written through the blocking `register_session_at`, which waits for the
-/// flock as v2 always did, and the table row follows outside it. A live
-/// session is never left out of both registries: every path writes the file
-/// row (or logs why it could not) and then attempts the table row, bounded by
-/// [`SHADOW_WRITE_TIMEOUT`]. Failures are only logged, since the session is
-/// already live; a table row that failed is inserted by the next reconcile
-/// pass from the file row.
+/// P6e: until the flip the file is the authority on which sessions exist,
+/// and a reconcile pass deletes a table row the file does not have. So a
+/// table row written after a failed file write would be deleted by the next
+/// pass; this never writes one. File first holds for every pre-flip writer.
+///
+/// The file write takes the lock with a bounded wait (`flock_bound`) so the
+/// common path never stalls, and holds it across both writes so a surface's
+/// read-modify-write cannot land between them. When the lock stays busy it
+/// falls back to the blocking `register_session_at`, which waits for the lock
+/// as v2 always did. A write that fails for another reason is retried on
+/// `retries`. If every attempt fails the session is live but unregistered:
+/// that is returned as an error for the caller to show the operator, and
+/// nothing is written to the table. A table write that fails after the file
+/// row is written is only logged: the next reconcile pass inserts it.
 async fn register_interactive_session(
     pool: &SqlitePool,
     sessions_path: &std::path::Path,
     record: &ainb_fleet_core::session_registry::AinbSessionRecord,
     task_id: &str,
     flock_bound: Duration,
-) {
+    retries: &[Duration],
+) -> Result<(), String> {
     use ainb_fleet_core::session_registry::{register_session_at, register_session_locked};
 
-    let held = match sessions_path.parent() {
-        Some(dir) => crate::session_import::acquire_sessions_flock(dir, flock_bound).await,
-        None => Err(anyhow::anyhow!("sessions.json has no parent directory")),
-    };
-    let (path, file_record) = (sessions_path.to_path_buf(), record.clone());
-    let written = match held {
-        Ok(flock) => {
-            tokio::task::spawn_blocking(move || {
-                let written = register_session_locked(&path, &file_record, &flock);
-                (Some(flock), written)
-            })
-            .await
-        }
-        Err(e) => {
-            tracing::info!(
-                task_id,
-                error = %format!("{e:#}"),
-                "sessions.json flock busy; registering with the blocking lock"
-            );
-            tokio::task::spawn_blocking(move || (None, register_session_at(&path, &file_record)))
+    let mut pauses = retries.iter();
+    let flock = loop {
+        let held = match sessions_path.parent() {
+            Some(dir) => crate::session_import::acquire_sessions_flock(dir, flock_bound).await,
+            None => Err(anyhow::anyhow!("sessions.json has no parent directory")),
+        };
+        let (path, file_record) = (sessions_path.to_path_buf(), record.clone());
+        let written = match held {
+            Ok(flock) => {
+                tokio::task::spawn_blocking(move || {
+                    let written = register_session_locked(&path, &file_record, &flock);
+                    (Some(flock), written)
+                })
                 .await
-        }
-    };
-    let flock = match written {
-        Ok((flock, Ok(()))) => flock,
-        Ok((flock, Err(e))) => {
-            tracing::warn!(task_id, error = %e, "session registry write failed");
-            flock
-        }
-        Err(e) => {
-            tracing::warn!(task_id, error = %e, "session registry write task failed");
-            None
-        }
+            }
+            Err(e) => {
+                tracing::info!(
+                    task_id,
+                    error = %format!("{e:#}"),
+                    "sessions.json flock busy; registering with the blocking lock"
+                );
+                tokio::task::spawn_blocking(move || {
+                    (None, register_session_at(&path, &file_record))
+                })
+                .await
+            }
+        };
+        let failure = match written {
+            Ok((flock, Ok(()))) => break flock,
+            Ok((_, Err(e))) => format!("{e:#}"),
+            Err(e) => format!("registry write task failed: {e}"),
+        };
+        let Some(pause) = pauses.next() else {
+            tracing::warn!(
+                task_id,
+                error = %failure,
+                "session registry write failed; the session is live but unregistered"
+            );
+            return Err(failure);
+        };
+        tracing::info!(task_id, error = %failure, "session registry write failed; retrying");
+        tokio::time::sleep(*pause).await;
     };
 
     match tokio::time::timeout(SHADOW_WRITE_TIMEOUT, shadow_write_session(pool, record)).await {
@@ -1799,6 +1821,7 @@ async fn register_interactive_session(
         Err(_) => tracing::warn!(task_id, "sessions table write timed out"),
     }
     drop(flock);
+    Ok(())
 }
 
 /// The `sessions` table row for a registry record.
@@ -1969,8 +1992,20 @@ async fn run_interactive(
         &record,
         &task.id,
         crate::session_import::SESSIONS_FLOCK_BOUND,
+        &REGISTRY_FILE_RETRIES,
     )
-    .await;
+    .await
+    .err()
+    .into_iter()
+    .for_each(|why| {
+        runner.stream_line(
+            ainb_hangar_proto::events::MessageKind::Error,
+            format!(
+                "This session is running but is not in the session list: \
+                 its sessions.json registration failed ({why})."
+            ),
+        );
+    });
 
     // a54: the session was registered for the shutdown reap right after spawn
     // (above). Unregister once `wait` returns — a naturally reaped session needs
@@ -3334,8 +3369,10 @@ mod tests {
                     &record,
                     "task-flock",
                     crate::session_import::SESSIONS_FLOCK_BOUND,
+                    &[],
                 )
-                .await;
+                .await
+                .unwrap();
             })
         };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
@@ -3396,8 +3433,10 @@ mod tests {
                     &record,
                     "task-busy",
                     Duration::from_millis(50),
+                    &[],
                 )
-                .await;
+                .await
+                .unwrap();
             })
         };
         // Well past the bound: the registration is now waiting on the
@@ -3418,6 +3457,51 @@ mod tests {
         let rows = SessionsRepo::list(&pool, None, 10).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session_id, record.session_id.to_string());
+    }
+
+    /// P6e: a registration whose file write keeps failing writes no table
+    /// row (the next pass would delete it, the file being the authority on
+    /// which sessions exist) and reports the failure for the operator, after
+    /// its retries. Red if the table write goes ahead after a failed file
+    /// write.
+    #[tokio::test]
+    async fn a_failed_file_write_registers_nothing_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool().clone();
+        // A regular file where the sessions directory should be: every
+        // attempt at the file write fails.
+        let blocker = tempfile::NamedTempFile::new().unwrap();
+        let path = blocker.path().join("sessions.json");
+        let record = ainb_fleet_core::session_registry::AinbSessionRecord::new(
+            "tmux_hangar-unregistered",
+            PathBuf::from("/work/unregistered"),
+            "ws",
+        );
+
+        let started = std::time::Instant::now();
+        let failed = register_interactive_session(
+            &pool,
+            &path,
+            &record,
+            "task-unregistered",
+            Duration::from_millis(50),
+            &[Duration::from_millis(20), Duration::from_millis(40)],
+        )
+        .await;
+        assert!(
+            failed.is_err(),
+            "a failed file write was reported as registered"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(60),
+            "the file write was not retried: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            SessionsRepo::list(&pool, None, 10).await.unwrap().is_empty(),
+            "a table row was written without its file row"
+        );
     }
 
     /// P6d: the daemon's own registration records the provider it launched,
