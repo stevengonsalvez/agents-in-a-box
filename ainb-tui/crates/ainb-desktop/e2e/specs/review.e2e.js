@@ -14,8 +14,8 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { click } from "../support.js";
-import { env, run, seeded } from "../world.js";
+import { click, intentsSent, selectedNode } from "../support.js";
+import { run, seeded } from "../world.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
