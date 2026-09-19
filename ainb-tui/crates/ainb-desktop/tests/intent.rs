@@ -57,14 +57,19 @@ fn a_refusal_reads_as_the_row_and_the_reason() {
     );
 }
 
-/// The updater from the webview: the window may run the update the host
-/// resolved (check, apply, roll back, discard the previous, read the
-/// settings); the channel and the tag are the terminal's and the config
-/// file's, never the window's. One list, shared with the palette gate.
+/// The updater from the webview: the window may check, apply the update the
+/// host resolved, and read the settings. Rolling back (a forced downgrade),
+/// removing the previous (the only recovery copy) and choosing the channel
+/// or the tag are the native menu's, the terminal's and the config file's,
+/// never the window's. One list, shared with the palette gate.
 #[test]
 fn the_window_may_run_the_update_but_never_choose_where_it_comes_from() {
     use ainb_desktop::intent::{refused_from_webview, update, update_refusal};
     let keymap = ainb_app::Keymap::defaults();
+    assert_eq!(
+        update::FROM_WEBVIEW,
+        [update::CHECK, update::APPLY, update::SETTINGS]
+    );
     for id in update::FROM_WEBVIEW {
         assert!(update_refusal(id).is_none(), "{id} refused");
         assert!(
@@ -72,14 +77,16 @@ fn the_window_may_run_the_update_but_never_choose_where_it_comes_from() {
             "{id} refused by the one list"
         );
     }
-    let refusal =
-        update_refusal(update::SET_SETTINGS).expect("the channel is not the window's to set");
-    assert_eq!(refusal.command, CommandId::new(update::SET_SETTINGS));
-    assert!(refused_from_webview(
-        &keymap,
-        &CommandId::new(update::SET_SETTINGS)
-    ));
-    assert_eq!(update::ALL.len(), update::FROM_WEBVIEW.len() + 1);
+    for id in [
+        update::ROLLBACK,
+        update::DISCARD_PREVIOUS,
+        update::SET_SETTINGS,
+    ] {
+        let refusal = update_refusal(id).unwrap_or_else(|| panic!("{id} is not the window's"));
+        assert_eq!(refusal.command, CommandId::new(id));
+        assert!(refused_from_webview(&keymap, &CommandId::new(id)));
+    }
+    assert_eq!(update::ALL.len(), update::FROM_WEBVIEW.len() + 3);
     assert!(update::ALL.iter().all(|id| id.starts_with("update.")));
 }
 
