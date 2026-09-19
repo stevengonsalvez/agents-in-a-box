@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { click } from "../support.js";
 import { env, run, seeded } from "../world.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -87,20 +88,14 @@ describe("reviewing from the window", () => {
     // and another spec in this world has typed in it before now: typed keys
     // would land after whatever it still held.
     await query.setValue("session_list.git");
-    await $('.palette-row[data-row="command:session_list.git"]').waitForExist({ timeout: 30_000 });
-    // Enter rather than a click on the row: the palette rebuilds every row on
-    // every frame the host sends, and frames arrive faster than a driver can
-    // find an element and click it, so a click on a row of this list loses a
-    // race no person loses. The highlighted row is read back first, so the
-    // journey still proves which row ran.
-    await browser.waitUntil(
-      async () =>
-        (await browser.execute(
-          () => document.querySelector('.palette-row[aria-selected="true"]')?.getAttribute("data-row") ?? "",
-        )) === "command:session_list.git",
-      { timeout: 30_000, timeoutMsg: "the palette never put session_list.git under the cursor" },
-    );
-    await browser.keys(["Enter"]);
+    // Clicked the way a person clicks it: found once, then clicked, with no
+    // retry on a stale element. The palette keeps an unchanged row's node
+    // across the frames the host keeps sending (#1267), so the row found is
+    // still the row on screen when the click lands. A palette that rebuilt its
+    // rows again would fail here with a stale element, not pass on a retry.
+    const row = await $('.palette-row[data-row="command:session_list.git"]');
+    await row.waitForExist({ timeout: 30_000 });
+    await row.click();
 
     // The review tab, and the first row drawn: the wall clock across this is a
     // real window's first render of a diff at the bound, which is the figure
@@ -108,8 +103,11 @@ describe("reviewing from the window", () => {
     // give.
     const started = Date.now();
     await click(".review-tab .tab-title");
+    // The default poll is 500 ms, which is larger than the figure being
+    // measured; at 20 ms the reading is the render, not the polling.
     await browser.waitUntil(async () => (await $$(".review-row")).length > 0, {
       timeout: 120_000,
+      interval: 20,
       timeoutMsg: "the review tab drew no rows",
     });
     const drawnMs = Date.now() - started;
@@ -159,6 +157,7 @@ describe("reviewing from the window", () => {
     await click(".review-tab .tab-title");
     await browser.waitUntil(async () => (await $$(".review-row")).length > 0, {
       timeout: 120_000,
+      interval: 20,
       timeoutMsg: "the review tab drew no rows the second time",
     });
     const remountMs = Date.now() - remountStarted;
@@ -193,6 +192,27 @@ describe("reviewing from the window", () => {
     });
     await click(".settings-head .close", 30_000);
 
+    // #1221's line, asserted rather than only recorded: the window draws the
+    // rows around the reducer's offset, so neither figure and neither DOM may
+    // grow with the diff. The redraw is the window alone, with the frame
+    // already in the store; the first render also carries the reducer reading
+    // the diff and the frame crossing the channel.
+    assert.ok(
+      nodes < 2_000,
+      `the review tab built ${nodes} nodes for ${rows} rows: a DOM that grows with the diff, not with the viewport`,
+    );
+    // The redraw is the window alone, with the frame already in the store, so
+    // it is held to #1221's line exactly.
+    assert.ok(remountMs < 200, `the window redrew in ${remountMs} ms, over the 200 ms line #1221 set`);
+    // The first render is not the same measurement: it also carries the
+    // reducer reading a half-megabyte diff from git and the frame crossing the
+    // channel, neither of which windowing touches. It is held to a stated
+    // second, which still fails loudly if the whole body comes back.
+    assert.ok(
+      drawnMs < 1_000,
+      `the first render took ${drawnMs} ms; the window draws a page, so this is the reducer's read, not the DOM`,
+    );
+
     writeFileSync(
       REPORT,
       `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, drawnMs, remountMs }, null, 2)}\n`,
@@ -202,73 +222,6 @@ describe("reviewing from the window", () => {
     );
   });
 });
-
-/**
- * Click `selector`, re-finding it each try until it lands.
- *
- * Every list in this window is redrawn on every frame the host sends, and a
- * frame arrives whenever anything moves: an element found a moment ago can be
- * detached before the click reaches it, which WebDriver reports as a stale
- * reference. That is the window working, not failing, so the click waits it
- * out and only the absence of the element is a failure.
- */
-async function click(selector, timeout = 60_000) {
-  let last = null;
-  try {
-    await browser.waitUntil(
-      async () => {
-        try {
-          const element = await $(selector);
-          if (!(await element.isExisting())) return false;
-          await element.click();
-          return true;
-        } catch (error) {
-          last = error;
-          if (!/stale element|no longer attached|not interactable/i.test(String(error))) throw error;
-          return false;
-        }
-      },
-      { timeout },
-    );
-  } catch (error) {
-    // The message is built here rather than in `timeoutMsg`: wdio takes that
-    // option as a string, so a function there is dropped and the run reports
-    // the bare timeout with nothing about what the clicks were hitting.
-    throw new Error(`${selector} never took a click in ${timeout} ms, last: ${last ?? error}`);
-  }
-}
-
-/**
- * What the webview asked the host for and what became of it, from the
- * desktop's own log, so a failure here names the command that was refused
- * rather than only the element that never appeared.
- */
-function intentsSent() {
-  try {
-    const lines = run("sh", [
-      "-c",
-      'cat "$1"/desktop.log* 2>/dev/null | grep "renderer intent"',
-      "log",
-      env().AINB_HANGAR_HOME,
-    ]);
-    return lines
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => `${line.match(/command="?([^"\s]+)/)?.[1] ?? "unknown"}:${line.match(/outcome="?(\w+)/)?.[1] ?? "unknown"}`);
-  } catch {
-    return [];
-  }
-}
-
-/** The category the frame says is selected, as the tree draws it. */
-async function selectedNode() {
-  // Read through the document rather than a `:has()` selector: this runner's
-  // WebKit is the one the bundle ships with, not the newest one.
-  return browser.execute(() => {
-    const current = document.querySelector('.settings-node button[aria-current="true"]');
-    return current === null ? null : current.closest(".settings-node").getAttribute("data-node");
-  });
-}
 
 /** The file the frame says is open, as the window draws it. */
 async function openFile() {

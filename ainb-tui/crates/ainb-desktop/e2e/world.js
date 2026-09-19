@@ -12,6 +12,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { OWNER_FILE } from "./cleanup.js";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -104,7 +105,7 @@ export function paneText(tmux) {
  * and the failures read as regressions in the app. Run `npm run build` in
  * `ui/` to clear this.
  */
-function freshBundle() {
+export function freshBundle() {
   const dist = resolve(HERE, "../ui/dist/index.html");
   if (!existsSync(dist)) throw new Error(`the webview is not built: ${dist}`);
   const built = statSync(dist).mtimeMs;
@@ -141,9 +142,14 @@ export function up(sessions = 2) {
   ]) {
     if (!existsSync(path)) throw new Error(`${name} is not built: ${path}`);
   }
+  // Already checked in `onPrepare`, before anything is cleared or started;
+  // kept here for a caller that builds a world on its own.
   freshBundle();
 
   const root = mkdtempSync(join(tmpdir(), "ainb-e2e-"));
+  // The run that owns this world, so a later run's cleanup leaves it alone
+  // while this process lives (cleanup.js).
+  writeFileSync(join(root, OWNER_FILE), String(process.pid));
   const home = join(root, "home");
   const hangar = join(home, ".agents-in-a-box");
   const bin = join(root, "bin");
