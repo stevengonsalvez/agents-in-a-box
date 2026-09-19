@@ -113,8 +113,18 @@ const EMPTY: Omit<StatsView, "state" | "status"> = {
   cut: undefined,
 };
 
-/** Section 21 as the stats tab draws it. */
-export function statsView(usage: UsageView | undefined): StatsView {
+/**
+ * What the tab says when the host withheld section 21 as oversize: the store
+ * keeps the body it last held, so the numbers drawn are the last that fitted.
+ */
+export const WITHHELD =
+  "The usage summary was too large to send, so these are the last numbers that fitted.";
+
+/**
+ * Section 21 as the stats tab draws it. `stale` is whether the host withheld
+ * the section since the body held here was framed.
+ */
+export function statsView(usage: UsageView | undefined, stale = false): StatsView {
   if (usage === undefined) return { ...EMPTY, state: "waiting", status: "Reading usage from the daemon" };
   const summary = usage.summary;
   if (summary === null) {
@@ -139,6 +149,7 @@ export function statsView(usage: UsageView | undefined): StatsView {
       break;
   }
   if (usage.failure !== null) said.push(`The last read failed: ${usage.failure}; these are the last numbers read`);
+  if (stale) said.push(WITHHELD);
   const busiest = Math.max(0, ...summary.daily.map((day) => tokens(day.bucket)));
   const lost: string[] = [];
   const count = (n: number, one: string, many: string) => {
