@@ -49,38 +49,85 @@ const FIXED_INSTANT: &str = "1970-01-01T00:00:00Z";
 /// home carries that path in its text, and it is a new path every run.
 const FIXED_HOME: &str = "<home>";
 
-/// `value` with every object's keys in sorted order, and every timestamp
-/// rewritten to [`FIXED_INSTANT`].
+/// `value`, canonical: object keys sorted, timestamps rewritten to
+/// [`FIXED_INSTANT`], the scratch home to [`FIXED_HOME`].
 ///
 /// A map on the wire is a `HashMap` more often than not, and this workspace
-/// builds serde_json with insertion order preserved, so two runs of one fixture
+/// builds `serde_json` with insertion order preserved, so two runs of one fixture
 /// can emit the same object with its keys in different order. Arrays are left
 /// exactly as they are: their order is the thing a renderer draws.
-fn canonical(value: serde_json::Value, home: &str) -> serde_json::Value {
+///
+/// `key` is the field the string sits under, because only a field that HOLDS a
+/// time is flattened: a commit message or a log line that happens to parse as
+/// RFC 3339 is content, and rewriting it would hide a real change from the
+/// diff.
+fn canonical(value: serde_json::Value, homes: &[String], key: Option<&str>) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
-            let sorted: std::collections::BTreeMap<String, serde_json::Value> =
-                map.into_iter().map(|(key, value)| (key, canonical(value, home))).collect();
+            let sorted: std::collections::BTreeMap<String, serde_json::Value> = map
+                .into_iter()
+                .map(|(name, value)| {
+                    let value = canonical(value, homes, Some(name.as_str()));
+                    (name, value)
+                })
+                .collect();
             serde_json::Value::Object(sorted.into_iter().collect())
         }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(|item| canonical(item, home)).collect())
-        }
-        serde_json::Value::String(text) if chrono::DateTime::parse_from_rfc3339(&text).is_ok() => {
-            serde_json::Value::String(FIXED_INSTANT.to_string())
-        }
-        serde_json::Value::String(text) if text.contains(home) => {
-            serde_json::Value::String(text.replace(home, FIXED_HOME))
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items.into_iter().map(|item| canonical(item, homes, key)).collect(),
+        ),
+        serde_json::Value::String(text) => {
+            if key.is_some_and(holds_a_time) && chrono::DateTime::parse_from_rfc3339(&text).is_ok()
+            {
+                return serde_json::Value::String(FIXED_INSTANT.to_string());
+            }
+            let mut text = text;
+            for home in homes {
+                if text.contains(home.as_str()) {
+                    text = text.replace(home.as_str(), FIXED_HOME);
+                }
+            }
+            serde_json::Value::String(text)
         }
         other => other,
     }
+}
+
+/// Whether a field named `key` holds a time rather than text that might read
+/// like one.
+///
+/// Named fields rather than every string that parses: a commit message, a log
+/// line or a path can parse as RFC 3339, and flattening one would hide a real
+/// change from the diff. A time field this misses shows up as an unstable dump
+/// in `framing_every_fixture_twice_gives_the_same_bytes`, which is the loud
+/// failure rather than the silent one.
+fn holds_a_time(key: &str) -> bool {
+    const MARKS: &[&str] = &[
+        "_at",
+        "date",
+        "time",
+        "accessed",
+        "created",
+        "updated",
+        "modified",
+        "seen",
+        "since",
+        "expires",
+        "started",
+        "finished",
+        "heartbeat",
+        "poll",
+        "stamp",
+        "deadline",
+    ];
+    MARKS.iter().any(|mark| key.contains(mark))
 }
 
 /// Every section of `fixture`, keyed by wire name, as a window receives them.
 ///
 /// The host id is the fixed local one, never this box's, so the dump is the
 /// fixture's and not the machine's.
-fn frames(fixture: &ParityFixture, home: &str) -> String {
+fn frames(fixture: &ParityFixture, homes: &[String]) -> String {
     let state = fixture.build();
     let host = HostId::local();
     let sections: serde_json::Map<String, serde_json::Value> = SectionId::ALL
@@ -88,7 +135,7 @@ fn frames(fixture: &ParityFixture, home: &str) -> String {
         .map(|id| {
             (
                 section_name(id).to_string(),
-                canonical(section_json(&state, id, &host), home),
+                canonical(section_json(&state, id, &host), homes, None),
             )
         })
         .collect();
@@ -105,15 +152,17 @@ fn every_fixture_frames_its_committed_sections() {
     // The parity tests own this process's environment; the fixtures read no
     // real home.
     std::env::set_var("HOME", home.path());
-    let home_path = home.path().display().to_string();
+    let homes = homes_of(home.path());
 
     let dir = fixture_dir();
     std::fs::create_dir_all(frames_dir()).expect("the frames directory");
     let mut stale = Vec::new();
+    let mut expected = std::collections::BTreeSet::new();
     for (name, path) in ParityFixture::all_in(&dir) {
         let fixture = ParityFixture::load(&path).unwrap_or_else(|error| panic!("{error}"));
-        let framed = frames(&fixture, &home_path);
+        let framed = frames(&fixture, &homes);
         let committed = frames_dir().join(format!("{name}.json"));
+        expected.insert(format!("{name}.json"));
 
         if std::env::var_os("UPDATE_PARITY_FRAMES").is_some() {
             std::fs::write(&committed, &framed).expect("write the frames");
@@ -131,29 +180,73 @@ fn every_fixture_frames_its_committed_sections() {
         }
     }
 
+    // A fixture that was renamed or deleted leaves its dump behind, and an
+    // orphan dump is a renderer's input that no fixture builds any more.
+    let mut orphans: Vec<String> = std::fs::read_dir(frames_dir())
+        .expect("the frames directory")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "json" {
+                return None;
+            }
+            Some(path.file_name()?.to_string_lossy().into_owned())
+        })
+        .filter(|name| !expected.contains(name))
+        .collect();
+    orphans.sort();
+    if std::env::var_os("UPDATE_PARITY_FRAMES").is_some() {
+        for orphan in &orphans {
+            std::fs::remove_file(frames_dir().join(orphan)).expect("remove the orphan dump");
+        }
+        orphans.clear();
+    }
+
     assert!(
         stale.is_empty(),
         "the framed sections of {stale:?} changed. Read the diff: a field that moved here is a field the window's renderer reads. Rewrite with UPDATE_PARITY_FRAMES=1 once it is deliberate"
     );
+    assert!(
+        orphans.is_empty(),
+        "{orphans:?} in the frames directory belong to no fixture. Delete them, or rewrite with UPDATE_PARITY_FRAMES=1"
+    );
+}
+
+/// Every spelling of the scratch home a fixture can carry: the path as it was
+/// handed out, and the one the filesystem resolves it to. On macOS a temporary
+/// directory lives under a symlink (`/var` to `/private/var`), so a path a
+/// fixture canonicalised would slip past a literal match.
+fn homes_of(home: &Path) -> Vec<String> {
+    let mut homes = vec![home.display().to_string()];
+    if let Ok(resolved) = home.canonicalize() {
+        let resolved = resolved.display().to_string();
+        if !homes.contains(&resolved) {
+            homes.push(resolved);
+        }
+    }
+    // The longest first, so a path that contains the other is rewritten whole.
+    homes.sort_by_key(|home| std::cmp::Reverse(home.len()));
+    homes
 }
 
 /// The dump is what the DOM half reads, so it has to be stable: the same
 /// fixture framed twice is the same bytes, or a diff means nothing.
+///
+/// Every fixture, not one: a clock or a map that only one fixture carries is
+/// exactly the instability that would land as a mystery diff in CI later.
 #[test]
-fn framing_one_fixture_twice_gives_the_same_bytes() {
+fn framing_every_fixture_twice_gives_the_same_bytes() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = tempfile::tempdir().expect("scratch home");
     // As above: a scratch home, never this box's.
     std::env::set_var("HOME", home.path());
-    let home_path = home.path().display().to_string();
+    let homes = homes_of(home.path());
 
-    let dir = fixture_dir();
-    let (name, path) = ParityFixture::all_in(&dir).into_iter().next().expect("a fixture");
-    let fixture = ParityFixture::load(&path).unwrap_or_else(|error| panic!("{error}"));
-
-    assert_eq!(
-        frames(&fixture, &home_path),
-        frames(&fixture, &home_path),
-        "{name} framed twice"
-    );
+    for (name, path) in ParityFixture::all_in(&fixture_dir()) {
+        let fixture = ParityFixture::load(&path).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            frames(&fixture, &homes),
+            frames(&fixture, &homes),
+            "{name} framed twice"
+        );
+    }
 }
