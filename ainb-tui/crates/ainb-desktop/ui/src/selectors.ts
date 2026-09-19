@@ -7,6 +7,7 @@ import type { AttentionKind, HostId } from "../../../ainb-app/bindings/AppState"
 import { elsewhereCount } from "./board.ts";
 import { idleCount, ringCount } from "./sessions.ts";
 import type { FrameStore } from "./store.ts";
+import { unreadCount } from "./inbox.ts";
 
 type RootSelector = (store: FrameStore, host: HostId | undefined) => number | boolean;
 
@@ -25,6 +26,8 @@ export const ROOT_SELECTORS = {
   /** The git view was withheld for being over the frame ceiling, so the review
    * tab is drawing a diff the host has already moved past. */
   gitViewStale: (store, host) => host !== undefined && store.state.stale[host]?.git_view === true,
+  /** The daemon's unread count for the header's inbox button (D3p-c). */
+  inboxUnread: (store, host) => (host === undefined ? 0 : unreadCount(store.section(host, "inbox"))),
   workspacesLoading: (store, host) =>
     host !== undefined && store.section(host, "workspace_load")?.is_loading_workspaces === true,
   hostCount: (store) => Object.keys(store.state.hosts).length,
