@@ -30,6 +30,7 @@ import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
 import { SettingsPage } from "./settings.tsx";
 import { CLOSE_SETTINGS, OPEN_SETTINGS } from "./settings.ts";
+import { banner as sidecarBanner, retryable, type SidecarState } from "./sidecar.ts";
 import type { SetupView, SetupWrite } from "../../bindings/Desktop.ts";
 import {
   accelerator,
@@ -60,13 +61,6 @@ const HEADER_COUNTS = [
 const TOAST_MS = 5000;
 
 const MAC = navigator.userAgent.includes("Mac");
-
-/** `ainb_desktop::sidecar::SidecarView`: no pid and no filesystem path. */
-type SidecarState =
-  | { state: "starting" }
-  | { state: "connected"; spawned: boolean }
-  | { state: "reconnecting"; error: string }
-  | { state: "degraded"; error: string; has_log: boolean };
 
 function Shell() {
   const store = createFrameStore(SUBSCRIBED);
@@ -377,19 +371,7 @@ function Shell() {
     return label(session?.name ?? target.tmux);
   };
 
-  const banner = () => {
-    const state = sidecar();
-    switch (state.state) {
-      case "starting":
-        return "Connecting to the hangar daemon";
-      case "connected":
-        return state.spawned ? "Started the hangar daemon" : "Attached to the hangar daemon";
-      case "reconnecting":
-        return `Reconnecting: ${state.error}`;
-      case "degraded":
-        return `No hangar daemon: ${state.error}`;
-    }
-  };
+  const banner = () => sidecarBanner(sidecar());
 
   return (
     <main class="shell">
@@ -428,7 +410,7 @@ function Shell() {
       <Show when={sidecar().state !== "connected"}>
         <div class={`banner ${sidecar().state}`} role="status">
           <span>{banner()}</span>
-          <Show when={sidecar().state === "degraded"}>
+          <Show when={retryable(sidecar())}>
             <span class="actions">
               <Show when={(sidecar() as { has_log?: boolean }).has_log}>
                 <button
@@ -574,6 +556,7 @@ function Shell() {
               config={config()}
               revision={configRevision(store, host())}
               hangar={hangar()}
+              sidecar={sidecar()}
               setup={setup()}
               run={(intents) => void run(intents)}
               onSetupWrite={setupWrite}
