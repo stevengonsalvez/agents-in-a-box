@@ -1,8 +1,8 @@
 # Expected facts of the `config` fixture, one per line, each a substring both
-# renderers must print: the ratatui snapshot (`config.snap`) and the settings
-# page's lines (`ainb-desktop/ui/src/settings.ts::settingsLines`). A line
-# starting with `#` is a comment. Deleting a fact from either renderer's
-# output fails its parity test; the mutation checks beside each test prove it.
+# renderers must print: the ratatui snapshot (`../config.snap`) and the settings
+# page's lines (`ainb-desktop/ui/test/parity.test.ts`, which mounts the page). A line
+# starting with `#` is a comment. A renderer that loses a row fails its
+# parity test; the mutation checks beside each half prove it.
 Authentication
 Workspace
 Docker
