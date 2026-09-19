@@ -84,6 +84,12 @@ pub enum ConnectionState {
         attempt: u32,
         /// Reason the last attempt failed, if known.
         error: Option<String>,
+        /// When the client published this attempt and began its `delay`.
+        ///
+        /// The client's own clock, so the time between two attempts can be
+        /// read without the observer's wake-up latency in it. On tokio's clock,
+        /// the one the backoff sleeps on.
+        scheduled_at: tokio::time::Instant,
     },
     /// Closed explicitly; will not reconnect.
     Closed,
@@ -194,6 +200,7 @@ impl ReconnectingFleetSubscription {
             delay: timing.backoff_1s,
             attempt: 1,
             error: None,
+            scheduled_at: tokio::time::Instant::now(),
         });
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let revision_tracker = Arc::new(AtomicI64::new(after_revision));
@@ -384,6 +391,7 @@ async fn run_reconnecting_fleet(
             delay,
             attempt,
             error: last_error,
+            scheduled_at: tokio::time::Instant::now(),
         });
 
         tokio::select! {
