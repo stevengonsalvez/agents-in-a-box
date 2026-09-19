@@ -1,0 +1,81 @@
+// The desktop inbox draws section 16 as the host framed it: the rows, which
+// are unread, the unread count as one scalar, why there is nothing when there
+// is nothing, and what the fold cut. It keeps no state of its own and has one
+// write, the whole-inbox sweep, sent as a command and nothing else.
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import type { InboxRowFrame_Serialize, InboxView_Serialize } from "../../../ainb-app/bindings/AppState";
+import { inboxView, MARK_ALL_READ, unreadCount } from "./inbox.ts";
+
+const row = (n: number, read: number | null = null): InboxRowFrame_Serialize => ({
+  id: `01J0INBOX00000000000000000${n}`,
+  kind: "issue",
+  event: "issue_created",
+  subject_id: `issue-${n}`,
+  summary: `issue ${n} opened [cut]`,
+  recipient: "operator",
+  created_at: Date.UTC(2026, 8, 19, 12, n),
+  read_at: read,
+});
+
+const view = (over: Partial<InboxView_Serialize> = {}): InboxView_Serialize => ({
+  entries: [row(2), row(1, Date.UTC(2026, 8, 19, 13, 0))],
+  unread: 1,
+  recipient: "operator",
+  absent: null,
+  unreachable: null,
+  rows_cut: 0,
+  summaries_cut: 0,
+  received_at_ms: 1,
+  ...over,
+});
+
+test("the rows draw newest first as framed, each marked read or unread", () => {
+  const drawn = inboxView(view());
+  assert.deepEqual(
+    drawn.rows.map((entry) => [entry.id, entry.unread, entry.summary, entry.label]),
+    [
+      [row(2).id, true, "issue 2 opened [cut]", "issue · issue_created"],
+      [row(1).id, false, "issue 1 opened [cut]", "issue · issue_created"],
+    ],
+    "the frame's order and summaries, the fold's cut marker kept",
+  );
+  assert.equal(drawn.status, null);
+  assert.equal(drawn.cut, undefined);
+});
+
+test("the unread count is one scalar, the daemon's, and zero with no section", () => {
+  assert.equal(unreadCount(view({ unread: 7 })), 7, "the daemon's count, not the rows counted");
+  assert.equal(unreadCount(undefined), 0);
+  assert.equal(typeof unreadCount(view()), "number");
+});
+
+test("mark all read is offered only while something is unread, and is a command", () => {
+  assert.equal(inboxView(view({ unread: 3 })).canMarkAllRead, true);
+  assert.equal(inboxView(view({ unread: 0 })).canMarkAllRead, false);
+  assert.deepEqual(MARK_ALL_READ, { Command: ["inbox.mark_all_read", null] });
+});
+
+test("an absent inbox and an unreachable one each say why, in the host's words", () => {
+  const absent = inboxView(view({ entries: [], unread: 0, absent: "the daemon serves no hangar/inbox_list" }));
+  assert.equal(absent.state, "absent");
+  assert.equal(absent.status, "the daemon serves no hangar/inbox_list");
+  assert.equal(absent.canMarkAllRead, false, "no sweep against an inbox the daemon does not serve");
+
+  const stale = inboxView(view({ unreachable: "daemon not reachable" }));
+  assert.equal(stale.state, "unreachable");
+  assert.match(stale.status ?? "", /daemon not reachable/);
+  assert.equal(stale.rows.length, 2, "the last rows that landed still draw");
+
+  assert.equal(inboxView(undefined).state, "waiting");
+  assert.equal(inboxView(view({ entries: [], unread: 0 })).state, "empty");
+});
+
+test("what the fold cut is one line of its own counters", () => {
+  assert.equal(
+    inboxView(view({ rows_cut: 4, summaries_cut: 1 })).cut,
+    "4 older entries not sent, 1 summary shortened",
+  );
+  assert.equal(inboxView(view({ rows_cut: 1 })).cut, "1 older entry not sent");
+});
