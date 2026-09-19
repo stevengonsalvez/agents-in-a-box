@@ -1199,6 +1199,7 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::InboxScrollDown
         | AppEvent::GitReviewSelectRow { .. }
         | AppEvent::GitViewScrollBy(..)
+        | AppEvent::GitViewSelectCommit { .. }
         | AppEvent::HomeSidebarClickItem { .. }
         | AppEvent::NewSessionCancel
         | AppEvent::PickRepoPaste(..)
