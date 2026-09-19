@@ -498,23 +498,41 @@ fn a_secret_inside_the_scrub_window_is_still_redacted() {
 
 /// A multi-megabyte line is classified in time that does not grow with it: the
 /// scrub sees a bounded window, not the whole line. Scrubbed whole, ~40 regex
-/// passes over 32 MiB take tens of seconds in a debug build; windowed, well
-/// under the ceiling here.
+/// passes over 32 MiB took 349 s in a debug build; windowed, about 1 s, so the
+/// 10 s ceiling holds on a slow runner. Only the classification is timed: the
+/// payloads are built and parsed first, as the live producer hands the
+/// classifier a parsed `Value`.
 #[test]
 fn a_huge_line_is_classified_in_bounded_time_and_size() {
     let huge = "x".repeat(32 << 20);
+    let rows = [
+        (
+            "acp.tool_call",
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "c1",
+                "status": "completed",
+                "content": [{"type": "content", "content": {"type": "text", "text": huge}}],
+            }),
+        ),
+        ("acp.message", serde_json::json!({"text": huge})),
+        ("acp.message", serde_json::json!({"text": "line\n".repeat(8 << 20)})),
+    ];
+
     let started = std::time::Instant::now();
-    let result = tool_result(&huge);
-    let body = message(&huge);
-    let many = message(&"line\n".repeat(8 << 20));
+    let out: Vec<Vec<(MessageKind, String)>> = rows
+        .iter()
+        .map(|(event_type, payload)| AcpClassifier::default().classify_value(event_type, payload))
+        .collect();
     let elapsed = started.elapsed();
 
-    assert!(result[0].1.chars().count() <= 84 + "tool  ".len(), "summary bounded");
-    assert_eq!(body.len(), 1);
-    assert!(body[0].1.chars().count() <= 8192, "body bounded");
-    assert!(many.len() <= 512, "entries bounded: {}", many.len());
+    assert!(out[0][0].1.chars().count() <= 84 + "tool  ".len(), "summary bounded");
+    assert_eq!(out[1].len(), 1);
+    assert!(out[1][0].1.chars().count() <= 8192, "body bounded");
+    assert!(out[2].len() <= 512, "entries bounded: {}", out[2].len());
+    assert_eq!(out[2].last().unwrap().1, format!("… {} more lines", (8 << 20) - 511));
     assert!(
-        elapsed < std::time::Duration::from_secs(5),
+        elapsed < std::time::Duration::from_secs(10),
         "a 32 MiB line took {elapsed:?}: the scrub is not windowed"
     );
 }
