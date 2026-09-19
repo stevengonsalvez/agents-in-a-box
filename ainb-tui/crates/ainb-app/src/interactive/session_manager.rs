@@ -1978,6 +1978,26 @@ impl InteractiveSessionManager {
     pub async fn list_sessions(
         &mut self,
     ) -> Result<Vec<InteractiveSession>, InteractiveSessionError> {
+        // P6e: one read of the store, through the session source. A failed
+        // read is logged and every session goes on to phase 2.
+        let store = crate::cli::util::load_session_store_async().await.unwrap_or_else(|e| {
+            warn!("session store unavailable for this refresh: {e}");
+            SessionStore::default()
+        });
+        self.list_sessions_with(&store).await
+    }
+
+    /// [`list_sessions`](Self::list_sessions) against a store the caller has
+    /// already read, so one refresh reads the store once however many tmux
+    /// sessions it walks (each read can wait out the RPC deadline).
+    ///
+    /// # Errors
+    ///
+    /// When tmux cannot be listed.
+    pub async fn list_sessions_with(
+        &mut self,
+        store: &SessionStore,
+    ) -> Result<Vec<InteractiveSession>, InteractiveSessionError> {
         info!("Discovering Interactive sessions from tmux");
 
         // Get all tmux sessions
@@ -1995,19 +2015,6 @@ impl InteractiveSessionManager {
         let tmux_sessions = String::from_utf8_lossy(&output.stdout);
         let mut discovered_sessions = Vec::new();
 
-        // P6e: one read of the store for the whole refresh, through the
-        // session source, not one per tmux session: each read can wait out
-        // the RPC deadline, and N of them would stall a refresh N times. A
-        // failed read is logged and every session goes on to phase 2.
-        let store = if tmux_sessions.lines().any(|name| name.starts_with("tmux_")) {
-            crate::cli::util::load_session_store_async().await.unwrap_or_else(|e| {
-                warn!("session store unavailable for this refresh: {e}");
-                SessionStore::default()
-            })
-        } else {
-            SessionStore::default()
-        };
-
         // Filter for our tmux sessions (prefix: tmux_)
         for tmux_name in tmux_sessions.lines() {
             if !tmux_name.starts_with("tmux_") {
@@ -2017,7 +2024,7 @@ impl InteractiveSessionManager {
             debug!("Found tmux session: {}", tmux_name);
 
             // Try to find corresponding worktree
-            if let Ok(session) = self.discover_session_from_tmux(tmux_name, &store).await {
+            if let Ok(session) = self.discover_session_from_tmux(tmux_name, store).await {
                 discovered_sessions.push(session);
             }
         }
