@@ -3107,7 +3107,15 @@ fn add_stopped_sessions(
 ) {
     let canonical_key =
         |p: &std::path::Path| -> PathBuf { p.canonicalize().unwrap_or_else(|_| p.to_path_buf()) };
-    let store = crate::interactive::SessionStore::load();
+    // P6e: through the process's session source, bounded. A failed read lists
+    // no stopped sessions this pass and says why; it never reads another store.
+    let store = match crate::cli::util::load_session_store() {
+        Ok(store) => store,
+        Err(e) => {
+            warn!("stopped sessions not listed this refresh: {e}");
+            return;
+        }
+    };
     for metadata in store.sessions().values() {
         if live_tmux_names.contains(&metadata.tmux_session_name) {
             continue;
@@ -4332,6 +4340,20 @@ impl AppState {
     pub async fn load_real_workspaces(&mut self) {
         info!("Loading active sessions (both Docker and Interactive)");
 
+        // P6e: a process that could not reach a ready daemon keeps its
+        // sessions on the file and says so, once; it retries in the
+        // background and says so again, once, when it is back on the daemon.
+        crate::cli::util::watch_degraded_session_source().await;
+        match crate::cli::util::session_source_notice().await {
+            Some(notice @ crate::cli::util::SessionSourceNotice::Degraded) => {
+                self.add_warning_notification(notice.message().to_string());
+            }
+            Some(notice @ crate::cli::util::SessionSourceNotice::Recovered) => {
+                self.add_info_notification(notice.message().to_string());
+            }
+            None => {}
+        }
+
         // Before the list goes: the selection is restored by identity below, so
         // a refresh does not move the operator off the row they chose (#1155).
         let keep = self.selected_row_identity();
@@ -5256,10 +5278,14 @@ impl AppState {
         }
         self.host.last_headroom_watchdog = Some(now);
 
-        let has_headroom_session = crate::interactive::SessionStore::load()
-            .sessions
-            .values()
-            .any(|m| m.headroom_enabled);
+        let store = match crate::cli::util::load_session_store() {
+            Ok(store) => store,
+            Err(e) => {
+                debug!("headroom watchdog skipped: {e}");
+                return;
+            }
+        };
+        let has_headroom_session = store.sessions.values().any(|m| m.headroom_enabled);
         if !has_headroom_session {
             return;
         }
@@ -5661,8 +5687,16 @@ impl AppState {
             return;
         }
 
-        // Load session store to identify orphaned tmux_ sessions
-        let session_store = SessionStore::load();
+        // Load session store to identify orphaned tmux_ sessions. A failed
+        // read leaves the lists as they were rather than calling every
+        // tmux_ session an orphan of an empty store.
+        let session_store = match crate::cli::util::load_session_store() {
+            Ok(store) => store,
+            Err(e) => {
+                warn!("orphaned tmux sessions not refreshed: {e}");
+                return;
+            }
+        };
 
         // Collect tmux names that appear in loaded workspaces (successfully matched)
         let matched_tmux_names: std::collections::HashSet<&str> = self
@@ -9826,7 +9860,9 @@ impl AppState {
             .map(|t| t.name().to_string())
             .or_else(|| self.find_session(session_id).and_then(|s| s.tmux_session_name.clone()))
             .or_else(|| {
-                let store = SessionStore::load();
+                let store = crate::cli::util::load_session_store()
+                    .map_err(|e| warn!("session store fallback unavailable: {e}"))
+                    .ok()?;
                 store
                     .sessions()
                     .values()
@@ -10034,7 +10070,7 @@ impl AppState {
         self.begin_codex_launch(session_id);
 
         // Resolve metadata up-front so we can audit even if subsequent steps fail.
-        let store = SessionStore::load();
+        let store = crate::cli::util::load_session_store_async().await?;
         let metadata = store.sessions().values().find(|m| m.session_id == session_id).cloned();
 
         // Recover the exact launch settings the session was CREATED with from
@@ -13204,7 +13240,7 @@ impl AppState {
 
         // Load persisted metadata once — used for both the resume-history probe
         // (Claude, keyed off the worktree cwd) and the Headroom routing flag.
-        let store = crate::interactive::SessionStore::load();
+        let store = crate::cli::util::load_session_store_async().await?;
         let metadata = store.sessions.get(&tmux_session_name);
         let skip_permissions =
             metadata.and_then(|m| m.skip_permissions).unwrap_or(session.skip_permissions);
