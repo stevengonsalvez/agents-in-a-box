@@ -140,6 +140,29 @@ impl Executor for DesktopExecutor {
                     }
                 }
             }
+            // P6e: the session store is the one store a write can reach the
+            // hangar daemon for, and a daemon that is not ready holds a write
+            // for its bounded wait. That must not be on the tick: it goes to
+            // a worker and its failure comes back as a deferred report. Every
+            // other store is a local file write and stays here.
+            Effect::Persist(store) if store.store_id() == "session_store" => {
+                let tx = self.deferred_tx.clone();
+                let store_id = store.store_id();
+                let spawned = std::thread::Builder::new()
+                    .name("ainb-desktop-session-store-write".into())
+                    .spawn(move || {
+                        if let Err(error) = ainb_app::config::persist::write(&store) {
+                            let _ = tx.send(reports::persist_failed(store_id, &error));
+                        }
+                    });
+                match spawned {
+                    Ok(_) => Vec::new(),
+                    Err(error) => vec![reports::persist_failed(
+                        store_id,
+                        &format!("the worker did not start: {error}"),
+                    )],
+                }
+            }
             Effect::Persist(store) => match ainb_app::config::persist::write(&store) {
                 Ok(()) => Vec::new(),
                 Err(error) => vec![reports::persist_failed(store.store_id(), &error)],
