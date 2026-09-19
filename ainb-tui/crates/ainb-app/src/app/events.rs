@@ -590,9 +590,16 @@ pub enum AppEvent {
     ConfigSaveAll,         // Save all settings (S)
     /// A form's edit of the row `key`, `config.set_row`: resolved against the
     /// row's kind, then written through the key-level save the popup uses.
+    /// `revision` is the config section version the form drew; an edit of a
+    /// frame the section has moved past is refused, visibly.
     ConfigSetRow {
         key: String,
         edit: crate::config::settings_model::ConfigRowEdit,
+        revision: u64,
+    },
+    /// A click on the config tree node `id`, `config.select_node`.
+    ConfigSelectNode {
+        id: String,
     },
     ConfigToggleExpand, // Open/close the selected section in the tree (Enter/Space)
     ConfigSearchStart,  // Open the `/` filter over every row
@@ -2316,32 +2323,26 @@ impl EventHandler {
     /// the file so unknown sections survive), then `save_external_keys` writes the
     /// rest. On success the edits are cleared, so a later save cannot rewrite a
     /// value another process has since changed.
-    /// The value `edit` gives the row `key`, or `None` when no such row is
-    /// editable or the edit does not fit the row's kind: a choice takes an
-    /// index into its own options, a secret takes a reference, and a plain
-    /// text edit never lands on a secret row.
+    /// The value `edit` gives the row `key`, or why it gives none: no such
+    /// row, a row the renderer may not edit (a denied row, an unclassified
+    /// one, a secret), or an edit that does not fit the row's kind. A choice
+    /// takes an index into its own options; text is cleaned and bounded.
     fn resolve_config_row_edit(
         state: &AppState,
         key: &str,
         edit: &crate::config::settings_model::ConfigRowEdit,
-    ) -> Option<crate::app::state::ConfigValue> {
-        use crate::app::state::{ConfigValue, SecretValue};
+    ) -> Result<crate::app::state::ConfigValue, &'static str> {
+        use crate::app::state::ConfigValue;
+        use crate::config::renderer_edit;
         use crate::config::settings_model::ConfigRowEdit;
-        if crate::config::screen_model::read_only_reason(key).is_some() {
-            return None;
+        if let Some(why) = crate::config::screen_model::read_only_reason(key) {
+            return Err(why);
         }
         // `config.set_row` is a renderer's row, so the renderer policy applies
-        // here as well as at the host's seam (#1224): a row whose value the
-        // host runs, or one the page does not draw, is not set by name.
-        if crate::config::renderer_edit::refusal(key).is_some() {
-            return None;
-        }
-        // The frame shows a scrubbed value; a form that sends it back would
-        // write the marker over the real value.
-        if let ConfigRowEdit::Text(text) = edit {
-            if text.contains(crate::fleet::bridge::redact::REDACTED) {
-                return None;
-            }
+        // here as well as at the host's seam (#1224): a denied row, an
+        // unclassified one, or a secret is not set by name.
+        if let Some(why) = renderer_edit::refusal(key) {
+            return Err(why);
         }
         let row = state
             .config
@@ -2349,27 +2350,30 @@ impl EventHandler {
             .settings
             .values()
             .flatten()
-            .find(|row| row.key == key)?;
+            .find(|row| row.key == key)
+            .ok_or("no such settings row")?;
         match (&row.value, edit) {
             (ConfigValue::Text(_), ConfigRowEdit::Text(text)) => {
-                Some(ConfigValue::Text(text.clone()))
+                // The frame shows a scrubbed value; a form that sends it back
+                // would write the marker over the real value.
+                if text.contains(crate::fleet::bridge::redact::REDACTED) {
+                    return Err("a scrubbed value is never written back");
+                }
+                renderer_edit::clean_text(text).map(ConfigValue::Text)
             }
-            (ConfigValue::Secret(_), ConfigRowEdit::Secret(reference)) => {
-                Some(ConfigValue::Secret(SecretValue {
-                    reference: reference.clone(),
-                    resolved: secret_reference_is_set(reference),
-                }))
-            }
-            (ConfigValue::Bool(_), ConfigRowEdit::Bool(value)) => Some(ConfigValue::Bool(*value)),
-            (ConfigValue::Choice(options, _), ConfigRowEdit::Choice(index))
-                if *index < options.len() =>
-            {
-                Some(ConfigValue::Choice(options.clone(), *index))
+            (ConfigValue::Secret(_), _) => Err(renderer_edit::SECRET_REASON),
+            (ConfigValue::Bool(_), ConfigRowEdit::Bool(value)) => Ok(ConfigValue::Bool(*value)),
+            (ConfigValue::Choice(options, _), ConfigRowEdit::Choice(index)) => {
+                if *index < options.len() {
+                    Ok(ConfigValue::Choice(options.clone(), *index))
+                } else {
+                    Err("the chosen option is not one of the row's")
+                }
             }
             (ConfigValue::Number(_), ConfigRowEdit::Number(value)) => {
-                Some(ConfigValue::Number(*value))
+                Ok(ConfigValue::Number(*value))
             }
-            _ => None,
+            _ => Err("the edit does not fit the row's kind"),
         }
     }
 
@@ -5880,9 +5884,27 @@ impl EventHandler {
             AppEvent::ConfigEditBackspace => {
                 state.config.config_screen_state.edit_buffer.pop();
             }
-            AppEvent::ConfigSetRow { key, edit } => {
-                if let Some(value) = Self::resolve_config_row_edit(state, &key, &edit) {
-                    Self::apply_config_row_edit(state, &key, value);
+            AppEvent::ConfigSetRow {
+                key,
+                edit,
+                revision,
+            } => {
+                // A dropped edit says so: a form that hears nothing draws a
+                // value it never wrote.
+                if revision != state.config.version() {
+                    state.add_warning_notification(format!(
+                        "{key}: the settings moved since the page drew them; edit dropped, try again"
+                    ));
+                } else {
+                    match Self::resolve_config_row_edit(state, &key, &edit) {
+                        Ok(value) => Self::apply_config_row_edit(state, &key, value),
+                        Err(why) => state.add_warning_notification(format!("{key}: {why}")),
+                    }
+                }
+            }
+            AppEvent::ConfigSelectNode { id } => {
+                if !state.config.config_screen_state.select_node_by_id(&id) {
+                    tracing::debug!("config tree node `{id}` is not on screen");
                 }
             }
             AppEvent::ConfigSaveAll => {
