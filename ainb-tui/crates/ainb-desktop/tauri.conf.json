@@ -1,13 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Agents in a Box",
-  "version": "0.1.0",
   "identifier": "dev.agentsinabox.desktop",
   "build": {
     "frontendDist": "ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm --prefix ui run dev",
-    "beforeBuildCommand": "npm --prefix ui run build"
+    "beforeDevCommand": { "script": "npm run dev", "cwd": "ui" },
+    "beforeBuildCommand": { "script": "npm run build", "cwd": "ui" }
   },
   "app": {
     "windows": [
@@ -28,6 +27,9 @@
     "active": true,
     "targets": "all",
     "icon": ["icons/32x32.png", "icons/icon.png"],
-    "externalBin": ["binaries/ainb-hangar-daemon"]
+    "externalBin": ["binaries/ainb-hangar-daemon"],
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }

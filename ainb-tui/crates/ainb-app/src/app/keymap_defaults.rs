@@ -1295,6 +1295,7 @@ pub fn defaults() -> Vec<Binding> {
             "pick",
             AppEvent::SessionAskPick {
                 request: String::new(),
+                index: 0,
                 label: String::new(),
             },
             "Answer with the option a click names",
@@ -1365,6 +1366,22 @@ pub fn defaults() -> Vec<Binding> {
             "scroll",
             AppEvent::GitViewScrollBy(0),
             "Scroll the active git view tab by the lines a wheel names",
+        ),
+        unbound(
+            Context::screen("config"),
+            "set_row",
+            AppEvent::ConfigSetRow {
+                key: String::new(),
+                edit: crate::config::settings_model::ConfigRowEdit::Text(String::new()),
+                revision: 0,
+            },
+            "Set the settings row a form names, and write that key",
+        ),
+        unbound(
+            Context::screen("config"),
+            "select_node",
+            AppEvent::ConfigSelectNode { id: String::new() },
+            "Select the settings tree node a click names",
         ),
         // Host reports (`crate::app::reports::ids`), unbound for the same reason.
         unbound(

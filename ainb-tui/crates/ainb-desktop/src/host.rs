@@ -139,6 +139,9 @@ pub struct DesktopHost<S: FrameSink> {
     /// about the reducer turns it off: the poller is a thread on a real
     /// socket, and its first publish is news whenever it lands.
     poll_attention: bool,
+    /// The daemons panel the settings page draws: keeps the collector alive
+    /// while the reducer is on the Config screen.
+    daemons_panel: crate::daemons_panel::DaemonsPanel,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -189,6 +192,7 @@ impl<S: FrameSink> DesktopHost<S> {
             sink,
             rescan: WorkspaceRescan::default(),
             agent_status: None,
+            daemons_panel: crate::daemons_panel::DaemonsPanel::default(),
             inbox_dialer: std::sync::Arc::new(inbox_dialer()),
             inbox: None,
             runtime: tokio::runtime::Handle::try_current().ok(),
@@ -334,6 +338,9 @@ impl<S: FrameSink> DesktopHost<S> {
         if let Some(reader) = &mut self.agent_status {
             reader.drain_into(&mut self.state);
         }
+        // The daemons panel on the settings page (D3d): the collector the
+        // terminal's Daemons screen arms, kept alive while Config is open.
+        self.daemons_panel.tick(&mut self.state);
         // Section 16, while a renderer reads it.
         if let Some(reader) = &mut self.inbox {
             reader.drain_into(&mut self.state);
@@ -423,25 +430,54 @@ impl<S: FrameSink> DesktopHost<S> {
     /// up.
     #[must_use]
     pub fn refused_from_renderer(&self, intent: &Intent) -> Option<Refusal> {
-        let (id, row) = match intent {
+        let (id, action) = match intent {
             Intent::Key(chord) => {
                 let (ctx, _) =
                     self.keymap.resolve_with_context(&active_contexts(&self.state), chord)?;
-                self.keymap
+                // A chord that resolves but names no row is a synthesised
+                // action: a printable key typed into a field the host owns.
+                // The window types with `Text`, which the host bounds and
+                // cleans; a key it cannot name is refused, closed, rather
+                // than let through unjudged.
+                let Some((id, row)) = self
+                    .keymap
                     .commands()
-                    .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))?
+                    .find(|(_, row)| row.ctx == ctx && row.chord.as_ref() == Some(chord))
+                else {
+                    return Some(Refusal {
+                        command: CommandId::new(format!("{}.text", ctx.name())),
+                        reason: "it types into a field the host owns; the window sends text instead",
+                    });
+                };
+                (id, row.action.clone())
             }
-            Intent::Command(id, _) => (id.clone(), self.keymap.command(id)?),
+            // Judged with its payload: a pointer row's action is what the
+            // arguments name (the settings row a `config.set_row` edits,
+            // #1224), not the placeholder the table wrote. A payload the row
+            // cannot parse is refused here, closed, rather than judged on the
+            // placeholder and left for the reducer to drop.
+            Intent::Command(id, args) => {
+                let row = self.keymap.command(id)?;
+                let Some(action) = row.action.with_args(args) else {
+                    return Some(Refusal {
+                        command: id.clone(),
+                        reason: "its payload does not fit the row",
+                    });
+                };
+                (id.clone(), action)
+            }
             _ => return None,
         };
         let why = if self.keymap.is_key_only(&id) {
             Some("it writes outside ainb, so it runs only from its key")
         } else {
-            self.state.remote_command_refusal(&row.action)
+            self.state.remote_command_refusal(&action)
         };
+        // An onboarding write has a path of its own in this shell (#1175):
+        // the refusal points at it rather than at a key the window cannot use.
         why.map(|reason| Refusal {
+            reason: crate::setup::desktop_path(&id).unwrap_or(reason),
             command: id,
-            reason,
         })
     }
 

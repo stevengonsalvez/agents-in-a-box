@@ -873,6 +873,34 @@ impl AppState {
             {
                 Some("it could finish onboarding with telemetry set up outside ainb")
             }
+            // A settings row a renderer may not edit (#1224), by name and by
+            // the key sequence: Enter on the row opens its popup, and Enter in
+            // the popup writes it. The judgement is the same at each step, so
+            // a script that sends the keys one by one is stopped at the first.
+            KeyAction::App(AppEvent::ConfigSetRow { key, .. }) => {
+                crate::config::renderer_edit::refusal(key)
+            }
+            KeyAction::App(AppEvent::ConfigEditSetting)
+                if self.shell.current_screen == crate::app::screens::ids::CONFIG =>
+            {
+                self.config
+                    .config_screen_state
+                    .current_setting()
+                    .and_then(|row| crate::config::renderer_edit::refusal(&row.key))
+            }
+            KeyAction::App(AppEvent::ConfigPopupConfirm)
+                if self.config.config_popup_state.show_popup =>
+            {
+                crate::config::renderer_edit::refusal(&self.config.config_popup_state.setting_key)
+            }
+            // The secret write paths: the keychain prompt on a row and the API
+            // key prompt. Not renderer-settable in this slice, whatever row
+            // is under the cursor.
+            KeyAction::App(
+                AppEvent::ConfigSecretToKeychain
+                | AppEvent::ConfigApiKeyStart
+                | AppEvent::ConfigApiKeySave,
+            ) => Some(crate::config::renderer_edit::SECRET_REASON),
             _ => None,
         }
     }
@@ -1959,6 +1987,29 @@ impl ConfigScreenState {
     }
 
     // --- navigation ---------------------------------------------------------
+
+    /// Where the tree node with `id` sits among the visible nodes, if it does.
+    #[must_use]
+    pub fn visible_node_position(&self, id: &str) -> Option<usize> {
+        self.visible_nodes
+            .iter()
+            .position(|index| self.tree.get(*index).is_some_and(|node| node.id() == id))
+    }
+
+    /// Select the tree node with `id` (`ConfigTreeNode::id`) when it is on
+    /// screen, as a click on it does; `false` when no visible node has it, and
+    /// nothing moves. Selection is the reducer's: a renderer names the node,
+    /// never keeps its own.
+    pub fn select_node_by_id(&mut self, id: &str) -> bool {
+        let Some(position) = self.visible_node_position(id) else {
+            return false;
+        };
+        self.selected_node = position;
+        self.selected_setting = 0;
+        self.focused_pane = ConfigPane::Categories;
+        self.refresh_visible_rows();
+        true
+    }
 
     pub fn select_next_category(&mut self) {
         if self.visible_nodes.is_empty() {

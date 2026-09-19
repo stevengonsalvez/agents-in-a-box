@@ -7,7 +7,7 @@
 // composer and is sent with `session_list.ask.enter`. The verified send
 // (`AskState::send`) is the only send there is.
 
-import { type Accessor, createEffect, createSignal, on } from "solid-js";
+import { type Accessor, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import type {
   AnswerPhase_Serialize,
   AskState_Serialize,
@@ -106,6 +106,16 @@ export function questionFor(sessions: SessionsView_Serialize | undefined): Quest
 }
 
 /**
+ * What a banner shows of a question, as one string: a repaint is due when
+ * this changes. The request, the title, whether it can be answered, and the
+ * labels in order; a hook that rewrites its options under one id reaches the
+ * banner, and a frame that carries the same question again does not repaint.
+ */
+function drawnDigest(question: Question): string {
+  return [question.request, question.title, String(question.answerable), ...question.options].join("\u001f");
+}
+
+/**
  * The question a banner has drawn, one paint behind `current`.
  *
  * `current` is the frame's question as of now. A click handler that read it
@@ -113,20 +123,28 @@ export function questionFor(sessions: SessionsView_Serialize | undefined): Quest
  * that question's own request id, so the reducer's request check passed for a
  * question the person never saw (#1191). The drawn question follows the frame
  * only after the next paint (`schedule`; `requestAnimationFrame` in the
- * window), keyed on the request: between a frame that moved the question on
- * and the paint that shows it, a click still names the old request, which
- * `pointedAt` refuses against the new answer state.
+ * window), keyed on what the banner shows (`drawnDigest`): between a frame
+ * that moved the question on and the paint that shows it, a click still names
+ * the old request, which `pointedAt` refuses against the new answer state.
+ *
+ * `schedule` returns the paint's cancel. A newer frame cancels the paint still
+ * pending, so only the newest question paints, and the banner's unmount
+ * cancels the last one, so nothing paints into a banner that is gone.
  */
-export function drawnQuestion(current: Accessor<Question>, schedule: (paint: () => void) => void): Accessor<Question> {
+export function drawnQuestion(
+  current: Accessor<Question>,
+  schedule: (paint: () => void) => () => void,
+): Accessor<Question> {
   const [drawn, setDrawn] = createSignal(current());
+  // A memo, not a bare accessor: `on` reruns whenever what it tracks writes,
+  // and every frame writes a new question object. The memo notifies only when
+  // the digest string itself changes.
+  const digest = createMemo(() => drawnDigest(current()));
   createEffect(
-    on(
-      () => current().request,
-      () => {
-        const question = current();
-        schedule(() => setDrawn(question));
-      },
-    ),
+    on(digest, () => {
+      const question = current();
+      onCleanup(schedule(() => setDrawn(question)));
+    }),
   );
   return drawn;
 }
@@ -179,10 +197,11 @@ function moves(from: number, to: number): RendererIntent[] {
 
 /**
  * The intents that pick option `index` and send it: the reducer put on the
- * question, then ONE pick naming the option by its label. The reducer resolves
- * the label against the options it holds when the pick runs, so a frame
- * landing between two intents cannot move a counted cursor onto another
- * option (#1191). The pick names the request the person read, and the reducer
+ * question, then ONE pick naming the option by its index, with the label the
+ * person read there as the check. The reducer verifies both against the
+ * options it holds when the pick runs, so a frame landing between two intents
+ * cannot move a counted cursor onto another option (#1191), and two labels
+ * that scrub alike on a frame are still told apart (#1248). The pick names the request the person read, and the reducer
  * refuses it once the question has moved on. None at all when the frame is
  * not pointed at this question, or when `index` names no option it offers.
  */
@@ -190,7 +209,10 @@ export function pickIntents(question: Question, ask: AskState_Serialize | undefi
   if (!pointedAt(question, ask) || !question.answerable) return [];
   const label = question.options[index];
   if (label === undefined) return [];
-  return [...focusIntents(question), { Command: ["session_list.ask.pick", { request: question.request, label }] }];
+  return [
+    ...focusIntents(question),
+    { Command: ["session_list.ask.pick", { request: question.request, index, label }] },
+  ];
 }
 
 /**

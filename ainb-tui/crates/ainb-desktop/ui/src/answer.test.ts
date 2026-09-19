@@ -1,6 +1,7 @@
 // The banner's question, the phases it reads, and the intents it sends.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { createRoot, createSignal } from "solid-js";
 import type {
@@ -173,7 +174,7 @@ test("picking option two sends one pick naming it by label, wherever the cursor 
   const question = questionFor(sessions(mark()))!;
   const intents = pickIntents(question, ask({ cursor: 2 }), 1);
   assert.deepEqual(commands(intents), ["session_list.select_row", "session_list.select_tab", "session_list.ask.pick"]);
-  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-7", label: "production" });
+  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-7", index: 1, label: "production" });
   assert.deepEqual(commands(pickIntents(question, ask({ cursor: 0 }), 1)), commands(intents));
   assert.deepEqual(pickIntents(question, ask(), 3), [], "an index off the list picks nothing");
 });
@@ -182,7 +183,7 @@ test("a pick sends the label as the frame carried it, not as the banner trims it
   const long = "x".repeat(120);
   const question = questionFor(sessions(mark({ options: [{ label: long, description: "" }] })))!;
   const intents = pickIntents(question, ask(), 0);
-  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-7", label: long });
+  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-7", index: 0, label: long });
 });
 
 test("a typed answer moves to the composer row, clears it in one step, types, sends", () => {
@@ -233,7 +234,7 @@ test("a click on the banner drawn before the question moved on sends nothing", (
   const paints: (() => void)[] = [];
   const { current, setCurrent, drawn, dispose } = createRoot((dispose) => {
     const [current, setCurrent] = createSignal<Question>(questionFor(sessions(mark()))!);
-    return { current, setCurrent, drawn: drawnQuestion(current, (paint) => paints.push(paint)), dispose };
+    return { current, setCurrent, drawn: drawnQuestion(current, queued(paints)), dispose };
   });
   try {
     paints.splice(0).forEach((paint) => paint());
@@ -248,8 +249,83 @@ test("a click on the banner drawn before the question moved on sends nothing", (
     paints.splice(0).forEach((paint) => paint());
     assert.equal(drawn().request, "att-8", "the paint brought the banner to the new question");
     const intents = pickIntents(drawn(), ask({ request: "att-8" }), 0);
-    assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-8", label: "staging" });
+    assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-8", index: 0, label: "staging" });
   } finally {
     dispose();
   }
+});
+
+/** A paint scheduler over `paints`: a paint waits there until flushed, and its cancel removes it. */
+function queued(paints: (() => void)[]) {
+  return (paint: () => void) => {
+    paints.push(paint);
+    return () => {
+      const at = paints.indexOf(paint);
+      if (at >= 0) paints.splice(at, 1);
+    };
+  };
+}
+
+test("a question that changes under the same request repaints", () => {
+  // The repaint is keyed on what the banner shows, not on the request alone:
+  // a hook that rewrites its options, title or route under one id must reach
+  // the banner, or a click would send a label the person never saw.
+  const paints: (() => void)[] = [];
+  const { setCurrent, drawn, dispose } = createRoot((dispose) => {
+    const [current, setCurrent] = createSignal<Question>(questionFor(sessions(mark()))!);
+    return { setCurrent, drawn: drawnQuestion(current, queued(paints)), dispose };
+  });
+  try {
+    paints.splice(0).forEach((paint) => paint());
+    assert.deepEqual(drawn().options, ["staging", "production", "local"]);
+
+    setCurrent(questionFor(sessions(mark({ options: [{ label: "canary", description: "" }] })))!);
+    assert.equal(paints.length, 1, "a repaint is scheduled for the new labels");
+    assert.deepEqual(drawn().options, ["staging", "production", "local"], "not before the paint");
+    paints.splice(0).forEach((paint) => paint());
+    assert.deepEqual(drawn().options, ["canary"]);
+
+    setCurrent(questionFor(sessions(mark({ options: [{ label: "canary", description: "" }], route: "None" })))!);
+    assert.equal(paints.length, 1, "a route change repaints too");
+    paints.splice(0).forEach((paint) => paint());
+    assert.equal(drawn().answerable, false);
+
+    setCurrent(questionFor(sessions(mark({ options: [{ label: "canary", description: "" }], route: "None" })))!);
+    assert.equal(paints.length, 0, "the same question again schedules nothing");
+  } finally {
+    dispose();
+  }
+});
+
+test("a pending paint is cancelled by a newer frame and by unmount", () => {
+  const paints: (() => void)[] = [];
+  const { setCurrent, drawn, dispose } = createRoot((dispose) => {
+    const [current, setCurrent] = createSignal<Question>(questionFor(sessions(mark()))!);
+    return { setCurrent, drawn: drawnQuestion(current, queued(paints)), dispose };
+  });
+  paints.splice(0).forEach((paint) => paint());
+
+  setCurrent(questionFor(sessions(mark({ request: "att-8" })))!);
+  setCurrent(questionFor(sessions(mark({ request: "att-9" })))!);
+  assert.equal(paints.length, 1, "only the newest paint is pending");
+  paints.splice(0).forEach((paint) => paint());
+  assert.equal(drawn().request, "att-9");
+
+  setCurrent(questionFor(sessions(mark({ request: "att-10" })))!);
+  assert.equal(paints.length, 1);
+  dispose();
+  assert.equal(paints.length, 0, "unmounting cancels the pending paint");
+  assert.equal(drawn().request, "att-9", "and nothing paints after it");
+});
+
+test("the banner reads props.question only to feed drawnQuestion", () => {
+  // Every other read must go through the drawn question: a `props.question`
+  // anywhere else is a getter over the frame, which reintroduces the
+  // paint-to-click gap while every behavioural test stays green.
+  const source = readFileSync(new URL("./answer.tsx", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  const reads = source.match(/props\.question/g) ?? [];
+  assert.equal(reads.length, 1, `props.question is read ${reads.length} times outside comments`);
+  assert.match(source, /drawnQuestion\(\s*\(\) => props\.question,/, "and that one read is the drawnQuestion feed");
 });

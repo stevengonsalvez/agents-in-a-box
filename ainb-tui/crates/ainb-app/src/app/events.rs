@@ -143,13 +143,14 @@ pub enum AppEvent {
     /// `Enter` on the `ask` tab: send the selected answer.
     SessionAskSend,
     /// `session_list.ask.pick`: answer the question `request` names with the
-    /// option labelled `label`, in one step. A surface that cannot press keys
+    /// option at `index`, whose label the person read as `label`, in one step. A surface that cannot press keys
     /// on the reducer's cursor names its pick, and the reducer resolves it
     /// against the options it holds: a banner that counted cursor moves off
     /// its frame sent a different option when a frame landed mid-sequence
     /// (#1191). Refused when the question to answer is not `request`.
     SessionAskPick {
         request: String,
+        index: usize,
         label: String,
     },
     /// `Enter` on a composer tab (`thread` / `pal`): send the message.
@@ -590,27 +591,40 @@ pub enum AppEvent {
     GoToHangar, // Navigate to the Hangar control plane (plugin screen)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
-    ConfigBack,             // Return to home screen (Esc)
-    ConfigNextCategory,     // Navigate to next category
-    ConfigPrevCategory,     // Navigate to previous category
-    ConfigNextSetting,      // Navigate to next setting
-    ConfigPrevSetting,      // Navigate to previous setting
-    ConfigSwitchPane,       // Toggle focus between category and settings pane (Tab)
-    ConfigNavigateUp,       // Navigate up within current focused pane
-    ConfigNavigateDown,     // Navigate down within current focused pane
-    ConfigFocusCategories,  // Switch focus to categories pane (Left)
-    ConfigFocusSettings,    // Switch focus to settings pane (Right)
-    ConfigEditSetting,      // Start editing current setting (Enter)
-    ConfigSaveEdit,         // Save current edit (Enter while editing)
-    ConfigCancelEdit,       // Cancel current edit (Esc while editing)
-    ConfigEditChar(char),   // Input character while editing
-    ConfigEditBackspace,    // Backspace while editing
-    ConfigSaveAll,          // Save all settings (S)
-    ConfigToggleExpand,     // Open/close the selected section in the tree (Enter/Space)
-    ConfigSearchStart,      // Open the `/` filter over every row
+    ConfigBack,            // Return to home screen (Esc)
+    ConfigNextCategory,    // Navigate to next category
+    ConfigPrevCategory,    // Navigate to previous category
+    ConfigNextSetting,     // Navigate to next setting
+    ConfigPrevSetting,     // Navigate to previous setting
+    ConfigSwitchPane,      // Toggle focus between category and settings pane (Tab)
+    ConfigNavigateUp,      // Navigate up within current focused pane
+    ConfigNavigateDown,    // Navigate down within current focused pane
+    ConfigFocusCategories, // Switch focus to categories pane (Left)
+    ConfigFocusSettings,   // Switch focus to settings pane (Right)
+    ConfigEditSetting,     // Start editing current setting (Enter)
+    ConfigSaveEdit,        // Save current edit (Enter while editing)
+    ConfigCancelEdit,      // Cancel current edit (Esc while editing)
+    ConfigEditChar(char),  // Input character while editing
+    ConfigEditBackspace,   // Backspace while editing
+    ConfigSaveAll,         // Save all settings (S)
+    /// A form's edit of the row `key`, `config.set_row`: resolved against the
+    /// row's kind, then written through the key-level save the popup uses.
+    /// `revision` is the config section version the form drew; an edit of a
+    /// frame the section has moved past is refused, visibly.
+    ConfigSetRow {
+        key: String,
+        edit: crate::config::settings_model::ConfigRowEdit,
+        revision: u64,
+    },
+    /// A click on the config tree node `id`, `config.select_node`.
+    ConfigSelectNode {
+        id: String,
+    },
+    ConfigToggleExpand, // Open/close the selected section in the tree (Enter/Space)
+    ConfigSearchStart,  // Open the `/` filter over every row
     ConfigSearchChar(char), // Type into the `/` filter
-    ConfigSearchBackspace,  // Backspace in the `/` filter
-    ConfigSearchCancel,     // Close the `/` filter (Esc)
+    ConfigSearchBackspace, // Backspace in the `/` filter
+    ConfigSearchCancel, // Close the `/` filter (Esc)
     ConfigSecretToKeychain, // Store a credential literal in the OS keychain (Ctrl+K)
     // API Key configuration
     ConfigApiKeyStart,  // Start API key input mode (when on API Key Status)
@@ -1585,7 +1599,18 @@ impl EventHandler {
                     tracing::warn!("command `{id}` runs only from its key");
                     return None;
                 }
-                if let Some(why) = state.remote_command_refusal(&binding.action) {
+                let Some(action) = binding.action.with_args(&args) else {
+                    // Field names only: a payload can carry a pairing code, a
+                    // path or typed text, none of which belongs in a log.
+                    let fields: Vec<&String> =
+                        args.as_object().map(|object| object.keys().collect()).unwrap_or_default();
+                    tracing::warn!("command `{id}` rejected arguments with fields {fields:?}");
+                    return None;
+                };
+                // Judged with its payload: a pointer row's action is what the
+                // arguments name (the settings row a `config.set_row` edits,
+                // #1224), not the placeholder the table wrote.
+                if let Some(why) = state.remote_command_refusal(&action) {
                     tracing::warn!("command `{id}` refused: {why}");
                     return None;
                 }
@@ -1597,14 +1622,6 @@ impl EventHandler {
                     tracing::warn!("command `{id}` is not active on this screen");
                     return None;
                 }
-                let Some(action) = binding.action.with_args(&args) else {
-                    // Field names only: a payload can carry a pairing code, a
-                    // path or typed text, none of which belongs in a log.
-                    let fields: Vec<&String> =
-                        args.as_object().map(|object| object.keys().collect()).unwrap_or_default();
-                    tracing::warn!("command `{id}` rejected arguments with fields {fields:?}");
-                    return None;
-                };
                 Self::apply_key_action(action, state, host)
             }
             // A press resolves to what was under it; a host answering a press
@@ -2355,6 +2372,83 @@ impl EventHandler {
     /// the file so unknown sections survive), then `save_external_keys` writes the
     /// rest. On success the edits are cleared, so a later save cannot rewrite a
     /// value another process has since changed.
+    /// The value `edit` gives the row `key`, or why it gives none: no such
+    /// row, a row the renderer may not edit (a denied row, an unclassified
+    /// one, a secret), or an edit that does not fit the row's kind. A choice
+    /// takes an index into its own options; text is cleaned and bounded.
+    fn resolve_config_row_edit(
+        state: &AppState,
+        key: &str,
+        edit: &crate::config::settings_model::ConfigRowEdit,
+    ) -> Result<crate::app::state::ConfigValue, &'static str> {
+        use crate::app::state::ConfigValue;
+        use crate::config::renderer_edit;
+        use crate::config::settings_model::ConfigRowEdit;
+        if let Some(why) = crate::config::screen_model::read_only_reason(key) {
+            return Err(why);
+        }
+        // `config.set_row` is a renderer's row, so the renderer policy applies
+        // here as well as at the host's seam (#1224): a denied row, an
+        // unclassified one, or a secret is not set by name.
+        if let Some(why) = renderer_edit::refusal(key) {
+            return Err(why);
+        }
+        let row = state
+            .config
+            .config_screen_state
+            .settings
+            .values()
+            .flatten()
+            .find(|row| row.key == key)
+            .ok_or("no such settings row")?;
+        match (&row.value, edit) {
+            (ConfigValue::Text(_), ConfigRowEdit::Text(text)) => {
+                // The frame shows a scrubbed value; a form that sends it back
+                // would write the marker over the real value.
+                if text.contains(crate::fleet::bridge::redact::REDACTED) {
+                    return Err("a scrubbed value is never written back");
+                }
+                renderer_edit::clean_text(text).map(ConfigValue::Text)
+            }
+            (ConfigValue::Secret(_), _) => Err(renderer_edit::SECRET_REASON),
+            (ConfigValue::Bool(_), ConfigRowEdit::Bool(value)) => Ok(ConfigValue::Bool(*value)),
+            (ConfigValue::Choice(options, _), ConfigRowEdit::Choice(index)) => {
+                if *index < options.len() {
+                    Ok(ConfigValue::Choice(options.clone(), *index))
+                } else {
+                    Err("the chosen option is not one of the row's")
+                }
+            }
+            (ConfigValue::Number(_), ConfigRowEdit::Number(value)) => {
+                Ok(ConfigValue::Number(*value))
+            }
+            _ => Err("the edit does not fit the row's kind"),
+        }
+    }
+
+    /// Set the row `key` to `value` and write it now, so the change becomes
+    /// the config and survives a restart without an explicit save-all. `S`
+    /// remains as the explicit save-all. One path for the popup's confirm and
+    /// a form's `config.set_row`.
+    fn apply_config_row_edit(
+        state: &mut AppState,
+        key: &str,
+        value: crate::app::state::ConfigValue,
+    ) {
+        tracing::info!("Config setting {} changed to: {}", key, value.display());
+        state.config.config_screen_state.set_row_value(key, value);
+        match Self::persist_config_screen(state) {
+            Ok(outcome) => {
+                if let Some(message) = outcome.message() {
+                    state.add_success_notification(message);
+                }
+            }
+            Err(e) => {
+                state.add_error_notification(format!("Failed to save setting: {e}"));
+            }
+        }
+    }
+
     fn persist_config_screen(state: &mut AppState) -> anyhow::Result<PersistOutcome> {
         let pending = state.config.config_screen_state.pending_edits().len();
         // Daemon rows are excluded: they go to SQLite, and
@@ -3379,7 +3473,11 @@ impl EventHandler {
                 state.fleet.ask_state.retarget(&chip);
                 Self::send_selected_answer(state, &chip);
             }
-            AppEvent::SessionAskPick { request, label } => {
+            AppEvent::SessionAskPick {
+                request,
+                index,
+                label,
+            } => {
                 let Some(chip) = crate::components::session_tabs::selected_blocking(state).cloned()
                 else {
                     state.add_info_notification("nothing is waiting on an answer here".to_string());
@@ -3397,9 +3495,10 @@ impl EventHandler {
                 }
                 state.fleet.ask_state.retarget(&chip);
                 // The cursor is put on the named option and the send fires in
-                // the same step, so nothing can move it in between. A label
-                // the question does not offer sends nothing, and says so.
-                match state.fleet.ask_state.pick(&chip, &label) {
+                // the same step, so nothing can move it in between. An index
+                // past the list, or one whose option no longer reads as the
+                // label the person saw, sends nothing and says so.
+                match state.fleet.ask_state.pick(&chip, index, &label) {
                     Ok(()) => Self::send_selected_answer(state, &chip),
                     Err(refusal) => {
                         state.add_info_notification(refusal);
@@ -3849,16 +3948,12 @@ impl EventHandler {
             }
             AppEvent::GitViewNextCommit => {
                 if let Some(ref mut git_state) = state.git_view.git_view_state {
-                    if git_state.selected_commit_index < git_state.commits.len().saturating_sub(1) {
-                        git_state.selected_commit_index += 1;
-                    }
+                    git_state.move_commit_selection(1);
                 }
             }
             AppEvent::GitViewPrevCommit => {
                 if let Some(ref mut git_state) = state.git_view.git_view_state {
-                    if git_state.selected_commit_index > 0 {
-                        git_state.selected_commit_index -= 1;
-                    }
+                    git_state.move_commit_selection(-1);
                 }
             }
             AppEvent::GitViewShowCommitDiff => {
@@ -5893,6 +5988,34 @@ impl EventHandler {
             AppEvent::ConfigEditBackspace => {
                 state.config.config_screen_state.edit_buffer.pop();
             }
+            AppEvent::ConfigSetRow {
+                key,
+                edit,
+                revision,
+            } => {
+                // A dropped edit says so: a form that hears nothing draws a
+                // value it never wrote.
+                if revision != state.config.version() {
+                    state.add_warning_notification(format!(
+                        "{key}: the settings moved since the page drew them; edit dropped, try again"
+                    ));
+                } else {
+                    match Self::resolve_config_row_edit(state, &key, &edit) {
+                        Ok(value) => Self::apply_config_row_edit(state, &key, value),
+                        Err(why) => state.add_warning_notification(format!("{key}: {why}")),
+                    }
+                }
+            }
+            AppEvent::ConfigSelectNode { id } => {
+                // Looked up by shared reference first: a `&mut` path through
+                // the section bumps its version, and a click on a node that is
+                // not on screen must frame nothing.
+                if state.config.config_screen_state.visible_node_position(&id).is_some() {
+                    state.config.config_screen_state.select_node_by_id(&id);
+                } else {
+                    tracing::debug!("config tree node `{id}` is not on screen");
+                }
+            }
             AppEvent::ConfigSaveAll => {
                 tracing::info!("Saving all settings to config file");
                 match Self::persist_config_screen(state) {
@@ -6198,29 +6321,7 @@ impl EventHandler {
                         };
 
                         if let Some(updated) = updated {
-                            tracing::info!(
-                                "Config setting {} changed to: {}",
-                                setting_key,
-                                updated.display()
-                            );
-                            state.config.config_screen_state.set_row_value(&setting_key, updated);
-                        }
-
-                        // Auto-persist: write config.toml immediately, so the change
-                        // *becomes* the config (and survives a reopen/restart)
-                        // without the user having to remember `S` save-all. `S`
-                        // remains as an explicit save-all; `Esc` still cancels the
-                        // single edit before it reaches here.
-                        match Self::persist_config_screen(state) {
-                            Ok(outcome) => {
-                                if let Some(message) = outcome.message() {
-                                    state.add_success_notification(message);
-                                }
-                            }
-                            Err(e) => {
-                                state
-                                    .add_error_notification(format!("Failed to save setting: {e}"));
-                            }
+                            Self::apply_config_row_edit(state, &setting_key, updated);
                         }
                     }
                 }
