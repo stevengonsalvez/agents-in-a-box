@@ -43,10 +43,11 @@ pub fn is_host_authored(id: &CommandId) -> bool {
         || ainb_app::app::plugin_action::ids::ALL.contains(&id.as_str())
 }
 
-/// The updater's command ids. The window may run the update the host
-/// resolved (check, apply, roll back, discard the previous, read the
-/// settings); which channel and tag it comes from is set in the terminal and
-/// the config file only, never from the window.
+/// The updater's command ids. The window may check, apply the update the
+/// host resolved, and read the settings. Rolling back (a forced downgrade),
+/// removing the previous (the only recovery copy) and choosing the channel
+/// or the tag are the native menu's, the terminal's and the config file's,
+/// never the window's.
 pub mod update {
     pub const CHECK: &str = "update.check";
     pub const APPLY: &str = "update.apply";
@@ -64,7 +65,7 @@ pub mod update {
         SET_SETTINGS,
     ];
     /// The ids the window may send.
-    pub const FROM_WEBVIEW: [&str; 5] = [CHECK, APPLY, ROLLBACK, DISCARD_PREVIOUS, SETTINGS];
+    pub const FROM_WEBVIEW: [&str; 3] = [CHECK, APPLY, SETTINGS];
 }
 
 /// The refusal for an updater id the window may not send, `None` when it may.
@@ -72,7 +73,7 @@ pub mod update {
 pub fn update_refusal(id: &str) -> Option<Refusal> {
     (update::ALL.contains(&id) && !update::FROM_WEBVIEW.contains(&id)).then(|| Refusal {
         command: CommandId::new(id),
-        reason: "the update channel is set in the terminal or the config file, not the window",
+        reason: "the menu, the terminal or the config file does this, not the window",
     })
 }
 
