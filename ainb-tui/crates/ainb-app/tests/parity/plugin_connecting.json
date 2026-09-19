@@ -1,0 +1,9 @@
+{
+  "width": 100,
+  "height": 24,
+  "screen": {
+    "kind": "plugin",
+    "screen": "abtop",
+    "registered": true
+  }
+}

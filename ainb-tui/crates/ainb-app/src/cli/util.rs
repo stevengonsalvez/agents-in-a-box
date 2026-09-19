@@ -7,9 +7,12 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 use uuid::Uuid;
 
-use crate::interactive::session_manager::{ModelSource, SessionMetadata, SessionStore};
+use crate::interactive::session_manager::{
+    HeldLockMark, ModelSource, SessionMetadata, SessionStore, SessionStoreGuard,
+};
 use crate::models::SessionAgentType;
 use ainb_hangar_client::DaemonClient;
 use ainb_hangar_proto::protocol::CAP_WORKSPACE_SESSIONS;
@@ -91,104 +94,271 @@ pub fn metadata_to_entry(meta: &SessionMetadata) -> WorkspaceSessionEntry {
 /// Where this process reads and writes sessions.
 ///
 /// ```text
-/// resolve ──▶ hello advertises hangar.workspace.sessions?
-///               └─▶ session_list says import_complete? ──▶ Daemon
-///             anything else ─────────────────────────────▶ File
+/// resolve ──▶ AINB_SESSION_SOURCE=file? ──yes──────────────────────▶ File
+///               │ no
+///               ▼
+///             this build advertises hangar.workspace.sessions? ─no─▶ File
+///               │ yes
+///               ▼
+///             dial + hello within SESSION_RPC_DEADLINE ──fails────▶ Degraded
+///               │
+///               ▼
+///             the daemon advertises the capability? ──no─────────▶ File
+///               │ yes
+///               ▼
+///             session_list says import_complete? ──no / fails────▶ Degraded
+///               │ yes
+///               ▼
+///             Daemon
 /// ```
 ///
-/// While P6d is dark, [`resolve`](Self::resolve) always answers
-/// [`File`](Self::File); see [`CAP_WORKSPACE_SESSIONS`].
-///
 /// Decided once per process by [`session_source`], so one command cannot
-/// read from the table and write to the file. On [`Daemon`](Self::Daemon)
-/// the table is authoritative and `sessions.json` is never written; a daemon
-/// that fails later in the command is an error, not a fallback. On
-/// [`File`](Self::File) the flocked `SessionStore` path is used unchanged.
+/// read from the table and write to the file. The one transition is
+/// [`Degraded`](Self::Degraded) to [`Daemon`](Self::Daemon), made by
+/// [`leave_degraded`] once a daemon is up and has reconciled; there is no way
+/// back, and a daemon that fails after the switch is an error, not a
+/// fallback.
+///
+/// On [`Daemon`](Self::Daemon) the table is authoritative for reads, and
+/// every write changes the `sessions.json` row first and then the table,
+/// under the file's lock, so a previous release reading the file still sees
+/// current sessions. On [`File`](Self::File) and
+/// [`Degraded`](Self::Degraded) the flocked `SessionStore` path is used, the
+/// lock wait bounded by [`SESSION_RPC_DEADLINE`].
 #[derive(Debug, Clone)]
 pub enum SessionSource {
     /// The daemon's `sessions` table, behind RPC.
     Daemon(DaemonClient),
     /// `~/.agents-in-a-box/sessions.json`.
     File,
+    /// This build speaks the sessions capability but no ready daemon was
+    /// reachable: sessions are on the file, as on [`File`](Self::File), and
+    /// a long-lived process keeps trying to reach the daemon
+    /// ([`reresolve_while_degraded`]). Carries the client it will retry with,
+    /// or `None` to read one from the environment when it retries.
+    Degraded(Option<DaemonClient>),
 }
+
+/// The bound on every session RPC [`SessionSource`] makes.
+///
+/// It also bounds the wait for the `sessions.json` lock. On expiry the call
+/// returns an error the caller surfaces; it never hangs a reducer or a CLI
+/// command.
+///
+/// 3 s, not the 2 s the goal recommends: a daemon that has just restarted
+/// holds a session read for up to its `FIRST_PASS_WAIT` (2 s) before it
+/// answers not-ready, and that answer must arrive inside this deadline, or
+/// the client reads a timeout where the daemon meant "retry". A test in
+/// `ainb-core` pins this one above the daemon's.
+pub const SESSION_RPC_DEADLINE: Duration = Duration::from_secs(3);
+
+/// The bound on the reconcile a surface asks for when it leaves
+/// [`SessionSource::Degraded`]: the daemon's pass may wait for the lock and
+/// then write, each bounded on the daemon's side.
+const LEAVE_DEGRADED_DEADLINE: Duration = Duration::from_secs(10);
+
+/// The process's kill switch: `AINB_SESSION_SOURCE=file` makes
+/// [`SessionSource::resolve`] answer [`File`](SessionSource::File) before
+/// it dials anything. Any other value is ignored with one warning.
+pub const SESSION_SOURCE_ENV: &str = "AINB_SESSION_SOURCE";
 
 /// How many times [`SessionSource::mutate`] reads a not-ready daemon before
 /// it gives up. Each wait is the daemon's own bounded first-pass wait.
 const NOT_READY_ATTEMPTS: u32 = 3;
 
+/// The pause between two of those attempts, so a daemon that answers
+/// not-ready at once cannot turn them into a tight loop.
+const NOT_READY_PAUSE: Duration = Duration::from_millis(100);
+
 fn daemon_io_error(what: &str, error: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(format!("daemon session {what} failed: {error}"))
 }
 
+/// Run a session RPC under [`SESSION_RPC_DEADLINE`].
+async fn within_deadline<T, E: std::fmt::Display>(
+    what: &str,
+    call: impl std::future::Future<Output = Result<T, E>>,
+) -> std::io::Result<T> {
+    tokio::time::timeout(SESSION_RPC_DEADLINE, call).await.map_or_else(
+        |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "daemon session {what} did not answer within {} ms",
+                    SESSION_RPC_DEADLINE.as_millis()
+                ),
+            ))
+        },
+        |result| result.map_err(|e| daemon_io_error(what, e)),
+    )
+}
+
+/// How long any write through the resolver waits for the `sessions.json`
+/// lock, on every source.
+///
+/// Longer than the RPC deadline on purpose: the daemon's reconcile pass holds
+/// this lock on every boot, whatever the capability says, for up to its flock
+/// wait (`SESSIONS_FLOCK_BOUND`, 2 s) plus its store write
+/// (`RECONCILE_STORE_BOUND`, 5 s). A writer that gave up sooner would fail,
+/// and `ainb run` roll back, a live session only because a daemon happened to
+/// be reconciling. A test in `ainb-core` pins this above the daemon's sum.
+pub const SESSIONS_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// The bound on all of one `mutate`'s table writes together.
+///
+/// On [`SessionSource::Daemon`] each RPC is also under
+/// [`SESSION_RPC_DEADLINE`]; this caps a run of slow ones, so a write of many
+/// rows cannot hold the lock for many deadlines.
+pub const MUTATE_WRITES_DEADLINE: Duration = SESSION_RPC_DEADLINE;
+
+/// Take the `sessions.json` lock, waiting at most [`SESSIONS_LOCK_WAIT`].
+async fn lock_within_deadline() -> std::io::Result<SessionStoreGuard> {
+    let deadline = tokio::time::Instant::now() + SESSIONS_LOCK_WAIT;
+    loop {
+        if let Some(guard) = SessionStore::try_lock()? {
+            return Ok(guard);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "sessions.json lock still held after {} ms",
+                    SESSIONS_LOCK_WAIT.as_millis()
+                ),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Whether [`SESSION_SOURCE_ENV`] forces the file. Read before any dial.
+fn kill_switch_says_file() -> bool {
+    static IGNORED: std::sync::Once = std::sync::Once::new();
+    match std::env::var(SESSION_SOURCE_ENV) {
+        Ok(value) if value == "file" => true,
+        Ok(value) if !value.is_empty() => {
+            IGNORED.call_once(|| {
+                eprintln!(
+                    "Warning: ignoring {SESSION_SOURCE_ENV}={value:?}; only \"file\" is read."
+                );
+            });
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Whether this build speaks the sessions capability: its own catalogue, or,
+/// in a `test-support` build, the harness switch
+/// ([`advertise_workspace_sessions_for_tests`], or
+/// `AINB_TEST_WORKSPACE_SESSIONS=1` for a real `ainb` binary).
+fn build_advertises() -> bool {
+    if ainb_hangar_proto::protocol::advertises(CAP_WORKSPACE_SESSIONS) {
+        return true;
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    if TEST_ADVERTISES.load(std::sync::atomic::Ordering::SeqCst)
+        || std::env::var("AINB_TEST_WORKSPACE_SESSIONS").is_ok_and(|v| v == "1")
+    {
+        return true;
+    }
+    false
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static TEST_ADVERTISES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Make [`SessionSource::resolve`] treat the sessions capability as built in.
+///
+/// For tests before the flip does it for real; test builds only. The daemon
+/// side is `advertise_workspace_sessions_for_tests`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn advertise_workspace_sessions_for_tests(on: bool) {
+    TEST_ADVERTISES.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Say once per process that sessions are on the file for now.
+fn degraded_notice() {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        eprintln!("Notice: sessions are on the local sessions.json until the hangar daemon is up.");
+    });
+}
+
 impl SessionSource {
-    /// Decide against the daemon named by the environment.
-    ///
-    /// While P6d is dark this build does not advertise
-    /// `CAP_WORKSPACE_SESSIONS`, so the answer is [`File`](Self::File)
-    /// without dialing: every CLI reader and writer behaves as before the
-    /// table existed. P6e turns it on by adding the capability to the
-    /// catalogue, together with the TUI's readers and writers.
+    /// Decide against the daemon named by the environment. See the type's
+    /// diagram.
     pub async fn resolve() -> Self {
-        if !ainb_hangar_proto::protocol::advertises(CAP_WORKSPACE_SESSIONS) {
+        if kill_switch_says_file() || !build_advertises() {
             return Self::File;
         }
-        match DaemonClient::from_env() {
-            Ok(client) => Self::resolve_with(client).await,
-            Err(_) => Self::File,
+        if let Ok(client) = DaemonClient::from_env() {
+            Self::resolve_with(client).await
+        } else {
+            degraded_notice();
+            Self::Degraded(None)
         }
     }
 
     /// Decide against the daemon at `socket` with `token` (the test seam).
     ///
-    /// Unlike [`resolve`](Self::resolve) this asks the daemon even while the
-    /// capability is dark, so tests can drive the daemon path.
+    /// Unlike [`resolve`](Self::resolve) this asks the daemon even when the
+    /// build does not advertise the capability, so tests can drive the
+    /// daemon path. The kill switch still wins, before any dial.
     pub async fn resolve_at(socket: PathBuf, token: String) -> Self {
+        if kill_switch_says_file() {
+            return Self::File;
+        }
         Self::resolve_with(DaemonClient::with_parts(socket, token)).await
     }
 
     async fn resolve_with(client: DaemonClient) -> Self {
-        let Ok(hello) = client.hello().await else {
-            return Self::File;
+        let Ok(hello) = within_deadline("hello", client.hello()).await else {
+            degraded_notice();
+            return Self::Degraded(Some(client));
         };
         if !hello.advertises(CAP_WORKSPACE_SESSIONS) {
+            // A daemon from before the sessions table: it will never serve
+            // them, so this is the file for good, not a degraded wait.
             return Self::File;
         }
         let probe = WorkspaceSessionListParams {
             workspace_name: None,
             limit: Some(1),
         };
-        match client.workspace_session_list(probe).await {
+        match within_deadline("list", client.workspace_session_list(probe)).await {
             Ok(res) if res.import_complete => Self::Daemon(client),
-            Ok(_) => {
-                eprintln!(
-                    "Warning: the daemon has not finished importing sessions.json; \
-                     reading the file this run."
-                );
-                Self::File
-            }
-            Err(e) => {
-                eprintln!(
-                    "Warning: daemon session list failed ({e}); reading sessions.json this run."
-                );
-                Self::File
+            _ => {
+                degraded_notice();
+                Self::Degraded(Some(client))
             }
         }
+    }
+
+    /// Whether sessions are on the file only because the daemon is not up:
+    /// the state a surface shows a notice for.
+    #[must_use]
+    pub const fn is_degraded(&self) -> bool {
+        matches!(self, Self::Degraded(_))
     }
 
     /// Read the whole store from this source.
     ///
     /// # Errors
     ///
-    /// On [`Daemon`](Self::Daemon), when the RPC fails, or when the daemon
-    /// answers not-ready (`import_complete: false`). The file is not read
-    /// instead: the process already decided where its sessions live.
+    /// When the current thread holds the `sessions.json` lock (nesting would
+    /// hang). On [`Daemon`](Self::Daemon), when the RPC fails or passes
+    /// [`SESSION_RPC_DEADLINE`], or when the daemon answers not-ready
+    /// (`import_complete: false`). The file is not read instead: the process
+    /// already decided where its sessions live.
     ///
     /// Not-ready is not monotonic: a daemon that restarts answers it until
     /// its first reconcile pass commits, with no rows. Read as a store, that
     /// is zero sessions, and `mutate` would diff against an empty view.
     pub async fn load(&self) -> std::io::Result<SessionStore> {
+        SessionStore::ensure_lock_not_held()?;
         let client = match self {
-            Self::File => return Ok(SessionStore::load()),
+            Self::File | Self::Degraded(_) => return Ok(SessionStore::load()),
             Self::Daemon(client) => client,
         };
         Self::load_daemon(client).await?.ok_or_else(|| {
@@ -202,10 +372,11 @@ impl SessionSource {
     /// Read the whole store from the daemon. `None` means the daemon answered
     /// not-ready: its first reconcile pass since boot has not committed.
     async fn load_daemon(client: &DaemonClient) -> std::io::Result<Option<SessionStore>> {
-        let res = client
-            .workspace_session_list(WorkspaceSessionListParams::default())
-            .await
-            .map_err(|e| daemon_io_error("list", e))?;
+        let res = within_deadline(
+            "list",
+            client.workspace_session_list(WorkspaceSessionListParams::default()),
+        )
+        .await?;
         if !res.import_complete {
             return Ok(None);
         }
@@ -229,14 +400,19 @@ impl SessionSource {
 
     /// Apply `f` to the store and persist the difference.
     ///
-    /// On [`File`](Self::File) the store is loaded under the lock, `f` runs,
-    /// and the file is saved only if something changed.
+    /// On [`File`](Self::File) and [`Degraded`](Self::Degraded) the store is
+    /// loaded under the lock, `f` runs, and the file is saved only if
+    /// something changed.
     ///
-    /// On [`Daemon`](Self::Daemon) the store is read fresh, `f` runs, and only
-    /// what changed is written: one delete per session id that disappeared,
-    /// one upsert per session that is new or different. The `sessions.json`
-    /// lock is held across the whole read-modify-write so two CLI processes
-    /// cannot interleave, as on the file path.
+    /// On [`Daemon`](Self::Daemon), under the `sessions.json` lock: the table
+    /// is read, `f` runs, and what changed is written row by row, the file
+    /// first (upsert or remove by tmux key, never a whole-file replace from
+    /// the table) and then the table (one delete per session id that
+    /// disappeared, one upsert per session that is new or different). If a
+    /// table write fails, the file is put back as it was before the lock is
+    /// released and the error is returned. So after every successful write
+    /// the file and the table agree on the sessions it touched, and a
+    /// previous release reading the file sees them.
     ///
     /// A daemon that is not ready (it restarted, and its first reconcile pass
     /// has not committed) needs that same lock for the pass. So on a not-ready
@@ -247,18 +423,24 @@ impl SessionSource {
     ///
     /// # Errors
     ///
-    /// The first failed RPC, so a caller such as `ainb run` can roll back, or
-    /// a still-reconciling error once the attempts are spent.
+    /// When the current thread already holds the lock; when the lock is not
+    /// free within [`SESSION_RPC_DEADLINE`]; the first failed or timed-out
+    /// RPC, so a caller such as `ainb run` can roll back; or a
+    /// still-reconciling error once the attempts are spent.
     pub async fn mutate<F>(&self, f: F) -> std::io::Result<()>
     where
         F: FnOnce(&mut SessionStore),
     {
+        SessionStore::ensure_lock_not_held()?;
         let client = match self {
-            Self::File => {
-                let _guard = SessionStore::lock()?;
-                let mut store = SessionStore::load();
+            Self::File | Self::Degraded(_) => {
+                let _guard = lock_within_deadline().await?;
+                let (mut store, _) = load_file_for_write()?;
                 let before = snapshot(&store);
-                f(&mut store);
+                {
+                    let _mark = HeldLockMark::enter();
+                    f(&mut store);
+                }
                 // Save only on change, as v2's orphan cleanup did: a no-op
                 // never rewrites the file another writer may be reading.
                 return if snapshot(&store) == before {
@@ -269,49 +451,164 @@ impl SessionSource {
             }
             Self::Daemon(client) => client,
         };
+
         let mut attempts = 0;
         let (_guard, mut store) = loop {
-            let guard = SessionStore::lock()?;
+            let guard = lock_within_deadline().await?;
             if let Some(store) = Self::load_daemon(client).await? {
                 break (guard, store);
             }
             drop(guard);
             attempts += 1;
+            if attempts == 1 {
+                eprintln!("Notice: the hangar daemon is reconciling sessions; waiting.");
+            }
             if attempts >= NOT_READY_ATTEMPTS {
                 return Err(daemon_io_error(
                     "list",
                     "the daemon is still reconciling sessions.json; nothing was written, try again",
                 ));
             }
+            tokio::time::sleep(NOT_READY_PAUSE).await;
             // Asked without the lock, so the daemon's pass can take it.
             let _ = Self::load_daemon(client).await?;
         };
         let before = entries_by_id(&store);
-        f(&mut store);
-        let after = entries_by_id(&store);
-
-        for (id, _) in before.iter().filter(|(id, _)| !after.contains_key(*id)) {
-            client
-                .workspace_session_delete(WorkspaceSessionDeleteParams {
-                    session_id: Some(id.to_string()),
-                    tmux_session_name: None,
-                })
-                .await
-                .map_err(|e| daemon_io_error("delete", e))?;
+        {
+            let _mark = HeldLockMark::enter();
+            f(&mut store);
         }
-        for (id, entry) in &after {
-            if before.get(id) == Some(entry) {
-                continue;
+        let after = entries_by_id(&store);
+        let removed: Vec<Uuid> =
+            before.keys().filter(|id| !after.contains_key(*id)).copied().collect();
+        // Sorted by tmux name, so a multi-row write happens in the same
+        // order every time, whatever the map's order.
+        let mut written: Vec<&WorkspaceSessionEntry> = after
+            .iter()
+            .filter(|(id, entry)| before.get(*id) != Some(*entry))
+            .map(|(_, entry)| entry)
+            .collect();
+        written.sort_by(|a, b| a.tmux_session_name.cmp(&b.tmux_session_name));
+        if removed.is_empty() && written.is_empty() {
+            return Ok(());
+        }
+
+        let file_before = write_file_rows(&removed, &written)?;
+        let table = tokio::time::timeout(
+            MUTATE_WRITES_DEADLINE,
+            write_table_rows(client, &removed, &written),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "daemon session writes did not finish within {} ms",
+                    MUTATE_WRITES_DEADLINE.as_millis()
+                ),
+            ))
+        });
+        if let Err(e) = table {
+            if let Err(revert) = restore_file(file_before.as_deref()) {
+                return Err(std::io::Error::other(format!(
+                    "{e}; and sessions.json could not be put back: {revert}"
+                )));
             }
-            client
-                .workspace_session_upsert(WorkspaceSessionUpsertParams {
-                    session: entry.clone(),
-                })
-                .await
-                .map_err(|e| daemon_io_error("write", e))?;
+            return Err(e);
         }
         Ok(())
     }
+}
+
+/// Apply the row changes to `sessions.json` under the caller's lock: remove
+/// every row of a removed session id, upsert every written row by its tmux
+/// key (dropping the row an id held under an old tmux name). Rows the change
+/// does not touch are left as they are. Goes through `SessionStore`'s own
+/// load and save, the same typed path every file writer uses. Returns the
+/// file's bytes before the change (`None`: no file) for [`restore_file`].
+fn write_file_rows(
+    removed: &[Uuid],
+    written: &[&WorkspaceSessionEntry],
+) -> std::io::Result<Option<Vec<u8>>> {
+    let (mut file, before) = load_file_for_write()?;
+    for id in removed {
+        file.remove_by_session_id(*id);
+    }
+    for entry in written {
+        let meta = entry_to_metadata(entry).map_err(std::io::Error::other)?;
+        file.remove_by_session_id(meta.session_id);
+        file.upsert(meta);
+    }
+    file.save()?;
+    Ok(before)
+}
+
+/// Load `sessions.json` for a write, under the caller's lock, with the bytes
+/// it was read from (`None`: no file).
+///
+/// `SessionStore::load` answers an empty store for a file it cannot parse,
+/// which is right for a read and wrong for a write: saving that store would
+/// cut a corrupt file down to the rows the write touched. So a file that
+/// does not parse is refused here, untouched, before anything is written, on
+/// every source.
+fn load_file_for_write() -> std::io::Result<(SessionStore, Option<Vec<u8>>)> {
+    let path = SessionStore::storage_path();
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((SessionStore::default(), None));
+        }
+        Err(e) => return Err(e),
+    };
+    match serde_json::from_slice::<SessionStore>(&bytes) {
+        Ok(store) => Ok((store, Some(bytes))),
+        Err(e) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("sessions.json does not parse ({e}); refusing to rewrite it"),
+        )),
+    }
+}
+
+/// Put `sessions.json` back to `before` (`None`: remove it), under the
+/// caller's lock.
+fn restore_file(before: Option<&[u8]>) -> std::io::Result<()> {
+    let path = SessionStore::storage_path();
+    before.map_or_else(
+        || match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+        |bytes| crate::config::write_atomic(&path, &String::from_utf8_lossy(bytes)),
+    )
+}
+
+/// Apply the row changes to the daemon's table, each RPC under
+/// [`SESSION_RPC_DEADLINE`].
+async fn write_table_rows(
+    client: &DaemonClient,
+    removed: &[Uuid],
+    written: &[&WorkspaceSessionEntry],
+) -> std::io::Result<()> {
+    for id in removed {
+        within_deadline(
+            "delete",
+            client.workspace_session_delete(WorkspaceSessionDeleteParams {
+                session_id: Some(id.to_string()),
+                tmux_session_name: None,
+            }),
+        )
+        .await?;
+    }
+    for entry in written {
+        within_deadline(
+            "write",
+            client.workspace_session_upsert(WorkspaceSessionUpsertParams {
+                session: (*entry).clone(),
+            }),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Every entry keyed by its map key, for change detection.
@@ -323,11 +620,97 @@ fn entries_by_id(store: &SessionStore) -> HashMap<Uuid, WorkspaceSessionEntry> {
     store.sessions.values().map(|m| (m.session_id, metadata_to_entry(m))).collect()
 }
 
-static SESSION_SOURCE: tokio::sync::OnceCell<SessionSource> = tokio::sync::OnceCell::const_new();
+static SESSION_SOURCE: tokio::sync::OnceCell<std::sync::RwLock<SessionSource>> =
+    tokio::sync::OnceCell::const_new();
 
-/// This process's [`SessionSource`], resolved on first use and then fixed.
-pub async fn session_source() -> &'static SessionSource {
-    SESSION_SOURCE.get_or_init(SessionSource::resolve).await
+/// This process's [`SessionSource`], resolved on first use and then fixed,
+/// except for the one move out of [`Degraded`](SessionSource::Degraded)
+/// that [`leave_degraded`] makes.
+pub async fn session_source() -> SessionSource {
+    let cell = SESSION_SOURCE
+        .get_or_init(|| async { std::sync::RwLock::new(SessionSource::resolve().await) })
+        .await;
+    cell.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+/// Try once to move this process from `Degraded` to `Daemon`.
+///
+/// Reach the daemon, check it speaks the capability, ask it to reconcile (so
+/// the sessions written to the file while degraded are in the table) and
+/// wait for that pass, then check the table is ready. Returns whether the
+/// process is on the daemon now.
+///
+/// The move is made once; nothing moves the process back.
+pub async fn leave_degraded() -> bool {
+    let cell = SESSION_SOURCE
+        .get_or_init(|| async { std::sync::RwLock::new(SessionSource::resolve().await) })
+        .await;
+    let current = cell.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    let SessionSource::Degraded(client) = current else {
+        return matches!(current, SessionSource::Daemon(_));
+    };
+    let Some(client) = client.or_else(|| DaemonClient::from_env().ok()) else {
+        return false;
+    };
+    let Some(next) = SessionSource::leave_degraded_with(client).await else {
+        return false;
+    };
+    let mut slot = cell.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.is_degraded() {
+        *slot = next;
+    }
+    true
+}
+
+impl SessionSource {
+    /// The checks [`leave_degraded`] makes, against `client`. `None` means
+    /// stay degraded for now.
+    pub async fn leave_degraded_with(client: DaemonClient) -> Option<Self> {
+        let hello = within_deadline("hello", client.hello()).await.ok()?;
+        if !hello.advertises(CAP_WORKSPACE_SESSIONS) {
+            return None;
+        }
+        tokio::time::timeout(
+            LEAVE_DEGRADED_DEADLINE,
+            client.workspace_session_reconcile(),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        let probe = WorkspaceSessionListParams {
+            workspace_name: None,
+            limit: Some(1),
+        };
+        let res = within_deadline("list", client.workspace_session_list(probe)).await.ok()?;
+        res.import_complete.then_some(Self::Daemon(client))
+    }
+}
+
+/// The delays between re-resolve attempts of a degraded long-lived process:
+/// 1 s, 4 s, 16 s, then every 16 s (the P6a reconnect cadence).
+pub fn reresolve_delays() -> impl Iterator<Item = Duration> {
+    [1, 4, 16]
+        .into_iter()
+        .map(Duration::from_secs)
+        .chain(std::iter::repeat(Duration::from_secs(16)))
+}
+
+/// Retry [`leave_degraded`] on [`reresolve_delays`] while this process is
+/// degraded.
+///
+/// For a long-lived process (TUI, desktop, `ainb web`); returns once it is
+/// on the daemon or was never degraded. A CLI command does not call this;
+/// it ends.
+pub async fn reresolve_while_degraded() {
+    if !session_source().await.is_degraded() {
+        return;
+    }
+    for delay in reresolve_delays() {
+        tokio::time::sleep(delay).await;
+        if leave_degraded().await {
+            return;
+        }
+    }
 }
 
 /// Drive `fut` to completion from sync code, wherever it is called from.
@@ -358,8 +741,10 @@ fn run_async<F: std::future::Future<Output = T> + Send, T: Send>(fut: F) -> T {
 ///
 /// # Errors
 ///
-/// When the daemon was chosen and its RPC fails.
+/// When the current thread holds the `sessions.json` lock, or the daemon was
+/// chosen and its RPC fails or times out.
 pub async fn load_session_store_async() -> std::io::Result<SessionStore> {
+    SessionStore::ensure_lock_not_held()?;
     session_source().await.load().await
 }
 
@@ -369,6 +754,7 @@ pub async fn load_session_store_async() -> std::io::Result<SessionStore> {
 ///
 /// As [`load_session_store_async`].
 pub fn load_session_store() -> std::io::Result<SessionStore> {
+    SessionStore::ensure_lock_not_held()?;
     run_async(load_session_store_async())
 }
 
@@ -381,6 +767,7 @@ pub async fn mutate_session_store_async<F>(f: F) -> std::io::Result<()>
 where
     F: FnOnce(&mut SessionStore),
 {
+    SessionStore::ensure_lock_not_held()?;
     session_source().await.mutate(f).await
 }
 
@@ -393,6 +780,7 @@ pub fn mutate_session_store<F>(f: F) -> std::io::Result<()>
 where
     F: FnOnce(&mut SessionStore) + Send,
 {
+    SessionStore::ensure_lock_not_held()?;
     run_async(mutate_session_store_async(f))
 }
 
