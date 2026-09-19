@@ -19,11 +19,11 @@ use ainb_app::wire::frame::{FrameBatch, HostId, Subscription};
 use ainb_app::{Intent, Keymap};
 use ainb_desktop::executor::DesktopExecutor;
 use ainb_desktop::host::{DesktopHost, FrameSink, agent_status_dialer};
-use ainb_desktop::intent::{Refusal, RendererIntent};
+use ainb_desktop::intent::{self, Refusal, RendererIntent, update};
 use ainb_desktop::shell::Shell;
 use ainb_desktop::sidecar::{Sidecar, SidecarConfig, SidecarState, SidecarView};
 use ainb_desktop::terminal::{TabEvents, TabsView, Terminals, Tmux};
-use ainb_desktop::updater::{self, Check, Install, Settings as UpdateSettings, Updater};
+use ainb_desktop::updater::{self, Check, Install, Phase, Settings as UpdateSettings, Updater};
 use ainb_hangar_proto::agent_status::AgentState;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Emitter, Manager};
@@ -271,10 +271,31 @@ fn dispatch(window: tauri::State<'_, Window>, intent: RendererIntent) -> Option<
 }
 
 /// Where the daemon connection stands, for the banner on first paint.
-/// A toast to the webview, or a log line when the window is not there.
+/// A toast to the webview (scrubbed, then cut), or a log line when the window
+/// is not there.
 fn handle_toast(handle: &tauri::AppHandle, text: String) {
-    if let Err(error) = handle.emit("toast", &text) {
+    if let Err(error) = handle.emit("toast", intent::toast_text(&text)) {
         tracing::warn!(%error, text, "update toast not delivered to the webview");
+    }
+}
+
+/// The updater's phase to the webview, for its status line.
+fn emit_phase(handle: &tauri::AppHandle, phase: Phase) {
+    if let Err(error) = handle.emit("update", &phase) {
+        tracing::warn!(%error, "update phase not delivered to the webview");
+    }
+}
+
+/// The one gate the updater's commands pass through: `id` is refused from
+/// the window when it chooses where updates come from
+/// (`intent::update_refusal`, the list `refused_from_webview` shares).
+fn update_gate(id: &str) -> Result<(), String> {
+    match intent::update_refusal(id) {
+        Some(refusal) => Err(format!(
+            "{} is not run from the window: {}",
+            refusal.command, refusal.reason
+        )),
+        None => Ok(()),
     }
 }
 
@@ -294,6 +315,7 @@ fn describe_check(check: &Check) -> String {
 
 /// Run the check off the main thread and remember what it found.
 async fn run_update_check(handle: &tauri::AppHandle) -> Check {
+    emit_phase(handle, Phase::Checking);
     let window = handle.state::<Window>();
     let updater = Arc::clone(&window.updater);
     let last = Arc::clone(&window.last_check);
@@ -321,16 +343,32 @@ async fn run_update_apply(handle: &tauri::AppHandle) -> Result<PathBuf, String> 
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
         .ok_or_else(|| "run Check for Updates first".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let phases = handle.clone();
+    let version = match &check {
+        Check::Available { version, .. } => version.clone(),
+        _ => String::new(),
+    };
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let install = Install::detect().map_err(|error| error.to_string())?;
         updater
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .apply(&check, &install)
+            .apply_with(&check, &install, &mut |phase| emit_phase(&phases, phase))
             .map_err(|error| format!("{error:#}"))
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+    .and_then(|inner| inner);
+    match &result {
+        Ok(_) => emit_phase(handle, Phase::Installed { version }),
+        Err(reason) => emit_phase(
+            handle,
+            Phase::Failed {
+                reason: intent::toast_text(reason),
+            },
+        ),
+    }
+    result
 }
 
 async fn run_update_rollback() -> Result<(), String> {
@@ -342,15 +380,27 @@ async fn run_update_rollback() -> Result<(), String> {
     .map_err(|error| error.to_string())?
 }
 
+/// Remove the one rollback slot, at the person's request only.
+async fn run_update_discard_previous() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let install = Install::detect().map_err(|error| error.to_string())?;
+        updater::clear_previous(&install).map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// The updater's check, for the webview.
 #[tauri::command]
-async fn update_check(app: tauri::AppHandle) -> Check {
-    run_update_check(&app).await
+async fn update_check(app: tauri::AppHandle) -> Result<Check, String> {
+    update_gate(update::CHECK)?;
+    Ok(run_update_check(&app).await)
 }
 
 /// Install what the last check found and restart into it.
 #[tauri::command]
 async fn update_apply(app: tauri::AppHandle) -> Result<(), String> {
+    update_gate(update::APPLY)?;
     run_update_apply(&app).await?;
     app.restart();
 }
@@ -358,36 +408,29 @@ async fn update_apply(app: tauri::AppHandle) -> Result<(), String> {
 /// Put the previous version back and restart into it.
 #[tauri::command]
 async fn update_rollback(app: tauri::AppHandle) -> Result<(), String> {
+    update_gate(update::ROLLBACK)?;
     run_update_rollback().await?;
     app.restart();
 }
 
-/// The updater's local settings.
+/// Remove the previous version, the one rollback slot.
 #[tauri::command]
-fn update_settings(window: tauri::State<'_, Window>) -> UpdateSettings {
-    window
+async fn update_discard_previous() -> Result<(), String> {
+    update_gate(update::DISCARD_PREVIOUS)?;
+    run_update_discard_previous().await
+}
+
+/// The updater's local settings, to read. They are set in the terminal or
+/// the config file: there is no command that writes them.
+#[tauri::command]
+fn update_settings(window: tauri::State<'_, Window>) -> Result<UpdateSettings, String> {
+    update_gate(update::SETTINGS)?;
+    Ok(window
         .updater
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .settings()
-        .clone()
-}
-
-/// Replace the updater's local settings; a bad prerelease tag is refused.
-#[tauri::command]
-fn update_set_settings(
-    window: tauri::State<'_, Window>,
-    settings: UpdateSettings,
-) -> Result<(), String> {
-    if let updater::Channel::Prerelease { tag } = &settings.channel {
-        updater::validate_tag(tag).map_err(|error| error.to_string())?;
-    }
-    window
-        .updater
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .set_settings(settings)
-        .map_err(|error| error.to_string())
+        .clone())
 }
 
 #[tauri::command]
@@ -602,6 +645,14 @@ fn main() {
                             }
                         });
                     }
+                    menu::UPDATE_DISCARD_PREVIOUS => {
+                        tauri::async_runtime::spawn(async move {
+                            match run_update_discard_previous().await {
+                                Ok(()) => handle_toast(&handle, "The previous version was removed.".to_string()),
+                                Err(error) => handle_toast(&handle, format!("The previous version was not removed: {error}")),
+                            }
+                        });
+                    }
                     _ => {}
                 }
             });
@@ -625,13 +676,6 @@ fn main() {
                     // after its presence lease's `dial_presence`
                     // (ainb-hangar-client) completed the hello that recorded it.
                     if connected {
-                        // The new version has proved itself once its sidecar
-                        // connects: the previous copy is no longer needed.
-                        if let Ok(install) = Install::detect() {
-                            if let Err(error) = updater::clear_previous(&install) {
-                                tracing::warn!(%error, "the previous version was not cleared");
-                            }
-                        }
                         let host_id = HostId::of_daemon(&socket);
                         let window = handle.state::<Window>();
                         if host_id != window.shell.host_id() {
@@ -679,8 +723,8 @@ fn main() {
             update_check,
             update_apply,
             update_rollback,
-            update_settings,
-            update_set_settings
+            update_discard_previous,
+            update_settings
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
