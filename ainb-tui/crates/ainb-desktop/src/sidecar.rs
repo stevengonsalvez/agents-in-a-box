@@ -144,9 +144,17 @@ pub enum SidecarView {
         daemon_version: Option<String>,
         protocol: ProtocolRange,
     },
-    Reconnecting { error: String },
-    Incompatible { message: String, daemon_is_newer: bool },
-    Degraded { error: String, has_log: bool },
+    Reconnecting {
+        error: String,
+    },
+    Incompatible {
+        message: String,
+        daemon_is_newer: bool,
+    },
+    Degraded {
+        error: String,
+        has_log: bool,
+    },
 }
 
 impl SidecarState {
