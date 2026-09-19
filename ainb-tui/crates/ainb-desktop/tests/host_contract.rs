@@ -557,7 +557,11 @@ fn the_ask_commands_send_an_answer_and_the_frame_follows_it() {
     let _ = host.dispatch(select_session_tab(SessionTab::Ask));
     let _ = host.tick();
     log.borrow_mut().clear();
-    let _ = host.dispatch(ainb_app::app::pointer::pick_answer("att-7", "production"));
+    let _ = host.dispatch(ainb_app::app::pointer::pick_answer(
+        "att-7",
+        1,
+        "production",
+    ));
     assert_eq!(
         host.state().fleet.ask_state.cursor(),
         1,

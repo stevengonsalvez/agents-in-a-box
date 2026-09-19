@@ -5,6 +5,7 @@
 //!
 //! ```text
 //! probe ── hello ok ─────────────────────────────▶ Connected (attached)
+//!   │ ── hello refused: ranges do not overlap ────▶ Incompatible (no spawn)
 //!   │ no answer
 //!   ▼
 //! spawn ── child exits 0 in grace (lost the flock) ─▶ wait hello ─▶ Connected (attached)
@@ -24,7 +25,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ainb_hangar_client::{DaemonClient, DaemonError, PresenceLease, PresenceState};
+use ainb_hangar_proto::auth::HelloResult;
 use ainb_hangar_proto::connections::{SurfaceInfo, SurfaceKind};
+use ainb_hangar_proto::protocol::ProtocolRange;
 use tokio::sync::{Notify, watch};
 
 /// Where the supervisor looks and what it starts.
@@ -103,10 +106,28 @@ pub enum SidecarState {
         /// Whether this supervisor started it, rather than attaching to one
         /// that was already running or won the race.
         spawned: bool,
+        /// The daemon's build version, as its hello named it; `None` from a
+        /// daemon that predates the negotiation. Shown, never branched on.
+        daemon_version: Option<String>,
+        /// The protocol range the daemon speaks; the legacy range from a
+        /// daemon that answered a bare `{}`.
+        protocol: ProtocolRange,
     },
     /// The presence connection was lost; the supervisor is finding a daemon
     /// again.
     Reconnecting { error: String },
+    /// A daemon owns this home and refused this build's protocol range on the
+    /// first frame. Nothing was spawned: the daemon's flock would refuse the
+    /// child too. The operator moves one of the two binaries and "Retry"
+    /// probes again.
+    Incompatible {
+        /// The daemon's own sentence, verbatim: it names the fix.
+        message: String,
+        /// Whether the daemon's range sits above this build's, so the app is
+        /// the older side and an update of the app is the fix, rather than a
+        /// stop of the daemon.
+        daemon_is_newer: bool,
+    },
     /// No daemon could be found or started. "Retry" runs the probe again.
     Degraded { error: String, log: PathBuf },
 }
@@ -118,9 +139,22 @@ pub enum SidecarState {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum SidecarView {
     Starting,
-    Connected { spawned: bool },
-    Reconnecting { error: String },
-    Degraded { error: String, has_log: bool },
+    Connected {
+        spawned: bool,
+        daemon_version: Option<String>,
+        protocol: ProtocolRange,
+    },
+    Reconnecting {
+        error: String,
+    },
+    Incompatible {
+        message: String,
+        daemon_is_newer: bool,
+    },
+    Degraded {
+        error: String,
+        has_log: bool,
+    },
 }
 
 impl SidecarState {
@@ -129,9 +163,25 @@ impl SidecarState {
     pub fn view(&self) -> SidecarView {
         match self {
             Self::Starting => SidecarView::Starting,
-            Self::Connected { spawned, .. } => SidecarView::Connected { spawned: *spawned },
+            Self::Connected {
+                spawned,
+                daemon_version,
+                protocol,
+                ..
+            } => SidecarView::Connected {
+                spawned: *spawned,
+                daemon_version: daemon_version.clone(),
+                protocol: *protocol,
+            },
             Self::Reconnecting { error } => SidecarView::Reconnecting {
                 error: scrub_paths(error),
+            },
+            Self::Incompatible {
+                message,
+                daemon_is_newer,
+            } => SidecarView::Incompatible {
+                message: scrub_paths(message),
+                daemon_is_newer: *daemon_is_newer,
             },
             Self::Degraded { error, log } => SidecarView::Degraded {
                 error: scrub_paths(error),
@@ -242,9 +292,23 @@ async fn supervise(config: SidecarConfig, state: watch::Sender<SidecarState>, re
     };
     let mut losses = 0usize;
     loop {
-        let spawned = match find_or_start(&config).await {
-            Ok(spawned) => spawned,
-            Err(error) => {
+        let (spawned, hello) = match find_or_start(&config).await {
+            Ok(found) => found,
+            Err(Refusal::Incompatible {
+                message,
+                daemon_is_newer,
+            }) => {
+                tracing::warn!(%message, daemon_is_newer, "the daemon owning this home refused this build; not spawning");
+                state.send_replace(SidecarState::Incompatible {
+                    message,
+                    daemon_is_newer,
+                });
+                retry.notified().await;
+                losses = 0;
+                state.send_replace(SidecarState::Starting);
+                continue;
+            }
+            Err(Refusal::NoDaemon(error)) => {
                 degrade(error);
                 retry.notified().await;
                 losses = 0;
@@ -286,10 +350,12 @@ async fn supervise(config: SidecarConfig, state: watch::Sender<SidecarState>, re
         // Logged, not framed: the webview is told "connected" and nothing
         // about the process, while the window's own log says which daemon this
         // is, which is what a proof run compares with the one a CLI finds.
-        tracing::info!(daemon_pid = ?pid, spawned, "attached to the hangar daemon");
+        tracing::info!(daemon_pid = ?pid, spawned, daemon_version = ?hello.daemon_version, "attached to the hangar daemon");
         state.send_replace(SidecarState::Connected {
             daemon_pid: pid,
             spawned,
+            daemon_version: hello.daemon_version,
+            protocol: hello.protocol,
         });
         let connected_at = Instant::now();
 
@@ -326,11 +392,31 @@ async fn supervise(config: SidecarConfig, state: watch::Sender<SidecarState>, re
     }
 }
 
-/// Attach to a live daemon, or start the bundled one. `Ok(true)` when this
-/// call's child is the daemon that answered.
-async fn find_or_start(config: &SidecarConfig) -> Result<bool, String> {
-    if hello(config).await.is_ok() {
-        return Ok(false);
+/// Why no daemon could be attached to.
+#[derive(Debug)]
+enum Refusal {
+    /// A daemon owns the home and cannot serve this build. Spawning is no
+    /// remedy: the child would lose the flock to the same daemon.
+    Incompatible {
+        message: String,
+        daemon_is_newer: bool,
+    },
+    /// Nothing answered, or the bundled daemon could not be started.
+    NoDaemon(String),
+}
+
+impl From<String> for Refusal {
+    fn from(error: String) -> Self {
+        Self::NoDaemon(error)
+    }
+}
+
+/// Attach to a live daemon, or start the bundled one. `true` when this call's
+/// child is the daemon that answered; the hello it answered beside it.
+async fn find_or_start(config: &SidecarConfig) -> Result<(bool, HelloResult), Refusal> {
+    match hello(config).await {
+        Ok(hello) => return Ok((false, hello)),
+        Err(error) => incompatible(&error)?,
     }
     let mut last_error = String::from("the daemon never started");
     for attempt in 1..=config.max_spawn_attempts {
@@ -341,13 +427,17 @@ async fn find_or_start(config: &SidecarConfig) -> Result<bool, String> {
                 Ok(Some(status)) => break Some(status),
                 Ok(None) if Instant::now() >= grace_end => break None,
                 Ok(None) => tokio::time::sleep(Duration::from_millis(50)).await,
-                Err(error) => return Err(format!("could not watch the daemon child: {error}")),
+                Err(error) => {
+                    return Err(Refusal::NoDaemon(format!(
+                        "could not watch the daemon child: {error}"
+                    )));
+                }
             }
         };
         match exited {
             // It lost the flock: another daemon owns this home. Attach to it.
             Some(status) if status.success() => {
-                return wait_for_hello(config, None).await.map(|()| false);
+                return wait_for_hello(config, None).await.map(|hello| (false, hello));
             }
             Some(status) => {
                 last_error = format!(
@@ -357,20 +447,26 @@ async fn find_or_start(config: &SidecarConfig) -> Result<bool, String> {
                 );
             }
             None => match wait_for_hello(config, Some(&mut child)).await {
-                Ok(()) => {
+                Ok(hello) => {
                     reap_when_done(child);
-                    return Ok(true);
+                    return Ok((true, hello));
                 }
-                Err(error) => {
+                Err(refusal @ Refusal::Incompatible { .. }) => {
+                    // The answer came from a daemon that owns the home and is
+                    // not this child; the child is losing the flock to it.
+                    reap_when_done(child);
+                    return Err(refusal);
+                }
+                Err(Refusal::NoDaemon(error)) => {
                     // A child that took the home's lock is the daemon for this
                     // home, still booting: killing it would kill the only
                     // daemon, and every retry would kill the next. Leave it,
                     // reap it when it exits, and stop spawning more.
                     if daemon_pid(&config.hangar_home) == Some(child.id()) {
                         reap_when_done(child);
-                        return Err(format!(
+                        return Err(Refusal::NoDaemon(format!(
                             "{error}; the daemon holds this home and is still starting"
-                        ));
+                        )));
                     }
                     // It never owned the home: stop it and reap it rather than
                     // leave a half-started process or a zombie behind.
@@ -381,7 +477,27 @@ async fn find_or_start(config: &SidecarConfig) -> Result<bool, String> {
             },
         }
     }
-    Err(last_error)
+    Err(Refusal::NoDaemon(last_error))
+}
+
+/// `Err` when `error` is the daemon refusing this build's range, so the
+/// caller stops before it spawns; `Ok` for every other failure.
+fn incompatible(error: &DaemonError) -> Result<(), Refusal> {
+    match error {
+        DaemonError::Incompatible {
+            daemon,
+            client,
+            message,
+            ..
+        } => Err(Refusal::Incompatible {
+            message: message.clone(),
+            // A refusal that did not say its range reads as an older daemon:
+            // the stop verb is the fix that always holds; an update of this
+            // app is offered only when the daemon proved it is the newer one.
+            daemon_is_newer: daemon.is_some_and(|daemon| daemon.min > client.max),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Reap the daemon this process started whenever it exits, so a daemon that
@@ -441,36 +557,39 @@ fn spawn_daemon(config: &SidecarConfig) -> Result<Child, String> {
 /// The variable the daemon resolves its home from.
 const HANGAR_HOME_ENV: &str = "AINB_HANGAR_HOME";
 
-async fn hello(config: &SidecarConfig) -> Result<(), DaemonError> {
-    config.client()?.hello().await.map(|_| ())
+async fn hello(config: &SidecarConfig) -> Result<HelloResult, DaemonError> {
+    config.client()?.hello().await
 }
 
 /// Wait for hello to answer within the budget. A child that dies first ends
-/// the wait early.
+/// the wait early, and so does a daemon that refuses this build's range.
 async fn wait_for_hello(
     config: &SidecarConfig,
     mut child: Option<&mut Child>,
-) -> Result<(), String> {
+) -> Result<HelloResult, Refusal> {
     let deadline = Instant::now() + config.hello_budget;
     loop {
         let error = match hello(config).await {
-            Ok(()) => return Ok(()),
-            Err(error) => error.to_string(),
+            Ok(hello) => return Ok(hello),
+            Err(error) => {
+                incompatible(&error)?;
+                error.to_string()
+            }
         };
         if let Some(child) = child.as_deref_mut() {
             if let Ok(Some(status)) = child.try_wait() {
-                return Err(format!(
+                return Err(Refusal::NoDaemon(format!(
                     "the daemon exited with {status} before answering; see {}",
                     config.log_path().display()
-                ));
+                )));
             }
         }
         if Instant::now() >= deadline {
-            return Err(format!(
+            return Err(Refusal::NoDaemon(format!(
                 "no daemon answered on {} within {:?}: {error}",
                 config.socket().display(),
                 config.hello_budget
-            ));
+            )));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

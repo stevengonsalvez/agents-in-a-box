@@ -271,6 +271,7 @@ impl AppState {
             SectionId::Onboarding => self.onboarding.version(),
             SectionId::Shell => self.shell.version(),
             SectionId::AgentStatus => self.agent_status.version(),
+            SectionId::Usage => self.usage.version(),
         }
     }
 
@@ -302,6 +303,28 @@ impl AppState {
     /// the head it was told, so the next read cannot render live below it.
     pub fn agent_status_reset(&mut self) -> bool {
         self.agent_status.update(AgentStatusSection::reset)
+    }
+
+    /// Fold one `fleet/usage_summary` reply into section 21 (D3p-e). The same
+    /// counters read again move no version.
+    pub fn apply_usage_read(
+        &mut self,
+        reply: ainb_hangar_proto::fleet::FleetUsageSummaryResult,
+        received_at_ms: i64,
+    ) -> bool {
+        self.usage.update(|section| section.apply_read(reply, received_at_ms))
+    }
+
+    /// The usage read failed: section 21 keeps its numbers and says why.
+    pub fn usage_read_failed(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        self.usage.update(|section| section.mark_read_failed(reason))
+    }
+
+    /// The daemon cannot serve a usage summary: section 21 is absent, and why.
+    pub fn usage_absent(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        self.usage.update(|section| section.mark_absent(reason))
     }
 
     /// A newer Fleet revision was observed: section 20 goes stale until a read
@@ -873,6 +896,34 @@ impl AppState {
             {
                 Some("it could finish onboarding with telemetry set up outside ainb")
             }
+            // A settings row a renderer may not edit (#1224), by name and by
+            // the key sequence: Enter on the row opens its popup, and Enter in
+            // the popup writes it. The judgement is the same at each step, so
+            // a script that sends the keys one by one is stopped at the first.
+            KeyAction::App(AppEvent::ConfigSetRow { key, .. }) => {
+                crate::config::renderer_edit::refusal(key)
+            }
+            KeyAction::App(AppEvent::ConfigEditSetting)
+                if self.shell.current_screen == crate::app::screens::ids::CONFIG =>
+            {
+                self.config
+                    .config_screen_state
+                    .current_setting()
+                    .and_then(|row| crate::config::renderer_edit::refusal(&row.key))
+            }
+            KeyAction::App(AppEvent::ConfigPopupConfirm)
+                if self.config.config_popup_state.show_popup =>
+            {
+                crate::config::renderer_edit::refusal(&self.config.config_popup_state.setting_key)
+            }
+            // The secret write paths: the keychain prompt on a row and the API
+            // key prompt. Not renderer-settable in this slice, whatever row
+            // is under the cursor.
+            KeyAction::App(
+                AppEvent::ConfigSecretToKeychain
+                | AppEvent::ConfigApiKeyStart
+                | AppEvent::ConfigApiKeySave,
+            ) => Some(crate::config::renderer_edit::SECRET_REASON),
             _ => None,
         }
     }
@@ -1959,6 +2010,29 @@ impl ConfigScreenState {
     }
 
     // --- navigation ---------------------------------------------------------
+
+    /// Where the tree node with `id` sits among the visible nodes, if it does.
+    #[must_use]
+    pub fn visible_node_position(&self, id: &str) -> Option<usize> {
+        self.visible_nodes
+            .iter()
+            .position(|index| self.tree.get(*index).is_some_and(|node| node.id() == id))
+    }
+
+    /// Select the tree node with `id` (`ConfigTreeNode::id`) when it is on
+    /// screen, as a click on it does; `false` when no visible node has it, and
+    /// nothing moves. Selection is the reducer's: a renderer names the node,
+    /// never keeps its own.
+    pub fn select_node_by_id(&mut self, id: &str) -> bool {
+        let Some(position) = self.visible_node_position(id) else {
+            return false;
+        };
+        self.selected_node = position;
+        self.selected_setting = 0;
+        self.focused_pane = ConfigPane::Categories;
+        self.refresh_visible_rows();
+        true
+    }
 
     pub fn select_next_category(&mut self) {
         if self.visible_nodes.is_empty() {
@@ -3076,6 +3150,9 @@ pub struct AppState {
     /// Section 20: agent status from one joined daemon read (T0-section).
     pub agent_status: Versioned<AgentStatusSection>,
 
+    /// Section 21: usage, a fold of the daemon's `fleet/usage_summary` (D3p-e).
+    pub usage: Versioned<crate::app::sections::UsageSection>,
+
     /// Effects queued by the step being applied, for the host to drain. Not a
     /// section: see [`crate::app::effect::EffectOutbox`].
     effects: crate::app::effect::EffectOutbox,
@@ -3610,6 +3687,7 @@ impl AppState {
             recovery: Versioned::default(),
             mcp_pool: Versioned::default(),
             agent_status: Versioned::default(),
+            usage: Versioned::default(),
             effects: crate::app::effect::EffectOutbox::default(),
             statusline: StatuslineProbe::default(),
             host: HostOnlyState::default(),
@@ -4392,8 +4470,10 @@ impl AppState {
             .filter_map(|w| w.shell_session.clone().map(|s| (w.path.clone(), s)))
             .collect();
 
-        // Clear existing workspaces before loading to prevent duplicates
-        self.sessions.workspaces.clear();
+        // Taken, not cleared: the rows are rebuilt from disk below, and what
+        // the host set on them rides over by id at the end, as the background
+        // scan's apply does.
+        let held = std::mem::take(&mut self.sessions.workspaces);
 
         // Check and refresh OAuth tokens if needed (only if Docker is available)
         let home_dir = dirs::home_dir();
@@ -4484,6 +4564,8 @@ impl AppState {
 
         // Also try to auto-detect workspace shells from tmux
         self.auto_detect_workspace_shells().await;
+
+        crate::models::workspace::carry_host_rows(&held, &mut self.sessions.workspaces);
 
         // Reset selection state before setting new selection
         // This is critical to avoid stale indices after refresh that break navigation
@@ -4773,6 +4855,22 @@ impl AppState {
                             // (#1155).
                             let keep = self.selected_row_identity();
                             self.host.workspaces_applied = true;
+                            // The scan discovered the rows; what the host set
+                            // on them (the chips, the errors, the provider id,
+                            // the attach mark, the logs and preview) rides
+                            // over by id, so no frame between this and the
+                            // next attention merge shows a waiting row with no
+                            // question on it.
+                            let mut workspaces = workspaces;
+                            let mut ssh_sessions = ssh_sessions;
+                            crate::models::workspace::carry_host_rows(
+                                &self.sessions.workspaces,
+                                &mut workspaces,
+                            );
+                            crate::models::session::carry_host_rows(
+                                &self.ssh.ssh_sessions,
+                                &mut ssh_sessions,
+                            );
                             self.sessions.workspaces = workspaces;
                             self.ssh.ssh_sessions = ssh_sessions;
 

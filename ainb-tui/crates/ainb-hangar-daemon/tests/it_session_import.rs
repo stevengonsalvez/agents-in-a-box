@@ -444,17 +444,16 @@ async fn a_pass_never_overwrites_a_table_row_with_its_file_row() {
     assert_eq!(table(pool).await, vec![current]);
 }
 
-/// KNOWN GAP, pinned until P6e-2 and P6e-4: a delete through the real
-/// `workspace/session_delete` RPC removes the table row only, so the file row
-/// survives and the next reconcile pass brings the session back.
-///
-/// The handler cannot remove the file row itself: the CLI's daemon path holds
-/// the `sessions.json` flock across this RPC (`ainb-app/src/cli/util.rs`),
-/// so a handler waiting on that flock would time out every delete. The goal's
-/// fix is on the client, which deletes the file row under the flock it
-/// already holds and then calls this RPC. When that lands, this test turns
-/// red and is rewritten to assert the session stays deleted. It is reachable
-/// only through the dark capability until then.
+/// A delete through the bare `workspace/session_delete` RPC removes the
+/// table row only, so the file row survives and the next reconcile pass
+/// brings the session back. This is the handler's contract, not a gap: the
+/// handler cannot take the `sessions.json` flock, because the client holds
+/// it across this RPC. Since P6e-2 the client removes the file row under
+/// that flock before it calls the RPC, so a delete through `SessionSource`
+/// stays deleted (`ainb-core/tests/session_resolver.rs`,
+/// `a_delete_through_the_daemon_is_not_brought_back_by_the_next_pass`).
+/// What this pins is that the pass trusts the file: a caller that deletes a
+/// table row and leaves its file row gets it back.
 #[tokio::test]
 async fn a_table_only_delete_comes_back_until_clients_delete_the_file_row() {
     use ainb_hangar_daemon::events::EventBroker;
@@ -495,14 +494,14 @@ async fn a_table_only_delete_comes_back_until_clients_delete_the_file_row() {
     assert_eq!(ids(&table(pool).await), vec![kept]);
     assert!(
         fs::read_to_string(&sessions_path).unwrap().contains("ainb-gone"),
-        "the RPC now removes the file row: the gap is closed, rewrite this test"
+        "the RPC now removes the file row: update this test and its doc"
     );
 
     reconcile_sessions(pool, &sessions_path).await.unwrap();
     assert_eq!(
         ids(&table(pool).await),
         vec![gone, kept],
-        "the pass no longer brings the session back: the gap is closed, rewrite this test"
+        "the pass no longer trusts the file row: update this test and its doc"
     );
 }
 
@@ -542,8 +541,9 @@ async fn an_old_binary_append_is_inserted_by_the_next_tick() {
     assert_eq!(ids(&table(pool).await), want);
 }
 
-/// A file session whose tmux name the table binds to another id is skipped,
-/// counted on the marker, and the table row is unchanged.
+/// A file session whose tmux name the table binds to another id the file also
+/// has (renamed there; the table wins on contents) is skipped, counted on the
+/// marker, and the table row is unchanged.
 #[tokio::test]
 async fn a_tmux_name_conflict_is_skipped_counted_and_the_table_wins() {
     let dir = tempfile::tempdir().unwrap();
@@ -556,8 +556,15 @@ async fn a_tmux_name_conflict_is_skipped_counted_and_the_table_wins() {
     let before = table(pool).await;
 
     let rival = "00000000-0000-0000-0000-0000000000f2";
-    sessions_file(&sessions_path, &[(rival, "ainb-shared", "file-ws")]);
+    sessions_file(
+        &sessions_path,
+        &[
+            (holder, "ainb-shared-renamed", "table-ws"),
+            (rival, "ainb-shared", "file-ws"),
+        ],
+    );
     let outcome = reconcile_sessions(pool, &sessions_path).await.unwrap();
+    assert!(outcome.deleted.is_empty(), "{:?}", outcome.deleted);
 
     assert_eq!((outcome.marker.imported, outcome.marker.skipped), (0, 1));
     assert_eq!(outcome.conflicts.len(), 1);
@@ -768,4 +775,82 @@ async fn a_rewrite_that_keeps_the_mtime_still_runs_a_pass() {
 
     let outcome = watch.tick(pool).await.expect("a same-mtime rewrite runs a pass").unwrap();
     assert_eq!(outcome.marker.imported, 1);
+}
+
+// ─── P6e: the file is the authority on which sessions exist (#1250) ────────
+
+/// A delete that reached the file but not the table (a client that removed
+/// the file row and then crashed, or whose table delete failed) is finished
+/// by the next pass: the table row goes too, and the pass says so.
+#[tokio::test]
+async fn a_delete_that_reached_only_the_file_is_finished_by_the_next_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    let (gone, kept) = (
+        "00000000-0000-0000-0000-0000000000a1",
+        "00000000-0000-0000-0000-0000000000a2",
+    );
+    sessions_file(
+        &sessions_path,
+        &[(gone, "ainb-gone", "ws"), (kept, "ainb-kept", "ws")],
+    );
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+    reconcile_sessions(pool, &sessions_path).await.unwrap();
+
+    // The file row went; the crash came before the table delete.
+    sessions_file(&sessions_path, &[(kept, "ainb-kept", "ws")]);
+    let outcome = reconcile_sessions(pool, &sessions_path).await.unwrap();
+    assert_eq!(outcome.deleted, vec![gone.to_string()]);
+    assert_eq!(ids(&table(pool).await), vec![kept]);
+}
+
+/// A `sessions.json` that goes missing while the table holds sessions is not
+/// read as "no sessions": the pass is refused, every row stays, and the
+/// marker is left as it was. The watcher's tick right after the file went
+/// away is the case that matters.
+#[tokio::test]
+async fn a_missing_file_never_empties_a_populated_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    let kept = "00000000-0000-0000-0000-0000000000b7";
+    sessions_file(&sessions_path, &[(kept, "ainb-kept", "ws")]);
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+    let mut watch = ReconcileWatch::new(&sessions_path);
+    assert!(watch.tick(pool).await.unwrap().is_ok());
+    let source = reconcile_key(&marker_key(&sessions_path));
+    let marker = SessionsRepo::import_marker(pool, &source).await.unwrap();
+
+    fs::remove_file(&sessions_path).unwrap();
+    let err = watch.tick(pool).await.expect("a vanished file is a change").unwrap_err();
+    assert!(format!("{err:#}").contains("missing"), "{err:#}");
+    assert_eq!(
+        ids(&table(pool).await),
+        vec![kept],
+        "a missing file emptied the table"
+    );
+    assert_eq!(
+        SessionsRepo::import_marker(pool, &source).await.unwrap(),
+        marker
+    );
+}
+
+/// A fresh home (no file, no rows) still completes its pass, or the table
+/// could never become authoritative and the capability never engage.
+#[tokio::test]
+async fn a_fresh_home_with_no_file_still_completes_its_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+
+    let outcome = reconcile_sessions(pool, &sessions_path).await.unwrap();
+    assert_eq!(outcome.marker.imported, 0);
+    assert!(outcome.deleted.is_empty());
+    let source = marker_key(&sessions_path);
+    assert!(SessionsRepo::import_complete_for(pool, &source).await.unwrap());
 }

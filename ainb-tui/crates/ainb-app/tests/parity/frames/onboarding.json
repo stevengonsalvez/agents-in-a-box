@@ -3303,5 +3303,10 @@
     "absent": null,
     "head_revision": 0,
     "view": null
+  },
+  "usage": {
+    "absent": null,
+    "failure": null,
+    "summary": null
   }
 }

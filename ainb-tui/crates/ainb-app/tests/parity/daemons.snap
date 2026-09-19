@@ -1,8 +1,8 @@
 ╭ ⚙ Daemons  runtime health────────────────────────────────────────────────────────────────────────────────────────────╮
 │  DAEMON         TYPE    STATE     PID     UPTIME  VERSION       LAST ACTIVITY ERR HEALTH                             │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+│▶ notifyd        process ● running -       -       1.28.2 ✓      -             0   heartbeat fresh                    │
+│  hangar daemon  process ● running -       -       1.28.2 ✓      -             0   socket and db reachable            │
+│  phone bridge   process ○ stopped -       -       unknown       -             2   clean stop                         │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -25,7 +25,7 @@
 │                                                                                                                      │
 │                                                                                                                      │
 │╭ ◇ Hooks  ainb-hooks  I install / repair  B pin running─────────────────────────────────────────────────────────────╮│
-││reading hook health…                                                                                                ││
+││hook health unavailable — run `ainb doctor --fix-hooks`                                                             ││
 ││                                                                                                                    ││
 ││                                                                                                                    ││
 ││                                                                                                                    ││

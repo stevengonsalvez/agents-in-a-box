@@ -105,12 +105,55 @@ pub fn toast_text(text: &str) -> String {
         .collect()
 }
 
+/// The plugin screens the desktop may watch: `PLUGIN_SCREENS` less
+/// `analytics` (D3p-f). The stats tab draws burndown's counters from the
+/// daemon's usage projection, so a cell painting burndown's own screen beside
+/// it would put the same numbers on the desktop twice, from two scans.
+pub const DESKTOP_WATCHABLE_SCREENS: &[&str] = &[
+    ainb_app::app::screens::ids::WITR,
+    ainb_app::app::screens::ids::LEARNINGS,
+    ainb_app::app::screens::ids::ABTOP,
+    ainb_app::app::screens::ids::HANGAR,
+];
+
+/// Why a watch of `screen` is refused on the desktop, or `None` when the
+/// screen is one it may watch. Every screen outside
+/// [`DESKTOP_WATCHABLE_SCREENS`] is refused; `analytics` names the stats tab.
+#[must_use]
+pub fn watch_refusal(screen: &str) -> Option<&'static str> {
+    if DESKTOP_WATCHABLE_SCREENS.contains(&screen) {
+        None
+    } else if screen == ainb_app::app::screens::ids::ANALYTICS {
+        Some("the stats tab draws analytics' counters on the desktop")
+    } else {
+        Some("not a plugin screen the desktop watches")
+    }
+}
+
+/// The watch refusal for a `plugin.owned.watch_screen` command, from its
+/// `screen` argument.
+fn watched_screen_refusal(id: &CommandId, args: &ainb_app::app::Args) -> Option<&'static str> {
+    if id.as_str() != ainb_app::app::plugin_action::ids::WATCH_SCREEN {
+        return None;
+    }
+    watch_refusal(args.get("screen")?.as_str()?)
+}
+
 impl TryFrom<RendererIntent> for Intent {
     /// The host-authored command the webview tried to send. A key-only id
     /// passes here and is refused by the shell, which holds the keymap.
     type Error = Refusal;
 
     fn try_from(intent: RendererIntent) -> Result<Self, Refusal> {
+        if let RendererIntent::Command(id, args) = &intent {
+            if let Some(reason) = watched_screen_refusal(id, args) {
+                tracing::warn!("command `{id}` refused from the webview: {reason}");
+                return Err(Refusal {
+                    command: id.clone(),
+                    reason,
+                });
+            }
+        }
         match intent {
             RendererIntent::Key(chord) => Ok(Self::Key(chord)),
             RendererIntent::Command(id, _) if is_host_authored(&id) => {

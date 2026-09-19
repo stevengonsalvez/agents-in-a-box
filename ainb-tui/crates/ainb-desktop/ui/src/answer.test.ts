@@ -174,7 +174,7 @@ test("picking option two sends one pick naming it by label, wherever the cursor 
   const question = questionFor(sessions(mark()))!;
   const intents = pickIntents(question, ask({ cursor: 2 }), 1);
   assert.deepEqual(commands(intents), ["session_list.select_row", "session_list.select_tab", "session_list.ask.pick"]);
-  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-7", label: "production" });
+  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-7", index: 1, label: "production" });
   assert.deepEqual(commands(pickIntents(question, ask({ cursor: 0 }), 1)), commands(intents));
   assert.deepEqual(pickIntents(question, ask(), 3), [], "an index off the list picks nothing");
 });
@@ -183,7 +183,7 @@ test("a pick sends the label as the frame carried it, not as the banner trims it
   const long = "x".repeat(120);
   const question = questionFor(sessions(mark({ options: [{ label: long, description: "" }] })))!;
   const intents = pickIntents(question, ask(), 0);
-  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-7", label: long });
+  assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-7", index: 0, label: long });
 });
 
 test("a typed answer moves to the composer row, clears it in one step, types, sends", () => {
@@ -249,7 +249,7 @@ test("a click on the banner drawn before the question moved on sends nothing", (
     paints.splice(0).forEach((paint) => paint());
     assert.equal(drawn().request, "att-8", "the paint brought the banner to the new question");
     const intents = pickIntents(drawn(), ask({ request: "att-8" }), 0);
-    assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-8", label: "staging" });
+    assert.deepEqual((intents[2] as { Command: [string, unknown] }).Command[1], { request: "att-8", index: 0, label: "staging" });
   } finally {
     dispose();
   }
@@ -290,8 +290,14 @@ test("a question that changes under the same request repaints", () => {
     paints.splice(0).forEach((paint) => paint());
     assert.equal(drawn().answerable, false);
 
+    const painted = drawn();
     setCurrent(questionFor(sessions(mark({ options: [{ label: "canary", description: "" }], route: "None" })))!);
     assert.equal(paints.length, 0, "the same question again schedules nothing");
+    // Identity, not just equality: the banner's option rows are keyed off
+    // this object's `options`, so a frame that changes only the object must
+    // leave the very same array in place, and with it the option elements.
+    assert.equal(drawn(), painted, "and the drawn question is the same object");
+    assert.equal(drawn().options, painted.options, "with the same options array");
   } finally {
     dispose();
   }

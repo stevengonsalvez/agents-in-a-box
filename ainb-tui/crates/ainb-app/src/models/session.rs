@@ -798,6 +798,40 @@ pub fn same_scan_rows(held: &[Session], found: &[Session]) -> bool {
         && held.iter().zip(found).all(|(held, found)| held.same_scan_fields(found))
 }
 
+impl Session {
+    /// Take the fields the host set on `held`, the row this one replaces: the
+    /// fields [`Self::same_scan_fields`] leaves out, because a scan builds
+    /// them at their defaults. Applying a scan without this dropped a live
+    /// row's question until the next attention merge, and a frame in between
+    /// showed the row with nothing to answer.
+    ///
+    /// The provider id is the one exception: the scan is its only writer
+    /// (`to_session_model`), so a scan that found one lands it, and the held
+    /// value is the fallback for a scan that found none. Carrying the held
+    /// value over the scan's would freeze it, and a thread id learned later
+    /// would never reach the row (an Approve chip would lose its broker route).
+    pub fn carry_host_fields(&mut self, held: &Session) {
+        self.recent_logs.clone_from(&held.recent_logs);
+        self.preview_content.clone_from(&held.preview_content);
+        self.is_attached = held.is_attached;
+        self.live_attention.clone_from(&held.live_attention);
+        self.errors.clone_from(&held.errors);
+        if self.provider_session_id.is_none() {
+            self.provider_session_id.clone_from(&held.provider_session_id);
+        }
+    }
+}
+
+/// Carry the host's fields from `held` onto the rows of `found` with the same
+/// id. A row the host never held stays as the scan built it.
+pub fn carry_host_rows(held: &[Session], found: &mut [Session]) {
+    for row in found {
+        if let Some(previous) = held.iter().find(|previous| previous.id == row.id) {
+            row.carry_host_fields(previous);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct GitChanges {

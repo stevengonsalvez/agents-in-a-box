@@ -21,6 +21,7 @@ pub mod onboarding;
 pub mod persist;
 pub mod presets;
 pub mod registry;
+pub mod renderer_edit;
 pub mod screen_model;
 pub mod session_defaults;
 pub mod settings_model;

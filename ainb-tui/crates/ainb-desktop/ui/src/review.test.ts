@@ -91,6 +91,7 @@ function section(
     commits: [],
     commits_cut: 0,
     selected_commit_index: 0,
+    selected_commit_cut: false,
     review: { files, files_cut: 0 },
     review_ui: {
       selected_file: selected,
@@ -188,6 +189,18 @@ test("the section says what the budget cost it, or says nothing at all", () => {
     sectionCut(shortened),
     "Over the frame's budget: 12 changed paths, 900 diff lines not sent",
   );
+});
+
+test("rows the files lost are said at the top, not only file by file", () => {
+  // The shape a real repository hits first: every file framed, each cut to the
+  // per-file cap, nothing else cut at all. Without the sum the section says
+  // nothing and a diff missing thousands of rows reads as a short one.
+  const cut = section([
+    file("a.rs", [hunk(1, [row(1, "one")])], { rows_cut: 3_600, hunks_cut: 2 }),
+    file("b.rs", [hunk(1, [row(1, "two")])], { rows_cut: 1_400 }),
+  ]);
+
+  assert.equal(sectionCut(cut), "Over the frame's budget: 5000 rows, 2 hunks not sent");
 });
 
 test("a section that has not arrived draws nothing rather than throwing", () => {
