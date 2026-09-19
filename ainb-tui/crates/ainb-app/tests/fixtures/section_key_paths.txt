@@ -364,6 +364,7 @@ git_view.git_view_state.commits[].author
 git_view.git_view_state.commits[].date
 git_view.git_view_state.commits[].hash_short
 git_view.git_view_state.commits[].message
+git_view.git_view_state.commits_cut
 git_view.git_view_state.diff_content[]
 git_view.git_view_state.diff_lines_cut
 git_view.git_view_state.diff_scroll_offset
@@ -376,6 +377,7 @@ git_view.git_view_state.file_tree_items[].is_expanded
 git_view.git_view_state.file_tree_items[].is_folder
 git_view.git_view_state.file_tree_items[].is_last_in_group
 git_view.git_view_state.file_tree_items[].status
+git_view.git_view_state.files_cut
 git_view.git_view_state.is_dirty
 git_view.git_view_state.markdown_content[].content
 git_view.git_view_state.markdown_content[].style
@@ -409,6 +411,7 @@ git_view.git_view_state.review_ui.sidebar_selected
 git_view.git_view_state.selected_commit_index
 git_view.git_view_state.selected_file_index
 git_view.git_view_state.selected_tree_index
+git_view.git_view_state.tree_items_cut
 git_view.git_view_state.worktree_path
 git_view.is_current_dir_git_repo
 git_view.quick_commit_cursor
