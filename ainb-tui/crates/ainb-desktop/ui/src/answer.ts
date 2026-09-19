@@ -28,7 +28,7 @@ export type Route = "daemon" | "broker" | "pane";
 /** The question the banner is showing. */
 export interface Question {
   sessionId: string;
-  /** The reducer's request id for this chip, as `fleet.ask_state.request` names it. */
+  /** The reducer's request id for this chip, as `fleet.ask_state.request` has it. */
   request: string;
   title: string;
   kind: AttentionKind;
@@ -252,9 +252,10 @@ function moves(from: number, to: number): RendererIntent[] {
  * person read there as the check. The reducer verifies both against the
  * options it holds when the pick runs, so a frame landing between two intents
  * cannot move a counted cursor onto another option (#1191), and two labels
- * that scrub alike on a frame are still told apart (#1248). The pick names the request the person read, and the reducer
- * refuses it once the question has moved on. None at all when the frame is
- * not pointed at this question, or when `index` names no option it offers.
+ * that scrub alike on a frame are still told apart (#1248). The pick names
+ * the request the person read, and the reducer refuses it once the question
+ * has moved on. None at all when the frame is not pointed at this question,
+ * or when `index` names no option it offers.
  */
 export function pickIntents(question: Question, ask: AskState_Serialize | undefined, index: number): RendererIntent[] {
   if (!pointedAt(question, ask) || !question.answerable) return [];
