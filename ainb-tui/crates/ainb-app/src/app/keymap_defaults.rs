@@ -1286,6 +1286,7 @@ pub fn defaults() -> Vec<Binding> {
             Context::Screen("session_list", super::keymap::SubContext::Named("ask")),
             "pick",
             AppEvent::SessionAskPick {
+                request: String::new(),
                 label: String::new(),
             },
             "Answer with the option a click names",
