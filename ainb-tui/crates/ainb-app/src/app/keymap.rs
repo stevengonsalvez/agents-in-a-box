@@ -1381,6 +1381,7 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::ConfigEditBackspace
         | AppEvent::ConfigSaveAll
         | AppEvent::ConfigSetRow { .. }
+        | AppEvent::ConfigSelectNode { .. }
         | AppEvent::ConfigToggleExpand
         | AppEvent::ConfigSearchStart
         | AppEvent::ConfigSearchChar(..)
