@@ -56,8 +56,6 @@ pub struct UsageView {
     /// Why the last read failed while the last summary is still drawn.
     /// Scrubbed.
     pub failure: Option<String>,
-    /// The local epoch-ms clock the summary was received at.
-    pub received_at_ms: Option<i64>,
     pub summary: Option<UsageSummaryFrame>,
 }
 
@@ -81,12 +79,6 @@ pub enum UsageState {
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct UsageSummaryFrame {
     pub state: UsageState,
-    /// When the daemon generated the summary, epoch ms.
-    pub generated_at: Option<i64>,
-    /// Inclusive window start, epoch ms.
-    pub start_at: Option<i64>,
-    /// Exclusive window end, epoch ms.
-    pub end_at: Option<i64>,
     /// `None` while scanning: never a synthesised zero.
     pub totals: Option<UsageBucketFrame>,
     /// Oldest first, at most [`USAGE_MAX_DAILY`].
@@ -149,12 +141,53 @@ pub struct UsageProjectFrame {
 
 impl From<&UsageSection> for UsageView {
     fn from(section: &UsageSection) -> Self {
+        Self::within(section, USAGE_FRAME_MAX_BYTES)
+    }
+}
+
+impl UsageView {
+    /// `section` as a frame of at most `max_bytes` encoded.
+    ///
+    /// The caps already hold every reply under [`USAGE_FRAME_MAX_BYTES`]; this
+    /// enforces it rather than trusting that arithmetic. Past the ceiling the
+    /// four lists go, each counted in its cut; then the detail; the totals
+    /// stay. A section that still does not fit frames absent and says why.
+    #[must_use]
+    pub fn within(section: &UsageSection, max_bytes: usize) -> Self {
         let scrub = |text: &str| crate::fleet::bridge::redact::scrub(text);
-        Self {
+        let mut view = Self {
             absent: section.absent.as_deref().map(scrub),
             failure: section.failure.as_deref().map(scrub),
-            received_at_ms: section.received_at_ms,
             summary: section.summary.as_ref().map(summary),
+        };
+        let fits =
+            |view: &Self| serde_json::to_vec(view).is_ok_and(|bytes| bytes.len() <= max_bytes);
+        if fits(&view) {
+            return view;
+        }
+        if let Some(frame) = &mut view.summary {
+            frame.projects_cut += frame.projects.len();
+            frame.projects.clear();
+            frame.models_cut += frame.models.len();
+            frame.models.clear();
+            frame.providers_cut += frame.providers.len();
+            frame.providers.clear();
+            frame.daily_cut += frame.daily.len();
+            frame.daily.clear();
+        }
+        if fits(&view) {
+            return view;
+        }
+        if let Some(frame) = &mut view.summary {
+            frame.detail = None;
+        }
+        if fits(&view) {
+            return view;
+        }
+        Self {
+            absent: Some("the usage summary is over the frame ceiling".to_string()),
+            failure: None,
+            summary: None,
         }
     }
 }
@@ -169,9 +202,6 @@ fn summary(held: &HeldUsage) -> UsageSummaryFrame {
             FleetUsageSummaryState::Partial => UsageState::Partial,
             FleetUsageSummaryState::Unavailable => UsageState::Unavailable,
         },
-        generated_at: reply.generated_at,
-        start_at: reply.start_at,
-        end_at: reply.end_at,
         totals: reply.totals.as_ref().map(bucket),
         daily: reply
             .daily
