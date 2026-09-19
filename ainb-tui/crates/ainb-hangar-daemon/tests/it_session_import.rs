@@ -1,11 +1,14 @@
 //! Integration tests for daemon boot import of sessions.json (spec P6d, #1166).
 
 use ainb_hangar_daemon::session_import::{
-    ImportReport, import_sessions_from, import_sessions_if_needed,
+    ImportReport, ReconcileWatch, import_sessions_from, import_sessions_if_needed,
+    reconcile_sessions, reconcile_sessions_bounded,
 };
 use ainb_hangar_store::Store;
-use ainb_hangar_store::repo::sessions::SessionsRepo;
+use ainb_hangar_store::repo::sessions::{SessionRow, SessionsRepo, reconcile_key};
 use std::fs;
+use std::path::Path;
+use std::time::Duration;
 
 /// Rows imported by a report, or a panic naming what happened instead.
 fn imported(report: &ImportReport) -> i64 {
@@ -220,7 +223,12 @@ async fn an_unparseable_file_fails_without_a_marker_and_retries() {
 
     let err = import_sessions_if_needed(pool, &sessions_path).await.unwrap_err();
     assert!(err.to_string().contains("parse"), "{err:#}");
-    assert!(!SessionsRepo::any_import_completed(pool).await.unwrap());
+    assert!(
+        SessionsRepo::import_marker(pool, &marker_key(&sessions_path))
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     one_session_file(
         &sessions_path,
@@ -249,7 +257,12 @@ async fn a_file_over_the_size_cap_is_refused() {
 
     let err = import_sessions_from(pool, &sessions_path, 16).await.unwrap_err();
     assert!(err.to_string().contains("limit"), "{err:#}");
-    assert!(!SessionsRepo::any_import_completed(pool).await.unwrap());
+    assert!(
+        SessionsRepo::import_marker(pool, &marker_key(&sessions_path))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// 7. A record whose id is present but not a UUID is rejected and counted,
@@ -342,4 +355,417 @@ async fn a_pre_marker_home_completes_without_duplicates() {
     };
     assert_eq!((marker.imported, marker.skipped), (0, 1));
     assert_eq!(SessionsRepo::list(pool, None, 100).await.unwrap(), prior);
+}
+
+// ─── P6e: the repeatable reconcile (criterion 3) ───────────────────────────
+
+/// Write a `sessions.json` holding `sessions` as `(id, tmux name, workspace)`.
+fn sessions_file(path: &Path, sessions: &[(&str, &str, &str)]) {
+    let mut map = serde_json::Map::new();
+    for (id, tmux, ws) in sessions {
+        map.insert(
+            (*tmux).to_string(),
+            serde_json::json!({
+                "session_id": id,
+                "tmux_session_name": tmux,
+                "worktree_path": format!("/home/user/work/{tmux}"),
+                "workspace_name": ws,
+                "created_at": 1_757_937_600_000_i64,
+                "agent_type": "Claude"
+            }),
+        );
+    }
+    let json = serde_json::json!({ "sessions": map });
+    fs::write(path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+}
+
+fn ids(rows: &[SessionRow]) -> Vec<&str> {
+    let mut ids: Vec<&str> = rows.iter().map(|r| r.session_id.as_str()).collect();
+    ids.sort_unstable();
+    ids
+}
+
+async fn table(pool: &sqlx::SqlitePool) -> Vec<SessionRow> {
+    SessionsRepo::list(pool, None, 100).await.unwrap()
+}
+
+/// The P6d import ran on an empty file; sessions created while the table was
+/// dark exist in the file only. The boot pass inserts every one of them, and
+/// only then is the table authoritative.
+#[tokio::test]
+async fn a_boot_pass_inserts_the_sessions_written_while_dark() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+
+    sessions_file(
+        &sessions_path,
+        &[
+            ("00000000-0000-0000-0000-00000000000a", "ainb-dark-a", "ws"),
+            ("00000000-0000-0000-0000-00000000000b", "ainb-dark-b", "ws"),
+        ],
+    );
+    let source = marker_key(&sessions_path);
+    assert!(!SessionsRepo::import_complete_for(pool, &source).await.unwrap());
+
+    let outcome = ReconcileWatch::new(&sessions_path).tick(pool).await.unwrap().unwrap();
+    assert_eq!(outcome.marker.imported, 2);
+    assert_eq!(
+        ids(&table(pool).await),
+        vec![
+            "00000000-0000-0000-0000-00000000000a",
+            "00000000-0000-0000-0000-00000000000b"
+        ]
+    );
+    assert!(SessionsRepo::import_complete_for(pool, &source).await.unwrap());
+}
+
+/// A table row is never overwritten by the file row of the same id: the
+/// table is newer than any file row it disagrees with.
+#[tokio::test]
+async fn a_pass_never_overwrites_a_table_row_with_its_file_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    let id = "00000000-0000-0000-0000-0000000000c1";
+    sessions_file(&sessions_path, &[(id, "ainb-keep", "file-ws")]);
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+
+    let mut current = SessionsRepo::get_by_id(pool, id).await.unwrap().unwrap();
+    current.workspace_name = "table-ws".to_string();
+    current.headroom_enabled = true;
+    SessionsRepo::upsert(pool, &current).await.unwrap();
+
+    let outcome = reconcile_sessions(pool, &sessions_path).await.unwrap();
+    assert_eq!(outcome.marker.imported, 0);
+    assert_eq!(table(pool).await, vec![current]);
+}
+
+/// KNOWN GAP, pinned until P6e-2 and P6e-4: a delete through the real
+/// `workspace/session_delete` RPC removes the table row only, so the file row
+/// survives and the next reconcile pass brings the session back.
+///
+/// The handler cannot remove the file row itself: the CLI's daemon path holds
+/// the `sessions.json` flock across this RPC (`ainb-app/src/cli/util.rs`),
+/// so a handler waiting on that flock would time out every delete. The goal's
+/// fix is on the client, which deletes the file row under the flock it
+/// already holds and then calls this RPC. When that lands, this test turns
+/// red and is rewritten to assert the session stays deleted. It is reachable
+/// only through the dark capability until then.
+#[tokio::test]
+async fn a_table_only_delete_comes_back_until_clients_delete_the_file_row() {
+    use ainb_hangar_daemon::events::EventBroker;
+    use ainb_hangar_daemon::health_stats::HealthStats;
+    use ainb_hangar_daemon::rpc::{self, DaemonHealth};
+    use ainb_hangar_proto::{RpcId, RpcRequest, methods};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    let (gone, kept) = (
+        "00000000-0000-0000-0000-0000000000d1",
+        "00000000-0000-0000-0000-0000000000d2",
+    );
+    sessions_file(
+        &sessions_path,
+        &[(gone, "ainb-gone", "ws"), (kept, "ainb-kept", "ws")],
+    );
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+    reconcile_sessions(pool, &sessions_path).await.unwrap();
+
+    let health = DaemonHealth {
+        socket_path: "/tmp/it-session-delete.sock".into(),
+        pid: 1,
+        started_at: std::time::Instant::now(),
+        version: "0.1.0".into(),
+        stats: std::sync::Arc::new(HealthStats::default()),
+    };
+    let delete = RpcRequest {
+        jsonrpc: ainb_hangar_proto::jsonrpc_version(),
+        id: RpcId::Number(1),
+        method: methods::WORKSPACE_SESSION_DELETE.into(),
+        params: serde_json::json!({ "session_id": gone }),
+    };
+    let resp = rpc::dispatch(pool, &delete, &health, &EventBroker::new().sink()).await;
+    assert_eq!(resp.result.unwrap()["deleted"], true);
+    assert_eq!(ids(&table(pool).await), vec![kept]);
+    assert!(
+        fs::read_to_string(&sessions_path).unwrap().contains("ainb-gone"),
+        "the RPC now removes the file row: the gap is closed, rewrite this test"
+    );
+
+    reconcile_sessions(pool, &sessions_path).await.unwrap();
+    assert_eq!(
+        ids(&table(pool).await),
+        vec![gone, kept],
+        "the pass no longer brings the session back: the gap is closed, rewrite this test"
+    );
+}
+
+/// A previous release appends to the file after a pass. The watcher sees the
+/// mtime move and its next tick inserts the row; an unchanged file runs no
+/// pass at all.
+#[tokio::test]
+async fn an_old_binary_append_is_inserted_by_the_next_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    let first = "00000000-0000-0000-0000-0000000000e1";
+    sessions_file(&sessions_path, &[(first, "ainb-first", "ws")]);
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+
+    let mut watch = ReconcileWatch::new(&sessions_path);
+    assert!(watch.tick(pool).await.unwrap().is_ok());
+    assert!(
+        watch.tick(pool).await.is_none(),
+        "an unchanged file must not run a pass"
+    );
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let old = ainb_fleet_core::session_registry::AinbSessionRecord::new(
+        "ainb-old-release",
+        "/home/user/work/old".into(),
+        "ws",
+    );
+    ainb_fleet_core::session_registry::register_session_at(&sessions_path, &old).unwrap();
+
+    let outcome = watch.tick(pool).await.expect("a changed file runs a pass").unwrap();
+    assert_eq!(outcome.marker.imported, 1);
+    let old_id = old.session_id.to_string();
+    let mut want = vec![first, old_id.as_str()];
+    want.sort_unstable();
+    assert_eq!(ids(&table(pool).await), want);
+}
+
+/// A file session whose tmux name the table binds to another id is skipped,
+/// counted on the marker, and the table row is unchanged.
+#[tokio::test]
+async fn a_tmux_name_conflict_is_skipped_counted_and_the_table_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    let holder = "00000000-0000-0000-0000-0000000000f1";
+    sessions_file(&sessions_path, &[(holder, "ainb-shared", "table-ws")]);
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+    let before = table(pool).await;
+
+    let rival = "00000000-0000-0000-0000-0000000000f2";
+    sessions_file(&sessions_path, &[(rival, "ainb-shared", "file-ws")]);
+    let outcome = reconcile_sessions(pool, &sessions_path).await.unwrap();
+
+    assert_eq!((outcome.marker.imported, outcome.marker.skipped), (0, 1));
+    assert_eq!(outcome.conflicts.len(), 1);
+    assert_eq!(outcome.conflicts[0].session_id, rival);
+    assert_eq!(outcome.conflicts[0].holder, holder);
+    let marker = SessionsRepo::import_marker(pool, &reconcile_key(&marker_key(&sessions_path)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.skipped, 1);
+    assert_eq!(table(pool).await, before);
+}
+
+/// A failed pass writes no reconcile marker, so `import_complete` stays false
+/// even though the P6d import row exists; the watcher retries it and the
+/// repaired file completes.
+#[tokio::test]
+async fn a_failed_pass_leaves_the_table_not_authoritative() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+    let source = marker_key(&sessions_path);
+    assert!(SessionsRepo::import_marker(pool, &source).await.unwrap().is_some());
+
+    fs::write(&sessions_path, "{ not json").unwrap();
+    let mut watch = ReconcileWatch::new(&sessions_path);
+    let err = watch.tick(pool).await.unwrap().unwrap_err();
+    assert!(format!("{err:#}").contains("parse"), "{err:#}");
+    assert!(
+        SessionsRepo::import_marker(pool, &reconcile_key(&source))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!SessionsRepo::import_complete_for(pool, &source).await.unwrap());
+
+    // Over the cap fails the same way.
+    let capped = ReconcileWatch::with_cap(&sessions_path, 4).tick(pool).await.unwrap();
+    assert!(capped.is_err());
+
+    // A failed pass is retried on the next tick even with the mtime unchanged.
+    assert!(watch.tick(pool).await.unwrap().is_err());
+    sessions_file(
+        &sessions_path,
+        &[("00000000-0000-0000-0000-0000000000a9", "ainb-fixed", "ws")],
+    );
+    assert!(watch.tick(pool).await.unwrap().is_ok());
+    assert!(SessionsRepo::import_complete_for(pool, &source).await.unwrap());
+}
+
+/// A writer that blocks on the flock while a pass holds it lands its row in
+/// the file after the pass, and the next pass inserts it: never lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_writer_blocked_during_a_pass_is_inserted_by_the_next_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool().clone();
+    let sessions_path = dir.path().join("sessions.json");
+    sessions_file(
+        &sessions_path,
+        &[("00000000-0000-0000-0000-0000000000b1", "ainb-before", "ws")],
+    );
+    import_sessions_if_needed(&pool, &sessions_path).await.unwrap();
+
+    // Hold the SQLite write lock so the pass stops inside its store write,
+    // with the flock taken.
+    let mut blocker = pool.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *blocker).await.unwrap();
+    let pass = {
+        let (pool, path) = (pool.clone(), sessions_path.clone());
+        tokio::spawn(async move { reconcile_sessions(&pool, &path).await })
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while ainb_fleet_core::session_registry::try_lock_sessions_store_at(dir.path())
+        .unwrap()
+        .is_some()
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the pass never took the flock"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let late = ainb_fleet_core::session_registry::AinbSessionRecord::new(
+        "ainb-late",
+        "/home/user/work/late".into(),
+        "ws",
+    );
+    let writer = {
+        let (path, late) = (sessions_path.clone(), late.clone());
+        std::thread::spawn(move || {
+            ainb_fleet_core::session_registry::register_session_at(&path, &late).unwrap();
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !fs::read_to_string(&sessions_path).unwrap().contains("ainb-late"),
+        "the writer got past the flock during the pass"
+    );
+
+    sqlx::query("ROLLBACK").execute(&mut *blocker).await.unwrap();
+    drop(blocker);
+    let first = pass.await.unwrap().unwrap();
+    assert_eq!(
+        first.marker.imported, 0,
+        "the pass read the file before the writer"
+    );
+    writer.join().unwrap();
+    assert!(fs::read_to_string(&sessions_path).unwrap().contains("ainb-late"));
+
+    let second = reconcile_sessions(&pool, &sessions_path).await.unwrap();
+    assert_eq!(second.marker.imported, 1);
+    assert!(
+        SessionsRepo::get_by_id(&pool, &late.session_id.to_string())
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// A pass whose store write is stuck behind another writer gives up at its
+/// bound instead of holding the flock: the flock is free again at once, and
+/// no marker is written. Every CLI writer blocks on that flock meanwhile.
+#[tokio::test]
+async fn a_stuck_store_write_releases_the_flock_at_its_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    sessions_file(
+        &sessions_path,
+        &[("00000000-0000-0000-0000-0000000000b9", "ainb-stuck", "ws")],
+    );
+
+    let mut blocker = pool.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *blocker).await.unwrap();
+    let started = std::time::Instant::now();
+    let err = reconcile_sessions_bounded(
+        pool,
+        &sessions_path,
+        1024 * 1024,
+        Duration::from_millis(200),
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("did not finish"), "{err:#}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        ainb_fleet_core::session_registry::try_lock_sessions_store_at(dir.path())
+            .unwrap()
+            .is_some(),
+        "the flock outlived the pass"
+    );
+    sqlx::query("ROLLBACK").execute(&mut *blocker).await.unwrap();
+    drop(blocker);
+
+    let source = marker_key(&sessions_path);
+    assert!(
+        SessionsRepo::import_marker(pool, &reconcile_key(&source))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(table(pool).await.is_empty());
+}
+
+/// A rewrite that keeps the file's mtime (`cp -p`, a restore) is still a
+/// change: the watcher also compares length and inode.
+#[tokio::test]
+async fn a_rewrite_that_keeps_the_mtime_still_runs_a_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    sessions_file(
+        &sessions_path,
+        &[("00000000-0000-0000-0000-0000000000e7", "ainb-one", "ws")],
+    );
+    let mtime = fs::metadata(&sessions_path).unwrap().modified().unwrap();
+
+    let mut watch = ReconcileWatch::new(&sessions_path);
+    assert!(watch.tick(pool).await.unwrap().is_ok());
+
+    sessions_file(
+        &sessions_path,
+        &[
+            ("00000000-0000-0000-0000-0000000000e7", "ainb-one", "ws"),
+            ("00000000-0000-0000-0000-0000000000e8", "ainb-two", "ws"),
+        ],
+    );
+    fs::File::options()
+        .write(true)
+        .open(&sessions_path)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    assert_eq!(
+        fs::metadata(&sessions_path).unwrap().modified().unwrap(),
+        mtime
+    );
+
+    let outcome = watch.tick(pool).await.expect("a same-mtime rewrite runs a pass").unwrap();
+    assert_eq!(outcome.marker.imported, 1);
 }

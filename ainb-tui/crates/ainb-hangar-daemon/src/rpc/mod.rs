@@ -1632,6 +1632,7 @@ async fn handle(
         methods::WORKSPACE_SESSION_LIST => handle_session_list(pool, req).await,
         methods::WORKSPACE_SESSION_UPSERT => handle_session_upsert(pool, req).await,
         methods::WORKSPACE_SESSION_DELETE => handle_session_delete(pool, req).await,
+        methods::WORKSPACE_SESSION_RECONCILE => handle_session_reconcile(pool).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -2040,6 +2041,14 @@ async fn message_cursor_for(
 }
 
 /// Project one persisted message onto the wire.
+///
+/// The body is scrubbed here, the one place a message leaves the daemon by
+/// (`fleet/message_list` and both `fleet/message_event` pushes), because an
+/// agent reply's body is the turn's final message, raw agent prose (#1211).
+/// The row keeps what was written, which the re-prime corpus reads back into
+/// the agent. `id`, `scope_key`,
+/// `origin_message_id` and `sender` are daemon-minted identity, not text, and
+/// pass through.
 fn message_wire(
     row: &ainb_hangar_store::repo::fleet_message::FleetMessageRow,
 ) -> ainb_hangar_proto::fleet::FleetMessage {
@@ -2055,7 +2064,7 @@ fn message_wire(
             "marker" => FleetMessageKind::Marker,
             _ => FleetMessageKind::User,
         },
-        body: row.body.clone(),
+        body: ainb_hangar_core::redact::scrub(&row.body),
         created_at: row.created_at,
     }
 }
@@ -13488,8 +13497,11 @@ fn session_entry_to_row(
 /// [`SESSION_LIST_MAX`](ainb_hangar_proto::sessions::SESSION_LIST_MAX)).
 ///
 /// The answer carries `import_complete`: until the boot import of
-/// `sessions.json` has finished, an empty table does not mean "no sessions",
-/// and the client reads the file instead.
+/// `sessions.json` and a reconcile pass of that same file have finished, an
+/// empty table does not mean "no sessions", and the client reads the file
+/// instead. The file is the one this daemon resolves for its home. Before
+/// this boot's first pass commits, the answer waits for it (bounded) and
+/// then says not-ready rather than serve rows the pass has not checked.
 async fn handle_session_list(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -13502,14 +13514,25 @@ async fn handle_session_list(
     } else {
         parse_params(req, "{ workspace_name?, limit? }")?
     };
+    // Past the first-pass wait, the list's not-ready answer is no rows and
+    // `import_complete: false`, which sends the client to the file.
+    if !sessions_table_ready().await {
+        return to_value(&WorkspaceSessionListResult {
+            sessions: Vec::new(),
+            truncated: false,
+            import_complete: false,
+        });
+    }
     let limit = params.limit.unwrap_or(SESSION_LIST_MAX).min(SESSION_LIST_MAX);
     let mut rows = SessionsRepo::list(pool, params.workspace_name.as_deref(), limit + 1)
         .await
         .map_err(|e| store_err(&e))?;
     let truncated = rows.len() > limit as usize;
     rows.truncate(limit as usize);
-    let import_complete =
-        SessionsRepo::any_import_completed(pool).await.map_err(|e| store_err(&e))?;
+    let sessions_path = crate::session_import::daemon_sessions_path();
+    let import_complete = SessionsRepo::import_complete_for(pool, &sessions_path.to_string_lossy())
+        .await
+        .map_err(|e| store_err(&e))?;
 
     let sessions = rows.into_iter().map(session_row_to_entry).collect();
     to_value(&WorkspaceSessionListResult {
@@ -13517,6 +13540,30 @@ async fn handle_session_list(
         truncated,
         import_complete,
     })
+}
+
+/// Whether the sessions table may be touched: this boot's first reconcile
+/// pass has committed, waited for up to
+/// [`FIRST_PASS_WAIT`](crate::session_import::FIRST_PASS_WAIT).
+///
+/// P6e: `session_list`, `session_upsert` and `session_delete` wait on this,
+/// so none acts on rows the boot has not reconciled. The list answers
+/// not-ready in its own shape; a mutation answers [`sessions_not_ready`].
+/// `session_reconcile` is exempt by design: it runs a pass, and a committed
+/// pass is what opens the gate, so gating it would lock the gate shut.
+async fn sessions_table_ready() -> bool {
+    crate::session_import::first_pass_done_within(crate::session_import::FIRST_PASS_WAIT).await
+}
+
+/// The not-ready answer of a session mutation: [`STORE_UNAVAILABLE`], the code
+/// a client already reads as "the store is busy, nothing was written".
+fn sessions_not_ready() -> RpcError {
+    RpcError {
+        code: STORE_UNAVAILABLE,
+        message: "sessions table not ready: this boot's first reconcile pass has not committed"
+            .to_string(),
+        data: None,
+    }
 }
 
 /// Upsert a session. The entry is validated first (canonical UUID id, tmux
@@ -13531,6 +13578,9 @@ async fn handle_session_upsert(
     let params: ainb_hangar_proto::sessions::WorkspaceSessionUpsertParams =
         parse_params(req, "{ session }")?;
     params.session.validate().map_err(|why| invalid_params(&why))?;
+    if !sessions_table_ready().await {
+        return Err(sessions_not_ready());
+    }
     let row = session_entry_to_row(params.session);
     match SessionsRepo::upsert(pool, &row).await.map_err(|e| store_err(&e))? {
         UpsertOutcome::Written => {}
@@ -13544,6 +13594,33 @@ async fn handle_session_upsert(
     to_value(&ainb_hangar_proto::sessions::WorkspaceSessionUpsertResult { ok: true })
 }
 
+/// Run one reconcile pass of this daemon's `sessions.json` and answer with it
+/// once it has committed. It takes no params; any sent are ignored, as the
+/// pass is always of this daemon's own file.
+///
+/// The one-time import runs first if it has not, so a client that finds
+/// `import_complete: false` can bring the table up to date with one call. A
+/// failed pass leaves the marker as it was and answers with the error.
+async fn handle_session_reconcile(pool: &SqlitePool) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::sessions::WorkspaceSessionReconcileResult;
+
+    let sessions_path = crate::session_import::daemon_sessions_path();
+    let failed = |e: anyhow::Error| internal(&format!("sessions reconcile failed: {e:#}"));
+    crate::session_import::import_sessions_if_needed(pool, &sessions_path)
+        .await
+        .map_err(failed)?;
+    let outcome = crate::session_import::reconcile_sessions(pool, &sessions_path)
+        .await
+        .map_err(failed)?;
+    let marker = outcome.marker;
+    to_value(&WorkspaceSessionReconcileResult {
+        imported: marker.imported,
+        skipped: marker.skipped,
+        rejected: marker.rejected,
+        completed_at: marker.completed_at,
+    })
+}
+
 /// Delete a session by id or tmux name, each checked the way an upsert
 /// checks it.
 async fn handle_session_delete(
@@ -13555,6 +13632,9 @@ async fn handle_session_delete(
 
     let params: ainb_hangar_proto::sessions::WorkspaceSessionDeleteParams =
         parse_params(req, "{ session_id?, tmux_session_name? }")?;
+    if !sessions_table_ready().await {
+        return Err(sessions_not_ready());
+    }
     let deleted = if let Some(id) = params.session_id.as_deref() {
         if !is_canonical_uuid(id) {
             return Err(invalid_params("session_id must be a canonical UUID"));
@@ -16846,12 +16926,22 @@ mod tests {
             .await;
             assert!(res.error.is_none(), "{res:?}");
         }
-        ainb_hangar_store::repo::sessions::SessionsRepo::complete_import(
+        // P6e: the import row alone (all P6d wrote) no longer makes the table
+        // authoritative; the reconcile row of the same file does. The path is
+        // the one the handler resolves; only its rows are written, no file.
+        let source = crate::session_import::daemon_sessions_path().to_string_lossy().into_owned();
+        ainb_hangar_store::repo::sessions::SessionsRepo::complete_import(pool, &source, &[], 0, 1)
+            .await
+            .unwrap();
+        let imported_only =
+            session_rpc(pool, methods::WORKSPACE_SESSION_LIST, serde_json::json!({})).await;
+        assert_eq!(imported_only.result.unwrap()["import_complete"], false);
+        ainb_hangar_store::repo::sessions::SessionsRepo::complete_reconcile(
             pool,
-            "/home/u/.agents-in-a-box/sessions.json",
+            &source,
             &[],
             0,
-            1,
+            2,
         )
         .await
         .unwrap();

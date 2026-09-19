@@ -24,7 +24,6 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { join } from "node:path";
 import { AINB_BIN, env, hook, paneText, run, seeded } from "../world.js";
 
 const QUESTION = "Ship to which environment?";
@@ -49,11 +48,6 @@ function askLine(eventId, sessionId, cwd) {
   };
 }
 
-/** `value` as an SQL string literal, its quotes doubled. */
-function sqlText(value) {
-  return `'${value.replaceAll("'", "''")}'`;
-}
-
 /**
  * What the window asked the host to do and what became of it, in order: each
  * `renderer intent` line the desktop logged, as `{ command, outcome }`. A key
@@ -76,19 +70,6 @@ function intentsSent() {
     }));
 }
 
-/** The daemon's own record of one attention row, read by a separate process. */
-function attentionRow(id) {
-  const db = join(env().AINB_HANGAR_HOME, "hangar.db");
-  try {
-    return run("sqlite3", [
-      db,
-      `SELECT state || '|' || COALESCE(answered_by, '') || '|' || COALESCE(answer, '') FROM attention WHERE id = ${sqlText(id)};`,
-    ]).trim();
-  } catch {
-    return "";
-  }
-}
-
 /** The desktop's own log lines about answering, for a failure to show. */
 function desktopLog() {
   try {
@@ -96,6 +77,28 @@ function desktopLog() {
   } catch {
     return "(no desktop log)";
   }
+}
+
+/**
+ * Click `selector` as a person does: through the driver, so the click passes
+ * WebDriver's own actionability checks (displayed, enabled, not covered),
+ * which a click the page runs on itself never proves. The banner's buttons
+ * are reconciled by label across frames, so the element the driver found is
+ * the one it clicks; should a frame replace it in between, the driver says
+ * so as a stale element and the click is looked up again, a few times.
+ */
+async function clickAsPerson(selector, attempts = 5) {
+  let last = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await $(selector).click();
+      return;
+    } catch (error) {
+      if (!/stale element/i.test(String(error))) throw error;
+      last = error;
+    }
+  }
+  throw last;
 }
 
 /** Wait for `condition`, failing with what `explain` says at the deadline. */
@@ -158,21 +161,12 @@ describe("answering from the window", () => {
       "the banner offers the three options in order",
     );
 
-    // Option two. The click sends the reducer's own commands and nothing the
-    // window authored; the phase the banner reads is the frame's
-    // `fleet.ask_state.phases` entry for this request.
-    //
-    // Clicked in the page, by selector, in one step: the frames arriving every
-    // second redraw the banner, so a button looked up by the driver can be
-    // replaced before its click lands. The click event is the page's own, so
-    // the button's handler runs exactly as it does for a person.
+    // Option two, clicked through the driver (#1192). The click sends the
+    // reducer's own commands and nothing the window authored; the phase the
+    // banner reads is the frame's `fleet.ask_state.phases` entry for this
+    // request.
     const sentBefore = intentsSent().length;
-    const clicked = await browser.execute((index) => {
-      const option = document.querySelector(`.answer-banner .answer-option[data-option="${index}"]`);
-      option?.click();
-      return option !== null;
-    }, PICK);
-    assert.ok(clicked, "option two is on the banner");
+    await clickAsPerson(`.answer-banner .answer-option[data-option="${PICK}"]`);
     let phase = "";
     await settle(
       async () => {
@@ -183,7 +177,7 @@ describe("answering from the window", () => {
         return phase === "delivered";
       },
       60_000,
-      () => `the banner never read delivered (last phase: ${phase || "none"}; row: ${attentionRow(request)}; pane: ${paneText(target.tmux).trim().split("\n").slice(-3).join(" / ")})\n${desktopLog()}`,
+      () => `the banner never read delivered (last phase: ${phase || "none"}; pane: ${paneText(target.tmux).trim().split("\n").slice(-3).join(" / ")})\n${desktopLog()}`,
     );
 
     // What the window sent for that pick, from the host's own log: the
@@ -216,18 +210,10 @@ describe("answering from the window", () => {
       timeoutMsg: `the answer never reached the agent in ${target.tmux}`,
     });
 
-    // The daemon's record, read by a separate process: answered, by the desktop.
-    await browser.waitUntil(() => attentionRow(request).startsWith("answered|"), {
-      timeout: 30_000,
-      timeoutMsg: () => `the row never read answered: ${attentionRow(request)}`,
-    });
-    const [, answeredBy, answer] = attentionRow(request).split("|");
-    // `<surface>@<host>`: the surface is what the person sat at.
-    assert.match(answeredBy, /^desktop@/, "the desktop answered, not the terminal");
-    assert.equal(answer, OPTIONS[PICK]);
-
-    // A second surface on the same daemon reads the same winner: the web
-    // dashboard's answer to the same question loses to the desktop's.
+    // The daemon's record, read through its own RPC by a second surface on
+    // the same daemon (#1193): the web dashboard's answer to the same question
+    // loses to the desktop's, and the refusal names the winner. The answer
+    // text itself is the pane's business, proven above.
     const port = 20_000 + (stamp % 20_000);
     const token = `e2e-${stamp}`;
     web = spawn(AINB_BIN, ["web", "--listen", `127.0.0.1:${port}`, "--token", token], {
@@ -251,7 +237,9 @@ describe("answering from the window", () => {
       },
       { timeout: 60_000, interval: 500, timeoutMsg: "the web dashboard never answered" },
     );
-    assert.deepEqual(second, { outcome: "already_answered", by: answeredBy }, JSON.stringify(second));
+    assert.equal(second?.outcome, "already_answered", JSON.stringify(second));
+    // `<surface>@<host>`: the surface is what the person sat at.
+    assert.match(second.by, /^desktop@/, `the desktop answered, not the terminal: ${JSON.stringify(second)}`);
 
     // The board's card is the row raised with the provider id, which no one
     // answered, so it is still waiting. With #1049 closed, one question would

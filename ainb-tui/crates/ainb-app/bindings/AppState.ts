@@ -979,20 +979,6 @@ export type CloneProgress_Serialize = {
 	error: string | null,
 };
 
-/**  Transient UI state for the review surface (selection + scroll). */
-export type CodeReviewUi = {
-	/**  Index of the sidebar-selected file (mirrors the highlighted tree file). */
-	selected_file: number,
-	/**  Selected row in the flattened sidebar tree (files and folders). */
-	sidebar_selected: number,
-	/**  Directory paths the user has collapsed in the sidebar tree. */
-	collapsed_dirs: string[],
-	/**  First visible virtual-row index (diff body vertical scroll offset). */
-	scroll: number,
-	/**  Index of the hunk the `n`/`N` cursor is on (0-based, across all files). */
-	current_hunk: number,
-};
-
 /**
  *  Available Codex models for session.
  * 
@@ -1037,6 +1023,12 @@ export type CommitInfo = CommitInfo_Serialize;
 /**  Information about a single commit */
 export type CommitInfo_Serialize = {
 	hash_short: string,
+	/**
+	 *  The commit author's display name (`author().name()`); the email is
+	 *  never read. A frame carries it scrubbed, so a credential shape in it is
+	 *  redacted (#1212). The name itself is kept by design: the Commits tab
+	 *  shows who wrote each commit. Withholding it from remote hosts is #1244.
+	 */
 	author: string,
 	date: string,
 	message: string,
@@ -2618,34 +2610,77 @@ export type GitFileStatus = "Added" | "Modified" | "Deleted" | "Renamed" | "Untr
 
 export type GitTab = "Review" | "Files" | "Diff" | "Commits" | "Markdown";
 
-export type GitViewState = GitViewState_Serialize;
+/**
+ *  The git view as a frame carries it: every field the state holds, with the
+ *  long ones windowed and each window's loss counted.
+ */
+export type GitViewFrame = GitViewFrame_Serialize;
 
-export type GitViewState_Serialize = {
+/**
+ *  The git view as a frame carries it: every field the state holds, with the
+ *  long ones windowed and each window's loss counted.
+ */
+export type GitViewFrame_Serialize = {
 	active_tab: GitTab,
 	changed_files: ChangedFile[],
+	/**  Changed paths the frame did not carry, so a shortened tree says so. */
+	files_cut: number,
 	selected_file_index: number,
+	/**  Scrubbed, then cut to [`MAX_DIFF_LINES`] and to what the budget allows. */
 	diff_content: string[],
+	/**
+	 *  Diff lines the frame did not carry, so a short diff and a cut one are
+	 *  not read as the same thing.
+	 */
+	diff_lines_cut: number,
 	diff_scroll_offset: number,
-	worktree_path: string,
+	/**
+	 *  The worktree's directory name, scrubbed, or `worktree` when that name
+	 *  would be the operator's username (a worktree at home) or empty (`/`,
+	 *  a path ending in `..`). Never the absolute path: the seam denies paths
+	 *  on the wire for remote surfaces, and nothing that draws this view
+	 *  reads more than the name (the #1097 rule for the web rows, #1212
+	 *  here).
+	 */
+	worktree_name: string,
 	is_dirty: boolean,
 	can_push: boolean,
+	/**  The draft crosses as its length, as it did before the bound. */
 	commit_message_len: number | null,
 	commit_message_cursor: number,
+	/**
+	 *  Sorted, because a set has no order and a frame has to be the same bytes
+	 *  twice for the same state.
+	 */
 	expanded_folders: string[],
+	/**
+	 *  Expanded folders the frame did not carry, so a tree that draws fewer
+	 *  open folders than the person opened says why.
+	 */
+	expanded_folders_cut: number,
 	file_tree_items: FileTreeItem[],
+	/**  Tree rows the frame did not carry. */
+	tree_items_cut: number,
 	selected_tree_index: number,
+	/**
+	 *  Scrubbed as one document, then cut to [`MAX_MARKDOWN_LINES`] and to
+	 *  [`MAX_LINE_CHARS`] a line.
+	 */
 	markdown_content: MarkdownLine_Serialize[],
+	markdown_lines_cut: number,
 	markdown_scroll_offset: number,
 	commits: CommitInfo_Serialize[],
+	/**  Commits the frame did not carry. */
+	commits_cut: number,
 	selected_commit_index: number,
-	review: ReviewModel_Serialize,
-	review_ui: CodeReviewUi,
+	review: ReviewFrame_Serialize,
+	review_ui: ReviewUiFrame,
 };
 
 export type GitViewView = GitViewView_Serialize;
 
 export type GitViewView_Serialize = {
-	git_view_state: GitViewState_Serialize | null,
+	git_view_state: GitViewFrame_Serialize | null,
 	quick_commit_message_len: number | null,
 	quick_commit_cursor: number,
 	is_current_dir_git_repo: boolean,
@@ -2789,34 +2824,17 @@ export type HookHealthIssue = {
  */
 export type HostId = string;
 
-/**  A contiguous run of changed + surrounding-context lines. */
-export type Hunk = Hunk_Serialize;
+/**  One hunk, its rows already scrubbed and within the file's budget. */
+export type HunkFrame = HunkFrame_Serialize;
 
-/**  A contiguous run of changed + surrounding-context lines. */
-export type Hunk_Serialize = {
-	/**  1-based first old (pre-image) line number in this hunk; 0 if none. */
+/**  One hunk, its rows already scrubbed and within the file's budget. */
+export type HunkFrame_Serialize = {
 	old_start: number,
-	/**  1-based first new (post-image) line number in this hunk; 0 if none. */
 	new_start: number,
-	/**
-	 *  Hidden context lines between the previous hunk (or file head) and this
-	 *  one.
-	 */
 	gap_before: number,
-	/**
-	 *  Hidden context lines after this hunk (only set on the final hunk → file
-	 *  tail).
-	 */
 	gap_after: number,
-	/**  How many of `gap_before` are currently revealed by the user. */
 	expanded_before: number,
-	/**  How many of `gap_after` are currently revealed by the user. */
 	expanded_after: number,
-	/**
-	 *  Rows in display order. A frame scrubs them as one text (a key block
-	 *  spans rows) and drops the word-emphasis ranges of any row the scrub
-	 *  changed, since those byte offsets point into the original text.
-	 */
 	rows: DiffRow_Serialize[],
 };
 
@@ -3870,42 +3888,74 @@ export type RepositoryPreset_Serialize = {
 	environment: { [key in string]: string },
 };
 
-/**  One changed file and its hunks. */
-export type ReviewFile = ReviewFile_Serialize;
+/**
+ *  One changed file: its own fields, its hunks windowed on one row budget, and
+ *  the rows that budget cost it.
+ */
+export type ReviewFileFrame = ReviewFileFrame_Serialize;
 
-/**  One changed file and its hunks. */
-export type ReviewFile_Serialize = {
-	/**  Repo-relative path. */
+/**
+ *  One changed file: its own fields, its hunks windowed on one row budget, and
+ *  the rows that budget cost it.
+ */
+export type ReviewFileFrame_Serialize = {
 	path: string,
-	/**  Git status (Added/Modified/Deleted/Renamed/Untracked). */
 	status: GitFileStatus,
-	/**  Lines added. */
 	insertions: number,
-	/**  Lines removed. */
 	deletions: number,
-	/**  Detected syntect language token (e.g. `"rust"`), or `None` if unknown. */
 	language: string | null,
-	/**  Whether this file's diff block is collapsed in the UI. */
 	collapsed: boolean,
-	/**  Binary file — no rows are produced, the UI shows a placeholder. */
 	binary: boolean,
-	/**  Diff hunks in file order. */
-	hunks: Hunk_Serialize[],
+	hunks: HunkFrame_Serialize[],
+	/**
+	 *  Rows this file lost, to [`MAX_ROWS_PER_FILE`], to [`MAX_ROWS_TOTAL`], or
+	 *  to the byte budget.
+	 */
+	rows_cut: number,
+	/**
+	 *  Hunks this file lost. A hunk costs bytes with no rows in it at all, and
+	 *  a file rewritten line by line has one per line.
+	 */
+	hunks_cut: number,
+};
+
+/**  The review model as a frame carries it. */
+export type ReviewFrame = ReviewFrame_Serialize;
+
+/**  The review model as a frame carries it. */
+export type ReviewFrame_Serialize = {
+	files: ReviewFileFrame_Serialize[],
+	/**
+	 *  Changed files the frame did not carry. A file costs bytes before any of
+	 *  its rows do, so twenty thousand empty ones pass the ceiling on their
+	 *  own.
+	 */
+	files_cut: number,
 };
 
 /**
- *  A full review of working-directory (or commit) changes: every changed file
- *  with its structured hunks, ready to flatten into a scrollable row list.
+ *  What a surface has selected and scrolled to, brought inside the window the
+ *  frame kept.
  */
-export type ReviewModel = ReviewModel_Serialize;
-
-/**
- *  A full review of working-directory (or commit) changes: every changed file
- *  with its structured hunks, ready to flatten into a scrollable row list.
- */
-export type ReviewModel_Serialize = {
-	/**  Changed files, sorted by path. */
-	files: ReviewFile_Serialize[],
+export type ReviewUiFrame = {
+	selected_file: number,
+	sidebar_selected: number,
+	/**  Sorted, for the reason [`GitViewFrame::expanded_folders`] is. */
+	collapsed_dirs: string[],
+	/**  Collapsed directories the frame did not carry. */
+	collapsed_dirs_cut: number,
+	/**
+	 *  The first row to draw, in the FRAME's rows rather than the reducer's:
+	 *  the frame carries a cut of the model, so the same number would
+	 *  otherwise name different content on each side.
+	 */
+	scroll: number,
+	/**
+	 *  The row the reducer is on was not sent, so `scroll` is the nearest one
+	 *  that was.
+	 */
+	scroll_cut: boolean,
+	current_hunk: number,
 };
 
 /**  The parts of a row's status that decide which entries its menu offers. */

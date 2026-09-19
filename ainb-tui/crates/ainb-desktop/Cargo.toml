@@ -65,4 +65,6 @@ specta-typescript = { version = "=0.0.12", optional = true }
 tauri-build = { version = "~2.6.3", optional = true }
 
 [dev-dependencies]
+# The shared agent status reader's fake daemon (#1188).
+ainb-app = { path = "../ainb-app", features = ["test-support"] }
 tempfile = "3"
