@@ -114,6 +114,10 @@ pub struct DesktopHost<S: FrameSink> {
     scanned_generation: Option<u64>,
     /// The least time after a scan before news may start the next one.
     news_floor: Duration,
+    /// Whether the tick starts the daemon attention poller. A test that is
+    /// about the reducer turns it off: the poller is a thread on a real
+    /// socket, and its first publish is news whenever it lands.
+    poll_attention: bool,
 }
 
 impl<S: FrameSink> DesktopHost<S> {
@@ -160,6 +164,7 @@ impl<S: FrameSink> DesktopHost<S> {
             rescan_every: WORKSPACE_RESCAN,
             scanned_generation: None,
             news_floor: ainb_app::AppState::workspace_rescan_floor(),
+            poll_attention: true,
         }
     }
 
@@ -176,6 +181,15 @@ impl<S: FrameSink> DesktopHost<S> {
     #[must_use]
     pub const fn flooring_news_at(mut self, floor: Duration) -> Self {
         self.news_floor = floor;
+        self
+    }
+
+    /// Never start the daemon attention poller on a tick. For tests: the
+    /// poller's first publish counts as news, which runs the attention merge
+    /// whenever the thread happens to get there, whatever the cadence says.
+    #[must_use]
+    pub const fn without_attention_poll(mut self) -> Self {
+        self.poll_attention = false;
         self
     }
 
@@ -225,12 +239,14 @@ impl<S: FrameSink> DesktopHost<S> {
         // The poller is idempotent by an atomic, so starting it every tick is
         // its documented use. Every read here is by shared reference: a `&mut`
         // path through the `Versioned` Fleet section would bump it each tick.
-        ainb_app::fleet::attention_poll::spawn(
-            &self.state.fleet.daemon_attention,
-            &self.state.fleet.fleet_snapshot,
-            &self.state.host.attention_poll_running,
-            &self.state.host.daemon_attention_generation,
-        );
+        if self.poll_attention {
+            ainb_app::fleet::attention_poll::spawn(
+                &self.state.fleet.daemon_attention,
+                &self.state.fleet.fleet_snapshot,
+                &self.state.host.attention_poll_running,
+                &self.state.host.daemon_attention_generation,
+            );
+        }
         // The merged attention each session row carries on its frame. The
         // reducer paces it: at once on daemon news, otherwise on its own
         // cadence, and a merge that finds nothing new bumps nothing.
