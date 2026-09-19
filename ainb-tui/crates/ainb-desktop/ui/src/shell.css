@@ -79,6 +79,7 @@ body {
 }
 
 .banner.degraded,
+.banner.incompatible,
 .banner.reconnecting {
   color: var(--gold);
 }
