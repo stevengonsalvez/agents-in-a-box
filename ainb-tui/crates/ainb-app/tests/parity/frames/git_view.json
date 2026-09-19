@@ -101,6 +101,7 @@
                 ]
               }
             ],
+            "hunks_cut": 0,
             "insertions": 1,
             "language": null,
             "path": "src/lib.rs",
@@ -144,16 +145,20 @@
                 ]
               }
             ],
+            "hunks_cut": 0,
             "insertions": 3,
             "language": null,
             "path": "README.md",
             "rows_cut": 0,
             "status": "Added"
           }
-        ]
+        ],
+        "files_cut": 0
       },
       "review_ui": {
-        "collapsed_dirs": [],
+        "collapsed_dirs": [
+          "src"
+        ],
         "current_hunk": 0,
         "scroll": 0,
         "selected_file": 0,
