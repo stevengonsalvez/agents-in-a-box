@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "ainb-desktop"
-version = "0.1.0"
+version = "1.28.2"
 dependencies = [
  "ainb-app",
  "ainb-hangar-client",
@@ -364,6 +364,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
  "which",
 ]
 
