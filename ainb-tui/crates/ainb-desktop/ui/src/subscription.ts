@@ -5,7 +5,9 @@
 
 import type {
   AgentStatusView,
+  ConfigView_Serialize,
   FleetView_Serialize,
+  HangarView_Serialize,
   HostId,
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
@@ -24,13 +26,15 @@ export const SUBSCRIBED: SectionName[] = [
   "fleet",
   "config",
   "agent_status",
+  "hangar",
 ];
 
 /**
- * Subscribed ahead of their readers: settings in D3. A section leaves this
- * list when its reader lands, as Fleet and agent status did with the board.
+ * Subscribed ahead of their readers. A section leaves this list when its
+ * reader lands, as Fleet and agent status did with the board and config and
+ * hangar did with the settings page.
  */
-export const AHEAD_OF_READERS: SectionName[] = ["shell", "tmux", "config"];
+export const AHEAD_OF_READERS: SectionName[] = ["shell", "tmux"];
 
 /** The sidebar's rows and the tab titles: the host's Sessions section. */
 export function shellSessions(store: FrameStore, host: HostId | undefined): SessionsView_Serialize | undefined {
@@ -45,4 +49,14 @@ export function shellAgentStatus(store: FrameStore, host: HostId | undefined): A
 /** The board's lines, the attention list and the answer banner: Fleet. */
 export function shellFleet(store: FrameStore, host: HostId | undefined): FleetView_Serialize | undefined {
   return host === undefined ? undefined : store.section(host, "fleet");
+}
+
+/** The settings page's form: the host's config section. */
+export function shellConfig(store: FrameStore, host: HostId | undefined): ConfigView_Serialize | undefined {
+  return host === undefined ? undefined : store.section(host, "config");
+}
+
+/** The settings page's daemons panel: the host's hangar section. */
+export function shellHangar(store: FrameStore, host: HostId | undefined): HangarView_Serialize | undefined {
+  return host === undefined ? undefined : store.section(host, "hangar");
 }
