@@ -5903,7 +5903,12 @@ impl EventHandler {
                 }
             }
             AppEvent::ConfigSelectNode { id } => {
-                if !state.config.config_screen_state.select_node_by_id(&id) {
+                // Looked up by shared reference first: a `&mut` path through
+                // the section bumps its version, and a click on a node that is
+                // not on screen must frame nothing.
+                if state.config.config_screen_state.visible_node_position(&id).is_some() {
+                    state.config.config_screen_state.select_node_by_id(&id);
+                } else {
                     tracing::debug!("config tree node `{id}` is not on screen");
                 }
             }
