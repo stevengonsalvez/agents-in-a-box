@@ -253,7 +253,20 @@ impl GitViewState {
             GitTab::Diff => self.scroll_diff_up_by(n),
             GitTab::Markdown if down => self.scroll_markdown_down_by(n),
             GitTab::Markdown => self.scroll_markdown_up_by(n),
-            _ => {}
+            // The commit list scrolls by its selection: the terminal's list
+            // keeps the selected commit in view, so a separate offset would be
+            // pulled back to it on the next paint (#1242).
+            GitTab::Commits if down => {
+                self.selected_commit_index = self
+                    .selected_commit_index
+                    .saturating_add(n)
+                    .min(self.commits.len().saturating_sub(1));
+            }
+            GitTab::Commits => {
+                self.selected_commit_index = self.selected_commit_index.saturating_sub(n);
+            }
+            // Retired from the tab cycle: nothing draws it to scroll.
+            GitTab::Files => {}
         }
     }
 

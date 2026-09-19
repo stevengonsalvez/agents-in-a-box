@@ -20,6 +20,7 @@ pub mod bindings;
 pub mod fields;
 pub mod frame;
 pub mod git_view;
+pub mod inbox;
 pub mod shape;
 pub mod store;
 pub mod trace;
@@ -157,7 +158,7 @@ pub fn serialize_section<S: Serializer>(
         SectionId::Fleet => FleetView::from(&*state.fleet).serialize(serializer),
         SectionId::Hangar => HangarView::from(&*state.hangar).serialize(serializer),
         SectionId::McpPool => McpPoolView::from(&*state.mcp_pool).serialize(serializer),
-        SectionId::Inbox => InboxView {}.serialize(serializer),
+        SectionId::Inbox => inbox::InboxView::from(&*state.inbox).serialize(serializer),
         SectionId::PluginsHost => PluginsHostView::from(&*state.plugins_host).serialize(serializer),
         SectionId::Config => ConfigView::from(&*state.config).serialize(serializer),
         SectionId::Skills => SkillsView::from(&*state.skills).serialize(serializer),
@@ -709,10 +710,6 @@ view!(McpPoolView<'a> for McpPoolSection {
     mcp_overlay: Option<crate::app::state::McpOverlayState>,
 });
 
-#[derive(Serialize)]
-#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
-struct InboxView {}
-
 // `plugin_ui_states` stays out: each view is JSON its plugin wrote, with keys
 // no key-path check can know in advance, so nothing proves it free of a secret.
 // `watched_plugin_screens` stays out too: which screens other hosts watch is
@@ -1026,7 +1023,7 @@ struct SectionBodies<'a> {
     fleet: FleetView<'a>,
     hangar: HangarView<'a>,
     mcp_pool: McpPoolView<'a>,
-    inbox: InboxView,
+    inbox: inbox::InboxView,
     plugins_host: PluginsHostView<'a>,
     config: ConfigView<'a>,
     skills: SkillsView<'a>,
@@ -1053,7 +1050,8 @@ pub(crate) fn register_section_views(types: specta::Types) -> specta::Types {
         .register::<FleetView<'static>>()
         .register::<HangarView<'static>>()
         .register::<McpPoolView<'static>>()
-        .register::<InboxView>()
+        .register::<inbox::InboxView>()
+        .register::<inbox::InboxRowFrame>()
         .register::<PluginsHostView<'static>>()
         .register::<ConfigView<'static>>()
         .register::<SkillsView<'static>>()

@@ -1,0 +1,36 @@
+    ╭────────╮
+[G] │ Review │ · Commits                                                                                     Tab switch
+────┘        └──────────────────────────────────────────────────────────────────────────────────────────────────────────
+╭ 📋  Code Review 3 files +5 -2  Hunk 1/3 ──────────────────────────────────────────────────────────────────────────────╮
+│ 📁  Changed Files (3)    │∨ src/auth/session.rs   +2 • -1   [Modified]                                                │
+│▶ ▶ 📁  docs (1)          │   1   fn token(header: &str) -> Option<&str> {                                             │
+│  ▼ 📁  src (2)           │   2 ▌     header.strip_prefix("Bearer ")                                                   │
+│  └ ▼ 📁  auth (2)        │   2 ▌     let token = header.strip_prefix("Bearer ")?;                                     │
+│    └ [M] session.rs     │   3 ▌     (!token.is_empty()).then_some(token)                                             │
+│    └ [A] mod.rs         │   4   }                                                                                    │
+│                         │∨ src/auth/mod.rs   +2 • -0   [Added]                                                       │
+│                         │   1 ▌ pub mod session;                                                                     │
+│                         │   2 ▌ pub mod refresh;                                                                     │
+│                         │∨ docs/auth.md   +1 • -1   [Modified]                                                       │
+│                         │   1   # Auth                                                                               │
+│                         │   2 ▌ A token is read from the header.                                                     │
+│                         │   2 ▌ A token is read from the header and checked for emptiness.                           │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+│                         │                                                                                            │
+╰ ↑/↓ files j/k scroll n/N hunk Space toggle z expand e/E folders Tab tabs Esc back ───────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│✓ Working directory clean  │  ✓ Up to date  │  p push │ Esc back                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

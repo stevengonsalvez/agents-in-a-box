@@ -52,6 +52,9 @@ pub mod ids {
     /// Daemons runtime-health and repair screen for phone bridge, notifyd,
     /// ATC, and fleet daemons. Reached from home with `d`.
     pub const DAEMONS: &str = "daemons";
+    /// The daemon's notification inbox (D3-prime), drawn from the `inbox`
+    /// section on every surface.
+    pub const INBOX: &str = "inbox";
 }
 
 /// Outcome of a screen-handled event.
@@ -105,6 +108,9 @@ mod tests {
             ids::SESSION_RECOVERY,
             ids::SKILLS,
             ids::SKILL_MANAGER,
+            ids::HANGAR,
+            ids::DAEMONS,
+            ids::INBOX,
         ];
         let mut sorted = all.to_vec();
         sorted.sort();

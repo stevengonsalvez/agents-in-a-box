@@ -6,6 +6,7 @@
 import type {
   AgentStatusView,
   FleetView_Serialize,
+  GitViewView_Serialize,
   HostId,
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
@@ -24,6 +25,7 @@ export const SUBSCRIBED: SectionName[] = [
   "fleet",
   "config",
   "agent_status",
+  "git_view",
 ];
 
 /**
@@ -45,4 +47,15 @@ export function shellAgentStatus(store: FrameStore, host: HostId | undefined): A
 /** The board's lines, the attention list and the answer banner: Fleet. */
 export function shellFleet(store: FrameStore, host: HostId | undefined): FleetView_Serialize | undefined {
   return host === undefined ? undefined : store.section(host, "fleet");
+}
+
+/**
+ * The review tab's files, hunks and rows: the host's GitView section.
+ *
+ * Bounded before it is sent (`ainb-app/src/wire/git_view.rs`), so what arrives
+ * is a window on the diff with counters saying what it left out, never the
+ * whole of a large one.
+ */
+export function shellGitView(store: FrameStore, host: HostId | undefined): GitViewView_Serialize | undefined {
+  return host === undefined ? undefined : store.section(host, "git_view");
 }
