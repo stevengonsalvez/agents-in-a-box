@@ -63,18 +63,13 @@ pub fn entry_to_metadata(entry: &WorkspaceSessionEntry) -> Result<SessionMetadat
 /// Convert local [`SessionMetadata`] into proto [`WorkspaceSessionEntry`].
 #[must_use]
 pub fn metadata_to_entry(meta: &SessionMetadata) -> WorkspaceSessionEntry {
-    let agent_type = serde_json::to_value(meta.agent_type)
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_else(|| "Claude".to_string());
-    let model_source = serde_json::to_value(meta.model_source)
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_else(|| "LegacyTyped".to_string());
-    let codex_model = meta
-        .codex_model
-        .as_ref()
-        .and_then(|cm| serde_json::to_value(cm).ok().and_then(|v| v.as_str().map(String::from)));
+    // These are fieldless enums with no serde renames, so the Debug name is
+    // the persisted name `entry_to_metadata` parses back (pinned by
+    // `enum_names_round_trip`). Formatting keeps this module off the
+    // serialisation call-site list `tests/serialize_guard.rs` fences.
+    let agent_type = format!("{:?}", meta.agent_type);
+    let model_source = format!("{:?}", meta.model_source);
+    let codex_model = meta.codex_model.map(|cm| format!("{cm:?}"));
 
     WorkspaceSessionEntry {
         session_id: meta.session_id.to_string(),
@@ -547,6 +542,38 @@ mod tests {
         let meta = create_test_store().sessions["tmux_project-a"].clone();
         let back = entry_to_metadata(&metadata_to_entry(&meta)).unwrap();
         assert_eq!(back.session_id, meta.session_id);
+    }
+
+    #[test]
+    fn enum_names_round_trip() {
+        use crate::models::session::CodexModel;
+        fn back<T: serde::de::DeserializeOwned>(name: String) -> T {
+            serde_json::from_value(serde_json::Value::String(name)).unwrap()
+        }
+        for v in [
+            SessionAgentType::Claude,
+            SessionAgentType::Shell,
+            SessionAgentType::Ssh,
+            SessionAgentType::Codex,
+            SessionAgentType::Gemini,
+            SessionAgentType::Copilot,
+            SessionAgentType::Antigravity,
+            SessionAgentType::Kiro,
+        ] {
+            assert_eq!(back::<SessionAgentType>(format!("{v:?}")), v);
+        }
+        for v in [ModelSource::LegacyTyped, ModelSource::Raw] {
+            assert_eq!(back::<ModelSource>(format!("{v:?}")), v);
+        }
+        for v in [
+            CodexModel::SystemDefault,
+            CodexModel::Gpt55,
+            CodexModel::Gpt56Terra,
+            CodexModel::Gpt56Luna,
+            CodexModel::Gpt53Codex,
+        ] {
+            assert_eq!(back::<CodexModel>(format!("{v:?}")), v);
+        }
     }
 
     #[test]
