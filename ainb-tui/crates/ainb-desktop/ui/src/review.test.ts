@@ -16,6 +16,7 @@ import {
   bodyLines,
   fileCut,
   fileRows,
+  keyRows,
   ROW_PX,
   scrollIntent,
   sectionCut,
@@ -97,6 +98,7 @@ function section(
       collapsed_dirs: [],
       collapsed_dirs_cut: 0,
       scroll: 0,
+      scroll_cut: false,
       current_hunk: 0,
     },
     ...over,
@@ -298,16 +300,18 @@ test("many small wheel deltas add up to whole rows, and lines are rows", () => {
   let pending = 0;
   let sent = 0;
   for (let tick = 0; tick < 10; tick += 1) {
-    const step = wheelRows(pending, { deltaY: ROW_PX / 5, deltaMode: 0 });
+    const step = wheelRows(pending, { deltaY: ROW_PX / 5, deltaMode: 0 }, 30);
     pending = step.pending;
     sent += step.rows;
   }
   assert.equal(sent, 2, "ten tenths of a fifth of a row is two rows");
 
   // A line-mode mouse: three lines is three rows, whatever a row is in pixels.
-  assert.deepEqual(wheelRows(0, { deltaY: 3, deltaMode: 1 }), { rows: 3, pending: 0 });
+  assert.deepEqual(wheelRows(0, { deltaY: 3, deltaMode: 1 }, 30), { rows: 3, pending: 0 });
   // And up is up.
-  assert.equal(wheelRows(0, { deltaY: -3, deltaMode: 1 }).rows, -3);
+  assert.equal(wheelRows(0, { deltaY: -3, deltaMode: 1 }, 30).rows, -3);
+  // A page is what the body can show, not a number picked in the code.
+  assert.equal(wheelRows(0, { deltaY: 1, deltaMode: 2 }, 30).rows, 30);
 });
 
 test("the row a frame's scroll names is the row the reducer means", async () => {
@@ -317,7 +321,17 @@ test("the row a frame's scroll names is the row the reducer means", async () => 
       file("src/next.rs", [hunk(1, [row(1, "third")])]),
     ],
     0,
-    { review_ui: { selected_file: 0, sidebar_selected: 0, collapsed_dirs: [], collapsed_dirs_cut: 0, scroll: 3, current_hunk: 1 } },
+    {
+      review_ui: {
+        selected_file: 0,
+        sidebar_selected: 0,
+        collapsed_dirs: [],
+        collapsed_dirs_cut: 0,
+        scroll: 3,
+        scroll_cut: false,
+        current_hunk: 1,
+      },
+    },
   );
 
   const html = await rendered({ gitView: body, stale: false, onChoose() {} });
@@ -382,5 +396,62 @@ test("emphasis ranges are byte offsets, and the window draws them where they are
   assert.deepEqual(segments(over), [
     { text: "sh", emphasis: false },
     { text: "ort", emphasis: true },
+  ]);
+});
+
+test("the keys the terminal answers move the reducer's offset, not the body", () => {
+  // Thirty rows in view, the body sitting at row 40 of 200.
+  assert.equal(keyRows("ArrowDown", 30, 40, 200), 1);
+  assert.equal(keyRows("ArrowUp", 30, 40, 200), -1);
+  assert.equal(keyRows("PageDown", 30, 40, 200), 30);
+  assert.equal(keyRows("PageUp", 30, 40, 200), -30);
+  // Home and End are relative, because the intent is a row COUNT: the reducer
+  // owns where the offset lands.
+  assert.equal(keyRows("Home", 30, 40, 200), -40);
+  assert.equal(keyRows("End", 30, 40, 200), 159);
+  assert.equal(keyRows("End", 30, 199, 200), 0, "already at the end asks for nothing");
+  assert.equal(keyRows("a", 30, 40, 200), null, "an ordinary key is not ours");
+});
+
+test("the body takes focus and refuses the browser's own scrolling", async () => {
+  const body = section([file("src/lib.rs", [hunk(1, [row(1, "one"), row(2, "two")])])]);
+
+  const html = await rendered({ gitView: body, stale: false, onChoose() {} });
+
+  assert.match(html, /class="review-body"[^>]*tabindex="0"/, html);
+  assert.match(html, /role="region"/, html);
+});
+
+test("a frame whose row was cut says so", async () => {
+  const body = section([file("src/lib.rs", [hunk(1, [row(1, "one")])])], 0, {
+    review_ui: {
+      selected_file: 0,
+      sidebar_selected: 0,
+      collapsed_dirs: [],
+      collapsed_dirs_cut: 0,
+      scroll: 1,
+      scroll_cut: true,
+      current_hunk: 0,
+    },
+  });
+
+  const html = await rendered({ gitView: body, stale: false, onChoose() {} });
+
+  assert.match(html.replace(/<[^>]*>/g, " "), /was not sent; this is the nearest one that was/, html);
+});
+
+test("emphasis ranges out of order are drawn, not dropped", () => {
+  const jumbled = {
+    ...row(1, "alpha beta gamma"),
+    emphasis: [
+      [11, 16] as [number, number],
+      [0, 5] as [number, number],
+    ],
+  };
+
+  assert.deepEqual(segments(jumbled), [
+    { text: "alpha", emphasis: true },
+    { text: " beta ", emphasis: false },
+    { text: "gamma", emphasis: true },
   ]);
 });
