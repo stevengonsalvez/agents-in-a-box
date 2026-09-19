@@ -87,6 +87,17 @@ fn body_lines(section: &InboxSection) -> Vec<Line<'static>> {
             Style::default().fg(WARNING_ORANGE),
         )));
     }
+    // What was cut comes before the rows: a screen too short for a hundred
+    // rows still says what it does not show.
+    if section.rows_cut > 0 || section.summaries_cut > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{} more rows not shown, {} summaries cut",
+                section.rows_cut, section.summaries_cut
+            ),
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        )));
+    }
     if section.entries.is_empty() {
         lines.push(Line::from(Span::styled(
             "nothing in the inbox",
@@ -116,15 +127,6 @@ fn body_lines(section: &InboxSection) -> Vec<Line<'static>> {
             ),
             Span::styled(row.summary.clone(), text_style),
         ]));
-    }
-    if section.rows_cut > 0 || section.summaries_cut > 0 {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "{} more rows not shown, {} summaries cut",
-                section.rows_cut, section.summaries_cut
-            ),
-            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-        )));
     }
     lines
 }
