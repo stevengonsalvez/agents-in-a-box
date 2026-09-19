@@ -4,6 +4,9 @@
 // so a click resolved against one frame acts on the same row after the tree
 // changed, and the wheel scrolls through the reducer rather than the host.
 
+#[path = "support/home.rs"]
+mod home;
+
 use ainb_app::app::NoRenderer;
 use ainb_app::app::pointer;
 use ainb_app::app::screens::ids as screen_ids;
@@ -51,9 +54,7 @@ fn file(path: &str, lines: usize) -> ReviewFile {
 
 /// The git view on its Review tab over `paths`.
 fn reviewing(paths: &[&str]) -> AppState {
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
-    std::mem::forget(home);
+    home::shared();
     let mut state = AppState::new();
     state.shell.current_screen = screen_ids::GIT_VIEW.to_string();
     let mut git = GitViewState::new("/parity/api".into());
