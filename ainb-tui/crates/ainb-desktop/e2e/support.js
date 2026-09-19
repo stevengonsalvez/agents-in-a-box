@@ -17,21 +17,29 @@
  */
 export async function click(selector, timeout = 60_000) {
   let last = null;
-  await browser.waitUntil(
-    async () => {
-      try {
-        const element = await $(selector);
-        if (!(await element.isExisting())) return false;
-        await element.click();
-        return true;
-      } catch (error) {
-        last = error;
-        if (!/stale element|no longer attached|not interactable/i.test(String(error))) throw error;
-        return false;
-      }
-    },
-    { timeout, timeoutMsg: () => `${selector} never took a click: ${last}` },
-  );
+  try {
+    await browser.waitUntil(
+      async () => {
+        try {
+          const element = await $(selector);
+          if (!(await element.isExisting())) return false;
+          await element.click();
+          return true;
+        } catch (error) {
+          last = error;
+          if (!/stale element|no longer attached|not interactable/i.test(String(error))) throw error;
+          return false;
+        }
+      },
+      { timeout },
+    );
+  } catch (error) {
+    // `waitUntil` takes its message as a string fixed at the call, so the
+    // last reason the click failed is only known here.
+    if (!/timed out/i.test(String(error))) throw error;
+    const why = last === null ? "the element never existed" : String(last);
+    throw new Error(`${selector} never took a click within ${timeout} ms: ${why}`);
+  }
 }
 
 /**
