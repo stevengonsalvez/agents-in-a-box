@@ -271,6 +271,7 @@ impl AppState {
             SectionId::Onboarding => self.onboarding.version(),
             SectionId::Shell => self.shell.version(),
             SectionId::AgentStatus => self.agent_status.version(),
+            SectionId::Usage => self.usage.version(),
         }
     }
 
@@ -302,6 +303,28 @@ impl AppState {
     /// the head it was told, so the next read cannot render live below it.
     pub fn agent_status_reset(&mut self) -> bool {
         self.agent_status.update(AgentStatusSection::reset)
+    }
+
+    /// Fold one `fleet/usage_summary` reply into section 21 (D3p-e). The same
+    /// counters read again move no version.
+    pub fn apply_usage_read(
+        &mut self,
+        reply: ainb_hangar_proto::fleet::FleetUsageSummaryResult,
+        received_at_ms: i64,
+    ) -> bool {
+        self.usage.update(|section| section.apply_read(reply, received_at_ms))
+    }
+
+    /// The usage read failed: section 21 keeps its numbers and says why.
+    pub fn usage_read_failed(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        self.usage.update(|section| section.mark_read_failed(reason))
+    }
+
+    /// The daemon cannot serve a usage summary: section 21 is absent, and why.
+    pub fn usage_absent(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        self.usage.update(|section| section.mark_absent(reason))
     }
 
     /// A newer Fleet revision was observed: section 20 goes stale until a read
@@ -3040,6 +3063,9 @@ pub struct AppState {
     /// Section 20: agent status from one joined daemon read (T0-section).
     pub agent_status: Versioned<AgentStatusSection>,
 
+    /// Section 21: usage, a fold of the daemon's `fleet/usage_summary` (D3p-e).
+    pub usage: Versioned<crate::app::sections::UsageSection>,
+
     /// Effects queued by the step being applied, for the host to drain. Not a
     /// section: see [`crate::app::effect::EffectOutbox`].
     effects: crate::app::effect::EffectOutbox,
@@ -3574,6 +3600,7 @@ impl AppState {
             recovery: Versioned::default(),
             mcp_pool: Versioned::default(),
             agent_status: Versioned::default(),
+            usage: Versioned::default(),
             effects: crate::app::effect::EffectOutbox::default(),
             statusline: StatuslineProbe::default(),
             host: HostOnlyState::default(),
