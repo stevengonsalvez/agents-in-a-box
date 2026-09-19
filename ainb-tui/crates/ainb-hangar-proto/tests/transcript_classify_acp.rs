@@ -349,8 +349,14 @@ fn token() -> String {
 /// body. A cut that ran before the scrub leaves the prefix plus a few body
 /// characters, which is exactly the fragment no credential shape matches.
 fn assert_no_token_piece(body: &str, what: &str) {
-    assert!(!body.contains("ghp_"), "{what}: the token's prefix survived: {body}");
-    assert!(!body.contains("QQQQ"), "{what}: the token's body survived: {body}");
+    assert!(
+        !body.contains("ghp_"),
+        "{what}: the token's prefix survived: {body}"
+    );
+    assert!(
+        !body.contains("QQQQ"),
+        "{what}: the token's body survived: {body}"
+    );
 }
 
 /// #1187: every cut the classifier makes runs after the scrub. Each fixture
@@ -424,8 +430,7 @@ fn a_token_straddling_each_cut_never_survives_it() {
 fn message(text: &str) -> Vec<(MessageKind, String)> {
     classify(&[(
         "acp.message",
-        &serde_json::json!({"kind": "acp.message", "text": text, "coalescedDeltas": 1})
-            .to_string(),
+        &serde_json::json!({"kind": "acp.message", "text": text, "coalescedDeltas": 1}).to_string(),
     )])
 }
 
@@ -467,7 +472,9 @@ fn a_private_key_across_lines_is_removed_whole() {
     );
     let lines: Vec<String> = message(&text).into_iter().map(|(_, body)| body).collect();
     assert!(
-        lines.iter().all(|line| !line.contains("MIIEow") && !line.contains("PRIVATE KEY")),
+        lines
+            .iter()
+            .all(|line| !line.contains("MIIEow") && !line.contains("PRIVATE KEY")),
         "a piece of the key survived: {lines:?}"
     );
     assert_eq!(lines.first().map(String::as_str), Some("here is the key"));
@@ -481,11 +488,21 @@ fn a_private_key_across_lines_is_removed_whole() {
 fn a_secret_inside_the_scrub_window_is_still_redacted() {
     let token = token();
 
-    let result = tool_result(&format!("{} {token} {}", "x".repeat(2000), "y".repeat(2000)));
+    let result = tool_result(&format!(
+        "{} {token} {}",
+        "x".repeat(2000),
+        "y".repeat(2000)
+    ));
     assert_no_token_piece(&result[0].1, "summary window");
 
     let block: String = (0..400)
-        .map(|i| if i == 300 { format!("line {i} {token}") } else { format!("line {i}") })
+        .map(|i| {
+            if i == 300 {
+                format!("line {i} {token}")
+            } else {
+                format!("line {i}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
     for (_, line) in message(&block) {
@@ -516,7 +533,10 @@ fn a_huge_line_is_classified_in_bounded_time_and_size() {
             }),
         ),
         ("acp.message", serde_json::json!({"text": huge})),
-        ("acp.message", serde_json::json!({"text": "line\n".repeat(8 << 20)})),
+        (
+            "acp.message",
+            serde_json::json!({"text": "line\n".repeat(8 << 20)}),
+        ),
     ];
 
     let started = std::time::Instant::now();
@@ -526,11 +546,17 @@ fn a_huge_line_is_classified_in_bounded_time_and_size() {
         .collect();
     let elapsed = started.elapsed();
 
-    assert!(out[0][0].1.chars().count() <= 84 + "tool  ".len(), "summary bounded");
+    assert!(
+        out[0][0].1.chars().count() <= 84 + "tool  ".len(),
+        "summary bounded"
+    );
     assert_eq!(out[1].len(), 1);
     assert!(out[1][0].1.chars().count() <= 8192, "body bounded");
     assert!(out[2].len() <= 512, "entries bounded: {}", out[2].len());
-    assert_eq!(out[2].last().unwrap().1, format!("… {} more lines", (8 << 20) - 511));
+    assert_eq!(
+        out[2].last().unwrap().1,
+        format!("… {} more lines", (8 << 20) - 511)
+    );
     assert!(
         elapsed < std::time::Duration::from_secs(10),
         "a 32 MiB line took {elapsed:?}: the scrub is not windowed"
@@ -542,7 +568,11 @@ fn a_huge_line_is_classified_in_bounded_time_and_size() {
 /// space, so a token past it is only partly scrubbed yet lands inside the cut.
 #[test]
 fn whitespace_before_a_token_cannot_push_it_out_of_the_scrub_window() {
-    let result = tool_result(&format!("{} github_pat_{}", " ".repeat(4020), "a".repeat(80)));
+    let result = tool_result(&format!(
+        "{} github_pat_{}",
+        " ".repeat(4020),
+        "a".repeat(80)
+    ));
     assert_eq!(result.len(), 1, "one result line: {result:?}");
     assert!(
         !result[0].1.contains("github_pat_"),
