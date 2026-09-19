@@ -117,13 +117,17 @@ impl Homes {
     }
 }
 
-/// Mark the boot import finished, as `import_sessions_if_needed` does.
+/// Bring the table up to date as a daemon boot does: the one-time import,
+/// then a reconcile pass. P6e: `import_complete` needs both.
 fn complete_import(hangar: &FleetHangar, homes: &Homes) {
     let path = homes.sessions_json();
     hangar.block_on(async {
         ainb_hangar_daemon::session_import::import_sessions_if_needed(hangar.pool(), &path)
             .await
             .expect("boot import");
+        ainb_hangar_daemon::session_import::reconcile_sessions(hangar.pool(), &path)
+            .await
+            .expect("boot reconcile");
     });
 }
 
