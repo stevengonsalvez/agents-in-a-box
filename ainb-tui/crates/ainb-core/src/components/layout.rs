@@ -681,6 +681,8 @@ impl LayoutComponent {
             // 1-based pane-local SGR coordinates (see encode_mouse_event).
             ui.embed_pane_area = Some(inner);
             self.tmux_preview.render_interactive(frame, area, state);
+            // No strip is painted, so no label can be clicked.
+            ui.sessions_pane.set_tab_strip(Vec::new());
         } else if active_tab == crate::components::session_tabs::SessionTab::Preview {
             // The observer is not a branch of its own: it is what `preview`
             // SHOWS when one is running, a live mirror in place of the
@@ -719,8 +721,27 @@ impl LayoutComponent {
             // nothing the pane cannot do, and without it the operator loses the
             // only affordance saying the other tabs exist.
             Self::render_tab_strip(frame, content_chunks[1], state, active_tab);
+            // Top and bottom borders only, so the title starts at the pane's
+            // first column.
+            let area = content_chunks[1];
+            ui.sessions_pane.set_tab_strip(crate::components::session_tabs::strip_hits(
+                state,
+                Rect::new(area.x, area.y, area.width, 1),
+            ));
         } else {
             self.render_session_tab(frame, content_chunks[1], state, active_tab);
+            // All four borders, so the title starts one column in and stops one
+            // column short, as ratatui places it.
+            let area = content_chunks[1];
+            ui.sessions_pane.set_tab_strip(crate::components::session_tabs::strip_hits(
+                state,
+                Rect::new(
+                    area.x.saturating_add(1),
+                    area.y,
+                    area.width.saturating_sub(2),
+                    1,
+                ),
+            ));
         }
 
         // Render bottom logs area (traditional logs viewer)
