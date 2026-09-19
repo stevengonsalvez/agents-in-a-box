@@ -6,6 +6,10 @@
 //!              └─▶ anything else ────────────────▶ File   ──▶ sessions.json
 //! ```
 //!
+//! P6d lands dark: no production daemon advertises the capability, so the
+//! first two tests pin that every CLI process stays on the file. The rest
+//! switch the capability on through the daemon's test-only switch.
+//!
 //! Every daemon test here drives the real RPC handlers through a real socket
 //! (`FleetHangar`), so deleting a handler fails them. The file is checked byte
 //! for byte after every daemon-mode write: the table is authoritative and the
@@ -95,8 +99,10 @@ impl Homes {
         fs::read(self.sessions_json()).ok()
     }
 
-    /// Start a real daemon socket on the hangar home.
+    /// Start a real daemon socket on the hangar home, with the dark sessions
+    /// capability switched on so the daemon path can be driven.
     fn start_daemon(&self) -> FleetHangar {
+        ainb_hangar_daemon::rpc::auth::advertise_workspace_sessions_for_tests(true);
         FleetHangar::start(&self.hangar)
     }
 
@@ -132,6 +138,48 @@ fn rt() -> tokio::runtime::Runtime {
         .enable_all()
         .build()
         .expect("client runtime")
+}
+
+/// Dark: a daemon with a completed import that does not advertise the
+/// capability (every production daemon in P6d) leaves the process on the file.
+#[test]
+fn a_dark_daemon_leaves_the_cli_on_the_file() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let homes = Homes::new();
+    let meta = make_session("sess-file-1", "file-ws");
+    homes.write_file_store(&[&meta]);
+    let hangar = homes.start_daemon();
+    complete_import(&hangar, &homes);
+    ainb_hangar_daemon::rpc::auth::advertise_workspace_sessions_for_tests(false);
+    let (socket, token) = homes.daemon_parts();
+
+    let rt = rt();
+    let source = rt.block_on(SessionSource::resolve_at(socket, token));
+    assert!(matches!(source, SessionSource::File), "{source:?}");
+    let run_meta = make_session("sess-run-1", "run-ws");
+    rt.block_on(source.mutate(|s| s.upsert(run_meta.clone()))).expect("file write");
+    let store = SessionStore::load();
+    assert!(
+        store.sessions.contains_key("sess-run-1"),
+        "the run landed in the file"
+    );
+    assert_eq!(
+        table(&hangar).len(),
+        1,
+        "the table holds only the imported row"
+    );
+}
+
+/// Dark: the production resolver answers the file even with a live daemon on
+/// the hangar home, because this build does not advertise the capability.
+#[test]
+fn the_production_resolver_is_the_file_while_dark() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let homes = Homes::new();
+    let _hangar = homes.start_daemon();
+    let _hangar_home = EnvGuard::set("AINB_HANGAR_HOME", &homes.hangar);
+    let source = rt().block_on(SessionSource::resolve());
+    assert!(matches!(source, SessionSource::File), "{source:?}");
 }
 
 /// No daemon at all: the file is the source and is read as-is.
