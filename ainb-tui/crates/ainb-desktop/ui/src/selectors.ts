@@ -4,6 +4,7 @@
 // rewrote. `selectors.test.ts` holds every entry to that.
 
 import type { AttentionKind, HostId } from "../../../ainb-app/bindings/AppState";
+import { elsewhereCount } from "./board.ts";
 import { idleCount, ringCount } from "./sessions.ts";
 import type { FrameStore } from "./store.ts";
 
@@ -24,4 +25,6 @@ export const ROOT_SELECTORS = {
   workspacesLoading: (store, host) =>
     host !== undefined && store.section(host, "workspace_load")?.is_loading_workspaces === true,
   hostCount: (store) => Object.keys(store.state.hosts).length,
+  /** Open rows no session in this window can show, as the host counted them. */
+  attentionElsewhere: (store, host) => (host === undefined ? 0 : elsewhereCount(store.section(host, "fleet"))),
 } satisfies Record<string, RootSelector>;

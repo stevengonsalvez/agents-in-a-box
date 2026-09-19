@@ -3,7 +3,12 @@
 // a section read but not subscribed, or subscribed with neither a reader nor
 // a place in `AHEAD_OF_READERS`, fails it (#1132).
 
-import type { HostId, SessionsView_Serialize } from "../../../ainb-app/bindings/AppState";
+import type {
+  AgentStatusView,
+  FleetView_Serialize,
+  HostId,
+  SessionsView_Serialize,
+} from "../../../ainb-app/bindings/AppState";
 import type { FrameStore, SectionName } from "./store.ts";
 
 /**
@@ -22,12 +27,22 @@ export const SUBSCRIBED: SectionName[] = [
 ];
 
 /**
- * Subscribed ahead of their readers: the attention list and agent cards in
- * D2, settings in D3. A section leaves this list when its reader lands.
+ * Subscribed ahead of their readers: settings in D3. A section leaves this
+ * list when its reader lands, as Fleet and agent status did with the board.
  */
-export const AHEAD_OF_READERS: SectionName[] = ["shell", "tmux", "fleet", "config", "agent_status"];
+export const AHEAD_OF_READERS: SectionName[] = ["shell", "tmux", "config"];
 
 /** The sidebar's rows and the tab titles: the host's Sessions section. */
 export function shellSessions(store: FrameStore, host: HostId | undefined): SessionsView_Serialize | undefined {
   return host === undefined ? undefined : store.section(host, "sessions");
+}
+
+/** The board's cards and their health: the host's agent status section. */
+export function shellAgentStatus(store: FrameStore, host: HostId | undefined): AgentStatusView | undefined {
+  return host === undefined ? undefined : store.section(host, "agent_status");
+}
+
+/** The board's lines, the attention list and the answer banner: Fleet. */
+export function shellFleet(store: FrameStore, host: HostId | undefined): FleetView_Serialize | undefined {
+  return host === undefined ? undefined : store.section(host, "fleet");
 }
