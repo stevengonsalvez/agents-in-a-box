@@ -487,9 +487,9 @@ impl SessionSource {
 /// Apply the row changes to `sessions.json` under the caller's lock: remove
 /// every row of a removed session id, upsert every written row by its tmux
 /// key (dropping the row an id held under an old tmux name). Rows the change
-/// does not touch, and fields this build does not model, are left as they
-/// are. Returns the file's bytes before the change (`None`: no file) for
-/// [`restore_file`].
+/// does not touch are left as they are. Goes through `SessionStore`'s own
+/// load and save, the same typed path every file writer uses. Returns the
+/// file's bytes before the change (`None`: no file) for [`restore_file`].
 fn write_file_rows(
     removed: &[Uuid],
     written: &[&WorkspaceSessionEntry],
@@ -500,34 +500,16 @@ fn write_file_rows(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
-    let mut file: serde_json::Value = before
-        .as_deref()
-        .and_then(|bytes| serde_json::from_slice(bytes).ok())
-        .unwrap_or_else(|| serde_json::json!({ "sessions": {} }));
-    if !file.get("sessions").is_some_and(serde_json::Value::is_object) {
-        file = serde_json::json!({ "sessions": {} });
+    let mut file = SessionStore::load();
+    for id in removed {
+        file.remove_by_session_id(*id);
     }
-    let Some(rows) = file.get_mut("sessions").and_then(serde_json::Value::as_object_mut) else {
-        return Err(std::io::Error::other(
-            "sessions.json has no sessions object",
-        ));
-    };
-    let id_of = |row: &serde_json::Value| {
-        row.get("session_id").and_then(serde_json::Value::as_str).map(str::to_string)
-    };
-    let gone: Vec<String> = removed.iter().map(Uuid::to_string).collect();
-    rows.retain(|_, row| id_of(row).is_none_or(|id| !gone.contains(&id)));
     for entry in written {
         let meta = entry_to_metadata(entry).map_err(std::io::Error::other)?;
-        let id = meta.session_id.to_string();
-        rows.retain(|key, row| {
-            key == &meta.tmux_session_name || id_of(row).as_deref() != Some(&id)
-        });
-        let value = serde_json::to_value(&meta).map_err(std::io::Error::other)?;
-        rows.insert(meta.tmux_session_name.clone(), value);
+        file.remove_by_session_id(meta.session_id);
+        file.upsert(meta);
     }
-    let body = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
-    crate::config::write_atomic(&path, &body)?;
+    file.save()?;
     Ok(before)
 }
 
