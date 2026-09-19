@@ -15,7 +15,7 @@
 //! the guard at the bottom refuses a release build that carries them.
 
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use ainb_app::cli::update::{
     DesktopBundle, RELEASE_DOWNLOAD_ROOT, ReleaseManifest, ReleaseState, UpdateAvailability,
@@ -222,7 +222,7 @@ pub enum Check {
 
 /// The updater over one source, one key and one home.
 pub struct Updater {
-    source: Rc<dyn Source>,
+    source: Arc<dyn Source + Send + Sync>,
     verify: Verify,
     settings: Settings,
     home: PathBuf,
@@ -233,7 +233,7 @@ impl Updater {
     #[must_use]
     pub fn new(home: PathBuf) -> Self {
         Self {
-            source: Rc::new(HttpSource),
+            source: Arc::new(HttpSource),
             verify: Verify::Pinned,
             settings: Settings::load(&home),
             home,
@@ -244,7 +244,7 @@ impl Updater {
     #[cfg(debug_assertions)]
     #[must_use]
     pub fn with_key(
-        source: Rc<dyn Source>,
+        source: Arc<dyn Source + Send + Sync>,
         public_key_b64: &str,
         settings: Settings,
         home: PathBuf,
