@@ -79,7 +79,9 @@ pub struct InboxReader {
 }
 
 impl InboxReader {
-    /// Start the task over `dialer`. Must be called inside a tokio runtime.
+    /// Start the task over `dialer`, on the tokio runtime that is current:
+    /// the TUI loop runs in one, and the desktop enters the handle it was
+    /// handed before calling this, since its subscribe command has none.
     #[must_use]
     pub fn spawn(dialer: Dialer) -> Self {
         Self::spawn_with(read_through(dialer), Timing::default())

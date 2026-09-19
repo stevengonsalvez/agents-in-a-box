@@ -225,7 +225,8 @@ impl<S: FrameSink> DesktopHost<S> {
 
     /// Start or stop the inbox reader to match `subscription`: a renderer
     /// that reads `inbox` gets a reader, one that stops reading it stops the
-    /// reads. Must be called inside a tokio runtime to start one.
+    /// reads. The reader starts on the runtime the host was handed
+    /// ([`Self::on_runtime`]); with none, the section is absent and says so.
     fn sync_inbox_reader(&mut self, subscription: &Subscription) {
         let wanted = subscription.contains(SectionId::Inbox);
         match (wanted, self.inbox.is_some()) {

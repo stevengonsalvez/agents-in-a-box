@@ -409,6 +409,7 @@ impl KeyContext {
             "skills" => Self::screen("skills"),
             "skill_manager" => Self::screen("skill_manager"),
             "daemons" => Self::screen("daemons"),
+            "inbox" => Self::screen("inbox"),
             "notifications.visible" => Self::Screen("notifications", SubContext::Named("visible")),
             "help.text" => Self::Screen("help", SubContext::Named("text")),
             "plugin.owned" => Self::Screen("plugin", SubContext::Named("owned")),
@@ -1366,6 +1367,7 @@ const fn app_event_writes_outside_ainb(event: &AppEvent) -> bool {
         | AppEvent::SkillManagerSourceRemoveCancel
         | AppEvent::GoToRecovery
         | AppEvent::GoToDaemons
+        | AppEvent::GoToInbox
         | AppEvent::PanelBack
         | AppEvent::GoToHangar
         | AppEvent::ConfigBack
