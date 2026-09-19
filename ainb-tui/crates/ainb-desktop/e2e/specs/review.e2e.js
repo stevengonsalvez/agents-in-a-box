@@ -87,20 +87,14 @@ describe("reviewing from the window", () => {
     // and another spec in this world has typed in it before now: typed keys
     // would land after whatever it still held.
     await query.setValue("session_list.git");
-    await $('.palette-row[data-row="command:session_list.git"]').waitForExist({ timeout: 30_000 });
-    // Enter rather than a click on the row: the palette rebuilds every row on
-    // every frame the host sends, and frames arrive faster than a driver can
-    // find an element and click it, so a click on a row of this list loses a
-    // race no person loses. The highlighted row is read back first, so the
-    // journey still proves which row ran.
-    await browser.waitUntil(
-      async () =>
-        (await browser.execute(
-          () => document.querySelector('.palette-row[aria-selected="true"]')?.getAttribute("data-row") ?? "",
-        )) === "command:session_list.git",
-      { timeout: 30_000, timeoutMsg: "the palette never put session_list.git under the cursor" },
-    );
-    await browser.keys(["Enter"]);
+    // Clicked the way a person clicks it: found once, then clicked, with no
+    // retry on a stale element. The palette keeps an unchanged row's node
+    // across the frames the host keeps sending (#1267), so the row found is
+    // still the row on screen when the click lands. A palette that rebuilt its
+    // rows again would fail here with a stale element, not pass on a retry.
+    const row = await $('.palette-row[data-row="command:session_list.git"]');
+    await row.waitForExist({ timeout: 30_000 });
+    await row.click();
 
     // The review tab, and the first row drawn: the wall clock across this is a
     // real window's first render of a diff at the bound, which is the figure
