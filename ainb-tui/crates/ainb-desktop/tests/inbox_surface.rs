@@ -67,11 +67,10 @@ fn the_page_opens_the_inbox_sweeps_it_read_and_closes_back() {
         "a second press while one is in flight sends nothing: {again:?}"
     );
 
-    // CLOSE_INBOX in inbox.ts.
+    // CLOSE_INBOX in inbox.ts: back to where it opened from, then on to the
+    // session list the window sits on, as closing settings does.
     let _ = send(&mut host, "inbox.back");
-    assert_eq!(
-        host.state().shell.current_screen,
-        "home",
-        "back to where it opened from"
-    );
+    assert_eq!(host.state().shell.current_screen, "home");
+    let _ = send(&mut host, "home.sessions");
+    assert_eq!(host.state().shell.current_screen, "session_list");
 }
