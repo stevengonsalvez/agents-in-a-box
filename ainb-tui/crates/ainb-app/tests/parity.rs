@@ -23,7 +23,7 @@ fn every_parity_fixture_builds_the_screen_it_names() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
     let fixtures = ParityFixture::all_in(&dir);
     assert!(
-        fixtures.len() >= 13,
+        fixtures.len() >= 14,
         "expected a fixture per screen, found {}",
         fixtures.len()
     );
