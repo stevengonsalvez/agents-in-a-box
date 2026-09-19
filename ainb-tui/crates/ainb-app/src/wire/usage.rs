@@ -34,6 +34,10 @@ pub const USAGE_MAX_NAME_CHARS: usize = 120;
 /// The most UTF-8 bytes the detail carries once scrubbed: the verb's own cap.
 pub const USAGE_DETAIL_MAX_BYTES: usize = ainb_hangar_proto::fleet::FLEET_USAGE_DETAIL_MAX_BYTES;
 
+/// The most characters an absent or failure reason carries, with its cut
+/// marker after: the reason cap the inbox section uses.
+pub const USAGE_REASON_MAX_CHARS: usize = crate::app::sections::MAX_INBOX_REASON_CHARS;
+
 /// How far past a cut the section keeps text, so the scrub sees a credential
 /// that straddles the cut whole.
 pub const USAGE_SCRUB_WINDOW: usize = 256;
