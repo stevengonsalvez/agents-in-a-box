@@ -72,6 +72,15 @@ pub fn execute<'t>(
             spawn_inbox_mark_all_read();
             Work::Done(Vec::new())
         }
+        // P6e: the session store is the one store a write can reach the
+        // hangar daemon for, and a daemon that is not ready holds a write for
+        // its bounded wait. That must not be on the tick: it goes to a worker
+        // and its failure comes back as a deferred report. Every other store
+        // is a local file write and stays here.
+        Effect::Persist(store) if store.store_id() == "session_store" => {
+            spawn_session_store_write(store);
+            Work::Done(Vec::new())
+        }
         Effect::Persist(store) => Work::Done(match crate::config::persist::write(&store) {
             Ok(()) => Vec::new(),
             Err(error) => vec![reports::persist_failed(store.store_id(), &error)],
@@ -232,6 +241,27 @@ fn spawn_inbox_mark_all_read() {
             after: None,
         };
         let _ = tx.send(reports::inbox_mark_all_read_finished(&outcome));
+    }
+}
+
+/// Write the session store off the tick, reporting a failure the way the
+/// synchronous arm would (P6e).
+fn spawn_session_store_write(store: ainb_app::app::Persist) {
+    let tx = deferred().0.clone();
+    let store_id = store.store_id();
+    let spawned = std::thread::Builder::new().name("ainb-session-store-write".into()).spawn({
+        let tx = tx.clone();
+        move || {
+            if let Err(error) = crate::config::persist::write(&store) {
+                let _ = tx.send(reports::persist_failed(store_id, &error));
+            }
+        }
+    });
+    if let Err(error) = spawned {
+        let _ = tx.send(reports::persist_failed(
+            store_id,
+            &format!("the worker did not start: {error}"),
+        ));
     }
 }
 
