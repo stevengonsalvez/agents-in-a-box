@@ -502,18 +502,81 @@ macro_rules! view {
     };
 }
 
-view!(SessionsView<'a> for SessionsSection {
-    workspaces: Vec<crate::models::Workspace>,
-    selected_workspace_index: Option<usize>,
-    selected_session_index: Option<usize>,
-    shell_selected: bool,
-    selected_sessions: std::collections::HashSet<uuid::Uuid>,
-    expand_all_workspaces: bool,
-    session_filter: crate::app::state::SessionFilter,
-    attached_session_id: Option<uuid::Uuid>,
-    favorite_workspace_paths: std::collections::HashSet<std::path::PathBuf>,
-    hidden_sessions: std::collections::HashSet<uuid::Uuid>,
-});
+/// The session list as a renderer draws it (#1180): every workspace, with only
+/// the rows the session filter lets through, and the selected row by id.
+///
+/// The frame carries the rows a surface draws, not the filter: a renderer
+/// never holds its own copy of the rule, and never a hidden set beside the
+/// list. The section's `selected_session_index` is an index into its full list,
+/// so it stays off the wire and the selection travels as `selected_session_id`.
+#[derive(Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+// Field names mirror the section's, prefixes and all, so the frame keys match
+// the Rust fields.
+#[allow(clippy::struct_field_names)]
+struct SessionsView<'a> {
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<crate::models::Workspace>))]
+    workspaces: VisibleWorkspaces<'a>,
+    selected_workspace_index: &'a Option<usize>,
+    selected_session_id: Option<uuid::Uuid>,
+    shell_selected: &'a bool,
+    selected_sessions: &'a std::collections::HashSet<uuid::Uuid>,
+    expand_all_workspaces: &'a bool,
+    session_filter: &'a crate::app::state::SessionFilter,
+    attached_session_id: &'a Option<uuid::Uuid>,
+    favorite_workspace_paths: &'a std::collections::HashSet<std::path::PathBuf>,
+}
+
+impl<'a> From<&'a SessionsSection> for SessionsView<'a> {
+    fn from(section: &'a SessionsSection) -> Self {
+        let selected_session_id = section
+            .selected_workspace_index
+            .and_then(|workspace| section.workspaces.get(workspace))
+            .zip(section.selected_session_index)
+            .and_then(|(workspace, session)| workspace.sessions.get(session))
+            .map(|session| session.id);
+        Self {
+            workspaces: VisibleWorkspaces {
+                workspaces: &section.workspaces,
+                filter: section.session_filter,
+            },
+            selected_workspace_index: &section.selected_workspace_index,
+            selected_session_id,
+            shell_selected: &section.shell_selected,
+            selected_sessions: &section.selected_sessions,
+            expand_all_workspaces: &section.expand_all_workspaces,
+            session_filter: &section.session_filter,
+            attached_session_id: &section.attached_session_id,
+            favorite_workspace_paths: &section.favorite_workspace_paths,
+        }
+    }
+}
+
+/// The workspaces with only the session rows `filter` shows, in list order.
+///
+/// A workspace whose rows all pass is serialised as it stands; only one that
+/// hides a row is copied without it.
+struct VisibleWorkspaces<'a> {
+    workspaces: &'a [crate::models::Workspace],
+    filter: crate::app::state::SessionFilter,
+}
+
+impl Serialize for VisibleWorkspaces<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.workspaces.len()))?;
+        for workspace in self.workspaces {
+            if workspace.sessions.iter().all(|session| self.filter.passes(session)) {
+                seq.serialize_element(workspace)?;
+            } else {
+                let mut visible = workspace.clone();
+                visible.sessions.retain(|session| self.filter.passes(session));
+                seq.serialize_element(&visible)?;
+            }
+        }
+        seq.end()
+    }
+}
 
 view!(SessionLabelsView<'a> for SessionLabelsSection {
     session_label_store: crate::config::SessionLabelStore,
