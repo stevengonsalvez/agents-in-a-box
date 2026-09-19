@@ -129,12 +129,27 @@ describe("reviewing from the window", () => {
       timeoutMsg: `the frame never named ${wanted} as the open file`,
     });
 
+    // The first figure is the whole path: the reducer projecting the section,
+    // the frame crossing the channel, and the window building the DOM. This
+    // second one is the window alone, with the frame already in its store: the
+    // tab is left and taken again, so the components mount over a section that
+    // has not changed. The gap between the two is what #1221 has to split.
+    await $(".board-tab .tab-title").click();
+    await $(".board").waitForExist({ timeout: 60_000 });
+    const remountStarted = Date.now();
+    await $(".review-tab .tab-title").click();
+    await browser.waitUntil(async () => (await $$(".review-row")).length > 0, {
+      timeout: 120_000,
+      timeoutMsg: "the review tab drew no rows the second time",
+    });
+    const remountMs = Date.now() - remountStarted;
+
     writeFileSync(
       REPORT,
-      `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, drawnMs }, null, 2)}\n`,
+      `${JSON.stringify({ files: FILES, lines: LINES, bytes, rows, nodes, drawnMs, remountMs }, null, 2)}\n`,
     );
     console.log(
-      `review at ${bytes} bytes: ${rows} rows, ${nodes} nodes, first render ${drawnMs} ms, cut banner ${JSON.stringify(cut)}`,
+      `review at ${bytes} bytes: ${rows} rows, ${nodes} nodes, first render ${drawnMs} ms, redraw ${remountMs} ms, cut banner ${JSON.stringify(cut)}`,
     );
   });
 });
