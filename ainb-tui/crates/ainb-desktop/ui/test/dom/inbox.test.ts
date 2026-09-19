@@ -40,6 +40,9 @@ function frame(over: Partial<InboxView_Serialize> = {}): InboxView_Serialize {
     rows_cut: 0,
     summaries_cut: 0,
     received_at_ms: READ_AT,
+    // The reducer's bounded scroll, which the terminal's screen draws from
+    // (#1261); the page draws every row the frame carries.
+    scroll: 0,
     ...over,
   };
 }
