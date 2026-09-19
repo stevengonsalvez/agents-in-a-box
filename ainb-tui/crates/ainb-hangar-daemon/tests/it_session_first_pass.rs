@@ -124,6 +124,31 @@ fn refused<T: std::fmt::Debug>(answer: Result<T, DaemonError>) -> Held {
     }
 }
 
+/// Dial the daemon and complete `auth/hello` while the test holds the lock,
+/// failing if that takes longer than [`opens_within`] from `spawned`.
+///
+/// `connections_list` is not a session RPC, so it is not gated, and every
+/// call dials and says hello first.
+async fn connect_while_locked(hangar: &Path, spawned: Instant) -> DaemonClient {
+    let socket = ainb_hangar_client::socket_path_in(hangar);
+    let token_file = ainb_hangar_proto::auth::token_file_in(hangar);
+    loop {
+        if socket.exists() && token_file.exists() {
+            let token = std::fs::read_to_string(&token_file).unwrap().trim().to_string();
+            let client = DaemonClient::with_parts(socket.clone(), token);
+            if client.connections_list().await.is_ok() {
+                return client;
+            }
+        }
+        assert!(
+            spawned.elapsed() < opens_within(),
+            "connect and hello waited on the held lock: not done after {:?}",
+            spawned.elapsed()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn no_session_rpc_touches_the_table_before_the_first_pass() {
     let home = tempfile::tempdir().unwrap();
@@ -160,26 +185,7 @@ async fn no_session_rpc_touches_the_table_before_the_first_pass() {
             .expect("spawn ainb-hangar-daemon"),
     );
 
-    // The socket opens and `auth/hello` completes at once, while the lock
-    // is still held: `connections_list` is not a session RPC, so it is not
-    // gated, and every call dials and says hello first.
-    let socket = ainb_hangar_client::socket_path_in(&hangar);
-    let token_file = ainb_hangar_proto::auth::token_file_in(&hangar);
-    let client = loop {
-        if socket.exists() && token_file.exists() {
-            let token = std::fs::read_to_string(&token_file).unwrap().trim().to_string();
-            let client = DaemonClient::with_parts(socket.clone(), token);
-            if client.connections_list().await.is_ok() {
-                break client;
-            }
-        }
-        assert!(
-            spawned.elapsed() < opens_within(),
-            "connect and hello waited on the held lock: not done after {:?}",
-            spawned.elapsed()
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
+    let client = connect_while_locked(&hangar, spawned).await;
 
     // The boot pass is stuck on the lock this test holds. Every session RPC
     // waits for it, bounded, then refuses rather than act on the stale
