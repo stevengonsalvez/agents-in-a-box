@@ -168,11 +168,18 @@ desktop updater and runs when it ships.
    already ran, and which version that one reports.
    Until the settings page carries an updates section, the updater's surface
    is the application menu on macOS (Check for Updates, Install Update and
-   Restart, Roll Back Update) and the channel is the file
-   `desktop-updater.json` in the hangar home (`~/.agents-in-a-box` unless
+   Restart, Roll Back Update, Remove Previous Version) and the channel is the
+   file `desktop-updater.json` in the hangar home (`~/.agents-in-a-box` unless
    `AINB_HANGAR_HOME` says otherwise): `{"channel":"stable"}`,
    `{"channel":"prerelease","tag":"v<X>-rc1"}` or `{"channel":"off"}`, read
-   at each check. Every outcome arrives as a toast in the window.
+   at each check. The channel and the tag are set in that file or from a
+   terminal only; the window can check, install, roll back and remove the
+   previous version, never choose where updates come from. A file that does
+   not parse declines every check with the reason until it is fixed. Every
+   outcome arrives as a toast in the window, and an install shows its phase
+   (downloading with progress, verifying, installing) while it runs. The
+   previous version stays beside the app as the one rollback slot until the
+   next installed update replaces it or Remove Previous Version is chosen.
 4. Set the update channel to `prerelease` with the tag `v<X>-rc1` (the file
    above, or the settings section once it exists). Check for Updates. It
    reports current.
