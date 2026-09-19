@@ -397,8 +397,13 @@ pub fn daemon_action_finished(report: &DaemonActionReport) -> Intent {
 
 /// Report how a "mark all read" sweep of the inbox ended.
 #[must_use]
-pub fn inbox_mark_all_read_finished(outcome: &crate::fleet::inbox_write::MarkAllReadOutcome) -> Intent {
-    command(ids::INBOX_MARK_ALL_READ_FINISHED, json!({ "outcome": outcome }))
+pub fn inbox_mark_all_read_finished(
+    outcome: &crate::fleet::inbox_write::MarkAllReadOutcome,
+) -> Intent {
+    command(
+        ids::INBOX_MARK_ALL_READ_FINISHED,
+        json!({ "outcome": outcome }),
+    )
 }
 
 /// Report that the host could not write the store `store_id` names
