@@ -122,3 +122,54 @@ impl<S: FrameSink> Shell<S> {
         self.core().host.set_host(host_id)
     }
 }
+
+/// One column per agent state: the most entries a board telemetry line
+/// carries.
+pub const BOARD_COLUMNS: usize = 5;
+
+/// The board's columns as the `renderer applied` log line prints them,
+/// `state=cards` each, and how many entries past [`BOARD_COLUMNS`] were
+/// dropped.
+///
+/// Five states, so a longer list is a renderer that drew no board it could
+/// name. The extra entries are not printed, and the count says they were
+/// there: a proof reading the line would otherwise take that renderer for one
+/// that drew five columns (#1194).
+#[must_use]
+pub fn board_columns(board: &[(ainb_hangar_proto::agent_status::AgentState, usize)]) -> (Vec<String>, usize) {
+    let columns = board
+        .iter()
+        .take(BOARD_COLUMNS)
+        .map(|(state, cards)| format!("{}={cards}", state.as_str()))
+        .collect();
+    (columns, board.len().saturating_sub(BOARD_COLUMNS))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ainb_hangar_proto::agent_status::AgentState;
+
+    #[test]
+    fn a_board_line_holds_one_entry_per_state_and_counts_the_rest() {
+        let five = [
+            (AgentState::Working, 1),
+            (AgentState::Waiting, 2),
+            (AgentState::Idle, 0),
+            (AgentState::Exited, 3),
+            (AgentState::Unverifiable, 4),
+        ];
+        let (columns, dropped) = board_columns(&five);
+        assert_eq!(
+            columns,
+            ["working=1", "waiting=2", "idle=0", "exited=3", "unverifiable=4"]
+        );
+        assert_eq!(dropped, 0);
+
+        let mut over = five.to_vec();
+        over.extend([(AgentState::Waiting, 9), (AgentState::Idle, 9)]);
+        let (columns, dropped) = board_columns(&over);
+        assert_eq!(columns.len(), BOARD_COLUMNS, "the line stays bounded");
+        assert_eq!(dropped, 2, "and the drop is counted, not silent");
+    }
+}
