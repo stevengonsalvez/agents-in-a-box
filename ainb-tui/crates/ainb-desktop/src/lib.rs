@@ -8,6 +8,10 @@
 //!   failure report.
 //! - [`intent::RendererIntent`] is what the webview may send.
 //! - [`clipboard`] holds the size rule a copy and a paste share.
+//! - [`setup`] is the desktop-native path for the onboarding writes the
+//!   webview may not run (#1175), behind a confirmation the shell owns.
+//! - [`daemons_panel`] keeps the daemons collector alive while the settings
+//!   page draws it.
 //! - [`shell::Shell`] locks the host and the executor together for the
 //!   window's commands and tick.
 //! - [`sidecar`] finds or starts the bundled hangar daemon and holds this
@@ -21,9 +25,11 @@ pub mod agent_status;
 #[cfg(feature = "typescript-bindings")]
 pub mod bindings;
 pub mod clipboard;
+pub mod daemons_panel;
 pub mod executor;
 pub mod host;
 pub mod intent;
+pub mod setup;
 pub mod shell;
 pub mod sidecar;
 pub mod terminal;
