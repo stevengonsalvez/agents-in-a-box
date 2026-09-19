@@ -41,8 +41,10 @@ fn fast() -> Timing {
     Timing {
         ready_every: Duration::from_secs(60),
         scanning_every: Duration::from_millis(40),
-        backoff_initial: Duration::from_millis(20),
-        backoff_max: Duration::from_millis(80),
+        // Long beside the 10 ms drain, so the failure is seen before the
+        // retry's read replaces it.
+        backoff_initial: Duration::from_millis(150),
+        backoff_max: Duration::from_millis(300),
     }
 }
 
