@@ -3848,16 +3848,12 @@ impl EventHandler {
             }
             AppEvent::GitViewNextCommit => {
                 if let Some(ref mut git_state) = state.git_view.git_view_state {
-                    if git_state.selected_commit_index < git_state.commits.len().saturating_sub(1) {
-                        git_state.selected_commit_index += 1;
-                    }
+                    git_state.move_commit_selection(1);
                 }
             }
             AppEvent::GitViewPrevCommit => {
                 if let Some(ref mut git_state) = state.git_view.git_view_state {
-                    if git_state.selected_commit_index > 0 {
-                        git_state.selected_commit_index -= 1;
-                    }
+                    git_state.move_commit_selection(-1);
                 }
             }
             AppEvent::GitViewShowCommitDiff => {
