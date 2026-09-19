@@ -19,7 +19,12 @@ import { cleanUpBeforeRun } from "./cleanup.js";
 
 export const config = {
   runner: "local",
-  specs: ["./specs/journey.e2e.js", "./specs/answer.e2e.js", "./specs/review.e2e.js"],
+  specs: [
+    "./specs/journey.e2e.js",
+    "./specs/answer.e2e.js",
+    "./specs/review.e2e.js",
+    "./specs/commits.e2e.js",
+  ],
   maxInstances: 1,
   framework: "mocha",
   reporters: ["spec"],
