@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ConfigView_Serialize, HangarView_Serialize } from "../../../ainb-app/bindings/AppState";
-import { settingsLines } from "./settings.ts";
+import { editRefusal, settingsLines } from "./settings.ts";
 
 const PARITY_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../ainb-app/tests/parity");
 
@@ -71,4 +71,16 @@ test("the check fails when one fact is deleted from the rendered output", () => 
   const deleted = expected[expected.length - 1]!;
   const mutated = lines.map((line) => line.split(deleted).join(""));
   assert.deepEqual(missingFacts(mutated, expected), [deleted]);
+});
+
+test("the page's edit policy is the reducer's, row for row", () => {
+  // `ainb-app/tests/config_renderer_edits.rs` writes one verdict per registry
+  // row; the page's copy (#1224) must give the same verdict for every one.
+  const verdicts = readFileSync(join(PARITY_DIR, "../fixtures/renderer_editable_rows.txt"), "utf8")
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => line.split(" ") as [string, string]);
+  assert.ok(verdicts.length > 100, "the fixture lists the registry");
+  const wrong = verdicts.filter(([verdict, key]) => (editRefusal(key) === null) !== (verdict === "allow"));
+  assert.deepEqual(wrong, [], "rows where the page and the reducer disagree");
 });
