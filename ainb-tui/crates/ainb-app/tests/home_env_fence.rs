@@ -6,8 +6,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// The two variables that decide where this crate believes home is.
-const OWNED: [&str; 2] = ["HOME", "AINB_HOME"];
+/// The variable that decides where this crate believes home is.
+///
+/// `AINB_HOME` is not on the list, though the guard sets it too: nineteen unit
+/// tests in `session_manager` point it at a directory of their own and put it
+/// back, and they do it holding the crate's one environment lock, so they are
+/// ordered rather than racing. Moving them onto the guard is worth doing and is
+/// not this change.
+const OWNED: [&str; 1] = ["HOME"];
 
 /// The only files allowed to write them: the guard, and this fence, which has to
 /// name the calls it forbids in order to find them. Nothing under `src` is on
@@ -73,4 +79,40 @@ fn rust_files(dir: &Path) -> Box<dyn Iterator<Item = PathBuf>> {
             .into_iter()
             .chain(directories.into_iter().flat_map(|path| rust_files(&path))),
     )
+}
+
+/// The lock is the crate's, and there is one of it.
+///
+/// A module that declares its own `Mutex` around `setenv` orders its own tests
+/// and nothing else: two locks around one environment still let two threads
+/// write it at the same time, which is the race both were written to stop.
+#[test]
+fn no_module_declares_an_environment_lock_of_its_own() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut declarations = Vec::new();
+
+    for file in rust_files(&root.join("src")).chain(rust_files(&root.join("tests"))) {
+        let relative = file
+            .strip_prefix(&root)
+            .expect("every walked file sits under the crate")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative == "src/env_lock.rs" || relative == "tests/home_env_fence.rs" {
+            continue;
+        }
+        let source = std::fs::read_to_string(&file).expect("a readable source file");
+        for (number, line) in source.lines().enumerate() {
+            let declares = line.contains("static") && line.contains("Mutex<()>");
+            if declares && line.contains("ENV_LOCK") {
+                declarations.push(format!("{relative}:{}: {}", number + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        declarations.is_empty(),
+        "these declare an environment lock beside the crate's one lock in \
+         src/env_lock.rs, which orders their own tests and no others:\n{}",
+        declarations.join("\n")
+    );
 }
