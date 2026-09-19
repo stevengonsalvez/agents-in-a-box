@@ -79,3 +79,29 @@ test("usageStale reads the stale mark on section 21, not on any other", () => {
     dispose();
   });
 });
+
+test("inboxUnread is the daemon's unread count for the header, 0 with no section", () => {
+  createRoot((dispose) => {
+    const store = createFrameStore(["inbox"]);
+    assert.equal(ROOT_SELECTORS.inboxUnread(store, "local"), 0);
+    store.applyDrain("local", [
+      {
+        frames: [
+          frame("inbox", 1, {
+            entries: [],
+            unread: 4,
+            recipient: "operator",
+            absent: null,
+            unreachable: null,
+            rows_cut: 0,
+            summaries_cut: 0,
+            received_at_ms: 1,
+          }),
+        ],
+      },
+    ]);
+    assert.equal(ROOT_SELECTORS.inboxUnread(store, "local"), 4);
+    assert.equal(ROOT_SELECTORS.inboxUnread(store, undefined), 0);
+    dispose();
+  });
+});
