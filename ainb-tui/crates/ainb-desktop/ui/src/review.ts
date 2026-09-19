@@ -163,6 +163,9 @@ export function windowLines(
   const drawn: BodyLine[] = [];
   let header: BodyLine | undefined;
   for (const line of lines) {
+    // A file heading ends the hunk above it: without this, a window that opens
+    // on a file's heading draws the previous file's @@ header over it.
+    if (line.kind === "file") header = undefined;
     if (line.index === undefined) {
       header = line;
       continue;
