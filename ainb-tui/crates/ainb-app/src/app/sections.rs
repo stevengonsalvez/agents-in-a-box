@@ -606,6 +606,10 @@ pub struct FleetSection {
     /// unrelated things in one place. It belongs with `ask_state` and
     /// `broadcast` because it is the same attention-and-answer family.
     pub conversation: crate::fleet::conversation::Conversation,
+    /// The open ACP transcript, bounded and scrubbed, written by the reducer's
+    /// tick from the transcript host in `HostOnlyState`. The default whenever
+    /// none is open, so the section never carries a closed run's tail.
+    pub transcript: crate::fleet::transcript::Transcript,
     /// The daemon's half of the attention picture, refreshed by
     /// [`crate::fleet::attention_poll`] on its own thread.
     ///
@@ -670,6 +674,7 @@ impl Default for FleetSection {
             ask_state: crate::fleet::answer::AskState::default(),
             broadcast: crate::fleet::broadcast::Broadcast::default(),
             conversation: crate::fleet::conversation::Conversation::default(),
+            transcript: crate::fleet::transcript::Transcript::default(),
             daemon_attention: Arc::new(Mutex::new(
                 crate::fleet::attention::DaemonAttention::default(),
             )),
@@ -1049,7 +1054,7 @@ pub struct HostOnlyState {
     /// the same list writes nothing, so a host that rescans on a timer does not
     /// reframe the whole Sessions section, reset the selection or raise a
     /// notice every time; the first one always applies.
-    pub workspaces_applied: bool,
+    pub(crate) workspaces_applied: bool,
     pub preview_update_task: Option<tokio::task::JoinHandle<()>>,
     // A changed selection must settle before starting a read-only client.
     pub(crate) observer_pending: Option<(String, Instant)>,
@@ -1067,9 +1072,9 @@ pub struct HostOnlyState {
     // never looks it up. A raw name, only ever compared: a session tmux accepts
     // but `TmuxSessionName` refuses must still match its own row.
     pub(crate) host_tmux_session: Option<String>,
-    pub workspace_load_started: Option<Instant>,
+    pub(crate) workspace_load_started: Option<Instant>,
     /// Channel receiver for background workspace loading results
-    pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
+    pub(crate) workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
     /// When a host's rescan cadence runs from: the end of the last workspace
     /// scan, or the state's creation before any has finished.
     pub(crate) workspace_rescan_from: Instant,
@@ -1163,6 +1168,13 @@ pub struct HostOnlyState {
     /// and finds this unchanged leaves `fleet.conversation` alone rather than
     /// rebuilding fifty rows to compare them.
     pub(crate) conversation_mark: Option<ConversationMark>,
+    /// The ACP transcript a person opened from the board, when one is open.
+    ///
+    /// An ACP session has no tmux pane, so this is what stands in for its
+    /// terminal. Opened by `session_list.open_transcript`, ticked by the
+    /// reducer's tick while the session list shows, and dropped on close; a
+    /// page still in flight then reports into an inbox nobody reads.
+    pub transcript: Option<crate::fleet::transcript::TranscriptHost>,
     /// Whether the attention poller thread is alive, so the render loop can
     /// start one without having to remember whether it already did.
     pub attention_poll_running: Arc<std::sync::atomic::AtomicBool>,
@@ -1222,6 +1234,7 @@ impl Default for HostOnlyState {
             daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta::default(),
             session_chat: None,
             conversation_mark: None,
+            transcript: None,
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             attention_attached_at: HashMap::new(),

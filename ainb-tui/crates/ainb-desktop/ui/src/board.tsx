@@ -24,6 +24,8 @@ interface Props {
   elsewhere: number;
   /** A row was chosen: dispatch its intent. */
   onChoose(intent: RendererIntent): void;
+  /** An ACP card was chosen: open its transcript where a terminal would be. */
+  onOpenTranscript(sessionKey: string): void;
 }
 
 /**
@@ -96,8 +98,12 @@ export function Board(props: Props) {
                           class="board-card"
                           classList={{ open: card.hasOpenRequest }}
                           data-card={card.key}
-                          disabled={card.sessionId === null}
-                          onClick={() => show(card.sessionId, card.hasOpenRequest)}
+                          disabled={card.sessionId === null && !card.acp}
+                          onClick={() =>
+                            card.sessionId === null && card.acp
+                              ? props.onOpenTranscript(card.key)
+                              : show(card.sessionId, card.hasOpenRequest)
+                          }
                         >
                           <span class="card-title">{card.title}</span>
                           <span class="card-line">{cardLine(card)}</span>

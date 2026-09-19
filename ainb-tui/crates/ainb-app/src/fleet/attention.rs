@@ -243,8 +243,15 @@ pub struct AttentionOption {
 }
 
 /// One chip of a session row's merged attention, as a mirror frame carries it:
-/// the kind the row paints and the detail it can show, scrubbed. How the chip
-/// is answered stays on the host.
+/// the kind the row paints, the detail it can show, and what a surface needs to
+/// answer THIS chip rather than another one, all in the reducer's own order.
+///
+/// A renderer that answers from the window must name the chip the reducer will
+/// answer (`selected_blocking`, the first blocking chip here). Reading the
+/// daemon's rows instead picked a chip in wire order, so with two open
+/// questions on one session a click could send the other question's option.
+/// The route is the coarse kind of transport only; the attention id rides in
+/// `request`, which is how the reducer's own answer state names the chip.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AttentionMark {
@@ -252,6 +259,27 @@ pub struct AttentionMark {
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub detail: Option<String>,
+    /// The chip's request identity, as `fleet.ask_state.request` names it.
+    pub request: String,
+    /// The structured answers it offers, labels and descriptions scrubbed, in
+    /// the order the reducer's cursor walks them.
+    pub options: Vec<AttentionOption>,
+    /// How an answer to it would travel.
+    pub route: MarkRoute,
+}
+
+/// How an answer to a chip would travel, without the transport's details.
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+pub enum MarkRoute {
+    /// Through the daemon's `attention/answer`.
+    Daemon,
+    /// Typed into the session's own pane.
+    Pane,
+    /// Through the approve broker: only `approve` or `deny` can land.
+    Broker,
+    /// Not answerable from here.
+    None,
 }
 
 impl From<&SessionAttention> for AttentionMark {
@@ -259,6 +287,14 @@ impl From<&SessionAttention> for AttentionMark {
         Self {
             kind: chip.kind,
             detail: chip.detail.clone(),
+            request: crate::fleet::answer::request_id(chip),
+            options: chip.options.clone(),
+            route: match chip.answerable {
+                Answerable::Daemon { .. } => MarkRoute::Daemon,
+                Answerable::Tmux => MarkRoute::Pane,
+                Answerable::Broker { .. } => MarkRoute::Broker,
+                Answerable::No(_) => MarkRoute::None,
+            },
         }
     }
 }

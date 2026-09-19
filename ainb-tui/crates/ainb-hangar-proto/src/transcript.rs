@@ -45,6 +45,7 @@
 
 use std::collections::HashMap;
 
+use ainb_hangar_core::redact::scrub;
 use serde_json::Value;
 
 use crate::events::MessageKind;
@@ -68,6 +69,15 @@ const BODY_MAX: usize = 8192;
 /// count. Same backstop reasoning: a megabyte of newlines is a megabyte of
 /// `TaskMessage`s.
 const ENTRIES_PER_LINE_MAX: usize = 512;
+
+/// How far past a cut the scrub looks, in display chars.
+///
+/// The scrub must run before every cut (#1187), but over the whole input it is
+/// ~40 linear regex passes, and a provider line can be megabytes long. So each
+/// cut first clips to its bound plus this window, scrubs that, then cuts. The
+/// window is far wider than any credential shape, so a token straddling the
+/// cut still matches whole; text past the window is never shown.
+const SCRUB_WINDOW: usize = 4096;
 
 /// Most `tool_use` ids remembered while awaiting their `tool_result`. Claude
 /// issues a handful per message; this is a leak backstop, not a working limit.
@@ -243,7 +253,7 @@ impl StreamJsonClassifier {
         let snippet = block
             .get("content")
             .and_then(value_text)
-            .map(|s| truncate_chars(&one_line(&s), SUMMARY_MAX))
+            .map(|s| summary(&s))
             .unwrap_or_default();
         let dur = self
             .tool_starts
@@ -378,9 +388,7 @@ impl AcpClassifier {
             }
         }
 
-        let snippet = tool_output_text(payload)
-            .map(|s| truncate_chars(&one_line(&s), SUMMARY_MAX))
-            .unwrap_or_default();
+        let snippet = tool_output_text(payload).map(|s| summary(&s)).unwrap_or_default();
         let terminal = matches!(status, "completed" | "failed");
         if snippet.is_empty() && !terminal {
             return;
@@ -469,10 +477,7 @@ fn fold_acp_plan(payload: &Value, out: &mut Vec<(MessageKind, String)>) {
     for entry in entries {
         let status = entry.get("status").and_then(Value::as_str).unwrap_or("pending");
         let content = entry.get("content").and_then(Value::as_str).unwrap_or_default();
-        let body = truncate_chars(
-            &one_line(&format!("plan · {status} · {content}")),
-            SUMMARY_MAX,
-        );
+        let body = summary(&format!("plan · {status} · {content}"));
         out.push((MessageKind::ToolCall, body));
     }
 }
@@ -573,9 +578,13 @@ fn capped(mut out: Vec<(MessageKind, String)>) -> Vec<(MessageKind, String)> {
         // both halves.
         let dropped = out.len() - (ENTRIES_PER_LINE_MAX - 1);
         out.truncate(ENTRIES_PER_LINE_MAX - 1);
-        out.push((MessageKind::ToolResult, format!("… {dropped} more lines")));
+        out.push(more_lines(dropped));
     }
     for (_, body) in &mut out {
+        // Scrub first, then cut: a cut through a credential leaves its prefix
+        // and a few characters, which no shape matches downstream (#1187).
+        // Only the window the cut can show is scrubbed.
+        *body = scrub(clip_chars(body, BODY_MAX + SCRUB_WINDOW));
         if body.chars().count() > BODY_MAX {
             *body = truncate_chars(body, BODY_MAX);
         }
@@ -653,14 +662,41 @@ fn ts_of(v: &Value) -> Option<i64> {
 /// Split `text` into non-empty trimmed lines and push one entry per line in
 /// `kind`'s lane, so a multi-line block never overflows a single render row (the
 /// renderer paints one entry per row). Empty input pushes nothing.
+///
+/// The whole text is scrubbed before the split: a private key spans lines, and
+/// each of its body lines alone matches no shape.
+///
+/// Bounded like every cut: only the first [`ENTRIES_PER_LINE_MAX`] lines, each
+/// clipped to [`BODY_MAX`] plus [`SCRUB_WINDOW`], are scrubbed. The lines past
+/// them are counted, never copied or scrubbed, and named in one closing entry
+/// the way [`capped`] names what it drops.
 fn push_lines(out: &mut Vec<(MessageKind, String)>, kind: MessageKind, text: &str) {
-    for line in text.lines() {
-        let line = line.trim_end();
-        if line.trim().is_empty() {
-            continue;
-        }
-        out.push((kind, line.to_string()));
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let shown = lines
+        .by_ref()
+        .take(ENTRIES_PER_LINE_MAX)
+        .map(|line| clip_chars(line, BODY_MAX + SCRUB_WINDOW))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut scrubbed = scrub(&shown)
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| (kind, line.to_string()))
+        .collect::<Vec<_>>();
+    let unseen = lines.count();
+    if unseen > 0 {
+        let kept = scrubbed.len().min(ENTRIES_PER_LINE_MAX - 1);
+        let dropped = scrubbed.len() - kept + unseen;
+        scrubbed.truncate(kept);
+        scrubbed.push(more_lines(dropped));
     }
+    out.extend(scrubbed);
+}
+
+/// The entry that names lines a cap dropped.
+fn more_lines(dropped: usize) -> (MessageKind, String) {
+    (MessageKind::ToolResult, format!("… {dropped} more lines"))
 }
 
 /// A compact one-line summary of a tool_use `input` object: the most telling
@@ -681,7 +717,7 @@ fn compact_input(input: Option<&Value>) -> String {
         "prompt",
     ] {
         if let Some(s) = obj.get(key).and_then(value_text) {
-            return truncate_chars(&one_line(&s), SUMMARY_MAX);
+            return summary(&s);
         }
     }
     // No telling field: a flat, truncated key=val rendering.
@@ -690,7 +726,7 @@ fn compact_input(input: Option<&Value>) -> String {
         .map(|(k, val)| format!("{k}={}", one_line(&compact_value(val))))
         .collect::<Vec<_>>()
         .join(" ");
-    truncate_chars(&flat, SUMMARY_MAX)
+    summary(&flat)
 }
 
 /// Read a JSON value as display text: a string as-is, else its compact JSON.
@@ -743,6 +779,46 @@ fn fmt_dur(ms: i64) -> String {
     } else {
         format!("{}m{}s", ms / 60_000, (ms % 60_000) / 1000)
     }
+}
+
+/// A one-line summary clipped to [`SUMMARY_MAX`], scrubbed BEFORE the clip.
+///
+/// Every summary cut goes through here (#1187). Scrubbed after, a token that
+/// starts near the cut keeps its prefix plus a few characters, and that
+/// fragment matches no shape, so no later scrub can catch it.
+///
+/// Collapsed first, then windowed, then scrubbed, then cut: the window has to
+/// count the characters the cut counts. Windowed on raw text, a run of
+/// whitespace spends the window and then collapses to one space, leaving a
+/// token only partly inside it yet inside the cut.
+fn summary(s: &str) -> String {
+    truncate_chars(&scrub(&one_line_clipped(s, SCRUB_WINDOW)), SUMMARY_MAX)
+}
+
+/// [`one_line`] stopped at `max` chars, so a huge input is never collapsed
+/// past what a window reads.
+fn one_line_clipped(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut len = 0;
+    for word in s.split_whitespace() {
+        if len >= max {
+            break;
+        }
+        if len > 0 {
+            out.push(' ');
+            len += 1;
+        }
+        let word = clip_chars(word, max.saturating_sub(len));
+        out.push_str(word);
+        len += word.chars().count();
+    }
+    out
+}
+
+/// The first `max` chars of `s`, borrowed (char-safe, no ellipsis): the window
+/// a scrub reads before a cut.
+fn clip_chars(s: &str, max: usize) -> &str {
+    s.char_indices().nth(max).map_or(s, |(end, _)| &s[..end])
 }
 
 /// Truncate to `max` display chars with a trailing ellipsis on overflow

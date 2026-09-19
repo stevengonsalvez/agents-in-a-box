@@ -1,5 +1,5 @@
 import { render } from "solid-js/web";
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FrameBatch_Serialize, HostId } from "../../../ainb-app/bindings/AppState";
@@ -7,6 +7,11 @@ import { createFrameStore } from "./store.ts";
 import { shellAgentStatus, shellFleet, shellSessions, SUBSCRIBED } from "./subscription.ts";
 import { allSessions, label } from "./sessions.ts";
 import { ROOT_SELECTORS } from "./selectors.ts";
+import { AcpCard } from "./acp.tsx";
+import { transcriptIntent, transcriptView } from "./acp.ts";
+import { AnswerBanner } from "./answer.tsx";
+import { phaseOf, questionFor, type Refusal, sendInOrder } from "./answer.ts";
+import { newNotices, noticeKey } from "./notices.ts";
 import { Board } from "./board.tsx";
 import { Palette } from "./palette.tsx";
 import { Sidebar } from "./sidebar.tsx";
@@ -34,13 +39,6 @@ const HEADER_COUNTS = [
   [ROOT_SELECTORS.waitCount, "WAIT"],
   [ROOT_SELECTORS.errCount, "ERR"],
 ] as const;
-
-/**
- * `ainb_desktop::intent::Refusal`: an intent the host did not apply, with the
- * row it would have run and why. Keys that write outside ainb run only from
- * the TUI or the CLI.
- */
-type Refusal = { command: string; reason: string };
 
 /** How long a toast stays up. */
 const TOAST_MS = 5000;
@@ -88,6 +86,9 @@ function Shell() {
   // what is waiting on a human. A terminal takes the work area while it is
   // chosen, and the board is one click back.
   const [board, setBoard] = createSignal(true);
+  // The ACP session whose transcript card holds the work area, if any. It has
+  // no tmux pane, so the card stands where its terminal would.
+  const [transcriptKey, setTranscriptKey] = createSignal<string | null>(null);
   const focusers = new Map<string, () => void>();
   const tabKeys = createMemo(
     () => tabs().map((tab) => tab.key),
@@ -98,7 +99,10 @@ function Shell() {
 
   const activate = (key: string | null) => {
     setActive(key);
-    if (key !== null) setBoard(false);
+    if (key !== null) {
+      setBoard(false);
+      closeTranscript();
+    }
     if (key !== null) requestAnimationFrame(() => focusers.get(key)?.());
   };
   const showTabs = (view: TabsView) => {
@@ -118,10 +122,32 @@ function Shell() {
   };
   // A refused intent comes back with the row and the reason: say so, or a
   // key the window may not use (onboarding installs, a commit) looks dead.
-  const dispatch = (intent: RendererIntent) =>
-    void invoke<Refusal | null>("dispatch", { intent }).then((refusal) => {
-      if (refusal) toast(`${refusal.command} is not run from the window: ${refusal.reason}`);
-    });
+  const report = (refusal: Refusal | null) => {
+    if (refusal) toast(`${refusal.command} is not run from the window: ${refusal.reason}`);
+  };
+  const dispatch = (intent: RendererIntent) => void invoke<Refusal | null>("dispatch", { intent }).then(report);
+  const openTranscript = (sessionKey: string) => {
+    dispatch(transcriptIntent(sessionKey));
+    setTranscriptKey(sessionKey);
+    setBoard(false);
+  };
+  /** Close the card; the host drops the transcript and frames the default. */
+  function closeTranscript() {
+    if (transcriptKey() === null) return;
+    dispatch(transcriptIntent(null));
+    setTranscriptKey(null);
+  }
+  /**
+   * Send `intents` in order, each one applied before the next is sent: the
+   * host applies a dispatch before the command returns, so awaiting each keeps
+   * a cursor move ahead of the Enter that reads it. A refusal on any of them
+   * is reported the same way.
+   */
+  // Stops at the first refusal: a pick whose cursor move was refused must not
+  // go on to send Enter on whatever option the reducer is pointing at.
+  const run = async (intents: RendererIntent[]) => {
+    report(await sendInOrder(intents, (intent) => invoke<Refusal | null>("dispatch", { intent })));
+  };
   /** Select a session-list row and attach it, so the reducer marks it attached. */
   const openRow = (row: RowId) => dispatch(openRowIntent(row));
 
@@ -249,6 +275,38 @@ function Shell() {
   const sessionsStale = createMemo(() => ROOT_SELECTORS.sessionsStale(store, host()));
   const loading = createMemo(() => ROOT_SELECTORS.workspacesLoading(store, host()));
   const elsewhere = createMemo(() => ROOT_SELECTORS.attentionElsewhere(store, host()));
+  const shell = () => (host() ? store.section(host()!, "shell") : undefined);
+  const ask = () => fleet()?.ask_state;
+  const question = createMemo(() => questionFor(sessions()));
+
+  // The reducer speaks through its notices: a refused send says why in the
+  // reducer's own words (a daemon that is gone, a native picker, nothing typed),
+  // so the window shows each new one as a toast rather than a dead button. New
+  // by identity, not by count: the list is capped and drained from the front.
+  let heard: string[] = [];
+  createEffect(() => {
+    const notices = shell()?.notifications ?? [];
+    // A success notice is the reducer congratulating itself ("Workspaces
+    // loaded"), and the window rescans on a cadence: only what went wrong, or
+    // what the person needs to know, becomes a toast.
+    for (const notice of newNotices(heard, notices)) {
+      if (notice.notification_type !== "Success") toast(label(notice.message));
+    }
+    heard = notices.map(noticeKey);
+  });
+  // Another surface answered first: the row reads delivered, and the winner is
+  // named once, in a toast, however many frames repeat it.
+  createEffect(
+    on(
+      () => {
+        const phase = phaseOf(ask());
+        return phase.kind === "already_answered" ? [ask()?.request, phase.by].join("\n") : null;
+      },
+      (winner, previous) => {
+        if (winner !== null && winner !== previous) toast(`Already answered by ${winner.slice(winner.indexOf("\n") + 1)}`);
+      },
+    ),
+  );
 
   /** A tab's title: its session's name when the sidebar knows it. */
   const title = (tab: Tab) => {
@@ -340,20 +398,55 @@ function Shell() {
           ref={(element) => (sidebar = element)}
         />
         <section class="workarea">
-          <nav class="tabs" aria-label="Terminal tabs">
-            <span class="tab board-tab" classList={{ active: board() }}>
-              <button type="button" class="tab-title" onClick={() => setBoard(true)}>
+          <nav class="tabs" aria-label="Board and terminals">
+            <span class="tab board-tab" classList={{ active: board() && transcriptKey() === null }}>
+              <button
+                type="button"
+                class="tab-title"
+                aria-current={board() && transcriptKey() === null ? "page" : undefined}
+                onClick={() => {
+                  closeTranscript();
+                  setBoard(true);
+                }}
+              >
                 Board
               </button>
             </span>
+            {/* The ACP card's own place in the strip, where the session's
+                terminal tab would be if it had a pane. */}
+            <Show when={transcriptKey()}>
+              {(key) => (
+                <span class="tab transcript-tab active" data-state="transcript">
+                  <button type="button" class="tab-title" aria-current="page">
+                    {key()}
+                  </button>
+                  <button
+                    type="button"
+                    class="tab-close"
+                    aria-label={`Close ${key()}`}
+                    onClick={() => {
+                      closeTranscript();
+                      setBoard(true);
+                    }}
+                  >
+                    ×
+                  </button>
+                </span>
+              )}
+            </Show>
             <For each={tabs()}>
               {(tab) => (
                 <span
                   class="tab"
-                  classList={{ active: !board() && tab.key === active() }}
+                  classList={{ active: !board() && transcriptKey() === null && tab.key === active() }}
                   data-state={tab.state}
                 >
-                  <button type="button" class="tab-title" onClick={() => choose(tab)}>
+                  <button
+                    type="button"
+                    class="tab-title"
+                    aria-current={!board() && transcriptKey() === null && tab.key === active() ? "page" : undefined}
+                    onClick={() => choose(tab)}
+                  >
                     {title(tab)}
                   </button>
                   <button
@@ -368,16 +461,32 @@ function Shell() {
               )}
             </For>
           </nav>
-          <Show when={board()}>
+          <Show when={question()}>
+            {(shown) => <AnswerBanner question={shown()} ask={ask()} run={run} />}
+          </Show>
+          <Show when={transcriptKey()}>
+            {(key) => (
+              <AcpCard
+                sessionKey={key()}
+                view={transcriptView(fleet(), key())}
+                onClose={() => {
+                  closeTranscript();
+                  setBoard(true);
+                }}
+              />
+            )}
+          </Show>
+          <Show when={board() && transcriptKey() === null}>
             <Board
               agentStatus={agentStatus()}
               fleet={fleet()}
               sessions={sessions()}
               elsewhere={elsewhere()}
               onChoose={dispatch}
+              onOpenTranscript={openTranscript}
             />
           </Show>
-          <Show when={!board() && tabs().length === 0}>
+          <Show when={!board() && transcriptKey() === null && tabs().length === 0}>
             <p class="empty">Choose a session to open its terminal</p>
           </Show>
           {/* Keyed by tab key, not by the tab object each event replaces: a
@@ -389,7 +498,7 @@ function Shell() {
                   <TerminalView
                     tab={tab()}
                     title={title(tab())}
-                    active={!board() && key === active()}
+                    active={!board() && transcriptKey() === null && key === active()}
                     mac={MAC}
                     onAccelerator={onAccelerator}
                     onLeave={() => sidebar?.focus()}

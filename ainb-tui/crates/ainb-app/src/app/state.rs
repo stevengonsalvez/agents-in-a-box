@@ -12399,6 +12399,8 @@ impl AppState {
 
         let moved = self.tick_conversation(now_ms);
         self.project_conversation(moved);
+        let paged = self.tick_transcript(now_ms);
+        self.project_transcript(paged);
     }
 
     /// Open and tick the chat host for the tab that is showing, reporting
@@ -12424,6 +12426,44 @@ impl AppState {
             return false;
         }
         self.tick_chat_host(tab, now_ms)
+    }
+
+    /// Tick the open ACP transcript, reporting whether a page moved it.
+    ///
+    /// Only while the session list shows, as the conversation is: the board is
+    /// where it was opened, and a transcript behind another screen is not one
+    /// anyone is reading.
+    fn tick_transcript(&mut self, now_ms: i64) -> bool {
+        if self.shell.current_screen != screen_ids::SESSION_LIST {
+            return false;
+        }
+        self.host.transcript.as_mut().is_some_and(|host| host.tick(now_ms))
+    }
+
+    /// Write the open ACP transcript's bounded, scrubbed window onto the Fleet
+    /// section, or the default when none is open, so the section never
+    /// carries a closed run's tail.
+    ///
+    /// Rebuilt only when a page moved it or the transcript opened, closed or
+    /// changed session; a tick with no paging news leaves the frame alone. Like
+    /// the conversation, it reads `HostOnlyState`, so a replay of the section
+    /// log alone (#1079) reproduces none of it.
+    fn project_transcript(&mut self, paged: bool) {
+        let open = self
+            .host
+            .transcript
+            .as_ref()
+            .map(crate::fleet::transcript::TranscriptHost::session_key);
+        if !paged && self.fleet.transcript.session_key.as_deref() == open {
+            return;
+        }
+        let projected = self
+            .host
+            .transcript
+            .as_ref()
+            .map(crate::fleet::transcript::project)
+            .unwrap_or_default();
+        self.fleet.set_if_changed(|fleet| &mut fleet.transcript, projected);
     }
 
     /// Open `tab`'s chat host if it has one and tick it at `now_ms`, reporting

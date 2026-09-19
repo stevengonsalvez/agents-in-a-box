@@ -89,6 +89,9 @@ pub mod profile;
 /// the tolerant JSON codecs for the two `issue` columns, and the single
 /// validation + render seam shared by the store, the wire and the CLI.
 pub mod properties;
+/// Credential scrubbing ([`redact::scrub`]): every known token shape out of a
+/// string before it is logged, persisted, framed or cut for display.
+pub mod redact;
 /// The structured `agent_task_queue.result` JSON shape ([`result::TaskResult`]).
 pub mod result;
 /// Skill domain vocabulary: normalised [`skill::SkillName`], the
