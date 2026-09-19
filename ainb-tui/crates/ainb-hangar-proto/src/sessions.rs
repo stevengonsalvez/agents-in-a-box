@@ -64,9 +64,10 @@ pub struct WorkspaceSessionListResult {
     /// More rows matched than were returned.
     #[serde(default)]
     pub truncated: bool,
-    /// The boot import of `sessions.json` has completed on this home, so the
-    /// table is authoritative. `false` means the import failed or has not
-    /// run, and a client must not treat an empty table as "no sessions".
+    /// The one-time import of `sessions.json` AND at least one reconcile
+    /// pass of that file have completed, so the table is authoritative.
+    /// `false` means either has failed or not yet run, and a client must not
+    /// treat an empty table as "no sessions".
     #[serde(default)]
     pub import_complete: bool,
 }
@@ -101,6 +102,25 @@ pub struct WorkspaceSessionDeleteParams {
 pub struct WorkspaceSessionDeleteResult {
     /// Whether a matching session was deleted.
     pub deleted: bool,
+}
+
+/// Request parameters for `workspace/session_reconcile`. It takes none: the
+/// daemon reconciles the `sessions.json` it resolves for its own home.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSessionReconcileParams {}
+
+/// Result envelope for `workspace/session_reconcile`: the pass that ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSessionReconcileResult {
+    /// File sessions inserted into the table by this pass.
+    pub imported: i64,
+    /// File sessions not inserted because their tmux name belongs to another
+    /// session id in the table (the table wins).
+    pub skipped: i64,
+    /// File records that failed validation and stayed in the file only.
+    pub rejected: i64,
+    /// Unix milliseconds when the pass committed.
+    pub completed_at: i64,
 }
 
 /// Upper bound on the rows one `workspace/session_list` returns.

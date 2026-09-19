@@ -2,7 +2,8 @@
 
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::sessions::{
-    ImportMarker, ImportOutcome, SessionRow, SessionsRepo, UpsertOutcome,
+    FileSession, ImportMarker, ImportOutcome, NameConflict, SessionRow, SessionsRepo,
+    UpsertOutcome, reconcile_key,
 };
 
 fn test_session(id: &str, tmux: &str, ws: &str, created_at: i64) -> SessionRow {
@@ -286,4 +287,208 @@ async fn complete_import_writes_rows_and_marker_once() {
     assert_eq!(again, ImportOutcome::AlreadyCompleted);
     let marker = SessionsRepo::import_marker(pool, source).await.unwrap().unwrap();
     assert_eq!(marker.completed_at, 42);
+}
+
+fn from_file(row: &SessionRow) -> FileSession {
+    FileSession {
+        row: row.clone(),
+        id_minted: false,
+    }
+}
+
+/// P6e: the P6d import row alone does not make the table authoritative; the
+/// import and a reconcile pass for the SAME file do.
+#[tokio::test]
+async fn import_complete_needs_the_import_and_a_reconcile_of_one_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/u/.agents-in-a-box/sessions.json";
+    let other = "/home/v/.agents-in-a-box/sessions.json";
+
+    assert!(!SessionsRepo::import_complete_for(pool, source).await.unwrap());
+    SessionsRepo::complete_import(pool, source, &[], 0, 1).await.unwrap();
+    assert!(
+        !SessionsRepo::import_complete_for(pool, source).await.unwrap(),
+        "the import row alone must not report the table authoritative"
+    );
+
+    SessionsRepo::complete_reconcile(pool, other, &[], 0, 2).await.unwrap();
+    assert!(
+        !SessionsRepo::import_complete_for(pool, source).await.unwrap(),
+        "another file's reconcile row must not complete this file"
+    );
+
+    SessionsRepo::complete_reconcile(pool, source, &[], 0, 3).await.unwrap();
+    assert!(SessionsRepo::import_complete_for(pool, source).await.unwrap());
+}
+
+/// A reconcile inserts what the table lacks and never overwrites a row the
+/// table already holds under the same id.
+#[tokio::test]
+async fn reconcile_inserts_missing_rows_and_the_table_wins_on_an_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/u/.agents-in-a-box/sessions.json";
+
+    let table_row = test_session(
+        "00000000-0000-0000-0000-000000000001",
+        "ainb-s1",
+        "ws",
+        1000,
+    );
+    SessionsRepo::upsert(pool, &table_row).await.unwrap();
+
+    let mut stale = table_row.clone();
+    stale.workspace_name = "older-ws".to_string();
+    stale.headroom_enabled = false;
+    let missing = test_session(
+        "00000000-0000-0000-0000-000000000002",
+        "ainb-s2",
+        "ws",
+        2000,
+    );
+
+    let out = SessionsRepo::complete_reconcile(
+        pool,
+        source,
+        &[from_file(&stale), from_file(&missing)],
+        0,
+        7,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.marker.imported, 1);
+    assert_eq!(out.marker.skipped, 0);
+    assert!(out.conflicts.is_empty());
+
+    let all = SessionsRepo::list(pool, None, 100).await.unwrap();
+    assert_eq!(all, vec![missing, table_row]);
+}
+
+/// A file session whose tmux name the table binds to another id is skipped,
+/// counted, and reported; the table row is unchanged.
+#[tokio::test]
+async fn reconcile_skips_and_counts_a_tmux_name_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/u/.agents-in-a-box/sessions.json";
+
+    let holder = test_session(
+        "00000000-0000-0000-0000-000000000001",
+        "ainb-s1",
+        "ws",
+        1000,
+    );
+    SessionsRepo::upsert(pool, &holder).await.unwrap();
+    let rival = test_session(
+        "00000000-0000-0000-0000-000000000009",
+        "ainb-s1",
+        "ws",
+        1500,
+    );
+
+    let out = SessionsRepo::complete_reconcile(pool, source, &[from_file(&rival)], 2, 7)
+        .await
+        .unwrap();
+    assert_eq!(
+        out.marker,
+        ImportMarker {
+            source_path: reconcile_key(source),
+            completed_at: 7,
+            imported: 0,
+            skipped: 1,
+            rejected: 2,
+        }
+    );
+    assert_eq!(
+        out.conflicts,
+        vec![NameConflict {
+            session_id: rival.session_id.clone(),
+            tmux_session_name: "ainb-s1".to_string(),
+            holder: holder.session_id.clone(),
+        }]
+    );
+    assert_eq!(
+        SessionsRepo::list(pool, None, 100).await.unwrap(),
+        vec![holder]
+    );
+}
+
+/// A record whose id was minted on read matches the table by tmux name, so a
+/// repeated pass neither duplicates it nor reports it as a conflict.
+#[tokio::test]
+async fn reconcile_matches_a_minted_id_by_tmux_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/u/.agents-in-a-box/sessions.json";
+
+    let first = test_session(
+        "00000000-0000-0000-0000-000000000001",
+        "ainb-s1",
+        "ws",
+        1000,
+    );
+    let minted = |row: &SessionRow| FileSession {
+        row: row.clone(),
+        id_minted: true,
+    };
+    let out = SessionsRepo::complete_reconcile(pool, source, &[minted(&first)], 0, 1)
+        .await
+        .unwrap();
+    assert_eq!(out.marker.imported, 1);
+
+    let reminted = test_session(
+        "00000000-0000-0000-0000-000000000005",
+        "ainb-s1",
+        "ws",
+        1000,
+    );
+    let out = SessionsRepo::complete_reconcile(pool, source, &[minted(&reminted)], 0, 2)
+        .await
+        .unwrap();
+    assert_eq!(out.marker.imported, 0);
+    assert!(out.conflicts.is_empty(), "{:?}", out.conflicts);
+    assert_eq!(
+        SessionsRepo::list(pool, None, 100).await.unwrap(),
+        vec![first]
+    );
+}
+
+/// Each pass rewrites the reconcile marker with its own counts, and never
+/// touches the one-time import row.
+#[tokio::test]
+async fn reconcile_marker_carries_the_latest_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/u/.agents-in-a-box/sessions.json";
+
+    SessionsRepo::complete_import(pool, source, &[], 0, 1).await.unwrap();
+    let a = test_session(
+        "00000000-0000-0000-0000-000000000001",
+        "ainb-s1",
+        "ws",
+        1000,
+    );
+    SessionsRepo::complete_reconcile(pool, source, &[from_file(&a)], 0, 5)
+        .await
+        .unwrap();
+    SessionsRepo::complete_reconcile(pool, source, &[from_file(&a)], 1, 9)
+        .await
+        .unwrap();
+
+    let marker = SessionsRepo::import_marker(pool, &reconcile_key(source))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (marker.completed_at, marker.imported, marker.rejected),
+        (9, 0, 1)
+    );
+    let import = SessionsRepo::import_marker(pool, source).await.unwrap().unwrap();
+    assert_eq!(import.completed_at, 1);
 }

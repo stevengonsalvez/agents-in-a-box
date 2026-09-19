@@ -86,7 +86,13 @@ pub struct GitViewFrame {
     /// not read as the same thing.
     pub diff_lines_cut: usize,
     pub diff_scroll_offset: usize,
-    pub worktree_path: std::path::PathBuf,
+    /// The worktree's directory name, scrubbed, or `worktree` when that name
+    /// would be the operator's username (a worktree at home) or empty (`/`,
+    /// a path ending in `..`). Never the absolute path: the seam denies paths
+    /// on the wire for remote surfaces, and nothing that draws this view
+    /// reads more than the name (the #1097 rule for the web rows, #1212
+    /// here).
+    pub worktree_name: String,
     pub is_dirty: bool,
     pub can_push: bool,
     /// The draft crosses as its length, as it did before the bound.
@@ -267,7 +273,7 @@ pub fn project_within(
         diff_scroll_offset: within(state.diff_scroll_offset, diff_content.len()),
         diff_content,
         diff_lines_cut,
-        worktree_path: state.worktree_path.clone(),
+        worktree_name: worktree_name(&state.worktree_path),
         is_dirty: state.is_dirty,
         can_push: state.can_push,
         commit_message_len: state
@@ -305,6 +311,21 @@ pub fn project_within(
         review,
     }
 }
+
+/// What a frame calls the worktree: its directory name, scrubbed, or
+/// [`NEUTRAL_WORKTREE_NAME`] when that name would say something else. At the
+/// home directory the name is the operator's username, and at `/` or a path
+/// ending in `..` there is no name at all.
+fn worktree_name(path: &std::path::Path) -> String {
+    let at_home = dirs::home_dir().is_some_and(|home| home == path);
+    match path.file_name() {
+        Some(name) if !at_home => crate::fleet::bridge::redact::scrub(&name.to_string_lossy()),
+        _ => NEUTRAL_WORKTREE_NAME.to_string(),
+    }
+}
+
+/// The worktree's name on a frame when its directory name is not a project's.
+pub const NEUTRAL_WORKTREE_NAME: &str = "worktree";
 
 /// `set`, in an order a frame can repeat: a set has none of its own, so which
 /// entries a cut keeps would otherwise change run to run.
