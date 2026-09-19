@@ -105,7 +105,13 @@ export function SettingsPage(props: Props) {
                       class="chevron"
                       aria-label={node()?.expanded ? `Collapse ${node()?.label}` : `Expand ${node()?.label}`}
                       aria-expanded={node()?.expanded}
-                      onClick={() => props.run(toggleNode(key))}
+                      // The node's own id, not the list key: a repeated id
+                      // draws under a disambiguated key the reducer does not
+                      // know, and the click would do nothing.
+                      onClick={() => {
+                        const current = node();
+                        if (current !== undefined) props.run(toggleNode(current.id));
+                      }}
                     >
                       {node()?.expanded ? "▾" : "▸"}
                     </button>
@@ -114,7 +120,10 @@ export function SettingsPage(props: Props) {
                     type="button"
                     classList={{ active: node()?.selected }}
                     aria-current={node()?.selected ? "true" : undefined}
-                    onClick={() => props.run([selectNode(key)])}
+                    onClick={() => {
+                      const current = node();
+                      if (current !== undefined) props.run([selectNode(current.id)]);
+                    }}
                   >
                     {node()?.label}
                   </button>
