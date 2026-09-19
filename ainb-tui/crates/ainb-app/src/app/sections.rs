@@ -759,16 +759,328 @@ impl Default for ShellSection {
     }
 }
 
-/// The ainb-hooks inbox.
+/// Rows the inbox section keeps of one `hangar/inbox_list` read. Below the
+/// daemon's own cap of 200 (`INBOX_LIST_LIMIT`) on purpose, so the cut path
+/// runs against a real daemon rather than only in a test.
+pub const MAX_INBOX_ROWS: usize = 100;
+/// Characters of `summary` kept per row. The aggregator writes an issue's
+/// title into it with no cap of its own, so this is the bound that keeps one
+/// row from being the whole frame.
+pub const MAX_INBOX_SUMMARY_CHARS: usize = 256;
+/// Appended to a summary that was cut, so a short summary and a cut one are
+/// not read as the same thing.
+pub const INBOX_SUMMARY_CUT_MARKER: &str = " [cut]";
+/// Longest id-shaped field (`id`, `subject_id`, `kind`, `event`, `recipient`)
+/// a row may carry. A ULID is 26 characters; anything past this is not an id,
+/// and the row is dropped and counted rather than trusted. The content is
+/// checked too: an id is ASCII letters, digits, `-`, `_`, `:` and `.`, and a
+/// row carrying anything else in an id field is dropped the same way.
+pub const MAX_INBOX_ID_CHARS: usize = 128;
+/// Characters kept of a host's own reason (`absent`, `unreachable`). A daemon
+/// error message can be as long as the client accepts, and a reason that
+/// blanked the section would be the failure the budget exists to stop.
+pub const MAX_INBOX_REASON_CHARS: usize = 512;
+/// The section's encoded byte budget, well under `MAX_FRAME_BYTES`, because a
+/// section past the ceiling is withheld whole and a withheld inbox is a blank
+/// inbox with no counter to explain it. Held by construction: the caps above
+/// bound every string, and `tests/inbox_bound.rs` frames the worst case.
+pub const MAX_INBOX_BYTES: usize = 1024 * 1024;
+/// The actor whose inbox every surface reads: the local human, the same
+/// recipient the hangar plugin names. A workspace or actor picker is not this
+/// node's.
+pub const INBOX_RECIPIENT: &str = "member:me";
+/// The workspace the read names: the daemon's default, as the hangar plugin
+/// sends it (`DEFAULT_WORKSPACE_ID`).
+pub const INBOX_WORKSPACE_ID: &str = "default";
+
+/// Section 16: the daemon's notification inbox (D3-prime).
 ///
-/// Empty on purpose. The inbox screen's state was removed from `AppState`
-/// before this refactor, but the section is one of the nineteen the plan
-/// fixes as the boundary set, and `SectionId::Inbox` is what a surface
-/// subscribes to. Deleting it would renumber every section after it for a
-/// screen that is coming back, so it keeps its place and gains fields when
-/// the screen does.
+/// One actor's `hangar/inbox_list` read, folded: the rows newest-first, cut
+/// to [`MAX_INBOX_ROWS`] with every summary scrubbed then cut to
+/// [`MAX_INBOX_SUMMARY_CHARS`], and the unread count the daemon reported.
+/// Populated by a host-owned reader (the host owns the socket); this crate
+/// only reduces. The section kept its place, empty, from the extraction
+/// until the screen came back, so nothing renumbered.
 #[derive(Debug, Default)]
-pub struct InboxSection {}
+pub struct InboxSection {
+    /// The rows a surface draws, newest first, already bounded and scrubbed.
+    pub entries: Vec<ainb_hangar_proto::events::InboxEntryRow>,
+    /// The daemon's unread count for `recipient`, not derived from `entries`,
+    /// since the rows kept may be fewer than the rows unread.
+    pub unread: i64,
+    /// The actor whose inbox this is (`member:me` today).
+    pub recipient: String,
+    /// Why there are no rows, when there are none and the host knows why.
+    pub absent: Option<String>,
+    /// The last read failed for this reason; the rows shown are the last
+    /// ones that landed. Cleared by the next read.
+    pub unreachable: Option<String>,
+    /// Rows the daemon sent that the fold did not keep: past the row cap, or
+    /// carrying an id-shaped field that is not an id.
+    pub rows_cut: usize,
+    /// Summaries cut to [`MAX_INBOX_SUMMARY_CHARS`] in the rows kept.
+    pub summaries_cut: usize,
+    /// The local clock when the last read landed, epoch milliseconds.
+    pub received_at_ms: i64,
+}
+
+impl InboxSection {
+    /// Fold one read: bound it, scrub it, count what went. True when anything
+    /// a surface renders changed; the same rows again is not a change.
+    pub fn apply_read(
+        &mut self,
+        read: ainb_hangar_proto::snapshots::InboxListResult,
+        recipient: &str,
+        received_at_ms: i64,
+    ) -> bool {
+        let sent = read.entries.len();
+        let mut summaries_cut = 0;
+        let mut kept: Vec<_> = read
+            .entries
+            .into_iter()
+            .filter(|row| {
+                let ids = [
+                    &row.id,
+                    &row.subject_id,
+                    &row.kind,
+                    &row.event,
+                    &row.recipient,
+                ];
+                ids.iter().all(|id| id_like(id))
+            })
+            .collect();
+        kept.truncate(MAX_INBOX_ROWS);
+        // Every row sent that is not in the kept set was cut, whether for
+        // its ids or for the cap.
+        let rows_cut = sent - kept.len();
+        let entries: Vec<_> = kept
+            .into_iter()
+            .map(|mut row| {
+                // Scrub before the cut, never after: cutting first could keep
+                // the head of a credential the scrubber no longer recognises.
+                let scrubbed = crate::fleet::bridge::redact::scrub(&row.summary);
+                row.summary = match cut_chars(&scrubbed, MAX_INBOX_SUMMARY_CHARS) {
+                    Some(head) => {
+                        summaries_cut += 1;
+                        format!("{head}{INBOX_SUMMARY_CUT_MARKER}")
+                    }
+                    None => scrubbed,
+                };
+                row
+            })
+            .collect();
+        let changed = self.entries != entries
+            || self.unread != read.unread
+            || self.recipient != recipient
+            || self.absent.is_some()
+            || self.unreachable.is_some()
+            || self.rows_cut != rows_cut
+            || self.summaries_cut != summaries_cut;
+        self.entries = entries;
+        self.unread = read.unread;
+        self.recipient = recipient.to_string();
+        self.absent = None;
+        self.unreachable = None;
+        self.rows_cut = rows_cut;
+        self.summaries_cut = summaries_cut;
+        self.received_at_ms = received_at_ms;
+        changed
+    }
+
+    /// The host's read failed: the rows stay, and the surface says why they
+    /// may be stale. Without rows the section is absent for `reason`.
+    pub fn mark_read_failed(&mut self, reason: impl Into<String>) -> bool {
+        let reason = bound_reason(&reason.into());
+        // Before any read lands the section is absent, and a repeated failure
+        // replaces that one reason rather than adding a second.
+        if self.entries.is_empty() && self.received_at_ms == 0 {
+            return self.mark_absent(reason);
+        }
+        let changed = self.unreachable.as_deref() != Some(reason.as_str());
+        self.unreachable = Some(reason);
+        changed
+    }
+
+    /// The daemon cannot serve the read at all: no rows, and why.
+    pub fn mark_absent(&mut self, reason: impl Into<String>) -> bool {
+        let reason = bound_reason(&reason.into());
+        let changed = !self.entries.is_empty()
+            || self.unread != 0
+            || self.absent.as_deref() != Some(reason.as_str());
+        self.entries.clear();
+        self.unread = 0;
+        self.rows_cut = 0;
+        self.summaries_cut = 0;
+        self.unreachable = None;
+        self.absent = Some(reason);
+        changed
+    }
+
+    /// The host reconnected: drop everything so the next read builds fresh.
+    pub fn reset(&mut self) -> bool {
+        let changed =
+            !self.entries.is_empty() || self.absent.is_some() || self.unreachable.is_some();
+        *self = Self::default();
+        changed
+    }
+
+    /// The daemon answered a "mark all read" sweep: fold the unread count it
+    /// reported. The rows' `read_at` stamps are the daemon's, never a local
+    /// clock, so they arrive with the read the host makes after the sweep
+    /// (`apply_read`), not here.
+    pub fn apply_mark_all_read(&mut self, unread: i64) -> bool {
+        let changed = self.unread != unread;
+        self.unread = unread;
+        changed
+    }
+}
+
+/// The first `max` characters of `text` when it is longer than `max`, else
+/// `None`. Cuts on a character boundary, never inside one.
+fn cut_chars(text: &str, max: usize) -> Option<&str> {
+    let end = text.char_indices().nth(max).map(|(index, _)| index)?;
+    Some(&text[..end])
+}
+
+/// A host's reason as the section keeps it: scrubbed, then cut to
+/// [`MAX_INBOX_REASON_CHARS`] with the marker, the row summary's recipe.
+fn bound_reason(reason: &str) -> String {
+    let scrubbed = crate::fleet::bridge::redact::scrub(reason);
+    match cut_chars(&scrubbed, MAX_INBOX_REASON_CHARS) {
+        Some(head) => format!("{head}{INBOX_SUMMARY_CUT_MARKER}"),
+        None => scrubbed,
+    }
+}
+
+/// Whether `value` is shaped like an id the daemon mints or names: no longer
+/// than [`MAX_INBOX_ID_CHARS`], and only the id alphabet. Free text in an id
+/// field is not scrubbed into place; the row is dropped and counted.
+pub fn id_like(value: &str) -> bool {
+    let mut count = 0;
+    for c in value.chars() {
+        count += 1;
+        if count > MAX_INBOX_ID_CHARS {
+            return false;
+        }
+        if !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')) {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod inbox_section_tests {
+    use super::{INBOX_SUMMARY_CUT_MARKER, InboxSection, MAX_INBOX_SUMMARY_CHARS, cut_chars};
+    use ainb_hangar_proto::events::InboxEntryRow;
+    use ainb_hangar_proto::snapshots::InboxListResult;
+
+    fn row(summary: &str) -> InboxEntryRow {
+        InboxEntryRow {
+            id: "01J0".into(),
+            kind: "issue".into(),
+            event: "issue_created".into(),
+            subject_id: "issue-1".into(),
+            summary: summary.into(),
+            recipient: "member:me".into(),
+            created_at: 1,
+            read_at: None,
+        }
+    }
+
+    #[test]
+    fn cut_chars_is_none_at_or_under_the_limit() {
+        assert_eq!(cut_chars("abc", 3), None);
+        assert_eq!(cut_chars("abcd", 3), Some("abc"));
+        assert_eq!(cut_chars("ééé", 2), Some("éé"));
+    }
+
+    #[test]
+    fn a_failed_first_read_is_absent_and_a_failed_later_read_is_unreachable() {
+        let mut section = InboxSection::default();
+        assert!(section.mark_read_failed("connect: refused"));
+        assert_eq!(section.absent.as_deref(), Some("connect: refused"));
+        assert!(section.apply_read(
+            InboxListResult {
+                entries: vec![row("a")],
+                unread: 1,
+            },
+            "member:me",
+            5,
+        ));
+        assert!(section.absent.is_none());
+        assert!(section.mark_read_failed("io"));
+        assert_eq!(section.unreachable.as_deref(), Some("io"));
+        assert_eq!(section.entries.len(), 1);
+        assert!(
+            !section.mark_read_failed("io"),
+            "the same reason twice is no change"
+        );
+    }
+
+    #[test]
+    fn a_repeated_failure_before_any_read_carries_one_reason() {
+        let mut section = InboxSection::default();
+        assert!(section.mark_read_failed("first"));
+        assert!(section.mark_read_failed("second"));
+        assert_eq!(section.absent.as_deref(), Some("second"));
+        assert!(
+            section.unreachable.is_none(),
+            "absent and unreachable never both"
+        );
+    }
+
+    #[test]
+    fn a_long_summary_is_cut_once_and_marked() {
+        let mut section = InboxSection::default();
+        let long = "x".repeat(MAX_INBOX_SUMMARY_CHARS * 2);
+        section.apply_read(
+            InboxListResult {
+                entries: vec![row(&long)],
+                unread: 1,
+            },
+            "member:me",
+            5,
+        );
+        assert_eq!(section.summaries_cut, 1);
+        assert!(section.entries[0].summary.ends_with(INBOX_SUMMARY_CUT_MARKER));
+    }
+
+    #[test]
+    fn a_reason_is_scrubbed_then_cut() {
+        let mut section = InboxSection::default();
+        let long = format!("connect failed sk-{} {}", "k".repeat(48), "z".repeat(2000));
+        section.mark_absent(long);
+        let reason = section.absent.as_deref().unwrap();
+        assert!(!reason.contains(&"k".repeat(48)));
+        assert!(reason.ends_with(INBOX_SUMMARY_CUT_MARKER));
+        assert!(
+            reason.chars().count()
+                <= super::MAX_INBOX_REASON_CHARS + INBOX_SUMMARY_CUT_MARKER.len()
+        );
+    }
+
+    #[test]
+    fn id_like_takes_the_id_alphabet_only() {
+        assert!(super::id_like("01J0ABCDEFGHJKMNPQRSTVWXYZ"));
+        assert!(super::id_like("member:me"));
+        assert!(super::id_like("issue_created"));
+        assert!(super::id_like("v1.2-rc"));
+        assert!(!super::id_like("has space"));
+        assert!(!super::id_like("ctl\u{1}"));
+        assert!(!super::id_like("é"));
+        assert!(!super::id_like(&"a".repeat(super::MAX_INBOX_ID_CHARS + 1)));
+    }
+
+    #[test]
+    fn reset_drops_everything() {
+        let mut section = InboxSection::default();
+        section.mark_absent("gone");
+        assert!(section.reset());
+        assert!(section.absent.is_none());
+        assert!(!section.reset());
+    }
+}
 
 /// Section 20: agent status, the D14 one truth for every surface (T0-section,
 /// #1015).
@@ -1309,6 +1621,10 @@ pub struct HostOnlyState {
     /// `FleetSection::daemon_attention_seen` is the versioned copy that
     /// `refresh_daemon_attention_generation` folds it into once a frame.
     pub daemon_attention_generation: crate::fleet::attention_poll::Generation,
+    /// A "mark all read" sweep the host is sending now. One held key is one
+    /// sweep: a second press while it is in flight emits nothing, and the
+    /// report clears it.
+    pub inbox_mark_in_flight: bool,
     /// When each attached session was last seen attached by
     /// `AppState::refresh_attention`.
     ///
@@ -1359,6 +1675,7 @@ impl Default for HostOnlyState {
             transcript: None,
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            inbox_mark_in_flight: false,
             attention_attached_at: HashMap::new(),
         }
     }

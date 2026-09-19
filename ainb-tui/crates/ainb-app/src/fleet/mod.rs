@@ -30,6 +30,8 @@ pub mod control;
 pub mod conversation;
 pub mod daemon_cta;
 pub mod daemons;
+pub mod inbox_reader;
+pub mod inbox_write;
 pub mod pal_dial;
 pub mod plumbing;
 pub mod read;

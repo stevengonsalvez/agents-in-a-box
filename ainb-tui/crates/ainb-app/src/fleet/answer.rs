@@ -343,6 +343,34 @@ impl AskState {
         };
     }
 
+    /// Put the cursor on the option labelled `label`, for a surface that names
+    /// its pick rather than counting cursor moves off a frame.
+    ///
+    /// Matched against the label as this state holds it first, and only when
+    /// nothing is exact, as a frame carries it (scrubbed), so a label read off
+    /// a frame resolves and an option whose literal label is another's
+    /// scrubbed form is never beaten by position. Within a pass the first
+    /// match wins: two options with one label are one answer, since the label
+    /// is the text sent. The cursor is left where it was when nothing matches,
+    /// so a send that follows cannot land on an option nobody named.
+    ///
+    /// # Errors
+    ///
+    /// `label` is not one of `chip`'s options.
+    pub fn pick(&mut self, chip: &SessionAttention, label: &str) -> Result<(), String> {
+        let exact = chip.options.iter().position(|option| option.label == label);
+        let index = exact
+            .or_else(|| {
+                chip.options
+                    .iter()
+                    .position(|option| crate::fleet::bridge::redact::scrub(&option.label) == label)
+            })
+            .ok_or_else(|| "that option is not offered here".to_string())?;
+        self.cursor = index;
+        self.focus = AskFocus::Options;
+        Ok(())
+    }
+
     /// Type one character into the free-text answer.
     pub fn push_char(&mut self, c: char) {
         self.free_text.push(c);
@@ -560,6 +588,78 @@ mod tests {
     /// Publish a worker's outcome for `chip`, as the send thread does.
     fn publish(state: &AskState, chip: &SessionAttention, phase: AnswerPhase) {
         state.inbox.lock().unwrap().push((request_id(chip), phase));
+    }
+
+    #[test]
+    fn a_pick_by_label_lands_on_that_option_wherever_it_now_sits() {
+        let mut state = AskState::default();
+        let shown = ask_with_options(&["staging", "production", "local"]);
+        state.retarget(&shown);
+        // A frame lands between the click and the send and reorders the
+        // options: the label still names the same answer.
+        let reordered = ask_with_options(&["local", "production", "staging"]);
+        state.pick(&reordered, "staging").expect("offered");
+        assert_eq!(state.cursor(), 2);
+        assert_eq!(state.focus(), AskFocus::Options);
+        assert_eq!(
+            state.answer_text(&reordered).as_deref(),
+            Ok("staging"),
+            "the answer is the label that was picked"
+        );
+    }
+
+    #[test]
+    fn a_pick_from_the_composer_row_moves_back_to_the_options() {
+        let mut state = AskState::default();
+        let chip = ask_with_options(&["staging", "production"]);
+        state.retarget(&chip);
+        state.move_cursor(&chip, 2);
+        assert_eq!(state.focus(), AskFocus::FreeText);
+        state.pick(&chip, "production").expect("offered");
+        assert_eq!(state.cursor(), 1);
+        assert_eq!(state.focus(), AskFocus::Options);
+    }
+
+    #[test]
+    fn a_pick_names_the_label_as_a_frame_carries_it() {
+        let mut state = AskState::default();
+        let chip = ask_with_options(&[
+            "deploy",
+            "use sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789",
+        ]);
+        state.retarget(&chip);
+        let carried = crate::fleet::bridge::redact::scrub(&chip.options[1].label);
+        assert_ne!(carried, chip.options[1].label, "the frame scrubbed it");
+        state.pick(&chip, &carried).expect("the scrubbed label resolves");
+        assert_eq!(state.cursor(), 1);
+    }
+
+    #[test]
+    fn an_exact_label_beats_an_earlier_options_scrubbed_form() {
+        let mut state = AskState::default();
+        let secret = "use sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
+        let carried = crate::fleet::bridge::redact::scrub(secret);
+        // The second option's literal label is what the first one reads as on
+        // a frame. Naming it must pick the second, not the first by position.
+        let chip = ask_with_options(&[secret, carried.as_str()]);
+        state.retarget(&chip);
+        state.pick(&chip, &carried).expect("offered");
+        assert_eq!(state.cursor(), 1);
+    }
+
+    #[test]
+    fn a_label_nobody_offered_is_refused_and_moves_nothing() {
+        let mut state = AskState::default();
+        let chip = ask_with_options(&["staging", "production"]);
+        state.retarget(&chip);
+        state.move_cursor(&chip, 1);
+        let refused = state.pick(&chip, "prod").expect_err("not offered");
+        assert_eq!(refused, "that option is not offered here");
+        assert_eq!(state.cursor(), 1, "the cursor stays where it was");
+        assert!(
+            state.pick(&chip, "").is_err(),
+            "an empty label names nothing"
+        );
     }
 
     #[test]

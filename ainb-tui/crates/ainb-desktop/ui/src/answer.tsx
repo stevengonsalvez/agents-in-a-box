@@ -1,6 +1,7 @@
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import type { AskState_Serialize } from "../../../ainb-app/bindings/AppState";
-import { phaseOf, pickIntents, typedIntents, type Question } from "./answer.ts";
+import { drawnQuestion, phaseOf, pickIntents, typedIntents, type Question } from "./answer.ts";
+import { label } from "./sessions.ts";
 import type { RendererIntent } from "./tabs.ts";
 
 interface Props {
@@ -19,8 +20,20 @@ interface Props {
  * its own echo of what was typed. It is kept until the send is delivered, so a
  * failed send leaves the text where the person typed it, beside the reducer's
  * own count of the draft it restored.
+ *
+ * Everything drawn, and everything a click sends, reads the question as it was
+ * painted (`drawnQuestion`), not `props.question` as the frame now has it: the
+ * prop is a getter over the frame, and a click that read it named whichever
+ * question the frame had moved on to (#1191).
  */
 export function AnswerBanner(props: Props) {
+  const question = drawnQuestion(
+    () => props.question,
+    (paint) => {
+      const frame = requestAnimationFrame(paint);
+      return () => cancelAnimationFrame(frame);
+    },
+  );
   const [draft, setDraft] = createSignal("");
   const phase = () => phaseOf(props.ask);
   const busy = () => phase().kind === "in_flight";
@@ -34,11 +47,11 @@ export function AnswerBanner(props: Props) {
     ),
   );
 
-  const pick = (index: number) => void props.run(pickIntents(props.question, props.ask, index));
+  const pick = (index: number) => void props.run(pickIntents(question(), props.ask, index));
   const send = () => {
     const text = draft().trim();
     if (text === "") return;
-    void props.run(typedIntents(props.question, props.ask, text));
+    void props.run(typedIntents(question(), props.ask, text));
   };
 
   return (
@@ -46,19 +59,19 @@ export function AnswerBanner(props: Props) {
       class="answer-banner"
       role="region"
       aria-label="Answer"
-      data-kind={props.question.kind}
-      data-request={props.question.request}
+      data-kind={question().kind}
+      data-request={question().request}
     >
       <header>
-        <span class="row-kind">{props.question.kind}</span>
-        <span class="answer-title">{props.question.title}</span>
+        <span class="row-kind">{question().kind}</span>
+        <span class="answer-title">{question().title}</span>
       </header>
-      <Show when={props.question.detail}>
-        <p class="answer-detail">{props.question.detail}</p>
+      <Show when={question().detail}>
+        <p class="answer-detail">{question().detail}</p>
       </Show>
-      <Show when={props.question.options.length > 0}>
+      <Show when={question().options.length > 0}>
         <div class="answer-options" role="group" aria-label="Options">
-          <For each={props.question.options}>
+          <For each={question().options}>
             {(option, index) => (
               <button
                 type="button"
@@ -67,13 +80,13 @@ export function AnswerBanner(props: Props) {
                 disabled={busy()}
                 onClick={() => pick(index())}
               >
-                {index() + 1}. {option}
+                {index() + 1}. {label(option)}
               </button>
             )}
           </For>
         </div>
       </Show>
-      <Show when={props.question.freeText}>
+      <Show when={question().freeText}>
         <form
           class="answer-composer"
           onSubmit={(event) => {
