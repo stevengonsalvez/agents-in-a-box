@@ -1023,6 +1023,10 @@ export type CommitInfo = CommitInfo_Serialize;
 /**  Information about a single commit */
 export type CommitInfo_Serialize = {
 	hash_short: string,
+	/**
+	 *  Git config text, as free as the message, so a frame carries it
+	 *  scrubbed (#1212).
+	 */
 	author: string,
 	date: string,
 	message: string,
@@ -2628,7 +2632,13 @@ export type GitViewFrame_Serialize = {
 	 */
 	diff_lines_cut: number,
 	diff_scroll_offset: number,
-	worktree_path: string,
+	/**
+	 *  The worktree's directory name, scrubbed. Never the absolute path: the
+	 *  seam denies paths on the wire for remote surfaces, and nothing that
+	 *  draws this view reads more than the name (the #1097 rule for the web
+	 *  rows, #1212 here).
+	 */
+	worktree_name: string,
 	is_dirty: boolean,
 	can_push: boolean,
 	/**  The draft crosses as its length, as it did before the bound. */
