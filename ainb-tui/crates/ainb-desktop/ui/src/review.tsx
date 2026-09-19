@@ -6,6 +6,7 @@ import {
   gitView,
   scrollIntent,
   sectionCut,
+  segments,
   selectFileIntent,
   wheelRows,
   WITHHELD,
@@ -141,7 +142,15 @@ export function Review(props: Props) {
                     <p class="review-row" data-kind={line.row.kind.toLowerCase()} data-vrow={line.index}>
                       <span class="review-lineno">{line.row.old_lineno ?? ""}</span>
                       <span class="review-lineno">{line.row.new_lineno ?? ""}</span>
-                      <span class="review-text">{line.row.raw}</span>
+                      <span class="review-text">
+                        <For each={segments(line.row)}>
+                          {(run) => (
+                            <Show when={run.emphasis} fallback={run.text}>
+                              <span class="review-emph">{run.text}</span>
+                            </Show>
+                          )}
+                        </For>
+                      </span>
                     </p>
                   )
                 }
