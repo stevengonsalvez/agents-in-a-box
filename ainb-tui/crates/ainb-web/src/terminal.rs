@@ -87,7 +87,12 @@ enum ClientFrame {
 /// session matches or the pane has no tmux name.
 async fn resolve_tmux_name(state: &AppState, id: &str) -> Option<String> {
     let snap = state.resolve_snapshot().await.ok()?;
-    let sessions = snap.sessions.as_array()?;
+    tmux_name_in(snap.sessions.as_array()?, id)
+}
+
+/// The tmux session name of the row in `sessions` (the snapshot's
+/// `ainb list --frame` rows) whose `session_id` or `tmux_session_name` is `id`.
+fn tmux_name_in(sessions: &[serde_json::Value], id: &str) -> Option<String> {
     sessions.iter().find_map(|s| {
         let sid = s.get("session_id").and_then(|v| v.as_str());
         let tmux = s.get("tmux_session_name").and_then(|v| v.as_str());
@@ -431,6 +436,37 @@ fn pane_input(data: &str) -> std::borrow::Cow<'_, [u8]> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The attach lookup reads `ainb list --frame` rows, which list every
+    /// session whatever filter the TUI persisted: a stopped session the TUI
+    /// hides is still found (#1180).
+    #[test]
+    fn the_attach_lookup_finds_a_session_the_tui_filter_hides() {
+        use ainb_app::app::state::SessionFilter;
+        use ainb_app::config::AppConfig;
+        use ainb_app::models::{Session, SessionMode, SessionStatus, Workspace};
+
+        let mut state = ainb_app::AppState::with_config(AppConfig::default());
+        let mut session = Session::new("repo".to_string(), "/work/repo".to_string());
+        session.mode = SessionMode::Interactive;
+        session.status = SessionStatus::Stopped;
+        session.tmux_session_name = Some("tmux_repo-stopped".to_string());
+        let id = session.id.to_string();
+        let mut workspace = Workspace::new("repo".to_string(), "/work/repo".into());
+        workspace.add_session(session);
+        let sessions = state.sessions.get_mut();
+        sessions.workspaces = vec![workspace];
+        sessions.session_filter = SessionFilter::ActiveOnly;
+
+        let rows = serde_json::to_value(ainb_app::wire::web::session_rows(&state))
+            .expect("rows serialise");
+        let rows = rows.as_array().expect("an array of rows");
+        assert_eq!(
+            tmux_name_in(rows, &id).as_deref(),
+            Some("tmux_repo-stopped"),
+            "{rows:?}"
+        );
+    }
 
     #[test]
     fn an_input_frame_cannot_end_a_paste_early() {

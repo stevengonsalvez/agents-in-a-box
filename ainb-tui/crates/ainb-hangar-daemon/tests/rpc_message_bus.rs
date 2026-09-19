@@ -1789,6 +1789,203 @@ async fn a_cursored_transcript_subscribe_replays_the_gap() {
     );
 }
 
+/// A CURSORED `fleet/transcript_list` is bounded in bytes as well as rows.
+///
+/// A chunk's payload has no ceiling of its own, so a row cap alone lets one
+/// page carry `FLEET_TRANSCRIPT_LIST_MAX` verbatim tool updates. The walk
+/// takes the same byte budget as the tail and simply stops early:
+/// `next_after_order` already tells the caller where to resume, so nothing is
+/// lost and `truncated` stays false. One row larger than the whole budget is
+/// still returned on its own rather than stalling the walk on an empty page.
+#[tokio::test]
+async fn a_cursored_transcript_read_is_bounded_in_bytes_too() {
+    use ainb_hangar_proto::fleet::FLEET_TRANSCRIPT_LIST_MAX_BYTES;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    let fat = serde_json::json!({ "text": "x".repeat(200 * 1024) }).to_string();
+    for index in 0..4 {
+        seed_transcript_payload(&store, "acp:mine", &format!("fat-{index}"), &fat).await;
+    }
+    let huge =
+        serde_json::json!({ "text": "y".repeat(FLEET_TRANSCRIPT_LIST_MAX_BYTES + 1) }).to_string();
+    seed_transcript_payload(&store, "acp:mine", "huge", &huge).await;
+
+    let mut client = Client::authed(dir.path(), &socket).await;
+    let mut after = 0;
+    let mut pages = Vec::new();
+    while pages.len() < 10 {
+        let page = client
+            .call(
+                methods::FLEET_TRANSCRIPT_LIST,
+                serde_json::json!({ "session_key": "acp:mine", "after_order": after, "limit": 10 }),
+            )
+            .await;
+        let result = &page["result"];
+        assert_eq!(
+            result["truncated"], false,
+            "a cursored walk has nothing to admit"
+        );
+        let ids: Vec<String> = result["chunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chunk| chunk["event_id"].as_str().unwrap().to_string())
+            .collect();
+        if ids.is_empty() {
+            break;
+        }
+        after = result["next_after_order"].as_i64().unwrap();
+        pages.push(ids);
+    }
+    assert_eq!(
+        pages,
+        [vec!["fat-0", "fat-1"], vec!["fat-2", "fat-3"], vec!["huge"],],
+        "each page stops at the byte budget, the walk still reaches every row in order, \
+         and a row over the whole budget comes alone"
+    );
+}
+
+/// A credential in a stored transcript payload never leaves the daemon (#1199).
+///
+/// The ledger keeps what the provider sent, and every client renders what the
+/// daemon ships, so the scrub happens once, at the projection onto the wire:
+/// the read (`fleet/transcript_list`, tail and cursored) and the push
+/// (`fleet/transcript_event`, replayed gap and live) all carry the scrubbed
+/// chunk. Object keys are the provider's structure and stay; only string
+/// values are scrubbed. A payload that is not JSON rides as a string and is
+/// scrubbed whole.
+#[tokio::test]
+async fn a_token_in_a_stored_payload_never_reaches_a_transcript_reply() {
+    use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
+
+    // Assembled at runtime so no literal here matches a secret scanner.
+    let github = format!("ghp_{}", "C".repeat(36));
+    let anthropic = format!("sk-ant-api03-{}", "A".repeat(40));
+    let pem = format!(
+        "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+        "M".repeat(64)
+    );
+    let json_payload = serde_json::json!({
+        "sessionUpdate": "agent_message_chunk",
+        "content": { "type": "text", "text": format!("export GH_TOKEN={github} then retry") },
+        "rawInput": { "argv": ["curl", "-H", format!("x-api-key: {anthropic}")] },
+        "rawOutput": pem,
+        "exitCode": 0,
+    })
+    .to_string();
+    let text_payload = format!("not json: token={github}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, sink) = start_server(dir.path()).await;
+    seed_transcript_row(&store, "acp:mine", "before").await;
+    let before = FleetProviderEventRepo::head_order_for_session(store.pool(), "acp:mine")
+        .await
+        .unwrap()
+        .expect("the row the client holds");
+    seed_transcript_payload(&store, "acp:mine", "json-secret", &json_payload).await;
+    seed_transcript_payload(&store, "acp:mine", "text-secret", &text_payload).await;
+
+    // The ledger keeps what the provider sent: `raw_blake3` is a digest of
+    // those bytes and the prune export re-digests them, so a scrub moved to
+    // ingest would break both. The scrub belongs to the wire, not the row.
+    let stored =
+        FleetProviderEventRepo::list_by_session_after(store.pool(), "acp:mine", before, 10)
+            .await
+            .unwrap();
+    assert_eq!(stored[0].raw_payload, json_payload, "the stored row is raw");
+    assert!(stored[0].raw_payload.contains(&github));
+    assert_eq!(stored[1].raw_payload, text_payload, "the stored row is raw");
+
+    let secrets = [github.as_str(), anthropic.as_str(), "MMMMMMMMMMMMMMMM"];
+
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let tail = client
+        .call(
+            methods::FLEET_TRANSCRIPT_LIST,
+            serde_json::json!({ "session_key": "acp:mine", "limit": 10 }),
+        )
+        .await;
+    let tail_chunks: Vec<_> = tail["result"]["chunks"].as_array().unwrap()[1..].iter().collect();
+    assert_chunks_clean("uncursored list", &tail_chunks, &secrets);
+
+    let walk = client
+        .call(
+            methods::FLEET_TRANSCRIPT_LIST,
+            serde_json::json!({ "session_key": "acp:mine", "after_order": before, "limit": 10 }),
+        )
+        .await;
+    let walk_chunks: Vec<_> = walk["result"]["chunks"].as_array().unwrap().iter().collect();
+    assert_chunks_clean("cursored list", &walk_chunks, &secrets);
+
+    client
+        .call(
+            methods::FLEET_TRANSCRIPT_SUBSCRIBE,
+            serde_json::json!({ "session_key": "acp:mine", "after_order": before }),
+        )
+        .await;
+    let replayed = client
+        .drain_notifications("fleet/transcript_event", Duration::from_millis(800))
+        .await;
+    let replayed_chunks: Vec<_> = replayed.iter().map(|params| &params["chunk"]).collect();
+    assert_chunks_clean("replayed push", &replayed_chunks, &secrets);
+
+    // Live: the rows land after the subscription and arrive by wakeup.
+    seed_transcript_payload(&store, "acp:mine", "live-json", &json_payload).await;
+    seed_transcript_payload(&store, "acp:mine", "live-text", &text_payload).await;
+    let head = FleetProviderEventRepo::head_order_for_session(store.pool(), "acp:mine")
+        .await
+        .unwrap()
+        .expect("the live head");
+    sink.emit_transcript_order("acp:mine", head);
+    let live = client
+        .drain_notifications("fleet/transcript_event", Duration::from_millis(800))
+        .await;
+    let live_chunks: Vec<_> = live.iter().map(|params| &params["chunk"]).collect();
+    assert_chunks_clean("live push", &live_chunks, &secrets);
+}
+
+/// The two secret rows of one surface, as the test above seeds them, carry
+/// no credential and keep everything around one.
+fn assert_chunks_clean(surface: &str, chunks: &[&serde_json::Value], secrets: &[&str]) {
+    use ainb_hangar_core::redact::{REDACTED, find_secret};
+
+    assert_eq!(chunks.len(), 2, "{surface}: both secret rows arrive");
+    for chunk in chunks {
+        let wire = chunk.to_string();
+        assert_eq!(
+            find_secret(&wire),
+            None,
+            "{surface}: a credential shape left the daemon: {wire}"
+        );
+        for secret in secrets {
+            assert!(!wire.contains(secret), "{surface}: {secret} leaked: {wire}");
+        }
+        assert!(
+            wire.contains(REDACTED),
+            "{surface}: redaction marked: {wire}"
+        );
+    }
+    let json = &chunks[0]["payload"];
+    assert_eq!(
+        json["content"]["text"],
+        format!("export GH_TOKEN={REDACTED} then retry"),
+        "{surface}: the prose around a token survives"
+    );
+    assert_eq!(json["sessionUpdate"], "agent_message_chunk");
+    assert_eq!(
+        json["rawInput"]["argv"][0], "curl",
+        "{surface}: arrays keep shape"
+    );
+    assert_eq!(json["exitCode"], 0, "{surface}: numbers pass through");
+    assert_eq!(
+        chunks[1]["payload"],
+        format!("not json: token={REDACTED}"),
+        "{surface}: a non-JSON payload is scrubbed as a string"
+    );
+}
+
 /// An unbounded `targets` list is one request that writes an unbounded leg set
 /// and holds the daemon across a verified transport submit per recipient.
 #[tokio::test]
@@ -1938,6 +2135,21 @@ async fn an_exited_target_resolves_with_the_not_running_token() {
 }
 
 async fn seed_transcript_row(store: &Store, session_key: &str, event_id: &str) {
+    seed_transcript_payload(
+        store,
+        session_key,
+        event_id,
+        &serde_json::json!({ "text": "hi" }).to_string(),
+    )
+    .await;
+}
+
+async fn seed_transcript_payload(
+    store: &Store,
+    session_key: &str,
+    event_id: &str,
+    raw_payload: &str,
+) {
     use ainb_hangar_store::repo::fleet_provider_event::{
         FleetProviderEventRepo, NewFleetProviderEvent,
     };
@@ -1953,7 +2165,7 @@ async fn seed_transcript_row(store: &Store, session_key: &str, event_id: &str) {
             observed_at: 10,
             received_at: 11,
             event_type: "acp.message".to_string(),
-            raw_payload: serde_json::json!({ "text": "hi" }).to_string(),
+            raw_payload: raw_payload.to_string(),
         },
     )
     .await

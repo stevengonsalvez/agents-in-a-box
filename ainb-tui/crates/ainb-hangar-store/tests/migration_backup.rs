@@ -32,14 +32,18 @@ async fn seed_one_migration_behind(dir: &std::path::Path) -> i64 {
 }
 
 fn backups(dir: &std::path::Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
+    let mut names: Vec<(i64, String)> = std::fs::read_dir(dir)
         .expect("read hangar home")
         .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_str().map(ToString::to_string))
-        .filter(|name| name.starts_with("hangar.db.pre-") && name.ends_with(".bak"))
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            let version: i64 =
+                name.strip_prefix("hangar.db.pre-")?.strip_suffix(".bak")?.parse().ok()?;
+            Some((version, name))
+        })
         .collect();
-    names.sort();
-    names
+    names.sort_by_key(|(v, _)| *v);
+    names.into_iter().map(|(_, name)| name).collect()
 }
 
 /// A boot with a PENDING migration backs the database up first; the next boot,

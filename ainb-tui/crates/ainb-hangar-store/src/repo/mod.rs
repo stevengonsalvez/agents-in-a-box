@@ -46,6 +46,7 @@ pub mod notify_rule;
 pub mod profile;
 pub mod run_history;
 pub mod search;
+pub mod sessions;
 pub mod skill;
 pub mod squad;
 pub mod standup;

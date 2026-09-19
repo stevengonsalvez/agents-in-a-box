@@ -22,6 +22,15 @@ import Foundation
 // to Unicode scalars rather than Swift `Character`s; see `truncateChars` for
 // why that distinction is the difference between a bound and no bound.
 //
+// There is no scrub in this file, and that is not an omission. The Rust
+// classifier scrubs before it cuts (#1187), because a cut through a credential
+// leaves a prefix no shape matches. Here every payload arrives as a
+// `FleetTranscriptChunk` from `fleet/transcript_list` or
+// `fleet/transcript_event`, and the daemon scrubs each string value of that
+// payload before the chunk leaves it (`transcript_chunk_wire`, #1199), so every
+// cut below runs on text that is already scrubbed. A new input that does not
+// come through those two methods needs its own scrub before any cap applies.
+//
 // Every `switch` below is exhaustive with NO `default`, per the rule
 // `FleetChatPresentation.swift` states: a new lane or a new JSON shape must
 // fail to COMPILE rather than fall through to whichever arm was written last.

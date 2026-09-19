@@ -4,9 +4,351 @@
 // Uses prefix matching for both UUID and workspace name for user convenience.
 
 use anyhow::{Result, anyhow};
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use uuid::Uuid;
 
-use crate::interactive::session_manager::{SessionMetadata, SessionStore};
+use crate::interactive::session_manager::{ModelSource, SessionMetadata, SessionStore};
+use crate::models::SessionAgentType;
+use ainb_hangar_client::DaemonClient;
+use ainb_hangar_proto::protocol::CAP_WORKSPACE_SESSIONS;
+use ainb_hangar_proto::sessions::{
+    WorkspaceSessionDeleteParams, WorkspaceSessionEntry, WorkspaceSessionListParams,
+    WorkspaceSessionUpsertParams,
+};
+
+/// Convert a proto [`WorkspaceSessionEntry`] into local [`SessionMetadata`].
+///
+/// # Errors
+///
+/// Returns why the entry cannot be used when its `session_id` is not a UUID.
+/// The caller skips such a row; it never invents an id for it, because an
+/// id minted on read would differ on every read and match no worktree.
+pub fn entry_to_metadata(entry: &WorkspaceSessionEntry) -> Result<SessionMetadata, String> {
+    let session_id = Uuid::parse_str(&entry.session_id).map_err(|e| {
+        format!(
+            "session {:?} has a non-UUID id: {e}",
+            entry.tmux_session_name
+        )
+    })?;
+    let created_at = DateTime::from_timestamp_millis(entry.created_at).unwrap_or_else(Utc::now);
+    let agent_type = serde_json::from_value(serde_json::Value::String(entry.agent_type.clone()))
+        .unwrap_or(SessionAgentType::Claude);
+    let model_source =
+        serde_json::from_value(serde_json::Value::String(entry.model_source.clone()))
+            .unwrap_or(ModelSource::LegacyTyped);
+    let codex_model = entry
+        .codex_model
+        .as_ref()
+        .and_then(|cm| serde_json::from_value(serde_json::Value::String(cm.clone())).ok());
+
+    Ok(SessionMetadata {
+        session_id,
+        tmux_session_name: entry.tmux_session_name.clone(),
+        worktree_path: PathBuf::from(&entry.worktree_path),
+        workspace_name: entry.workspace_name.clone(),
+        created_at,
+        agent_type,
+        headroom_enabled: entry.headroom_enabled,
+        rtk_enabled: entry.rtk_enabled,
+        skip_permissions: entry.skip_permissions,
+        model: entry.model.clone(),
+        model_source,
+        codex_model,
+        codex_thread_id: entry.codex_thread_id.clone(),
+    })
+}
+
+/// Convert local [`SessionMetadata`] into proto [`WorkspaceSessionEntry`].
+#[must_use]
+pub fn metadata_to_entry(meta: &SessionMetadata) -> WorkspaceSessionEntry {
+    // These are fieldless enums with no serde renames, so the Debug name is
+    // the persisted name `entry_to_metadata` parses back (pinned by
+    // `enum_names_round_trip`). Formatting keeps this module off the
+    // serialisation call-site list `tests/serialize_guard.rs` fences.
+    let agent_type = format!("{:?}", meta.agent_type);
+    let model_source = format!("{:?}", meta.model_source);
+    let codex_model = meta.codex_model.map(|cm| format!("{cm:?}"));
+
+    WorkspaceSessionEntry {
+        session_id: meta.session_id.to_string(),
+        tmux_session_name: meta.tmux_session_name.clone(),
+        worktree_path: meta.worktree_path.to_string_lossy().to_string(),
+        workspace_name: meta.workspace_name.clone(),
+        created_at: meta.created_at.timestamp_millis(),
+        agent_type,
+        headroom_enabled: meta.headroom_enabled,
+        rtk_enabled: meta.rtk_enabled,
+        skip_permissions: meta.skip_permissions,
+        model: meta.model.clone(),
+        model_source,
+        codex_model,
+        codex_thread_id: meta.codex_thread_id.clone(),
+    }
+}
+
+/// Where this process reads and writes sessions.
+///
+/// ```text
+/// resolve ──▶ hello advertises hangar.workspace.sessions?
+///               └─▶ session_list says import_complete? ──▶ Daemon
+///             anything else ─────────────────────────────▶ File
+/// ```
+///
+/// While P6d is dark, [`resolve`](Self::resolve) always answers
+/// [`File`](Self::File); see [`CAP_WORKSPACE_SESSIONS`].
+///
+/// Decided once per process by [`session_source`], so one command cannot
+/// read from the table and write to the file. On [`Daemon`](Self::Daemon)
+/// the table is authoritative and `sessions.json` is never written; a daemon
+/// that fails later in the command is an error, not a fallback. On
+/// [`File`](Self::File) the flocked `SessionStore` path is used unchanged.
+#[derive(Debug, Clone)]
+pub enum SessionSource {
+    /// The daemon's `sessions` table, behind RPC.
+    Daemon(DaemonClient),
+    /// `~/.agents-in-a-box/sessions.json`.
+    File,
+}
+
+fn daemon_io_error(what: &str, error: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(format!("daemon session {what} failed: {error}"))
+}
+
+impl SessionSource {
+    /// Decide against the daemon named by the environment.
+    ///
+    /// While P6d is dark this build does not advertise
+    /// `CAP_WORKSPACE_SESSIONS`, so the answer is [`File`](Self::File)
+    /// without dialing: every CLI reader and writer behaves as before the
+    /// table existed. P6e turns it on by adding the capability to the
+    /// catalogue, together with the TUI's readers and writers.
+    pub async fn resolve() -> Self {
+        if !ainb_hangar_proto::protocol::advertises(CAP_WORKSPACE_SESSIONS) {
+            return Self::File;
+        }
+        match DaemonClient::from_env() {
+            Ok(client) => Self::resolve_with(client).await,
+            Err(_) => Self::File,
+        }
+    }
+
+    /// Decide against the daemon at `socket` with `token` (the test seam).
+    ///
+    /// Unlike [`resolve`](Self::resolve) this asks the daemon even while the
+    /// capability is dark, so tests can drive the daemon path.
+    pub async fn resolve_at(socket: PathBuf, token: String) -> Self {
+        Self::resolve_with(DaemonClient::with_parts(socket, token)).await
+    }
+
+    async fn resolve_with(client: DaemonClient) -> Self {
+        let Ok(hello) = client.hello().await else {
+            return Self::File;
+        };
+        if !hello.advertises(CAP_WORKSPACE_SESSIONS) {
+            return Self::File;
+        }
+        let probe = WorkspaceSessionListParams {
+            workspace_name: None,
+            limit: Some(1),
+        };
+        match client.workspace_session_list(probe).await {
+            Ok(res) if res.import_complete => Self::Daemon(client),
+            Ok(_) => {
+                eprintln!(
+                    "Warning: the daemon has not finished importing sessions.json; \
+                     reading the file this run."
+                );
+                Self::File
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: daemon session list failed ({e}); reading sessions.json this run."
+                );
+                Self::File
+            }
+        }
+    }
+
+    /// Read the whole store from this source.
+    ///
+    /// # Errors
+    ///
+    /// On [`Daemon`](Self::Daemon), when the RPC fails. The file is not read
+    /// instead: the process already decided where its sessions live.
+    pub async fn load(&self) -> std::io::Result<SessionStore> {
+        let client = match self {
+            Self::File => return Ok(SessionStore::load()),
+            Self::Daemon(client) => client,
+        };
+        let res = client
+            .workspace_session_list(WorkspaceSessionListParams::default())
+            .await
+            .map_err(|e| daemon_io_error("list", e))?;
+        if res.truncated {
+            eprintln!(
+                "Warning: the daemon returned only the newest {} sessions.",
+                res.sessions.len()
+            );
+        }
+        let mut store = SessionStore::default();
+        for entry in &res.sessions {
+            match entry_to_metadata(entry) {
+                Ok(meta) => {
+                    store.sessions.insert(meta.tmux_session_name.clone(), meta);
+                }
+                Err(why) => eprintln!("Warning: skipping {why}"),
+            }
+        }
+        Ok(store)
+    }
+
+    /// Apply `f` to the store and persist the difference.
+    ///
+    /// On [`File`](Self::File) the store is loaded under the lock, `f` runs,
+    /// and the file is saved only if something changed.
+    ///
+    /// On [`Daemon`](Self::Daemon) the store is read fresh, `f` runs, and only
+    /// what changed is written: one delete per session id that disappeared,
+    /// one upsert per session that is new or different. The `sessions.json`
+    /// lock is held across the whole read-modify-write so two CLI processes
+    /// cannot interleave, as on the file path.
+    ///
+    /// # Errors
+    ///
+    /// The first failed RPC, so a caller such as `ainb run` can roll back.
+    pub async fn mutate<F>(&self, f: F) -> std::io::Result<()>
+    where
+        F: FnOnce(&mut SessionStore),
+    {
+        let client = match self {
+            Self::File => {
+                let _guard = SessionStore::lock()?;
+                let mut store = SessionStore::load();
+                let before = snapshot(&store);
+                f(&mut store);
+                // Save only on change, as v2's orphan cleanup did: a no-op
+                // never rewrites the file another writer may be reading.
+                return if snapshot(&store) == before {
+                    Ok(())
+                } else {
+                    store.save()
+                };
+            }
+            Self::Daemon(client) => client,
+        };
+        let _guard = SessionStore::lock()?;
+        let mut store = self.load().await?;
+        let before = entries_by_id(&store);
+        f(&mut store);
+        let after = entries_by_id(&store);
+
+        for (id, _) in before.iter().filter(|(id, _)| !after.contains_key(*id)) {
+            client
+                .workspace_session_delete(WorkspaceSessionDeleteParams {
+                    session_id: Some(id.to_string()),
+                    tmux_session_name: None,
+                })
+                .await
+                .map_err(|e| daemon_io_error("delete", e))?;
+        }
+        for (id, entry) in &after {
+            if before.get(id) == Some(entry) {
+                continue;
+            }
+            client
+                .workspace_session_upsert(WorkspaceSessionUpsertParams {
+                    session: entry.clone(),
+                })
+                .await
+                .map_err(|e| daemon_io_error("write", e))?;
+        }
+        Ok(())
+    }
+}
+
+/// Every entry keyed by its map key, for change detection.
+fn snapshot(store: &SessionStore) -> std::collections::BTreeMap<String, WorkspaceSessionEntry> {
+    store.sessions.iter().map(|(k, m)| (k.clone(), metadata_to_entry(m))).collect()
+}
+
+fn entries_by_id(store: &SessionStore) -> HashMap<Uuid, WorkspaceSessionEntry> {
+    store.sessions.values().map(|m| (m.session_id, metadata_to_entry(m))).collect()
+}
+
+static SESSION_SOURCE: tokio::sync::OnceCell<SessionSource> = tokio::sync::OnceCell::const_new();
+
+/// This process's [`SessionSource`], resolved on first use and then fixed.
+pub async fn session_source() -> &'static SessionSource {
+    SESSION_SOURCE.get_or_init(SessionSource::resolve).await
+}
+
+/// Drive `fut` to completion from sync code, wherever it is called from.
+///
+/// On a multi-thread runtime the current worker blocks in place. On a
+/// current-thread runtime the only thread that can drive IO and timers is the
+/// one calling us, so the future runs on a scoped thread with a fresh
+/// current-thread runtime of its own: reusing the caller's handle there would
+/// wait on a driver that is blocked waiting on us.
+fn run_async<F: std::future::Future<Output = T> + Send, T: Send>(fut: F) -> T {
+    let fresh = |fut: F| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create tokio runtime")
+            .block_on(fut)
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(fut))
+        }
+        Ok(_) => std::thread::scope(|s| s.spawn(|| fresh(fut)).join().expect("thread join")),
+        Err(_) => fresh(fut),
+    }
+}
+
+/// Load the session store from this process's [`session_source`].
+///
+/// # Errors
+///
+/// When the daemon was chosen and its RPC fails.
+pub async fn load_session_store_async() -> std::io::Result<SessionStore> {
+    session_source().await.load().await
+}
+
+/// [`load_session_store_async`] from sync code.
+///
+/// # Errors
+///
+/// As [`load_session_store_async`].
+pub fn load_session_store() -> std::io::Result<SessionStore> {
+    run_async(load_session_store_async())
+}
+
+/// Mutate the session store through this process's [`session_source`].
+///
+/// # Errors
+///
+/// The lock, file or RPC failure; never swallowed.
+pub async fn mutate_session_store_async<F>(f: F) -> std::io::Result<()>
+where
+    F: FnOnce(&mut SessionStore),
+{
+    session_source().await.mutate(f).await
+}
+
+/// [`mutate_session_store_async`] from sync code.
+///
+/// # Errors
+///
+/// As [`mutate_session_store_async`].
+pub fn mutate_session_store<F>(f: F) -> std::io::Result<()>
+where
+    F: FnOnce(&mut SessionStore) + Send,
+{
+    run_async(mutate_session_store_async(f))
+}
 
 /// Find a session by ID (full or partial UUID) or workspace name prefix
 ///
@@ -17,7 +359,7 @@ use crate::interactive::session_manager::{SessionMetadata, SessionStore};
 ///
 /// Returns an error if no match is found or if multiple sessions match.
 pub fn find_session(id_or_name: &str) -> Result<SessionMetadata> {
-    let store = SessionStore::load();
+    let store = load_session_store()?;
     find_session_in_store(id_or_name, &store)
 }
 
@@ -226,6 +568,74 @@ mod tests {
         let result = find_session_in_store("nonexistent", &store);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No session found"));
+    }
+
+    #[test]
+    fn a_non_uuid_entry_is_refused_not_given_a_fresh_id() {
+        let mut entry = metadata_to_entry(&create_test_store().sessions["tmux_project-a"]);
+        entry.session_id = "01J8Z3K6Q2N4T5V7W9X0Y1Z2A3".to_string();
+        assert!(entry_to_metadata(&entry).is_err());
+    }
+
+    #[test]
+    fn entry_round_trip_keeps_the_id() {
+        let meta = create_test_store().sessions["tmux_project-a"].clone();
+        let back = entry_to_metadata(&metadata_to_entry(&meta)).unwrap();
+        assert_eq!(back.session_id, meta.session_id);
+    }
+
+    #[test]
+    fn enum_names_round_trip() {
+        use crate::models::session::CodexModel;
+        fn back<T: serde::de::DeserializeOwned>(name: String) -> T {
+            serde_json::from_value(serde_json::Value::String(name)).unwrap()
+        }
+        for v in [
+            SessionAgentType::Claude,
+            SessionAgentType::Shell,
+            SessionAgentType::Ssh,
+            SessionAgentType::Codex,
+            SessionAgentType::Gemini,
+            SessionAgentType::Copilot,
+            SessionAgentType::Antigravity,
+            SessionAgentType::Kiro,
+        ] {
+            assert_eq!(back::<SessionAgentType>(format!("{v:?}")), v);
+        }
+        for v in [ModelSource::LegacyTyped, ModelSource::Raw] {
+            assert_eq!(back::<ModelSource>(format!("{v:?}")), v);
+        }
+        for v in [
+            CodexModel::SystemDefault,
+            CodexModel::Gpt55,
+            CodexModel::Gpt56Terra,
+            CodexModel::Gpt56Luna,
+            CodexModel::Gpt53Codex,
+        ] {
+            assert_eq!(back::<CodexModel>(format!("{v:?}")), v);
+        }
+    }
+
+    /// Called from inside a current-thread runtime, `run_async` must finish a
+    /// future that needs the timer driver. Reusing the caller's handle
+    /// deadlocked here, so the test fails on a timeout rather than hanging.
+    #[test]
+    fn run_async_completes_inside_a_current_thread_runtime() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let got = rt.block_on(async {
+                run_async(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    7
+                })
+            });
+            let _ = tx.send(got);
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("run_async deadlocked inside a current-thread runtime");
+        assert_eq!(got, 7);
     }
 
     #[test]

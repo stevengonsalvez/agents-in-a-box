@@ -242,6 +242,30 @@ pub fn scrub_lines<S: AsRef<str>>(lines: &[S]) -> Vec<String> {
         .collect()
 }
 
+/// Scrub every string value in a JSON document, in place.
+///
+/// For a structured payload that leaves the process as JSON (a transcript
+/// chunk on the wire, #1199). Scrubbing each string on its own, rather than
+/// the serialised text, keeps the document valid: an unclosed PEM block in
+/// one value ends at that value instead of eating every field after it, and
+/// a value is scrubbed as the text it decodes to, not its escaped form.
+///
+/// Object keys are left as they are. They are the producer's structure
+/// (`content`, `rawInput`), not operator text, and rewriting one would change
+/// the shape every reader parses against.
+pub fn scrub_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => {
+            if find_secret(text).is_some() {
+                *text = scrub(text);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(scrub_json),
+        serde_json::Value::Object(fields) => fields.values_mut().for_each(scrub_json),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
 fn scrub_shapes(input: &str) -> String {
     let mut out = std::borrow::Cow::Borrowed(input);
     for (name, re) in shapes() {
@@ -387,6 +411,118 @@ mod tests {
     // file matches a secret scanner.
     fn fake(prefix: &str, body: char, len: usize) -> String {
         format!("{prefix}{}", body.to_string().repeat(len))
+    }
+
+    /// Scrubbing twice is scrubbing once. Load-bearing: the daemon scrubs a
+    /// transcript chunk before it ships (#1199) and the classifier scrubs the
+    /// text again before it cuts (#1187), so a second pass that rewrote the
+    /// marker or re-matched the text around it would change what renders.
+    #[test]
+    fn scrub_is_idempotent_over_every_shape() {
+        let shapes = [
+            fake("sk-ant-api03-", 'A', 40),
+            fake("sk-", 'b', 48),
+            fake("ghp_", 'C', 36),
+            fake("github_pat_", 'd', 82),
+            fake("glpat-", 'e', 20),
+            fake("AKIA", 'F', 16),
+            fake("AIza", 'g', 35),
+            format!(
+                "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+                fake("", 'h', 64)
+            ),
+            format!("-----BEGIN PRIVATE KEY-----\n{}", fake("", 'u', 64)),
+            format!(
+                "{}.{}.{}",
+                fake("eyJ", 'i', 20),
+                fake("eyJ", 'j', 20),
+                fake("", 'k', 20)
+            ),
+            format!(
+                "https://x-access-token:{}@github.com/o/r",
+                fake("", 'l', 12)
+            ),
+            fake("sk_live_", 'S', 24),
+            fake("rk_live_", 'R', 24),
+            fake("npm_", 'N', 36),
+            fake("pypi-AgEIcHlwaS5vcmc", 'P', 60),
+            fake("hf_", 'H', 34),
+            fake("dop_v1_", 'a', 64),
+            format!("{}.{}", fake("SG.", 'G', 22), fake("", 'g', 43)),
+            fake("xoxb-", '1', 40),
+            fake("xapp-", '2', 40),
+            fake("AWS_SECRET_ACCESS_KEY=", 'w', 40),
+            format!(
+                "https://api.telegram.org/{}/getUpdates",
+                fake("bot123456789:", 'T', 35)
+            ),
+            fake("123456789:", 't', 35),
+            format!(
+                "{}.{}.{}",
+                fake("", 'D', 24),
+                fake("", 'e', 7),
+                fake("", 'f', 27)
+            ),
+        ];
+        for shape in &shapes {
+            let text = format!("before {shape} after");
+            let once = scrub(&text);
+            assert_eq!(scrub(&once), once, "a second pass changed {once:?}");
+            assert_eq!(find_secret(&once), None, "the first pass left {once:?}");
+        }
+        let all = shapes.join(" | ");
+        let once = scrub(&all);
+        assert_eq!(scrub(&once), once, "a second pass changed the joined text");
+
+        let mut value = serde_json::json!({ "argv": shapes, "text": all });
+        scrub_json(&mut value);
+        let first = value.clone();
+        scrub_json(&mut value);
+        assert_eq!(
+            value, first,
+            "a second scrub_json pass changed the document"
+        );
+    }
+
+    #[test]
+    fn scrub_json_scrubs_every_string_value_and_keeps_the_shape() {
+        let github = fake("ghp_", 'C', 36);
+        let pem = format!("-----BEGIN RSA PRIVATE KEY-----\n{}", "M".repeat(64));
+        let mut value = serde_json::json!({
+            "content": { "text": format!("token {github} here") },
+            "argv": ["curl", format!("x-api-key: {}", fake("sk-ant-api03-", 'A', 40))],
+            "rawOutput": pem,
+            "after": "kept",
+            "exitCode": 0,
+            "ok": true,
+            "none": null,
+        });
+        scrub_json(&mut value);
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "content": { "text": format!("token {REDACTED} here") },
+                "argv": ["curl", format!("x-api-key: {REDACTED}")],
+                "rawOutput": REDACTED,
+                "after": "kept",
+                "exitCode": 0,
+                "ok": true,
+                "none": null,
+            }),
+            "an unclosed key ends at its own value, and nothing else changes"
+        );
+        assert_eq!(find_secret(&value.to_string()), None);
+    }
+
+    #[test]
+    fn scrub_json_leaves_object_keys_alone() {
+        let github = fake("ghp_", 'C', 36);
+        let mut value = serde_json::json!({ github.clone(): "v" });
+        scrub_json(&mut value);
+        assert!(
+            value.get(&github).is_some(),
+            "keys are structure and are not rewritten"
+        );
     }
 
     #[test]

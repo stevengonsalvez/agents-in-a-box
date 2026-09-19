@@ -1441,13 +1441,10 @@ fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
         );
         shell.preview_content = Some(seed.text("session.shell.preview_content", Captured));
         state.sessions.get_mut().workspaces[0].shell_session = Some(shell);
-        // One hidden row, so the verdict's leaf reaches the leak walk: ids
-        // only, and the walk proves it.
-        let hidden = state.sessions.get_mut().workspaces[0]
-            .sessions
-            .first()
-            .map(|session| session.id);
-        state.sessions.get_mut().hidden_sessions.extend(hidden);
+        // A selected row, so the selection's id reaches the leak walk.
+        let sessions = state.sessions.get_mut();
+        sessions.selected_workspace_index = Some(0);
+        sessions.selected_session_index = Some(0);
     }
     {
         let tmux = state.tmux.get_mut();

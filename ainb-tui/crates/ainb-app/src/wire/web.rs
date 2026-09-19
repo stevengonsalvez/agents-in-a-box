@@ -1,8 +1,9 @@
 // ABOUTME: The web dashboard's session rows, projected from the redacted
-// Sessions section frame. The browser never sees a session field that did not
-// first pass through `section_json` (issue #1056).
+// Sessions section view. The browser never sees a session field that did not
+// first pass through that view (issue #1056), and it sees every session,
+// whatever filter the TUI persisted (#1180).
 //
-//   AppState.sessions ──Frame::new──▶ redacted body ──session_rows──▶ /api/snapshot.sessions[]
+//   AppState.sessions ──every_session_json──▶ redacted body ──session_rows──▶ /api/snapshot.sessions[]
 //
 // The projection only picks and renames values already in the frame body, so
 // what the frame withholds (`display_name`) cannot reappear on the web. The
@@ -13,8 +14,6 @@
 // row field fails the same gate a new frame field does.
 
 use crate::app::AppState;
-use crate::app::versioned::SectionId;
-use crate::wire::frame::{Frame, HostId};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -36,19 +35,21 @@ pub struct WebSessionRow {
     pub claude_active: bool,
 }
 
-/// The web rows for every session of `state`, read from its Sessions frame.
+/// The web rows for every session of `state`, read through its Sessions view.
+///
+/// Every session, whatever session filter the TUI persisted: the filter is the
+/// TUI renderer's, and a stopped session the TUI hides is still one the web
+/// lists and attaches (#1180). `ainb list --frame`, the web dashboard and its
+/// attach lookup all route through here.
 #[must_use]
 pub fn session_rows(state: &AppState) -> Vec<WebSessionRow> {
-    // The web rows carry no host field, so the frame's host is never read.
-    rows_from_frame(&Frame::new(state, SectionId::Sessions, HostId::local()))
+    rows_from_body(&crate::wire::every_session_json(state))
 }
 
-/// The web rows a Sessions frame describes. Any other section's frame has no
-/// workspaces and gives no rows.
-#[must_use]
-pub fn rows_from_frame(frame: &Frame) -> Vec<WebSessionRow> {
+/// The web rows a Sessions view body describes.
+fn rows_from_body(body: &Value) -> Vec<WebSessionRow> {
     let text = |value: &Value| value.as_str().map(str::to_string);
-    frame.body()["workspaces"]
+    body["workspaces"]
         .as_array()
         .into_iter()
         .flatten()
@@ -482,6 +483,41 @@ mod tests {
             !rows[0].worktree_name.contains(CANARY),
             "{:?}",
             rows[0].worktree_name
+        );
+    }
+
+    /// The TUI's Shift+F filter is a fact about the TUI's renderer, not about
+    /// the sessions: the web rows, `ainb list --frame` and the attach lookup
+    /// read every session whatever filter the TUI persisted (#1180).
+    #[test]
+    fn the_web_rows_carry_every_session_whatever_the_tui_filter() {
+        use crate::app::state::SessionFilter;
+        use crate::models::SessionMode;
+
+        let mut state = sample_state(&mut PlainSeed);
+        let session = &mut state.sessions.get_mut().workspaces[0].sessions[0];
+        session.mode = SessionMode::Interactive;
+        session.status = SessionStatus::Stopped;
+        let stopped = session.id.to_string();
+
+        for filter in [
+            SessionFilter::All,
+            SessionFilter::ActiveOnly,
+            SessionFilter::StoppedOnly,
+        ] {
+            state.sessions.get_mut().session_filter = filter;
+            let rows = session_rows(&state);
+            assert!(
+                rows.iter().any(|row| row.session_id == stopped),
+                "{filter:?} dropped the stopped session: {rows:?}"
+            );
+        }
+        state.sessions.get_mut().workspaces[0].sessions[0].status = SessionStatus::Running;
+        state.sessions.get_mut().session_filter = SessionFilter::StoppedOnly;
+        assert_eq!(
+            session_rows(&state).len(),
+            1,
+            "a running row under StoppedOnly"
         );
     }
 

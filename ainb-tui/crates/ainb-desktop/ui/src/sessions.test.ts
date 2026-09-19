@@ -9,7 +9,7 @@ import type {
   Session_Serialize,
   SessionsView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
-import { idleCount, label, LABEL_CHARS, ringCount, ringFor, visibleRows } from "./sessions.ts";
+import { idleCount, isSelected, label, LABEL_CHARS, ringCount, ringFor } from "./sessions.ts";
 
 function session(id: string, status: SessionStatus = "Running", marks: AttentionKind[] = []): Session_Serialize {
   return {
@@ -53,35 +53,14 @@ test("a label drops control and format characters and stops at the cap", () => {
   assert.equal(label("\u{1F600}".repeat(100)), "\u{1F600}".repeat(LABEL_CHARS));
 });
 
-test("the sidebar draws the rows the frame keeps, and keeps each row's index", () => {
-  // The reducer decides; the frame carries the verdict. The window never
-  // re-derives the filter, so a rule that grows a case in Rust cannot be
-  // silently wrong here (#1157).
-  const rows = (hidden: string[]) => {
-    const sessions = {
-      workspaces: [
-        {
-          name: "repo",
-          sessions: [session("live"), session("gone", "Stopped"), session("boss", "Stopped")],
-        },
-      ],
-      hidden_sessions: hidden,
-    } as unknown as SessionsView_Serialize;
-    return visibleRows(sessions, sessions.workspaces[0]);
-  };
-
-  assert.deepEqual(
-    rows(["gone"]).map((row) => [row.index, row.session.id]),
-    [
-      [0, "live"],
-      // The row below a hidden one keeps ITS index: the selection is expressed
-      // in the reducer's own list, not in what is on screen.
-      [2, "boss"],
-    ],
-  );
-  assert.equal(rows([]).length, 3);
-  assert.equal(rows(["live", "gone", "boss"]).length, 0);
-  // A host at another version may send no verdict at all.
-  const bare = { workspaces: [{ name: "repo", sessions: [session("live")] }] } as unknown as SessionsView_Serialize;
-  assert.equal(visibleRows(bare, bare.workspaces[0]).length, 1);
+test("the selected row is named by id, not by its place in the list", () => {
+  // The frame carries only the rows the filter shows, so an index into the
+  // reducer's full list would name the wrong one (#1180).
+  const sessions = {
+    workspaces: [{ name: "repo", sessions: [session("live"), session("boss")] }],
+    selected_session_id: "boss",
+  } as unknown as SessionsView_Serialize;
+  assert.equal(isSelected(sessions, "boss"), true);
+  assert.equal(isSelected(sessions, "live"), false);
+  assert.equal(isSelected(undefined, "boss"), false);
 });
