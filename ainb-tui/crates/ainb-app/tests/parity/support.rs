@@ -235,11 +235,19 @@ impl ParityFixture {
                     .map(|(n, e)| row(n, &e.kind, &e.summary, e.read))
                     .collect();
                 for n in 0..*filler {
-                    rows.push(row(entries.len() + n, "task", &format!("Task queued: filler-{n}"), false));
+                    rows.push(row(
+                        entries.len() + n,
+                        "task",
+                        &format!("Task queued: filler-{n}"),
+                        false,
+                    ));
                 }
                 let unread = rows.iter().filter(|r| r.read_at.is_none()).count() as i64;
                 state.apply_inbox_read(
-                    ainb_hangar_proto::snapshots::InboxListResult { entries: rows, unread },
+                    ainb_hangar_proto::snapshots::InboxListResult {
+                        entries: rows,
+                        unread,
+                    },
                     1_700_000_001_000,
                 );
             }
