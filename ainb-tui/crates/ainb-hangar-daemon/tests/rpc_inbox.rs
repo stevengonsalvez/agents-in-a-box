@@ -612,7 +612,10 @@ async fn mark_read_with_one_op_id_twice_runs_the_sweep_once_and_replays() {
     });
     let first = c.call(methods::HANGAR_INBOX_MARK_READ, params.clone()).await;
     assert!(first["error"].is_null(), "first send must ack: {first}");
-    assert_eq!(first["result"]["marked"], 1, "the first send sweeps: {first}");
+    assert_eq!(
+        first["result"]["marked"], 1,
+        "the first send sweeps: {first}"
+    );
     assert_eq!(first["result"]["mutation"]["outcome"], "created", "{first}");
 
     let second = c.call(methods::HANGAR_INBOX_MARK_READ, params).await;
@@ -639,17 +642,27 @@ async fn mark_read_with_two_op_ids_is_two_sweeps_and_the_second_marks_nothing() 
 
     let mut c = Client::connect(&socket_path).await;
     c.auth_from_file(dir.path()).await;
-    let send = |op_id: &str| {
-        serde_json::json!({ "workspace_id": WS_SLUG, "recipient": OWNER, "op_id": op_id })
-    };
+    let send = |op_id: &str| serde_json::json!({ "workspace_id": WS_SLUG, "recipient": OWNER, "op_id": op_id });
     let first = c
-        .call(methods::HANGAR_INBOX_MARK_READ, send("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+        .call(
+            methods::HANGAR_INBOX_MARK_READ,
+            send("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
         .await;
     assert_eq!(first["result"]["marked"], 1, "{first}");
     let second = c
-        .call(methods::HANGAR_INBOX_MARK_READ, send("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+        .call(
+            methods::HANGAR_INBOX_MARK_READ,
+            send("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        )
         .await;
     assert!(second["error"].is_null(), "{second}");
-    assert_eq!(second["result"]["marked"], 0, "the second sweep finds nothing unread: {second}");
-    assert_eq!(second["result"]["mutation"]["outcome"], "created", "not a replay: {second}");
+    assert_eq!(
+        second["result"]["marked"], 0,
+        "the second sweep finds nothing unread: {second}"
+    );
+    assert_eq!(
+        second["result"]["mutation"]["outcome"], "created",
+        "not a replay: {second}"
+    );
 }
