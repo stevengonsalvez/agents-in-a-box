@@ -137,6 +137,15 @@ describe("reviewing from the window", () => {
             bodyScrollHeight: body.scrollHeight,
             panesHeight: panes === null ? null : panes.clientHeight,
             drawnRows: body.querySelectorAll("[data-vrow]").length,
+            // Every box between the body and the document, so an unbounded one
+            // is named rather than guessed at.
+            chain: (() => {
+              const up = [];
+              for (let node = body; node !== null; node = node.parentElement) {
+                up.push(`${node.tagName.toLowerCase()}.${node.className || "-"}:${node.clientHeight}`);
+              }
+              return up;
+            })(),
           };
     });
     const banners = await browser.execute(() =>
