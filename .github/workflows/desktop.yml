@@ -281,7 +281,14 @@ jobs:
       - name: No WebDriver symbol or plugin string in the release binary
         run: |
           set -euo pipefail
+          # On macOS the copy inside the bundle is what ships, so that is the
+          # binary read; on Linux the AppImage wraps the same file.
           BIN=target/release/ainb-desktop
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            APP="$(find target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+            BIN="$APP/Contents/MacOS/ainb-desktop"
+          fi
+          echo "binary under test: $BIN"
           test -x "$BIN"
           # Each tool's output is kept and asserted non-empty first: a stripped
           # binary would otherwise pass by telling us nothing. An `! pipeline`
