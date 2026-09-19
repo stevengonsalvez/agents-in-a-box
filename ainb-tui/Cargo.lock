@@ -474,6 +474,7 @@ dependencies = [
  "tracing-appender",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
  "which",
 ]
 
