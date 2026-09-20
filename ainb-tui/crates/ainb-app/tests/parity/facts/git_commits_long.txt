@@ -1,10 +1,12 @@
 # A list of two hundred commits with the hundredth selected: neither renderer
 # draws all of it, and both draw the page the selection is in. These facts are
-# the commits around that selection, so a renderer that pinned the list to the
-# top of the branch, or drew from row zero, fails them.
+# the selected commit and the two above it, which is where both windows
+# overlap: the terminal's list keeps the selection at the bottom edge of its
+# own page, so the commits after it are not on that screen. A renderer that
+# pinned the list to the top of the branch, or drew from row zero, fails them.
 c001000
 commit number 100
 c000990
 commit number 99
-c001010
-commit number 101
+c000980
+commit number 98
