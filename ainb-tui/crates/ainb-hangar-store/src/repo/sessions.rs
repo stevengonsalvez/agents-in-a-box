@@ -44,6 +44,45 @@ pub enum ImportOutcome {
     AlreadyCompleted,
 }
 
+/// Which table rows a reconcile pass may delete, which is the one thing the
+/// flip changes about a pass.
+///
+/// Before the flip the FILE is the authority on which sessions exist and the
+/// table on their contents (the orchestrator's rule on #1250): only the file
+/// was written by every surface, so a row the file lacks is a row a client
+/// deleted from the file and could not delete from the table. After the flip
+/// the TABLE is the authority and the file is a mirror kept row by row, so a
+/// row the file lacks is far more likely a mirror that has not caught up than
+/// a session someone ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deletes {
+    /// Pre-flip: every table row whose session the file does not have.
+    EveryRowTheFileLacks,
+    /// Post-flip, with a file that exists and parses: only rows the file has
+    /// had a chance to carry, that is rows created no later than the file's
+    /// own last write. An older binary's `ainb kill` is still reconciled,
+    /// and a row a new writer created between two passes is never taken for
+    /// one the file dropped.
+    RowsNoNewerThan(i64),
+    /// Post-flip, with no file to read: the mirror was lost, not emptied.
+    /// Nothing is deleted and the pass still commits its marker, so readers
+    /// are served from the table rather than waiting for a file that may
+    /// never come back.
+    Nothing,
+}
+
+impl Deletes {
+    /// Whether a row created at `created_at` may go.
+    #[must_use]
+    pub const fn may_delete(self, created_at: i64) -> bool {
+        match self {
+            Self::EveryRowTheFileLacks => true,
+            Self::RowsNoNewerThan(stamp) => created_at <= stamp,
+            Self::Nothing => false,
+        }
+    }
+}
+
 /// One `sessions.json` record offered to [`SessionsRepo::complete_reconcile`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSession {
@@ -359,18 +398,18 @@ impl SessionsRepo {
         Ok(n == 2)
     }
 
-    /// Make the table hold exactly the file's sessions, and record the pass
-    /// on the `<path>#reconcile` marker, in one `IMMEDIATE` transaction.
+    /// Make the table hold the file's sessions, and record the pass on the
+    /// `<path>#reconcile` marker, in one `IMMEDIATE` transaction.
     ///
-    /// Repeatable, unlike [`Self::complete_import`]. Until the flip the FILE
-    /// is the authority on which sessions exist and the TABLE on their
-    /// contents (the orchestrator's rule on #1250), so a pass:
-    /// - deletes every table row whose session the file does not have, first
-    ///   (a delete that reached the file but not the table, or a table write
-    ///   whose file change was reverted), returned in `deleted`;
+    /// Repeatable, unlike [`Self::complete_import`]. A pass:
+    /// - deletes the table rows `deletes` allows it to, first, returned in
+    ///   `deleted`;
     /// - then inserts every file session the table lacks;
     /// - leaves a row the file and the table both have untouched: the table
     ///   wins on contents.
+    ///
+    /// Which rows may be deleted is the difference the flip makes, and the
+    /// caller decides it from its own compiled catalogue; see [`Deletes`].
     ///
     /// A record with a minted id matches by tmux name. A file session whose
     /// tmux name is still bound to another id after the deletes is skipped
@@ -384,6 +423,7 @@ impl SessionsRepo {
         sessions: &[FileSession],
         rejected: i64,
         completed_at: i64,
+        deletes: Deletes,
     ) -> Result<ReconcileOutcome, sqlx::Error> {
         let mut tx = pool.begin_with(crate::repo::fleet::IMMEDIATE_TRANSACTION).await?;
 
@@ -397,13 +437,16 @@ impl SessionsRepo {
             .filter(|s| s.id_minted)
             .map(|s| s.row.tmux_session_name.as_str())
             .collect();
-        let table: Vec<(String, String)> =
-            sqlx::query_as("SELECT session_id, tmux_session_name FROM sessions")
+        let table: Vec<(String, String, i64)> =
+            sqlx::query_as("SELECT session_id, tmux_session_name, created_at FROM sessions")
                 .fetch_all(&mut *tx)
                 .await?;
         let mut deleted = Vec::new();
-        for (session_id, tmux_name) in table {
+        for (session_id, tmux_name, created_at) in table {
             if file_ids.contains(session_id.as_str()) || minted_names.contains(tmux_name.as_str()) {
+                continue;
+            }
+            if !deletes.may_delete(created_at) {
                 continue;
             }
             sqlx::query("DELETE FROM sessions WHERE session_id = ?")
