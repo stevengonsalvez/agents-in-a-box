@@ -378,7 +378,7 @@ impl SessionsRepo {
     /// costs a stale row. Rows leave the table through the table's own paths.
     ///
     /// A record with a minted id matches by tmux name. A file session whose
-    /// tmux name is still bound to another id after the deletes is skipped
+    /// tmux name is still bound to another id is skipped
     /// and returned as a [`NameConflict`]. Sound only while every writer
     /// writes the file row before the table row, which every pre-flip writer
     /// does. On any error the transaction rolls back and the marker keeps its
