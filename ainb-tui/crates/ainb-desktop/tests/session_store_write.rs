@@ -16,6 +16,9 @@ use support::isolated_home as scratch_home;
 /// queued, so this is the cost of a channel send, not of the write.
 const ON_TICK: Duration = Duration::from_millis(250);
 
+/// The store is one file for the whole binary, so the tests take turns.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// P6e: the desktop executor hands a session-store write to its worker and
 /// returns at once, even while that write cannot proceed; the write lands once
 /// it can, and the flush the app's exit paths call waits for it.
@@ -29,6 +32,7 @@ const ON_TICK: Duration = Duration::from_millis(250);
 /// daemon harness in this crate.
 #[test]
 fn a_session_store_write_is_queued_while_it_cannot_proceed_and_lands_after() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
     use ainb_app::app::Persist;
     use ainb_app::interactive::session_manager::{SessionMetadata, SessionStore};
 
@@ -87,5 +91,67 @@ fn a_session_store_write_is_queued_while_it_cannot_proceed_and_lands_after() {
     assert!(
         !SessionStore::load().sessions[&tmux].headroom_enabled,
         "the queued write did not land"
+    );
+}
+
+/// P6e: a worker that is gone, as a panic inside a write leaves it, is
+/// replaced by the next write rather than failing that write and every write
+/// after it.
+#[test]
+fn a_worker_that_is_gone_is_replaced_rather_than_failing_every_write() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    use ainb_app::app::Persist;
+    use ainb_app::interactive::session_manager::{SessionMetadata, SessionStore};
+
+    let home = scratch_home();
+    let tmux = "tmux_desktop-p6e-worker".to_string();
+    let mut store = SessionStore::load();
+    store.upsert(SessionMetadata {
+        session_id: uuid::Uuid::new_v4(),
+        tmux_session_name: tmux.clone(),
+        worktree_path: home.join("work"),
+        workspace_name: "ws".to_string(),
+        created_at: serde_json::from_str("\"2026-09-19T00:00:00Z\"").expect("a timestamp"),
+        agent_type: ainb_app::models::session::SessionAgentType::default(),
+        headroom_enabled: true,
+        rtk_enabled: false,
+        skip_permissions: None,
+        model: None,
+        model_source: ainb_app::interactive::session_manager::ModelSource::default(),
+        codex_model: None,
+        codex_thread_id: None,
+    });
+    store.save().expect("seed sessions.json");
+
+    let mut executor = ainb_desktop::executor::DesktopExecutor::new(None);
+    let first = executor.execute(Effect::Persist(Persist::SessionHeadroom {
+        tmux_session: tmux.clone(),
+        expected: true,
+        enabled: false,
+    }));
+    assert!(first.is_empty(), "the first write reported: {first:?}");
+
+    // The worker goes, its queue drained, leaving a sender nothing reads.
+    executor.break_session_store_worker_for_tests();
+    let after = executor.execute(Effect::Persist(Persist::SessionHeadroom {
+        tmux_session: tmux.clone(),
+        expected: false,
+        enabled: true,
+    }));
+    assert!(
+        after.is_empty(),
+        "the write after the loss was refused instead of starting another worker: {after:?}"
+    );
+    assert_eq!(
+        executor.flush_session_store_writes(ainb_app::cli::util::SESSION_STORE_FLUSH_BOUND),
+        0
+    );
+    assert!(
+        SessionStore::load().sessions[&tmux].headroom_enabled,
+        "the write after the worker was lost never landed"
+    );
+    assert!(
+        executor.take_deferred().is_empty(),
+        "the write after the loss was reported as failed"
     );
 }
