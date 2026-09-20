@@ -345,3 +345,77 @@ fn a_click_on_an_empty_commit_list_stays_at_the_start() {
         0
     );
 }
+
+/// A click names a commit by its short hash, so the list may not carry the
+/// same short hash twice: two commits sharing seven hex digits would select
+/// and open whichever came first.
+#[test]
+fn two_commits_sharing_seven_digits_get_hashes_of_their_own() {
+    let colliding = vec![
+        "abc1234def0000000000000000000000000000aa".to_string(),
+        "abc1234def0000000000000000000000000000bb".to_string(),
+        "0123456789abcdef0123456789abcdef01234567".to_string(),
+    ];
+    let short = ainb_app::git::operations::unique_short_hashes(&colliding);
+
+    assert_eq!(short.len(), 3);
+    assert_ne!(short[0], short[1], "the colliding pair is told apart");
+    let mut sorted = short.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), 3, "every short hash is unique: {short:?}");
+    assert!(
+        short.iter().all(|hash| hash.len() >= 7),
+        "and none is shorter than git's own seven: {short:?}"
+    );
+    for (full, hash) in colliding.iter().zip(&short) {
+        assert!(full.starts_with(hash), "{hash} is a prefix of {full}");
+    }
+}
+
+/// A list with nothing in common keeps git's seven.
+#[test]
+fn commits_that_do_not_collide_keep_seven_digits() {
+    let hashes = vec![
+        "aaaaaaa1111111111111111111111111111111111".to_string(),
+        "bbbbbbb2222222222222222222222222222222222".to_string(),
+    ];
+    let short = ainb_app::git::operations::unique_short_hashes(&hashes);
+    assert_eq!(short, vec!["aaaaaaa".to_string(), "bbbbbbb".to_string()]);
+}
+
+/// The hash a renderer sends is bounded: a whole hash is forty characters, so
+/// anything longer is not one and is refused before the reducer reads it.
+#[test]
+fn a_hash_longer_than_a_whole_one_is_refused() {
+    let mut state = on_commits(10);
+    select_commit(&mut state, "c0005");
+    let at = |state: &AppState| {
+        state.git_view.git_view_state.as_ref().expect("git view").selected_commit_index
+    };
+    assert_eq!(at(&state), 5);
+
+    // The list is made to carry one, so the refusal can only be the cap: a
+    // reducer that saw this hash would select it.
+    let long = "c".repeat(41);
+    state
+        .git_view
+        .get_mut()
+        .git_view_state
+        .as_mut()
+        .expect("git view")
+        .commits
+        .push(ainb_app::git::operations::CommitInfo {
+            hash_short: long.clone(),
+            author: "Sample Dev".to_string(),
+            date: "2026-09-19".to_string(),
+            message: "a hash no reader should accept".to_string(),
+        });
+
+    select_commit(&mut state, &long);
+    assert_eq!(
+        at(&state),
+        5,
+        "a 41-character hash never reached the reducer"
+    );
+}
