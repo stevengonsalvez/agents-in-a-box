@@ -75,6 +75,7 @@ fn a_write_during_the_boot_pass_waits_for_it_without_holding_the_lock() {
             &[],
             0,
             1,
+            ainb_hangar_store::repo::sessions::Deletes::Nothing,
         )
         .await
         .unwrap();
