@@ -1,0 +1,7 @@
+# What the session_recovery fixture must show, read against the ratatui snapshot
+# (ainb-app/tests/parity.rs) and, for the DOM half, carried by the fixture's
+# frames; the parity enumeration (screens.txt) requires this list for every
+# both row. Facts are renderer-neutral: what is shown, not how it is framed.
+No orphaned sessions found
+All items are either active or cleaned up.
+Select an item to view details
