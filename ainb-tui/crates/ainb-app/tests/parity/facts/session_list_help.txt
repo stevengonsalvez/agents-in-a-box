@@ -1,0 +1,7 @@
+# What the session_list_help fixture must show, read against the ratatui snapshot
+# (ainb-app/tests/parity.rs) and, for the DOM half, carried by the fixture's
+# frames; the parity enumeration (screens.txt) requires this list for every
+# both row. Facts are renderer-neutral: what is shown, not how it is framed.
+Press ? or Esc to close
+Previous session
+Quick-attach to numbered session
