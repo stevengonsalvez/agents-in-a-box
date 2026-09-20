@@ -76,7 +76,7 @@ export function commitsCut(section: GitViewView_Serialize | undefined): string |
   const parts: string[] = [];
   if (view.commits_cut > 0) parts.push(`${view.commits_cut} commits not sent`);
   if (view.selected_commit_cut) {
-    parts.push("the commit the terminal is on was not sent; this is the nearest one that was");
+    parts.push("the commit the terminal is on was not sent, so this is the nearest one that was");
   }
   return parts.length === 0 ? undefined : parts.join("; ");
 }
