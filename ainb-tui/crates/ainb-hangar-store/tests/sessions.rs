@@ -504,9 +504,9 @@ async fn reconcile_marker_carries_the_latest_pass() {
     assert_eq!(import.completed_at, 1);
 }
 
-/// Until the flip the file is the authority on which sessions exist: a table
-/// row whose session the file does not have is deleted by the pass, and
-/// returned in `deleted`, while a row the file has keeps its table contents.
+/// Since the flip the table is the authority on which sessions exist: a table
+/// row whose session the mirror does not have stays, and a row the mirror also
+/// has keeps its table contents.
 #[tokio::test]
 async fn reconcile_keeps_table_rows_the_file_does_not_have() {
     let dir = tempfile::tempdir().unwrap();
