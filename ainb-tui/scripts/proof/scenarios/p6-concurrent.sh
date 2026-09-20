@@ -173,9 +173,10 @@ p6_stores_agree() { [[ "$(p6_table_names)" == "$(p6_file_names)" ]]; }
 # ---------------------------------------------------------------------------
 
 # p6_row_needle <tmux name>: what the TUI's session list actually shows for a
-# session: not the tmux name, but the 8-hex suffix its branch carries
-# (`tmux_repo-7d755792` runs on `agents/7d755792`).
-p6_row_needle() { printf '%s' "${1##*-}"; }
+# session. Not the tmux name: the row is the branch, `agents/7d755792`, and the
+# 8 hex characters of it are in the tmux name too, last of the ones it carries
+# (`tmux_repo--agents-7d755792--<id>_agents_7d755792`).
+p6_row_needle() { printf '%s' "$1" | grep -oE '[0-9a-f]{8}' | tail -1; }
 
 # p6_tui_reload <pane>: leave the session list and open it again, which is
 # where the TUI reloads its workspaces. Same process, no restart: the reload
