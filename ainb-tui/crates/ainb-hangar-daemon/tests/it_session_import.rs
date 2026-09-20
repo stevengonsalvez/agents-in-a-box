@@ -806,12 +806,13 @@ async fn a_delete_that_reached_only_the_file_is_finished_by_the_next_pass() {
     assert_eq!(ids(&table(pool).await), vec![kept]);
 }
 
-/// A `sessions.json` that goes missing while the table holds sessions is not
-/// read as "no sessions": the pass is refused, every row stays, and the
-/// marker is left as it was. The watcher's tick right after the file went
-/// away is the case that matters.
+/// P6e-6, the flip: a `sessions.json` that goes missing while the table holds
+/// sessions is a lost mirror, not an empty store. The pass keeps every row and
+/// still commits, so the first-pass gate opens and readers are served from the
+/// table rather than waiting for a file that may never come back. Before the
+/// flip this same pass was refused, because the file decided existence.
 #[tokio::test]
-async fn a_missing_file_never_empties_a_populated_table() {
+async fn a_missing_file_leaves_the_rows_and_still_opens_the_gate() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_in(dir.path()).await.unwrap();
     let pool = store.pool();
@@ -825,16 +826,31 @@ async fn a_missing_file_never_empties_a_populated_table() {
     let marker = SessionsRepo::import_marker(pool, &source).await.unwrap();
 
     fs::remove_file(&sessions_path).unwrap();
-    let err = watch.tick(pool).await.expect("a vanished file is a change").unwrap_err();
-    assert!(format!("{err:#}").contains("missing"), "{err:#}");
+    let outcome = watch
+        .tick(pool)
+        .await
+        .expect("a vanished file is a change")
+        .expect("the pass refused a missing file");
+    assert!(
+        outcome.deleted.is_empty(),
+        "a lost mirror deleted rows: {:?}",
+        outcome.deleted
+    );
     assert_eq!(
         ids(&table(pool).await),
         vec![kept],
         "a missing file emptied the table"
     );
-    assert_eq!(
-        SessionsRepo::import_marker(pool, &source).await.unwrap(),
-        marker
+    let after = SessionsRepo::import_marker(pool, &source).await.unwrap();
+    assert!(
+        after != marker,
+        "the pass did not commit, so the gate would never open"
+    );
+    assert!(
+        SessionsRepo::import_complete_for(pool, &marker_key(&sessions_path))
+            .await
+            .unwrap(),
+        "readers are still not served from the table"
     );
 }
 
@@ -853,4 +869,48 @@ async fn a_fresh_home_with_no_file_still_completes_its_pass() {
     assert!(outcome.deleted.is_empty());
     let source = marker_key(&sessions_path);
     assert!(SessionsRepo::import_complete_for(pool, &source).await.unwrap());
+}
+
+/// P6e-6, the migration this release makes: a home that has been running the
+/// old stack has every session in `sessions.json` and none in the table. The
+/// first boot after the flip must keep all of them, whatever their age
+/// against the file's own last write, and open the gate.
+#[tokio::test]
+async fn the_first_boot_after_the_flip_keeps_a_populated_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    let one = "00000000-0000-0000-0000-0000000000e1";
+    let two = "00000000-0000-0000-0000-0000000000e2";
+    sessions_file(
+        &sessions_path,
+        &[(one, "ainb-one", "ws"), (two, "ainb-two", "ws")],
+    );
+
+    // The boot the flip ships: the P6d import, then the first pass.
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+    let mut watch = ReconcileWatch::new(&sessions_path);
+    let outcome = watch
+        .tick(pool)
+        .await
+        .expect("the first pass runs")
+        .expect("the first pass failed");
+
+    assert!(
+        outcome.deleted.is_empty(),
+        "the first pass after the flip dropped sessions: {:?}",
+        outcome.deleted
+    );
+    assert_eq!(
+        ids(&table(pool).await),
+        vec![one, two],
+        "a session in the file did not survive the first boot after the flip"
+    );
+    assert!(
+        SessionsRepo::import_complete_for(pool, &marker_key(&sessions_path))
+            .await
+            .unwrap(),
+        "the gate stayed shut, so no reader would be served from the table"
+    );
 }
