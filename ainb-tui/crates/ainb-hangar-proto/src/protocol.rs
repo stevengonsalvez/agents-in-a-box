@@ -173,11 +173,18 @@ pub const CAP_CONNECTIONS_TRANSIENT: &str = "hangar.connections.transient";
 pub const CAP_HOST_IDENTITY: &str = "hangar.host_identity";
 /// Capability: durable sessions table behind RPC (spec P6d, #1166).
 ///
-/// Defined but DARK: it is deliberately not in [`CAPABILITY_CATALOGUE`], so no
-/// daemon advertises it and every CLI reader and writer stays on
-/// `sessions.json`. The table, its RPCs and the boot import ship in P6d; P6e
-/// moves the TUI's readers and writers with the CLI and appends this constant
-/// to the catalogue (and to `capabilities.catalogue`) to turn it on.
+/// ADVERTISED since P6e-6, the flip: the daemon's `sessions` table is the one
+/// source every surface reads and writes, and `sessions.json` is kept beside
+/// it, row by row under its flock, as the mirror a previous release reads.
+///
+/// A daemon that advertises this also changes the rule its reconcile pass
+/// works to: before the flip the file decided which sessions exist, because
+/// only the file was complete; after it the table decides, and a pass reads a
+/// missing file as a lost mirror rather than as an empty store (the goal's
+/// open question 7).
+///
+/// `AINB_SESSION_SOURCE=file` in a process's environment puts that process
+/// back on `sessions.json` without a re-release.
 pub const CAP_WORKSPACE_SESSIONS: &str = "hangar.workspace.sessions";
 /// Capability: the converged attention inbox, list, subscribe, answer.
 pub const CAP_ATTENTION_INBOX: &str = "hangar.attention.inbox";
@@ -335,6 +342,10 @@ pub const CAPABILITY_CATALOGUE: &[&str] = &[
     CAP_CONNECTIONS_TRANSIENT,
     crate::fleet::FLEET_CAPABILITY_ROSTER_STATUS_READ,
     CAP_HOST_IDENTITY,
+    // P6e-6, the flip. Appended, never inserted: the committed
+    // `capabilities.catalogue` is a prefix of this array in order, so a
+    // removal cannot hide as a move.
+    CAP_WORKSPACE_SESSIONS,
 ];
 
 /// Whether this build advertises `id`.
@@ -353,12 +364,13 @@ pub fn catalogue_strings() -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// P6d lands dark: the sessions capability is defined but no build
-    /// advertises it until P6e flips it on together with the TUI.
+    /// P6e-6, the flip: the sessions capability is advertised, so every
+    /// surface resolves the daemon's table and no build decides sessions from
+    /// `sessions.json` any more. It was dark from P6d until this.
     #[test]
-    fn the_workspace_sessions_capability_is_dark() {
-        assert!(!advertises(CAP_WORKSPACE_SESSIONS));
-        assert!(!catalogue_strings().iter().any(|c| c == CAP_WORKSPACE_SESSIONS));
+    fn the_workspace_sessions_capability_is_advertised() {
+        assert!(advertises(CAP_WORKSPACE_SESSIONS));
+        assert!(catalogue_strings().iter().any(|c| c == CAP_WORKSPACE_SESSIONS));
     }
 
     /// The catalogue is a SET: a duplicated string means one of the two
