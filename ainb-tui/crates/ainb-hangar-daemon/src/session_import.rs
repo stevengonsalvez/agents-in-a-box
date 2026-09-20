@@ -294,12 +294,6 @@ async fn reconcile_pass(
         gate.send_replace(true);
     }
 
-    for session_id in &outcome.deleted {
-        tracing::info!(
-            %session_id,
-            "sessions table row deleted: sessions.json no longer has this session"
-        );
-    }
     for conflict in &outcome.conflicts {
         tracing::warn!(
             session_id = %conflict.session_id,
@@ -473,12 +467,11 @@ impl ReconcileWatch {
 /// Log a finished pass: quiet when it changed nothing.
 pub fn log_reconcile(outcome: &ReconcileOutcome) {
     let m = &outcome.marker;
-    if m.imported > 0 || m.skipped > 0 || m.rejected > 0 || !outcome.deleted.is_empty() {
+    if m.imported > 0 || m.skipped > 0 || m.rejected > 0 {
         tracing::info!(
             imported = m.imported,
             skipped = m.skipped,
             rejected = m.rejected,
-            deleted = outcome.deleted.len(),
             "sessions.json reconciled into the sessions table"
         );
     }
