@@ -79,7 +79,11 @@ describe("the inbox from the window", () => {
       assert.ok((await row.getText()).includes(issue.title), `row ${entry.id} carries the issue's title`);
       assert.ok((await row.getAttribute("class")).split(/\s+/).includes("unread"), `row ${entry.id} is drawn unread`);
     }
-    const drawn = await Promise.all((await $$(".inbox-row")).map((row) => row.getAttribute("data-entry")));
+    // Indexed, not mapped: the element array is a chainable promise, and
+    // its own `map` returns one promise rather than an iterable of them.
+    const rowsDrawn = await $$(".inbox-row");
+    const drawn = [];
+    for (let i = 0; i < rowsDrawn.length; i += 1) drawn.push(await rowsDrawn[i].getAttribute("data-entry"));
     assert.deepEqual(
       ids.filter((id) => !drawn.includes(id)),
       [],
