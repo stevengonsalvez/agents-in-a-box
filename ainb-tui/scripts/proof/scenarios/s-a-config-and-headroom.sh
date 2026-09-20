@@ -98,6 +98,13 @@ scenario() {
     grep -q 'workspace_defaults.branch_prefix *: proofa/' "$NODE_DIR/restart-branch-prefix.txt"
 
   # ---- Step 5: one headroom proxy -----------------------------------------
+  # A daemon of this node's own, started before the TUIs of this step and not
+  # owned by any of them. The daemon a TUI autostarts in an ephemeral hangar
+  # home dies with that TUI, and since the flip a surface that resolved it
+  # reads sessions through it: every read then fails, and the watchdog this
+  # step is about skips on the read rather than starting its proxy.
+  "$AINB_BIN" hangar daemon start >"$PROOF_WORLD/headroom-daemon.txt" 2>&1 || true
+  check "a daemon is up for the headroom step" wait_for 45 daemon_running
   fixture_session || { check "the headroom fixture session starts" false; return; }
   local store="$HOME/.agents-in-a-box/sessions.json" pidfile="$HOME/.agents-in-a-box/headroom/proxy.pid"
   # Headroom is a launch-time choice with no CLI verb, so the proof sets the
