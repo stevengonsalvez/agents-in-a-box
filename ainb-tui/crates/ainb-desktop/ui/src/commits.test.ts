@@ -8,7 +8,14 @@ import type {
   GitViewFrame_Serialize,
   GitViewView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
-import { commitRows, commitsCut, commitWindow, scrollFor, selectCommitIntent } from "./commits.ts";
+import {
+  commitCount,
+  commitRows,
+  commitsCut,
+  commitWindow,
+  scrollFor,
+  selectCommitIntent,
+} from "./commits.ts";
 
 const commit = (n: number): CommitInfo => ({
   hash_short: `c${String(n).padStart(4, "0")}`,
@@ -153,4 +160,10 @@ test("a selected row above the view scrolls up to it, and no further", () => {
 
 test("a selected row below the view scrolls down by what it is short", () => {
   assert.equal(scrollFor({ scrollTop: 100, clientHeight: 200 }, { top: 310, height: 20 }), 130);
+});
+
+test("the count a row's place is given against includes what was cut", () => {
+  assert.equal(commitCount(section([commit(0), commit(1)], 0, { commits_cut: 198 })), 200);
+  assert.equal(commitCount(section([commit(0)], 0)), 1);
+  assert.equal(commitCount(undefined), 0);
 });
