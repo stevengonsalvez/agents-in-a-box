@@ -87,14 +87,18 @@ fn flush_session_store_writes(handle: &tauri::AppHandle) {
         // Before `manage`, or after the state went: nothing was queued.
         return;
     };
-    let dropped = window
+    match window
         .shell
-        .flush_session_store_writes(ainb_app::cli::util::SESSION_STORE_FLUSH_BOUND);
-    if dropped > 0 {
-        tracing::warn!(
+        .flush_session_store_writes(ainb_app::cli::util::SESSION_STORE_FLUSH_BOUND)
+    {
+        Some(0) => {}
+        Some(dropped) => tracing::warn!(
             dropped,
             "session-store writes were still queued when the app went"
-        );
+        ),
+        None => tracing::warn!(
+            "the shell was busy for the whole bound; queued session-store writes were not drained"
+        ),
     }
 }
 
