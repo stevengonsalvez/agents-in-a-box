@@ -287,6 +287,9 @@ struct LinesArgs {
     lines: i32,
 }
 
+/// A whole SHA-1 commit hash, which is the longest id this command can name.
+const WHOLE_HASH_CHARS: usize = 40;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommitArgs {
@@ -456,7 +459,8 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
             })
         }
         AppEvent::GitViewSelectCommit { .. } => parse::<CommitArgs>(args)
-            .filter(|args| !args.sha.is_empty())
+            // A whole hash is forty characters, so anything longer is not one.
+            .filter(|args| !args.sha.is_empty() && args.sha.len() <= WHOLE_HASH_CHARS)
             .map(|args| AppEvent::GitViewSelectCommit { sha: args.sha }),
         AppEvent::GitViewScrollBy(_) => parse::<LinesArgs>(args)
             .filter(|args| args.lines != 0)
