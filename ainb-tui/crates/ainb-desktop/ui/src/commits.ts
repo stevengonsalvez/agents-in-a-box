@@ -85,3 +85,22 @@ export function commitsCut(section: GitViewView_Serialize | undefined): string |
 export function selectCommitIntent(sha: string): RendererIntent {
   return { Command: [SELECT_COMMIT, { sha }] };
 }
+
+/**
+ * Where to put the list's scroll so the selected row is in view, or
+ * `undefined` when it already is.
+ *
+ * The terminal moves this list only when the selection leaves the view
+ * (ratatui's own `ListState`), and the selection here is a cursor, not a
+ * scroll offset: pinning the selected row to the top of the box would jump
+ * the list under a person on every arrow key, which the terminal never does.
+ */
+export function scrollFor(
+  box: { scrollTop: number; clientHeight: number },
+  row: { top: number; height: number },
+): number | undefined {
+  if (row.top < box.scrollTop) return row.top;
+  const bottom = row.top + row.height;
+  if (bottom > box.scrollTop + box.clientHeight) return bottom - box.clientHeight;
+  return undefined;
+}
