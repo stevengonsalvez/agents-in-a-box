@@ -174,16 +174,7 @@ async fn no_session_rpc_touches_the_table_before_the_first_pass() {
         SessionsRepo::complete_import(pool, &source, &[], 0, 1).await.unwrap();
         // The leftover marker of a pass made before this boot; what it
         // deleted then is not what this test is about.
-        SessionsRepo::complete_reconcile(
-            pool,
-            &source,
-            &[],
-            0,
-            2,
-            ainb_hangar_store::repo::sessions::Deletes::Nothing,
-        )
-        .await
-        .unwrap();
+        SessionsRepo::complete_reconcile(pool, &source, &[], 0, 2).await.unwrap();
         pool.close().await;
     }
     write_sessions(&sessions_path);
