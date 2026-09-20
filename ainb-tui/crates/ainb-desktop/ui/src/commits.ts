@@ -81,6 +81,19 @@ export function commitsCut(section: GitViewView_Serialize | undefined): string |
   return parts.length === 0 ? undefined : parts.join("; ");
 }
 
+/**
+ * How many commits the branch has as far as the frame knows: the ones it
+ * carries plus the ones it says it left out.
+ *
+ * A reader told "row 3 of 12" when the branch has 200 commits is being told
+ * the diff is twelve commits long, so the count a row's place is given against
+ * is this one, not the length of the window or even of the framed list.
+ */
+export function commitCount(section: GitViewView_Serialize | undefined): number {
+  const view = gitView(section);
+  return view === undefined ? 0 : view.commits.length + view.commits_cut;
+}
+
 /** A click on the commit `sha`: the reducer decides, and the frame says so. */
 export function selectCommitIntent(sha: string): RendererIntent {
   return { Command: [SELECT_COMMIT, { sha }] };
