@@ -113,10 +113,19 @@ p6_pane_switched() {
   p6_logged "$pid" 'session source switched' "$2"
 }
 
-# p6_web_source <source>: `ainb web` resolved that source. Its own log is the
-# pane's output, which `start_web` tees, and it logs to stderr rather than to
-# the JSONL a TUI writes, so the line is in the compact shape.
+# p6_web_pid: the `ainb web` process itself. Not the pane's pid: `start_web`
+# runs it in a pipeline, so the pane holds the shell.
+p6_web_pid() { pgrep -f "$AINB_BIN web --listen" | head -1; }
+
+# p6_web_source <source>: `ainb web` resolved that source. It is a long-lived
+# command, so its line is in the JSONL log beside the TUIs'; the pane's own
+# output, which `start_web` tees, is read as well for a build that logs there.
 p6_web_source() {
+  local pid
+  pid="$(p6_web_pid)"
+  if [[ -n "$pid" ]] && p6_logged "$pid" 'session source resolved' "$1"; then
+    return 0
+  fi
   grep -q 'session source resolved' "$PROOF_WORLD/web.log" 2>/dev/null \
     && grep -q "source=\"\?$1\"\?" "$PROOF_WORLD/web.log"
 }
