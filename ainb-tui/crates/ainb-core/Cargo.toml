@@ -167,5 +167,55 @@ tempfile = "3"
 # hash a served body the way the downloader does.
 sha2 = "0.10"
 
+
+# P6e: each of these drives the session resolver through the seams that only
+# a `test-support` build has, so a plain `cargo test -p ainb` must not try to
+# compile them. Named here, as ainb-app names its own (#1241), or the whole
+# package fails to build for anyone who leaves the feature off.
+
+[[test]]
+name = "host_write_with_a_hung_daemon"
+required-features = ["test-support"]
+
+[[test]]
+name = "session_cli_daemon"
+required-features = ["test-support"]
+
+[[test]]
+name = "session_cli_daemon_boot_pass"
+required-features = ["test-support"]
+
+[[test]]
+name = "session_resolver"
+required-features = ["test-support"]
+
+[[test]]
+name = "session_resolver_degraded"
+required-features = ["test-support"]
+
+[[test]]
+name = "session_store_flush_bound"
+required-features = ["test-support"]
+
+[[test]]
+name = "session_store_worker"
+required-features = ["test-support"]
+
+[[test]]
+name = "tui_degraded_notice"
+required-features = ["test-support"]
+
+[[test]]
+name = "tui_reads_the_table"
+required-features = ["test-support"]
+
+[[test]]
+name = "tui_with_a_hung_daemon"
+required-features = ["test-support"]
+
+[[test]]
+name = "tui_writes_through_the_daemon"
+required-features = ["test-support"]
+
 [lints]
 workspace = true
