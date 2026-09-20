@@ -842,7 +842,7 @@ async fn a_missing_file_leaves_the_rows_and_still_opens_the_gate() {
         .tick(pool)
         .await
         .expect("a vanished file is a change")
-        .expect("the pass refused a missing file");
+        .expect("the pass must not refuse a missing mirror");
     assert!(
         outcome.deleted.is_empty(),
         "a lost mirror deleted rows: {:?}",
