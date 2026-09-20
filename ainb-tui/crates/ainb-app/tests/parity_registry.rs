@@ -91,13 +91,13 @@ fn every_screen_id_has_one_row_and_every_row_names_a_screen_id() {
     assert!(stale.is_empty(), "rows naming no screen id: {stale:?}");
 }
 
-/// A `both` row has its fixture, its snapshot and its frames; a `dom` row its
-/// fixture, frames and facts and no snapshot; an `excluded` row its reason.
-/// Facts for `both` rows are read wherever a list exists (`parity.rs`), and
-/// requiring one on every `both` row is the follow-up that writes the ten
-/// lists still missing.
+/// A `both` row has its fixture, its snapshot, its frames and its facts; a
+/// `dom` row its fixture, frames and facts and no snapshot; an `excluded` row
+/// its reason. The facts are what `parity.rs` reads against the snapshot and
+/// the DOM half against the frames, so a both row without a list is a screen
+/// nothing checks.
 #[test]
-fn every_covered_row_has_its_fixture_snapshot_and_frames_and_every_excluded_row_its_reason() {
+fn every_covered_row_has_its_fixture_snapshot_frames_and_facts_and_every_excluded_row_its_reason() {
     let dir = parity_dir();
     for row in rows() {
         match row.coverage.as_str() {
@@ -113,6 +113,11 @@ fn every_covered_row_has_its_fixture_snapshot_and_frames_and_every_excluded_row_
                     assert!(
                         dir.join("frames").join(format!("{fixture}.json")).is_file(),
                         "{}: a both row without the frames the DOM half reads: {fixture}",
+                        row.screen
+                    );
+                    assert!(
+                        dir.join("facts").join(format!("{fixture}.txt")).is_file(),
+                        "{}: a both row without the facts list both halves are checked against: {fixture}",
                         row.screen
                     );
                 }

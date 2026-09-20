@@ -45,9 +45,9 @@ test("every row the DOM half draws has the frames it draws from", () => {
   }
 });
 
-test("every dom row has the facts list its one renderer is checked against", () => {
+test("every drawn row has the facts list its renderers are checked against", () => {
   for (const row of rows()) {
-    if (row.coverage !== "dom") continue;
+    if (row.coverage !== "both" && row.coverage !== "dom") continue;
     for (const fixture of row.detail.split(/\s+/)) {
       const facts = fileURLToPath(new URL(`facts/${fixture}.txt`, parityDir));
       assert.ok(existsSync(facts), `${row.screen}: no facts list for ${fixture}`);
