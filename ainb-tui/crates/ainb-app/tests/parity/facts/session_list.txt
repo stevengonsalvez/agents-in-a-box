@@ -1,0 +1,9 @@
+# What the session_list fixture must show, read against the ratatui snapshot
+# (ainb-app/tests/parity.rs) and, for the DOM half, carried by the fixture's
+# frames; the parity enumeration (screens.txt) requires this list for every
+# both row. Facts are renderer-neutral: what is shown, not how it is framed.
+ainb/feat-login
+ainb/fix-cache
+ainb/docs-readme
+ainb/spike-ssr
+Session Info
