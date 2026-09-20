@@ -1510,6 +1510,43 @@ mod tests {
         assert_eq!(state.selected_id(), Some("a"));
     }
 
+    /// The snapshot can land before the event, and with sessions read over RPC
+    /// it usually does: the rebuild drops the answered row silently, and the
+    /// `AttentionAnswered` event then finds no card. The event is the fact
+    /// that another surface answered, so it still says so; the card's presence
+    /// is not what makes it true.
+    #[test]
+    fn a_row_dropped_by_a_snapshot_still_says_who_answered_it() {
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[
+            row("a", "ask_user_question", 100, &ask_payload("q", &["y"])),
+            row("b", "ask_user_question", 200, &ask_payload("q2", &["z"])),
+        ]);
+        // The snapshot arrives first and the row is simply gone.
+        state.set_attention(&[row("a", "ask_user_question", 100, &ask_payload("q", &["y"]))]);
+        assert!(state.cards().iter().all(|card| card.id != "b"));
+
+        let removed = state.retire_answered("b", "web@box", 1_000);
+
+        assert!(!removed, "there was no card left to remove");
+        assert_eq!(
+            state.answered_toast(1_000),
+            Some("answered by web@box"),
+            "the event is what says another surface answered it"
+        );
+    }
+
+    /// The distinction the toast has always drawn is kept: a retirement for a
+    /// row this board never showed says nothing.
+    #[test]
+    fn a_row_this_board_never_showed_says_nothing() {
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[row("a", "ask_user_question", 100, &ask_payload("q", &["y"]))]);
+
+        assert!(!state.retire_answered("never-here", "web@box", 1_000));
+        assert_eq!(state.answered_toast(1_000), None);
+    }
+
     #[test]
     fn another_surface_answering_retires_the_card_and_names_the_winner() {
         let mut state = ControlCenterState::default();
