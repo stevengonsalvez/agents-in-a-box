@@ -499,12 +499,22 @@ fn unauthorized(id: RpcId, message: &str) -> RpcResponse {
 mod tests {
     use super::*;
 
-    /// P6d is dark: a daemon's hello does not advertise the sessions
-    /// capability unless a test switches it on.
+    /// P6e-6, the flip: a daemon's hello advertises the sessions capability,
+    /// from the catalogue, exactly once. The switch that used to add it is a
+    /// no-op now, and a second copy of the id would be a hello that names the
+    /// same capability twice.
     #[test]
-    fn hello_keeps_the_sessions_capability_dark() {
+    fn hello_advertises_the_sessions_capability_once() {
         let cap = ainb_hangar_proto::protocol::CAP_WORKSPACE_SESSIONS;
-        assert!(!advertised_capabilities().iter().any(|c| c == cap));
+        advertise_workspace_sessions_for_tests(true);
+        let advertised = advertised_capabilities();
+        assert_eq!(
+            advertised.iter().filter(|c| *c == cap).count(),
+            1,
+            "the sessions capability is not advertised exactly once"
+        );
+        advertise_workspace_sessions_for_tests(false);
+        assert!(advertised_capabilities().iter().any(|c| c == cap));
     }
     use ainb_hangar_store::Store;
 
