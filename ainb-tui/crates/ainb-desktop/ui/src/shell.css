@@ -1389,12 +1389,17 @@ body {
   font-size: 12px;
 }
 
+/* One row is `ROW_PX` tall, which is what a wheel delta is measured against
+   and what the page size divides by (`review.ts`): the line box and the
+   padding are set here rather than inherited, so a font change cannot quietly
+   make the page size wrong. 16 + 2 + 2 = 20. */
 .commit-row {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr) max-content max-content;
   gap: 10px;
   width: 100%;
   border: 0;
+  line-height: 16px;
   padding: 2px 10px;
   background: transparent;
   color: var(--text);
