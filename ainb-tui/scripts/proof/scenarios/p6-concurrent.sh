@@ -26,7 +26,9 @@
 #     write lands after the lock goes with the file still valid JSON. A writer
 #     that took no lock would return at once and fail the wait.
 #   * the kill switch: `AINB_SESSION_SOURCE=file` puts one process on the file
-#     end to end, and what it wrote is in the table after a reconcile.
+#     end to end, and what it wrote is in the table after a reconcile. What it
+#     KILLED is not taken from the table by a pass: a pass adds and never takes
+#     away, so that row waits for a kill through a current surface.
 #
 #   * the mirror: with `sessions.json` moved away, the rows ainb web serves
 #     are still the table's. While both agree, equality cannot tell a surface
@@ -41,7 +43,7 @@
 # four came from (P6e open question 5).
 
 # shellcheck disable=SC2034  # read by write_result in lib.sh
-EXPECT="with the capability advertised by the build itself, the CLI and every TUI resolve the daemon's sessions table and what ainb web serves is that table, and one daemon serves the TUI, ainb web and the CLI together in every combination ({tui} {web} {tui,web} {tui,tui}): a session created from the TUI reaches every surface that is up, a kill from the TUI leaves every surface, an ASK answered on the web folds on the TUIs, and the table and sessions.json agree across a reconcile; separately, a write while degraded is file-first and reaches the table after the switch, a write waits for the sessions.json flock, the rows ainb web serves are still the table's when sessions.json is gone, and AINB_SESSION_SOURCE=file works end to end"
+EXPECT="with the capability advertised by the build itself, the CLI and every TUI resolve the daemon's sessions table and what ainb web serves is that table, and one daemon serves the TUI, ainb web and the CLI together in every combination ({tui} {web} {tui,web} {tui,tui}): a session created from the TUI reaches every surface that is up, a kill from the TUI leaves every surface, an ASK answered on the web folds on the TUIs, and the table and sessions.json agree across a reconcile; separately, a write while degraded is file-first and reaches the table after the switch, a write waits for the sessions.json flock, the rows ainb web serves are still the table's when sessions.json is gone, and AINB_SESSION_SOURCE=file works end to end, its file-only kill leaving a row the table keeps until a kill through the daemon clears it"
 
 # How long a surface has to show a change another surface made.
 P6_REACH=90
@@ -784,8 +786,17 @@ p6_kill_switch() {
     >"$PROOF_WORLD/p6-killswitch-kill.txt" 2>&1 \
     || observe "kill switch: ainb kill said $(tail -1 "$PROOF_WORLD/p6-killswitch-kill.txt")"
   check "kill switch: the row leaves sessions.json" wait_for 60 p6_file_lacks "$tmux_name"
+  # A pass adds and never takes away (P6e-6), so a kill made on the file alone
+  # does NOT end the session: the table keeps its row, which is the documented
+  # cost of a mirror a previous release could damage. That row waits for a kill
+  # through a current surface.
   observe "kill switch: reconcile said $(p6_reconcile)"
-  check "kill switch: the row leaves the table too" wait_for 60 p6_table_lacks "$tmux_name"
+  check "kill switch: the table keeps the row a file-only kill removed" \
+    p6_table_has "$tmux_name"
+  "$AINB_BIN" kill "$id" --force >"$PROOF_WORLD/p6-killswitch-kill-2.txt" 2>&1 \
+    || observe "kill switch: the second kill said $(tail -1 "$PROOF_WORLD/p6-killswitch-kill-2.txt")"
+  check "kill switch: a kill through the daemon clears that row" \
+    wait_for 60 p6_table_lacks "$tmux_name"
   return 0
 }
 
