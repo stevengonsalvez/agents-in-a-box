@@ -105,12 +105,33 @@ p6_pane_source() {
   p6_logged "$pid" 'session source resolved' "$2"
 }
 
-# p6_pane_switched <pane> <source>: that surface moved to that source.
+# p6_pane_switched <pane> <source>: that surface moved to that source. The
+# move is made by a background retry, and the surface reports it on its next
+# workspace load, so each attempt reloads the list: the reload is inside the
+# retry loop, not in front of it.
 p6_pane_switched() {
   local pid
   pid="$(p6_pane_pid "$1")"
   [[ -n "$pid" ]] || return 1
-  p6_logged "$pid" 'session source switched' "$2"
+  p6_tui_reload "$1" >/dev/null 2>&1
+  p6_logged "$pid" 'session source switched' "$2" && return 0
+  # The same move as the operator sees it: the surface says sessions are back
+  # on the daemon.
+  p6_pane_logged_text "$1" 'sessions are back on it'
+}
+
+# p6_pane_logged_text <pane> <text>: that surface's own log, or the stderr the
+# harness keeps for its pane, carries that line. Before a surface marks itself
+# long lived the resolver's notices go to stderr, after it they go to the log,
+# and which of the two a notice lands in depends on how early it was said.
+p6_pane_logged_text() {
+  local pane="$1" text="$2" pid
+  pid="$(p6_pane_pid "$pane")"
+  if [[ -n "$pid" ]] && grep -rlF "\"pid\":$pid" "$HOME/.agents-in-a-box/logs" 2>/dev/null \
+    | xargs -r grep -qF "$text" 2>/dev/null; then
+    return 0
+  fi
+  grep -qF "$text" "$PROOF_WORLD/$pane.stderr" 2>/dev/null
 }
 
 # p6_web_pid: the `ainb web` process itself. Not the pane's pid: `start_web`
@@ -134,11 +155,19 @@ p6_web_source() {
 # the file for now. Long-lived surfaces put that notice in the log rather than
 # writing over the screen.
 p6_pane_said_degraded() {
+  p6_pane_logged_text "$1" 'sessions are on the local sessions.json'
+}
+
+# p6_pane_source_lines <pane>: every source line that surface logged, for the
+# record, so a red check says what the surface actually reported.
+p6_pane_source_lines() {
   local pid
   pid="$(p6_pane_pid "$1")"
-  [[ -n "$pid" ]] || return 1
-  grep -rlF "\"pid\":$pid" "$HOME/.agents-in-a-box/logs" 2>/dev/null \
-    | xargs -r grep -qF 'sessions are on the local sessions.json' 2>/dev/null
+  [[ -n "$pid" ]] || { printf 'no pid for %s' "$1"; return 0; }
+  grep -rhoF --include='*.jsonl' "\"message\":\"session source" \
+    "$HOME/.agents-in-a-box/logs" 2>/dev/null | head -4 | tr '\n' ' '
+  grep -rho "session source [a-z]*.*source=[a-z\"]*" "$PROOF_WORLD/$1.stderr" 2>/dev/null \
+    | head -2 | tr '\n' ' '
 }
 
 # p6_cli_source <source> [env...]: one CLI read resolves that source. RUST_LOG
@@ -619,6 +648,7 @@ p6_degraded_and_file_first() {
   check "degraded: the TUI lists it after the switch" \
     wait_for "$P6_REACH" p6_tui_has tuid "$(p6_row_needle "$degraded_tmux")"
 
+  observe "degraded: the TUI's own source lines: $(p6_pane_source_lines tuid)"
   P6_DEGRADED_ID="$degraded_id"
   P6_DEGRADED_TMUX="$degraded_tmux"
   quit_tui tuid 2>/dev/null || ptmux kill-session -t "=tuid:" 2>/dev/null || true
