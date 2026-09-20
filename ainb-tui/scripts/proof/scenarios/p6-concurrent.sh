@@ -205,15 +205,27 @@ p6_row_needle() { printf '%s' "$1" | grep -oE '[0-9a-f]{8}' | tail -1; }
 # second TUI would never see another surface's session. Same process, no
 # restart: what the refresh reads is the process's session source.
 p6_tui_reload() {
-  local pane="$1"
-  if ! pane_text "$pane" | grep -qE 'Workspaces \('; then
-    keys "$pane" Escape
-    sleep 0.5
-    keys "$pane" s
-    wait_screen "$pane" 'Workspaces \(' 20
-  fi
-  keys "$pane" f
+  p6_tui_to_list "$1" || return 1
+  keys "$1" f
   sleep 1
+}
+
+# p6_tui_to_list <pane>: put the pane on the session list from wherever it is.
+# One Escape is not enough from a Hangar screen such as the control centre,
+# which steps back to the Hangar first, so this walks back until the home
+# screen is in front and then opens the list.
+p6_tui_to_list() {
+  local pane="$1" attempt
+  for attempt in 1 2 3 4; do
+    pane_text "$pane" | grep -qE 'Workspaces \(' && return 0
+    if pane_text "$pane" | grep -qE 'Stats +\[i\]'; then
+      keys "$pane" s
+      wait_screen "$pane" 'Workspaces \(' 20 && return 0
+    fi
+    keys "$pane" Escape
+    sleep 0.7
+  done
+  pane_text "$pane" | grep -qE 'Workspaces \('
 }
 
 # p6_tui_live <pane>: the TUI is still drawing its own screen. Every negative
@@ -463,9 +475,8 @@ p6_combination() {
             wait_screen "$i" '0 need you' "$P6_REACH"
         fi
         # Back to the list, which the checks after this one read.
-        keys "$i" Escape
-        sleep 0.5
-        open_session_list "$i"
+        p6_tui_reload "$i" \
+          || observe "$name: $i did not come back to the session list"
       done
     else
       check "$name: the web lists the card within ${P6_WEB_REACH} s" false
