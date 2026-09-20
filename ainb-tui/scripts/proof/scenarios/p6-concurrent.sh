@@ -430,13 +430,33 @@ p6_combination() {
     fi
     raise_ask "Proof P6e: $name?" "p6-$name" >/dev/null
     if web_card_id "Proof P6e" "p6-card-$name" "$P6_WEB_REACH"; then
+      # The card is drawn on the control centre, not on the session list, so
+      # each TUI is put there and the card is seen BEFORE it is answered: an
+      # absence on a screen the card never reaches proves nothing.
+      local saw_card=1
+      for i in "${panes[@]}"; do
+        if ! open_hangar_screen "$i" control 'Control  ·'; then
+          check "$name: the control centre opens on $i" false
+          saw_card=0
+          continue
+        fi
+        check "$name: the card is on $i's control centre before it is answered" \
+          wait_screen "$i" '1 need you' 30
+        wait_screen "$i" '1 need you' 1 || saw_card=0
+      done
       web_answer "$WEB_CARD_ID" 1 >"$PROOF_WORLD/p6-answer-$name.json"
       observe "$name: web answered $(tr -d '\n' <"$PROOF_WORLD/p6-answer-$name.json")"
       check "$name: the web answer was delivered" \
         grep -q '"outcome": *"delivered"' "$PROOF_WORLD/p6-answer-$name.json"
       for i in "${panes[@]}"; do
-        check "$name: the answered card folded on $i, which is still up" \
-          wait_for "$P6_REACH" p6_tui_lacks "$i" "Proof P6e: $name?"
+        if ((saw_card)); then
+          check "$name: the answered card retired on $i, which is still up" \
+            wait_screen "$i" '0 need you' "$P6_REACH"
+        fi
+        # Back to the list, which the checks after this one read.
+        keys "$i" Escape
+        sleep 0.5
+        open_session_list "$i"
       done
     else
       check "$name: the web lists the card within ${P6_WEB_REACH} s" false
@@ -600,6 +620,20 @@ p6_flock_is_taken() {
     check "flock: there is a session to write to" false
     return 1
   fi
+
+  # The control: the same write, with nothing holding the lock. Without it a
+  # writer that ignored the lock and merely took its time would pass the
+  # measurement below.
+  if ! fixture_session; then
+    check "flock: a second session for the control run" false
+    return 1
+  fi
+  local control_id="$FIXTURE_ID" control=$SECONDS
+  "$AINB_BIN" kill "$control_id" --force >"$PROOF_WORLD/p6-flock-control.txt" 2>&1 \
+    || observe "flock: the control kill said $(tail -1 "$PROOF_WORLD/p6-flock-control.txt")"
+  control=$((SECONDS - control))
+  observe "flock: the same write with no lock held took ${control}s"
+
   p6_hold_the_lock
   started=$SECONDS
   "$AINB_BIN" kill "$id" --force >"$PROOF_WORLD/p6-flock-kill.txt" 2>&1 &
@@ -612,8 +646,8 @@ p6_flock_is_taken() {
     || observe "flock: ainb kill said $(tail -1 "$PROOF_WORLD/p6-flock-kill.txt")"
   waited=$((SECONDS - started))
   observe "flock: the write took ${waited}s against a lock held for ${P6_LOCK_HOLD}s"
-  check "flock: the write waited for the lock instead of walking over it" \
-    test "$waited" -ge $((P6_LOCK_HOLD - 2))
+  check "flock: the held write waited about as long as the lock was held" \
+    test "$((waited - control))" -ge $((P6_LOCK_HOLD - 2))
   check "flock: the write landed once the lock went" \
     wait_for 60 p6_cli_lacks "$id"
   check "flock: sessions.json is still valid JSON" p6_file_parses
