@@ -504,9 +504,19 @@ table is what
 reads and what
 .BR "ainb attach" / "status" / "kill"
 resolve against; this file is written beside it, row by row under its lock, so
-a previous release still sees current sessions. Sessions an older binary
-writes here are reconciled into the table on the daemon's next pass. Editing or
-deleting it by hand does not remove a session: the table is what decides.
+a previous release still sees current sessions.
+.IP
+A session written here by an older binary is added to the table on the daemon's
+next pass. A session REMOVED here, by an older binary's
+.B ainb kill
+or by hand, is not: a pass only adds, because a release that cannot refuse a
+damaged mirror would otherwise decide what the table holds. Such a row stays
+listed until it is killed through a current surface:
+.B ainb kill <id>
+ends it in both. Restoring an old copy of this file can likewise bring back
+rows for sessions that have since been killed;
+.B ainb kill
+clears them.
 .TP
 .I ~/.agents\-in\-a\-box/config/config.toml
 User configuration. Edit through
