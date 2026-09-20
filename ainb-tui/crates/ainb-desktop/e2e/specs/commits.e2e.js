@@ -101,8 +101,13 @@ async function tryCommand(id) {
   await openPalette();
   await setPaletteQuery(id);
   const row = await $(`.palette-row[data-row="command:${id}"]`);
-  const offered = await row.waitForExist({ timeout: 5_000 }).catch(() => false);
-  if (offered === false) {
+  const drawn = await row.waitForExist({ timeout: 5_000 }).catch(() => false);
+  // A row the reducer would not run now is still drawn, greyed and disabled,
+  // so the list does not shift under a person (#1161). Drawn is therefore not
+  // runnable: Enter on a greyed row does nothing and leaves the palette open,
+  // which is exactly what this journey hit when it asked for `git_view.back`
+  // from the session list.
+  if (drawn === false || !(await row.isEnabled())) {
     await closePalette();
     return false;
   }
