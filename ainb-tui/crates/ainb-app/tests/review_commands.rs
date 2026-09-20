@@ -335,14 +335,32 @@ fn a_click_on_a_commit_that_is_gone_selects_nothing() {
     );
 }
 
-/// An empty commit list has nothing to select.
+/// An empty commit list has nothing to select, and the click that found
+/// nothing does not spoil the one that comes after it: the same hash selects
+/// once the commits are there.
 #[test]
 fn a_click_on_an_empty_commit_list_stays_at_the_start() {
     let mut state = on_commits(0);
-    select_commit(&mut state, "c0000");
+    select_commit(&mut state, "c0003");
+    let at = |state: &AppState| {
+        state.git_view.git_view_state.as_ref().expect("git view").selected_commit_index
+    };
+    assert_eq!(at(&state), 0, "nothing to select, nothing selected");
+
+    let commits = on_commits(10)
+        .git_view
+        .git_view_state
+        .as_ref()
+        .expect("git view")
+        .commits
+        .clone();
+    state.git_view.get_mut().git_view_state.as_mut().expect("git view").commits = commits;
+
+    select_commit(&mut state, "c0003");
     assert_eq!(
-        state.git_view.git_view_state.as_ref().expect("git view").selected_commit_index,
-        0
+        at(&state),
+        3,
+        "and the same hash selects once the list carries it"
     );
 }
 
