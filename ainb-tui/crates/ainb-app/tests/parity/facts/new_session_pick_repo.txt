@@ -1,0 +1,6 @@
+# What the new_session_pick_repo fixture must show, read against the ratatui snapshot
+# (ainb-app/tests/parity.rs) and, for the DOM half, carried by the fixture's
+# frames; the parity enumeration (screens.txt) requires this list for every
+# both row. Facts are renderer-neutral: what is shown, not how it is framed.
+New Session
+type to filter, or paste owner/repo

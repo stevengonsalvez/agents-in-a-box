@@ -1,0 +1,7 @@
+# What the log_history fixture must show, read against the ratatui snapshot
+# (ainb-app/tests/parity.rs) and, for the DOM half, carried by the fixture's
+# frames; the parity enumeration (screens.txt) requires this list for every
+# both row. Facts are renderer-neutral: what is shown, not how it is framed.
+Log History
+No log files found
+Select a log file to view logs

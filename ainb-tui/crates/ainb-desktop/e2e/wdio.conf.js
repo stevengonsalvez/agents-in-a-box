@@ -23,6 +23,7 @@ export const config = {
     "./specs/journey.e2e.js",
     "./specs/answer.e2e.js",
     "./specs/review.e2e.js",
+    "./specs/inbox.e2e.js",
     "./specs/commits.e2e.js",
   ],
   maxInstances: 1,

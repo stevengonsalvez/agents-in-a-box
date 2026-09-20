@@ -55,6 +55,39 @@ pub mod ids {
     /// The daemon's notification inbox (D3-prime), drawn from the `inbox`
     /// section on every surface.
     pub const INBOX: &str = "inbox";
+
+    /// Every screen id, once: the set the parity enumeration
+    /// (`tests/parity/screens.txt`) must cover, checked against the
+    /// constants above by `tests/parity_registry.rs`.
+    pub const ALL: &[&str] = &[
+        HOME,
+        CONFIG,
+        ANALYTICS,
+        WITR,
+        LEARNINGS,
+        ABTOP,
+        SESSION_LIST,
+        LOGS,
+        LOG_HISTORY,
+        TERMINAL,
+        HELP,
+        NEW_SESSION,
+        SEARCH_WORKSPACE,
+        NON_GIT_NOTIFICATION,
+        ATTACHED_TERMINAL,
+        AUTH_SETUP,
+        CLAUDE_CHAT,
+        GIT_VIEW,
+        ONBOARDING,
+        SETUP_MENU,
+        CHANGELOG,
+        SESSION_RECOVERY,
+        SKILLS,
+        SKILL_MANAGER,
+        HANGAR,
+        DAEMONS,
+        INBOX,
+    ];
 }
 
 /// Outcome of a screen-handled event.

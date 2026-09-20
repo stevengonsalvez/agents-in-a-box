@@ -10,6 +10,14 @@ EXPECT="ainb doctor --wire-shape reports no drift from the committed fixture, a 
 # by <canary> in every published capture once the checks have read them.
 PROOF_TOKEN="ghp""_ProofCanary0123456789abcdefghijklmnopq"
 
+# How long to wait for the web's cost panel to carry the recorded turn. The
+# web's cost task abandons a fetch at 30 s and doubles its bound (60, 120, up
+# to 240) until one lands, so a slow box can take about 210 s to land the
+# first cost. This sits above that, and the node records the wait it actually
+# took rather than assuming a quick one. Overridable, so the timeout branch
+# can be exercised deliberately.
+COST_PANEL_WAIT="${COST_PANEL_WAIT:-360}"
+
 scenario() {
   save_output wire-shape "$AINB_BIN" doctor --wire-shape
   local status=0
@@ -69,8 +77,21 @@ scenario() {
   # The cost task fetches at startup; wait for the panel before capturing. Only
   # when `fleet cost` saw the recorded turn: a world without burndown usage has
   # no panel to wait for.
+  #
+  # The wait has to outlast the web's OWN backoff, not just a quick fetch. The
+  # cost task abandons a fetch at 30 s and doubles the bound (60, 120, up to
+  # 240) until one lands, and #1055 measured `ainb fleet cost` at 120 s under
+  # contention, so a busy box can spend about 30 + 60 + 120 s before the first
+  # cost lands. A 60 s wait lost that race during run 30 on a loaded box, and
+  # failed a node whose product path was working: the same node passed on the
+  # same binary once the box was quieter.
+  local cost_wait=$SECONDS
   if (( cost_sessions > 0 )); then
-    wait_for 60 bash -c "curl -sS '$WEB_URL/api/snapshot' | jq -e '(.cost.totals.bucket.call_count // 0) > 0' >/dev/null"
+    if wait_for "$COST_PANEL_WAIT" bash -c "curl -sS '$WEB_URL/api/snapshot' | jq -e '(.cost.totals.bucket.call_count // 0) > 0' >/dev/null"; then
+      observe "the web cost panel landed after $((SECONDS - cost_wait))s"
+    else
+      observe "the web cost panel did not land within ${COST_PANEL_WAIT}s (web cost backoff: 30 s abandoned, doubling to 240 s; #1055)"
+    fi
   fi
   curl -sS "$WEB_URL/api/snapshot" | redact_host >"$NODE_DIR/web-snapshot.json"
   CAPTURES+=("web-snapshot.json")

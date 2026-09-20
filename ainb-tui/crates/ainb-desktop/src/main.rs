@@ -74,16 +74,46 @@ struct Window {
     last_check: Arc<Mutex<Option<Check>>>,
 }
 
+/// Drain the host's queued session-store writes before this process ends
+/// (P6e).
+///
+/// Every path out of this shell ends the process rather than unwinding: tao's
+/// run loop calls `exit` and a restart replaces the image, so no destructor
+/// runs and a queued write would go with the process. The wait is bounded for
+/// the whole queue, and what it leaves behind is logged rather than waited on:
+/// a daemon that stopped answering must not hold the app open.
+fn flush_session_store_writes(handle: &tauri::AppHandle) {
+    let Some(window) = handle.try_state::<Window>() else {
+        // Before `manage`, or after the state went: nothing was queued.
+        return;
+    };
+    let dropped = window
+        .shell
+        .flush_session_store_writes(ainb_app::cli::util::SESSION_STORE_FLUSH_BOUND);
+    if dropped > 0 {
+        tracing::warn!(
+            dropped,
+            "session-store writes were still queued when the app went"
+        );
+    }
+}
+
 /// What the renderer applied, for the proof harness to read from the log: the
-/// sections of a batch, how many session rows the sidebar holds, and how many
-/// cards each board column draws. Names and counts only, never a body.
+/// sections of a batch, how many session rows the sidebar holds, how many
+/// cards each board column draws, and the inbox's rows and unread count.
+/// Names and counts only, never a body.
 ///
 /// The names arrive as a `Subscription`, which deserializes from the wire
 /// names and drops anything else, so the line is bounded by the sections that
 /// exist and a renderer cannot name one it never applied. The columns arrive
 /// as `AgentState`s, so they are bounded the same way: one per state at most.
 #[tauri::command]
-fn renderer_applied(sections: Subscription, sessions: usize, board: Vec<(AgentState, usize)>) {
+fn renderer_applied(
+    sections: Subscription,
+    sessions: usize,
+    board: Vec<(AgentState, usize)>,
+    inbox: (usize, i64),
+) {
     let named: Vec<&str> = sections.sections().map(ainb_app::wire::section_name).collect();
     let (board, dropped) = ainb_desktop::shell::board_columns(&board);
     if dropped > 0 {
@@ -94,7 +124,17 @@ fn renderer_applied(sections: Subscription, sessions: usize, board: Vec<(AgentSt
             "renderer applied: the board list ran past the states"
         );
     }
-    tracing::info!(sections = ?named, sessions, board = ?board, "renderer applied");
+    // The inbox pair is rows then unread (D3p-d): what section 16 holds in
+    // the window, for the proof to read against the daemon's own count.
+    let (inbox_rows, inbox_unread) = inbox;
+    tracing::info!(
+        sections = ?named,
+        sessions,
+        board = ?board,
+        inbox_rows,
+        inbox_unread,
+        "renderer applied"
+    );
 }
 
 /// The terminal's copy: put the selection on the platform clipboard.
@@ -488,6 +528,7 @@ async fn update_check(app: tauri::AppHandle) -> Result<Check, String> {
 async fn update_apply(app: tauri::AppHandle) -> Result<(), String> {
     update_gate(update::APPLY)?;
     run_update_apply(&app).await?;
+    flush_session_store_writes(&app);
     app.restart();
 }
 
@@ -710,6 +751,7 @@ fn main() {
                             match run_update_apply(&handle).await {
                                 Ok(path) => {
                                     tracing::info!(path = %path.display(), "update installed; restarting");
+                                    flush_session_store_writes(&handle);
                                     handle.restart();
                                 }
                                 Err(error) => handle_toast(&handle, format!("Update not installed: {error}")),
@@ -719,7 +761,10 @@ fn main() {
                     menu::UPDATE_ROLLBACK => {
                         tauri::async_runtime::spawn(async move {
                             match run_update_rollback().await {
-                                Ok(()) => handle.restart(),
+                                Ok(()) => {
+                                    flush_session_store_writes(&handle);
+                                    handle.restart();
+                                }
                                 Err(error) => handle_toast(&handle, format!("Roll back failed: {error}")),
                             }
                         });
@@ -805,9 +850,17 @@ fn main() {
             update_apply,
             update_settings
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|error| {
             eprintln!("ainb desktop failed to start: {error}");
             std::process::exit(1);
+        })
+        // `build` and then `run`, not `run` alone: the run loop never returns,
+        // so the only place the app hears that it is going is this event, and
+        // a queued session-store write has to be drained there (P6e).
+        .run(|handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                flush_session_store_writes(handle);
+            }
         });
 }
