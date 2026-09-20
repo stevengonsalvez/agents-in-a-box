@@ -320,6 +320,13 @@ fn inbox_badge(state: &AppState) -> Option<Span<'static>> {
 }
 
 impl LayoutComponent {
+    /// The screens the registry holds, in registration order: what the
+    /// parity enumeration's terminal half walks.
+    #[must_use]
+    pub fn screen_ids(&self) -> &[ainb_app::app::screens::ScreenId] {
+        self.screens.order()
+    }
+
     pub fn new() -> Self {
         let mut screens = ScreenRegistry::new();
         register_builtins(&mut screens);

@@ -152,3 +152,28 @@ fn a_renderer_that_loses_a_daemon_fails_the_facts() {
         "a renderer missing a daemon row still showed every expected fact, so the list proves nothing"
     );
 }
+
+/// The same, re-proved on the inbox (D3-prime): the fixture seeds a hundred
+/// rows past the cut, and a renderer that loses one of the named rows fails
+/// the facts, so the inbox half cannot pass on its title and counters alone.
+#[test]
+fn a_renderer_that_loses_an_inbox_row_fails_the_facts() {
+    let home = tempfile::tempdir().expect("scratch home");
+    std::env::set_var("HOME", home.path());
+
+    let dir = fixture_dir();
+    let fixture = ParityFixture::load(&dir.join("inbox.json")).expect("the inbox fixture");
+    let list = std::fs::read_to_string(dir.join("facts/inbox.txt")).expect("the facts list");
+    assert_eq!(missing(&render(&fixture), &list), Vec::<&str>::new());
+
+    let lost = draw(&fixture, |state| {
+        state.inbox.update(|section| {
+            section.entries.remove(0);
+            true
+        });
+    });
+    assert!(
+        !missing(&lost, &list).is_empty(),
+        "a renderer missing an inbox row still showed every expected fact, so the list proves nothing"
+    );
+}

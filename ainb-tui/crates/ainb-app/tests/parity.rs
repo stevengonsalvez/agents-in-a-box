@@ -27,10 +27,10 @@ fn every_parity_fixture_builds_the_screen_it_names() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
     let fixtures = ParityFixture::all_in(&dir);
     assert!(
-        // Sixteen with the three plugin placeholder fixtures (D3p-f), one per
-        // state, and seventeen with the Commits tab's; the inbox and stats
-        // fixtures D3-prime adds raise it again.
-        fixtures.len() >= 17,
+        // 19: sixteen with the three plugin placeholder fixtures (D3p-f),
+        // seventeen with the Commits tab's, eighteen with the stats fixture
+        // (D3p-e) and nineteen with the inbox fixture (D3p-d).
+        fixtures.len() >= 19,
         "expected a fixture per screen, found {}",
         fixtures.len()
     );
