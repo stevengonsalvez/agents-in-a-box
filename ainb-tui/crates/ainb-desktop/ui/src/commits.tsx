@@ -1,6 +1,13 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { GitViewView_Serialize } from "../../../ainb-app/bindings/AppState";
-import { commitRows, commitsCut, commitWindow, scrollFor, selectCommitIntent } from "./commits.ts";
+import {
+  commitCount,
+  commitRows,
+  commitsCut,
+  commitWindow,
+  scrollFor,
+  selectCommitIntent,
+} from "./commits.ts";
 import { keyedList, sameKeys } from "./keyed.ts";
 import { gitView, keyRows, MAX_PAGE_ROWS, ROW_PX, scrollIntent, wheelRows, WITHHELD } from "./review.ts";
 import type { RendererIntent } from "./tabs.ts";
@@ -118,7 +125,7 @@ export function Commits(props: Props) {
           when={rows().length > 0}
           fallback={<p class="empty">No commits on this branch yet</p>}
         >
-          <div role="table" aria-rowcount={rows().length} aria-label="Commit rows">
+          <div role="table" aria-rowcount={commitCount(props.gitView)} aria-label="Commit rows">
             <For each={drawnKeys()}>
               {(key) => {
                 // The row as the latest frame has it, read when it is drawn
