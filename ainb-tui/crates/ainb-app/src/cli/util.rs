@@ -325,6 +325,23 @@ fn degraded_notice() {
     });
 }
 
+/// Say once per process that the daemon on this home predates the sessions
+/// table, so this process reads the file and will not move.
+///
+/// Unlike [`degraded_notice`] this is not a wait: the daemon has answered and
+/// named what it speaks. Since the flip it is the only way a process ends up
+/// on the file without being told to, so it says so rather than changing
+/// source in silence.
+fn older_daemon_notice() {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        say(
+            "Notice: this hangar daemon is older than the sessions table; \
+             sessions are on the local sessions.json until it is restarted on this release.",
+        );
+    });
+}
+
 impl SessionSource {
     /// Decide against the daemon named by the environment. See the type's
     /// diagram.
@@ -359,7 +376,9 @@ impl SessionSource {
         };
         if !hello.advertises(CAP_WORKSPACE_SESSIONS) {
             // A daemon from before the sessions table: it will never serve
-            // them, so this is the file for good, not a degraded wait.
+            // them, so this is the file for good, not a degraded wait, and
+            // the operator is told which of the two it is.
+            older_daemon_notice();
             return Self::File;
         }
         let probe = WorkspaceSessionListParams {
