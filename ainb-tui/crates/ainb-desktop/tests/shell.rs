@@ -60,3 +60,41 @@ fn a_dispatch_during_ticks_returns() {
         "the shell framed its moves"
     );
 }
+
+/// P6e: the flush the app's exit paths call is bounded by its own argument,
+/// the wait for the shell's lock included. A tick stuck holding that lock
+/// would otherwise hold the whole exit, which is the hang the bound exists to
+/// stop; the exit hears that the queue was never reached and goes.
+#[test]
+fn a_flush_gives_up_on_a_shell_that_stays_busy() {
+    support::isolated_home();
+
+    let host = DesktopHost::new(
+        AppConfig::default(),
+        Keymap::defaults(),
+        HostId::local(),
+        Subscription::only(&[SectionId::Shell]),
+        |_batch: FrameBatch| {},
+    );
+    let shell = Shell::new(host, DesktopExecutor::new(None));
+
+    let bound = Duration::from_millis(300);
+    let busy = shell.hold_for_tests();
+    let started = std::time::Instant::now();
+    let outcome = shell.flush_session_store_writes(bound);
+    let waited = started.elapsed();
+    drop(busy);
+
+    assert!(
+        outcome.is_none(),
+        "the flush claimed a queue it never reached"
+    );
+    assert!(
+        waited < bound * 4,
+        "the flush waited past its bound on the shell's lock: {waited:?}"
+    );
+
+    // The shell is free again, so the same call reaches the queue and finds
+    // nothing in it.
+    assert_eq!(shell.flush_session_store_writes(bound), Some(0));
+}

@@ -375,6 +375,20 @@ impl SessionSource {
         }
     }
 
+    /// This source's name for a log line: `daemon`, `file` or `degraded`.
+    ///
+    /// A surface's own log is the only place the source it resolved can be
+    /// read from outside the process, which is what the `p6-concurrent` proof
+    /// reads to tell a surface on the table from one on the file.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Daemon(_) => "daemon",
+            Self::File => "file",
+            Self::Degraded(_) => "degraded",
+        }
+    }
+
     /// Whether sessions are on the file only because the daemon is not up:
     /// the state a surface shows a notice for.
     #[must_use]
@@ -668,7 +682,19 @@ static SESSION_SOURCE: tokio::sync::OnceCell<std::sync::RwLock<SessionSource>> =
 /// that [`leave_degraded`] makes.
 pub async fn session_source() -> SessionSource {
     let cell = SESSION_SOURCE
-        .get_or_init(|| async { std::sync::RwLock::new(SessionSource::resolve().await) })
+        .get_or_init(|| async {
+            let source = SessionSource::resolve().await;
+            // Once per process, with the pid, because a proof cannot see
+            // which source a surface resolved any other way: two surfaces
+            // share a log directory, and the source decides nothing visible
+            // on screen until the stores disagree.
+            tracing::info!(
+                source = source.name(),
+                pid = std::process::id(),
+                "session source resolved"
+            );
+            std::sync::RwLock::new(source)
+        })
         .await;
     cell.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
@@ -697,6 +723,11 @@ pub async fn leave_degraded() -> bool {
     };
     let mut slot = cell.write().unwrap_or_else(std::sync::PoisonError::into_inner);
     if slot.is_degraded() {
+        tracing::info!(
+            source = next.name(),
+            pid = std::process::id(),
+            "session source switched"
+        );
         *slot = next;
     }
     true
