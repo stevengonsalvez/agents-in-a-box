@@ -218,8 +218,8 @@ fn a_selection_driven_rename_bumps_its_own_section() {
 
 #[test]
 fn every_section_moves_its_own_slot_and_only_its_own() {
-    // One writer per section, so all nineteen slots are exercised rather than
-    // the four a handful of events happen to touch. A slot wired to the wrong
+    // One writer per section, so every slot is exercised rather than the four
+    // a handful of events happen to touch. A slot wired to the wrong
     // field, or two sections sharing one counter, fails here.
     #[allow(clippy::type_complexity)]
     let writers: Vec<(SectionId, Box<dyn Fn(&mut AppState)>)> = vec![
@@ -311,6 +311,15 @@ fn every_section_moves_its_own_slot_and_only_its_own() {
             SectionId::AgentStatus,
             Box::new(|s: &mut AppState| {
                 s.agent_status_absent("daemon has no fleet/roster_status");
+            }),
+        ),
+        // Section 21 the same: the usage read's own outcomes are the only
+        // things that write it, and an absent daemon is the one that needs no
+        // reply to build.
+        (
+            SectionId::Usage,
+            Box::new(|s: &mut AppState| {
+                s.usage_absent("daemon has no fleet/usage_summary");
             }),
         ),
     ];
