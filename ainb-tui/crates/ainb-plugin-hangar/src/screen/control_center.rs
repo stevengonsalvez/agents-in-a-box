@@ -495,7 +495,21 @@ pub struct ControlCenterState {
     /// set when a card is retired because another surface won the answer.
     /// Unlike `note` it is not keyed to a card: the card it was about is gone.
     answered_toast: Option<(String, i64)>,
+    /// The ids this board has shown, newest last, bounded by [`SHOWN_IDS`].
+    ///
+    /// A retirement and the next `attention/list` snapshot race, and since the
+    /// flip (P6e-6) the snapshot usually wins: a read that was a file load is
+    /// an RPC now, so a refresh lands between the answer and the event. The
+    /// card is gone either way; this is what lets the event still say WHO
+    /// answered it, while a retirement for a row this board never showed goes
+    /// on saying nothing.
+    shown: std::collections::VecDeque<String>,
 }
+
+/// How many retired ids the board remembers for the toast. A board holds a
+/// handful of cards, and the window that matters is one refresh wide, so this
+/// is generous; it is bounded because the ids arrive from the daemon.
+const SHOWN_IDS: usize = 64;
 
 /// How long the "answered by <who>" toast stays on the title row.
 const ANSWERED_TOAST_MS: i64 = 3_000;
@@ -541,7 +555,10 @@ impl ControlCenterState {
         let before = self.cards.len();
         self.cards.retain(|card| card.id != attention_id);
         let removed = self.cards.len() != before;
-        if !removed {
+        // A card a snapshot dropped first is still one this board showed, and
+        // the operator is still owed the line about who answered it.
+        let was_shown = self.shown.iter().any(|id| id == attention_id);
+        if !removed && !was_shown {
             return false;
         }
         // Focus was on the card that just went away: fall to the first row, the
@@ -598,6 +615,14 @@ impl ControlCenterState {
         // answered from another surface or its session is gone.
         if self.note.as_ref().is_some_and(|(id, _)| !cards.iter().any(|c| &c.id == id)) {
             self.note = None;
+        }
+        for card in &cards {
+            if !self.shown.iter().any(|id| id == &card.id) {
+                self.shown.push_back(card.id.clone());
+            }
+        }
+        while self.shown.len() > SHOWN_IDS {
+            self.shown.pop_front();
         }
         self.cards = cards;
         self.clamp_option_cursor();
