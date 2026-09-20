@@ -171,6 +171,11 @@ fn a_daemon_that_does_not_advertise_leaves_the_client_on_the_file() {
         store.sessions.contains_key("sess-run-1"),
         "the run landed in the file"
     );
+    assert_eq!(
+        OLDER_DAEMON_REQUESTS.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the write was sent to a daemon that does not serve the table"
+    );
     rt.shutdown_background();
 }
 
@@ -380,10 +385,15 @@ fn daemon_death_mid_command_is_an_error_not_a_fallback() {
     assert_eq!(homes.file_bytes(), Some(file_before));
 }
 
+/// Requests the pre-flip fake daemon was sent past hello.
+static OLDER_DAEMON_REQUESTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// A daemon from before the flip: its hello carries the catalogue as that
 /// release knew it, without the sessions capability, and it answers nothing
 /// else. A client that meets one stays on the file for good.
 fn older_daemon(rt: &tokio::runtime::Runtime, dir: &Path) -> PathBuf {
+    OLDER_DAEMON_REQUESTS.store(0, std::sync::atomic::Ordering::SeqCst);
     let socket = dir.join("older.sock");
     let listener = rt.block_on(async { UnixListener::bind(&socket) }).expect("bind older");
     rt.spawn(async move {
@@ -410,6 +420,11 @@ fn older_daemon(rt: &tokio::runtime::Runtime, dir: &Path) -> PathBuf {
                     }),
                 )
                 .await;
+                // Anything past hello is a client that took this daemon for
+                // one that serves the table.
+                if read_frame(&mut reader).await.is_some() {
+                    OLDER_DAEMON_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 std::future::pending::<()>().await;
             });
         }
