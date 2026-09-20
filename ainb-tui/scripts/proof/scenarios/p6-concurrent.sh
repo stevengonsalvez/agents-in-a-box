@@ -190,14 +190,21 @@ p6_stores_agree() { [[ "$(p6_table_names)" == "$(p6_file_names)" ]]; }
 # (`tmux_repo--agents-7d755792--<id>_agents_7d755792`).
 p6_row_needle() { printf '%s' "$1" | grep -oE '[0-9a-f]{8}' | tail -1; }
 
-# p6_tui_reload <pane>: leave the session list and open it again, which is
-# where the TUI reloads its workspaces. Same process, no restart: the reload
-# is the operator's own key, and what it reads is the process's session source.
+# p6_tui_reload <pane>: put the pane on the session list and refresh it with
+# `f`, the list's own key, which re-reads the session store. Leaving the list
+# and opening it again is not a reload: it draws what the last read left, so a
+# second TUI would never see another surface's session. Same process, no
+# restart: what the refresh reads is the process's session source.
 p6_tui_reload() {
-  keys "$1" Escape
-  sleep 0.5
-  keys "$1" s
-  wait_screen "$1" 'Sessions|Workspaces|agent tick' 20
+  local pane="$1"
+  if ! pane_text "$pane" | grep -qE 'Workspaces \('; then
+    keys "$pane" Escape
+    sleep 0.5
+    keys "$pane" s
+    wait_screen "$pane" 'Workspaces \(' 20
+  fi
+  keys "$pane" f
+  sleep 1
 }
 
 # p6_tui_live <pane>: the TUI is still drawing its own screen. Every negative
@@ -475,6 +482,45 @@ p6_combination() {
 # The three rules that stand on their own
 # ---------------------------------------------------------------------------
 
+# The file the lock holder watches for: it lets the lock go when this appears.
+p6_lock_sentinel() { printf '%s' "$PROOF_WORLD/p6-release-the-lock"; }
+
+# p6_hold_the_lock: take the `sessions.json` lock in another process and keep
+# it until [`p6_release_the_lock`], the way the daemon's reconcile pass holds
+# it while it reads the file.
+p6_hold_the_lock() {
+  rm -f "$(p6_lock_sentinel)"
+  python3 -c "
+import fcntl, os, sys, time
+lock, sentinel = sys.argv[1], sys.argv[2]
+with open(lock, 'a+') as handle:
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    for _ in range(1800):
+        if os.path.exists(sentinel):
+            break
+        time.sleep(0.1)
+" "$HOME/.agents-in-a-box/sessions.json.lock" "$(p6_lock_sentinel)" &
+  P6_LOCK_PID=$!
+  sleep 1
+}
+
+# p6_daemon_up: bring the world's daemon up, for a leg that needs one of its
+# own. The leg before it may have left none: the degraded leg's daemon goes
+# with the TUI that started it.
+p6_daemon_up() {
+  daemon_running && return 0
+  "$AINB_BIN" hangar daemon start >"$PROOF_WORLD/p6-daemon-leg.txt" 2>&1 || true
+  wait_for 45 daemon_running
+}
+
+# p6_release_the_lock: let it go, and wait until it is gone.
+p6_release_the_lock() {
+  touch "$(p6_lock_sentinel)"
+  [[ -n "${P6_LOCK_PID:-}" ]] && wait "$P6_LOCK_PID" 2>/dev/null
+  P6_LOCK_PID=""
+  return 0
+}
+
 # p6_degraded_and_file_first: no daemon, then one. A create with nothing to
 # write a table row to still works and is in the file; a TUI started there
 # says degraded, shows the notice and switches; and the session written while
@@ -504,20 +550,27 @@ p6_degraded_and_file_first() {
   check "degraded: its row is in sessions.json, written before any table row" \
     p6_file_has "$degraded_tmux"
 
-  # The TUI started with no daemon up: degraded, the notice, then the switch
-  # once the daemon it autostarts is ready.
+  # The TUI autostarts a daemon of its own, so "no daemon up" is a race it
+  # usually wins. The window is held open instead: with the `sessions.json`
+  # lock taken, that daemon cannot finish its first pass, so it answers its
+  # session reads not-ready and every surface on it is degraded until the
+  # lock goes.
+  p6_hold_the_lock
   if ! start_tui tuid; then
+    p6_release_the_lock
     check "degraded: the TUI reaches the home screen with no daemon up" false
     p6_surfaces_down tuid
     return 1
   fi
-  check "degraded: the TUI resolved the file while the daemon was down" \
+  check "degraded: the TUI resolved the file while no daemon could answer" \
     wait_for 60 p6_pane_source tuid degraded
   check "degraded: the TUI said sessions are on the local file for now" \
     wait_for 60 p6_pane_said_degraded tuid
-  check "degraded: the daemon came up behind it" wait_for 60 daemon_running
+  p6_release_the_lock
+  check "degraded: the daemon finished its first pass behind it" \
+    wait_for 60 daemon_running
   check "degraded: the TUI switched to the daemon's table" \
-    wait_for 90 p6_pane_switched tuid daemon
+    wait_for 120 p6_pane_switched tuid daemon
 
   observe "degraded: reconcile said $(p6_reconcile)"
   check "degraded: the session written while degraded is in the table" \
@@ -532,13 +585,6 @@ p6_degraded_and_file_first() {
   return 0
 }
 
-# p6_lock_holder <seconds>: hold the sessions.json lock in another process,
-# the way the daemon's reconcile pass holds it.
-p6_lock_holder() {
-  python3 - "$HOME/.agents-in-a-box/sessions.json.lock" "$1" >/dev/null 2>&1 &
-  P6_LOCK_PID=$!
-  sleep 1
-}
 
 # p6_flock_is_taken: a write waits for the lock rather than walking over it.
 # The session killed here is the one the degraded leg created.
@@ -546,24 +592,25 @@ p6_flock_is_taken() {
   say "the sessions.json flock"
   observe "=== flock ==="
   local id="${P6_DEGRADED_ID:-}" tmux_name="${P6_DEGRADED_TMUX:-}" started waited
+  if ! p6_daemon_up; then
+    check "flock: a daemon is up behind the write" false
+    return 1
+  fi
   if [[ -z "$id" ]]; then
     check "flock: there is a session to write to" false
     return 1
   fi
-  python3 -c "
-import fcntl, sys, time
-path = sys.argv[1]
-with open(path, 'a+') as handle:
-    fcntl.flock(handle, fcntl.LOCK_EX)
-    time.sleep(float(sys.argv[2]))
-" "$HOME/.agents-in-a-box/sessions.json.lock" "$P6_LOCK_HOLD" &
-  local holder=$!
-  sleep 1
+  p6_hold_the_lock
   started=$SECONDS
-  "$AINB_BIN" kill "$id" --force >"$PROOF_WORLD/p6-flock-kill.txt" 2>&1 \
+  "$AINB_BIN" kill "$id" --force >"$PROOF_WORLD/p6-flock-kill.txt" 2>&1 &
+  local writer=$!
+  # The write is in front of a lock it cannot have; it is still waiting when
+  # the lock goes, which is what the wait below measures.
+  sleep "$P6_LOCK_HOLD"
+  p6_release_the_lock
+  wait "$writer" 2>/dev/null \
     || observe "flock: ainb kill said $(tail -1 "$PROOF_WORLD/p6-flock-kill.txt")"
   waited=$((SECONDS - started))
-  wait "$holder" 2>/dev/null || true
   observe "flock: the write took ${waited}s against a lock held for ${P6_LOCK_HOLD}s"
   check "flock: the write waited for the lock instead of walking over it" \
     test "$waited" -ge $((P6_LOCK_HOLD - 2))
@@ -581,6 +628,10 @@ with open(path, 'a+') as handle:
 p6_kill_switch() {
   say "the kill switch"
   observe "=== kill switch ==="
+  if ! p6_daemon_up; then
+    check "kill switch: a daemon is up to reconcile into" false
+    return 1
+  fi
   check "kill switch: a process with AINB_SESSION_SOURCE=file says so" \
     p6_cli_source file AINB_SESSION_SOURCE=file
 
