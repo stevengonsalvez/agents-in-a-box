@@ -44,45 +44,6 @@ pub enum ImportOutcome {
     AlreadyCompleted,
 }
 
-/// Which table rows a reconcile pass may delete, which is the one thing the
-/// flip changes about a pass.
-///
-/// Before the flip the FILE is the authority on which sessions exist and the
-/// table on their contents (the orchestrator's rule on #1250): only the file
-/// was written by every surface, so a row the file lacks is a row a client
-/// deleted from the file and could not delete from the table. After the flip
-/// the TABLE is the authority and the file is a mirror kept row by row, so a
-/// row the file lacks is far more likely a mirror that has not caught up than
-/// a session someone ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Deletes {
-    /// Pre-flip: every table row whose session the file does not have.
-    EveryRowTheFileLacks,
-    /// Post-flip, with a file that exists and parses: only rows the file has
-    /// had a chance to carry, that is rows created no later than the file's
-    /// own last write. An older binary's `ainb kill` is still reconciled,
-    /// and a row a new writer created between two passes is never taken for
-    /// one the file dropped.
-    RowsNoNewerThan(i64),
-    /// Post-flip, with no file to read: the mirror was lost, not emptied.
-    /// Nothing is deleted and the pass still commits its marker, so readers
-    /// are served from the table rather than waiting for a file that may
-    /// never come back.
-    Nothing,
-}
-
-impl Deletes {
-    /// Whether a row created at `created_at` may go.
-    #[must_use]
-    pub const fn may_delete(self, created_at: i64) -> bool {
-        match self {
-            Self::EveryRowTheFileLacks => true,
-            Self::RowsNoNewerThan(stamp) => created_at <= stamp,
-            Self::Nothing => false,
-        }
-    }
-}
-
 /// One `sessions.json` record offered to [`SessionsRepo::complete_reconcile`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSession {
@@ -114,9 +75,11 @@ pub struct ReconcileOutcome {
     pub marker: ImportMarker,
     /// Every name conflict of this pass, for the caller to report.
     pub conflicts: Vec<NameConflict>,
-    /// Table rows this pass deleted because the file no longer has them (the
-    /// file is the authority on which sessions exist until the flip). Not a
-    /// marker column: that would take a migration, which the goal rules out.
+    /// Table rows this pass deleted. Always empty since the flip (P6e-6): a
+    /// pass never deletes on the file's word, because a previous release
+    /// cannot refuse an unparseable `sessions.json` and would hand this pass
+    /// an empty file to act on. Kept because the field is on the wire, and
+    /// because deletion through the table's own paths may report here later.
     pub deleted: Vec<String>,
 }
 
@@ -402,14 +365,17 @@ impl SessionsRepo {
     /// `<path>#reconcile` marker, in one `IMMEDIATE` transaction.
     ///
     /// Repeatable, unlike [`Self::complete_import`]. A pass:
-    /// - deletes the table rows `deletes` allows it to, first, returned in
-    ///   `deleted`;
-    /// - then inserts every file session the table lacks;
+    /// - inserts every file session the table lacks;
     /// - leaves a row the file and the table both have untouched: the table
-    ///   wins on contents.
+    ///   wins on contents;
+    /// - deletes NOTHING.
     ///
-    /// Which rows may be deleted is the difference the flip makes, and the
-    /// caller decides it from its own compiled catalogue; see [`Deletes`].
+    /// Additive on purpose since the flip (P6e-6). A previous release cannot
+    /// refuse an unparseable `sessions.json`: its loader reads one as an empty
+    /// store and the next whole-file save writes that emptiness back. A pass
+    /// that deleted on the file's word would carry that wipe into the table,
+    /// and a wrong delete costs the operator their sessions while a late one
+    /// costs a stale row. Rows leave the table through the table's own paths.
     ///
     /// A record with a minted id matches by tmux name. A file session whose
     /// tmux name is still bound to another id after the deletes is skipped
@@ -423,38 +389,12 @@ impl SessionsRepo {
         sessions: &[FileSession],
         rejected: i64,
         completed_at: i64,
-        deletes: Deletes,
     ) -> Result<ReconcileOutcome, sqlx::Error> {
         let mut tx = pool.begin_with(crate::repo::fleet::IMMEDIATE_TRANSACTION).await?;
 
-        let file_ids: std::collections::HashSet<&str> = sessions
-            .iter()
-            .filter(|s| !s.id_minted)
-            .map(|s| s.row.session_id.as_str())
-            .collect();
-        let minted_names: std::collections::HashSet<&str> = sessions
-            .iter()
-            .filter(|s| s.id_minted)
-            .map(|s| s.row.tmux_session_name.as_str())
-            .collect();
-        let table: Vec<(String, String, i64)> =
-            sqlx::query_as("SELECT session_id, tmux_session_name, created_at FROM sessions")
-                .fetch_all(&mut *tx)
-                .await?;
-        let mut deleted = Vec::new();
-        for (session_id, tmux_name, created_at) in table {
-            if file_ids.contains(session_id.as_str()) || minted_names.contains(tmux_name.as_str()) {
-                continue;
-            }
-            if !deletes.may_delete(created_at) {
-                continue;
-            }
-            sqlx::query("DELETE FROM sessions WHERE session_id = ?")
-                .bind(&session_id)
-                .execute(&mut *tx)
-                .await?;
-            deleted.push(session_id);
-        }
+        // No deletes. A pass adds what the mirror has and the table lacks and
+        // takes nothing away: see `ReconcileOutcome::deleted`.
+        let deleted = Vec::new();
 
         let mut imported = 0_i64;
         let mut conflicts = Vec::new();
