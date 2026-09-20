@@ -496,12 +496,17 @@ Everything ainb persists, for the current user. Never
 .IR ~/.ainb/ .
 .TP
 .I ~/.agents\-in\-a\-box/sessions.json
-The session store: one record per session (id, workspace name, tmux session
-name, worktree path, branch, provider). This is what
+The session mirror: one record per session (id, workspace name, tmux session
+name, worktree path, branch, provider). The hangar daemon's
+.I sessions
+table is what
 .B ainb list
 reads and what
 .BR "ainb attach" / "status" / "kill"
-resolve against.
+resolve against; this file is written beside it, row by row under its lock, so
+a previous release still sees current sessions. Sessions an older binary
+writes here are reconciled into the table on the daemon's next pass. Editing or
+deleting it by hand does not remove a session: the table is what decides.
 .TP
 .I ~/.agents\-in\-a\-box/config/config.toml
 User configuration. Edit through
@@ -527,6 +532,19 @@ misbehaves.
 .I ./.ainb/config.toml
 Per\-repository overrides, read from the repository ainb is pointed at.
 .SH ENVIRONMENT
+.TP
+.B AINB_SESSION_SOURCE
+Set to
+.B file
+to make this one process read and write
+.I ~/.agents\-in\-a\-box/sessions.json
+instead of the daemon's sessions table, with no daemon call at all. It is read
+before anything is dialled, so it works whatever the daemon is doing, and it is
+the way back if the table is ever wrong: run the command with
+.B AINB_SESSION_SOURCE=file
+and the file decides. Any other value is ignored with one warning. A process
+forced onto the file still sees current sessions, because every write through
+the daemon keeps the file current.
 .TP
 .B AINB_HOME
 Relocates ainb's state so a test run or a throwaway fleet does not touch your
