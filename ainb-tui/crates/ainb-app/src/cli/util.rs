@@ -325,6 +325,23 @@ fn degraded_notice() {
     });
 }
 
+/// Say once per process that the daemon on this home predates the sessions
+/// table, so this process reads the file and will not move.
+///
+/// Unlike [`degraded_notice`] this is not a wait: the daemon has answered and
+/// named what it speaks. Since the flip it is the only way a process ends up
+/// on the file without being told to, so it says so rather than changing
+/// source in silence.
+fn older_daemon_notice() {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        say(
+            "Notice: this hangar daemon is older than the sessions table; \
+             sessions are on the local sessions.json until it is restarted on this release.",
+        );
+    });
+}
+
 impl SessionSource {
     /// Decide against the daemon named by the environment. See the type's
     /// diagram.
@@ -359,7 +376,9 @@ impl SessionSource {
         };
         if !hello.advertises(CAP_WORKSPACE_SESSIONS) {
             // A daemon from before the sessions table: it will never serve
-            // them, so this is the file for good, not a degraded wait.
+            // them, so this is the file for good, not a degraded wait, and
+            // the operator is told which of the two it is.
+            older_daemon_notice();
             return Self::File;
         }
         let probe = WorkspaceSessionListParams {
@@ -550,7 +569,7 @@ impl SessionSource {
         let file_before = write_file_rows(&removed, &written)?;
         let table = tokio::time::timeout(
             MUTATE_WRITES_DEADLINE,
-            write_table_rows(client, &removed, &written),
+            write_table_rows(client, &removed, &written, &before),
         )
         .await
         .unwrap_or_else(|_| {
@@ -637,32 +656,101 @@ fn restore_file(before: Option<&[u8]>) -> std::io::Result<()> {
 }
 
 /// Apply the row changes to the daemon's table, each RPC under
-/// [`SESSION_RPC_DEADLINE`].
+/// [`SESSION_RPC_DEADLINE`], and put the table back as it was if any of them
+/// fails.
+///
+/// The caller reverts `sessions.json` on failure, and since the flip no
+/// reconcile pass ever cleans up after a half-applied write: a row this call
+/// inserted before a later row was refused would be listed on every surface
+/// for a session that never ran, with nothing to take it away. So this undoes
+/// its own work, best effort, and says when the undo itself failed.
+///
+/// `before` is the table's own row for each id this call touches, as the file
+/// had it before the change: `None` for an id the table did not hold, which
+/// the undo deletes.
 async fn write_table_rows(
     client: &DaemonClient,
     removed: &[Uuid],
     written: &[&WorkspaceSessionEntry],
+    before: &HashMap<Uuid, WorkspaceSessionEntry>,
 ) -> std::io::Result<()> {
+    let mut applied: Vec<Uuid> = Vec::new();
     for id in removed {
-        within_deadline(
+        let outcome = within_deadline(
             "delete",
             client.workspace_session_delete(WorkspaceSessionDeleteParams {
                 session_id: Some(id.to_string()),
                 tmux_session_name: None,
             }),
         )
-        .await?;
+        .await;
+        if let Err(error) = outcome {
+            return Err(undo_table_rows(client, &applied, before, error).await);
+        }
+        applied.push(*id);
     }
     for entry in written {
-        within_deadline(
+        let id = Uuid::parse_str(&entry.session_id).ok();
+        let outcome = within_deadline(
             "write",
             client.workspace_session_upsert(WorkspaceSessionUpsertParams {
                 session: (*entry).clone(),
             }),
         )
-        .await?;
+        .await;
+        if let Err(error) = outcome {
+            return Err(undo_table_rows(client, &applied, before, error).await);
+        }
+        if let Some(id) = id {
+            applied.push(id);
+        }
     }
     Ok(())
+}
+
+/// Put back every row `applied` changed, and answer with the failure the
+/// caller should surface: `failure` on its own when the undo landed, or both
+/// when it did not.
+async fn undo_table_rows(
+    client: &DaemonClient,
+    applied: &[Uuid],
+    before: &HashMap<Uuid, WorkspaceSessionEntry>,
+    failure: std::io::Error,
+) -> std::io::Error {
+    let mut undone = Ok(());
+    for id in applied.iter().rev() {
+        let outcome = match before.get(id) {
+            // The table held this row before the write: put it back as it was.
+            Some(entry) => within_deadline(
+                "undo write",
+                client.workspace_session_upsert(WorkspaceSessionUpsertParams {
+                    session: entry.clone(),
+                }),
+            )
+            .await
+            .map(|_| ()),
+            // This call created it, so the table is as it was without it.
+            None => within_deadline(
+                "undo delete",
+                client.workspace_session_delete(WorkspaceSessionDeleteParams {
+                    session_id: Some(id.to_string()),
+                    tmux_session_name: None,
+                }),
+            )
+            .await
+            .map(|_| ()),
+        };
+        if let Err(error) = outcome {
+            undone = Err(error);
+            break;
+        }
+    }
+    match undone {
+        Ok(()) => failure,
+        Err(undo) => std::io::Error::other(format!(
+            "{failure}; and the table could not be put back: {undo}"
+        )),
+    }
 }
 
 /// Every entry keyed by its map key, for change detection.

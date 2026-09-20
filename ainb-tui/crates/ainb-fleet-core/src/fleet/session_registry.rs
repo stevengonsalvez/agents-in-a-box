@@ -183,12 +183,35 @@ pub fn register_session_locked(
 ) -> Result<()> {
     // Read-merge-write under the lock: load the existing store as opaque JSON so
     // foreign entries survive, replace only our tmux-named key, write atomically.
-    let mut store: serde_json::Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({ "sessions": {} }));
+    //
+    // A file that does not parse is REFUSED, not replaced (P6e-6). Reading one
+    // as an empty store and saving a single record over it loses every other
+    // session, and since the flip the reconcile pass takes what the mirror has,
+    // so a torn file would spread. An absent or empty file is a fresh home and
+    // is filled; anything else has to parse.
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", path.display()));
+        }
+    };
+    let mut store: serde_json::Value = match existing {
+        Some(text) if !text.trim().is_empty() => {
+            serde_json::from_str(&text).with_context(|| {
+                format!(
+                    "{} did not parse; refusing to write over it",
+                    path.display()
+                )
+            })?
+        }
+        _ => serde_json::json!({ "sessions": {} }),
+    };
     if !store.get("sessions").is_some_and(serde_json::Value::is_object) {
-        store = serde_json::json!({ "sessions": {} });
+        anyhow::bail!(
+            "{} has no sessions object; refusing to write over it",
+            path.display()
+        );
     }
     let entry = serde_json::to_value(record).context("serializing session record")?;
     store["sessions"][&record.tmux_session_name] = entry;
@@ -344,6 +367,48 @@ mod tests {
         assert_eq!(store["sessions"]["tmux_other"]["agent_type"], "Codex");
         assert_eq!(store["sessions"]["tmux_other"]["headroom_enabled"], true);
         // Our entry landed alongside it.
+        assert_eq!(
+            store["sessions"]["tmux_hangar-new"]["workspace_name"],
+            "proj"
+        );
+    }
+
+    /// P6e-6: a `sessions.json` that does not parse is not an empty one. The
+    /// old read swallowed the parse error and wrote one record over the file,
+    /// and since the table takes what the mirror has, a torn file could cost
+    /// every other session its row. Refuse instead, and leave the bytes alone.
+    #[test]
+    fn register_refuses_a_file_that_does_not_parse() {
+        let home = TempDir::new().unwrap();
+        let path = home.path().join("sessions.json");
+        let torn = r#"{"sessions":{"tmux_other":{"session_id":"111"#;
+        std::fs::write(&path, torn).unwrap();
+
+        let rec = AinbSessionRecord::new("tmux_hangar-new", PathBuf::from("/work/new"), "proj");
+        let err = register_session_at(&path, &rec).expect_err("a torn file was written over");
+
+        assert!(
+            format!("{err:#}").contains("did not parse"),
+            "the error does not say why: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            torn,
+            "the bytes changed under a refused write"
+        );
+    }
+
+    /// An empty file is a fresh home, not a torn one: the first write fills it.
+    #[test]
+    fn register_fills_an_empty_file() {
+        let home = TempDir::new().unwrap();
+        let path = home.path().join("sessions.json");
+        std::fs::write(&path, "   \n").unwrap();
+
+        let rec = AinbSessionRecord::new("tmux_hangar-new", PathBuf::from("/work/new"), "proj");
+        register_session_at(&path, &rec).expect("an empty file is writable");
+
+        let store = read(&path);
         assert_eq!(
             store["sessions"]["tmux_hangar-new"]["workspace_name"],
             "proj"

@@ -119,8 +119,10 @@ pub struct WorkspaceSessionReconcileResult {
     pub skipped: i64,
     /// File records that failed validation and stayed in the file only.
     pub rejected: i64,
-    /// Table rows deleted because `sessions.json` no longer has them (the
-    /// file is the authority on which sessions exist until the flip).
+    /// Table rows this pass deleted. Always 0 since the flip (P6e-6): a pass
+    /// adds what the mirror has and takes nothing away. Kept on the wire for
+    /// the clients that read it, and for deletion through the table's own
+    /// paths to report here later.
     #[serde(default)]
     pub deleted: i64,
     /// Unix milliseconds when the pass committed.

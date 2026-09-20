@@ -429,11 +429,13 @@ fn table_names(hangar: &FleetHangar) -> Vec<String> {
     names
 }
 
-/// A delete made while degraded reaches the file only. It is not undone: the
-/// next pass removes the table row, the file being the authority on which
-/// sessions exist until the flip.
+/// A delete made while degraded reaches the file only, and since the flip a
+/// pass does not finish it: the table decides which sessions exist, and a
+/// mirror a previous release could have damaged does not get to end one. The
+/// row stays until it is killed through a current surface, and the pass does
+/// not resurrect the file's copy either.
 #[test]
-fn a_delete_made_while_degraded_is_not_undone_by_the_daemon() {
+fn a_delete_made_while_degraded_leaves_its_row_for_a_real_kill() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let homes = Homes::new();
     homes.write_file_store(&[&make_session("sess-gone"), &make_session("sess-kept")]);
@@ -451,15 +453,21 @@ fn a_delete_made_while_degraded_is_not_undone_by_the_daemon() {
     }))
     .expect("a degraded delete goes to the file");
 
-    assert_eq!(reconcile(&hangar, &homes), 1);
-    assert_eq!(table_names(&hangar), vec!["sess-kept"]);
+    assert_eq!(reconcile(&hangar, &homes), 0, "a pass deleted a table row");
+    assert_eq!(
+        table_names(&hangar),
+        vec!["sess-gone", "sess-kept"],
+        "the degraded delete took a row out of the table"
+    );
 }
 
-/// A multi-row write whose later row the daemon refuses is reverted in the
-/// file, but the earlier row already reached the table. The next pass
-/// deletes that row, because the file does not have it.
+/// A multi-row write whose later row the daemon refuses puts BOTH stores back
+/// as they were. The file is reverted by the caller; the table undoes the rows
+/// the same call had already written, because since the flip no pass ever
+/// cleans up after a half-applied write and the row would otherwise be listed
+/// on every surface for a session that never ran.
 #[test]
-fn a_reverted_multi_row_write_leaves_nothing_after_the_next_pass() {
+fn a_refused_multi_row_write_puts_the_table_back() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let homes = Homes::new();
     homes.write_file_store(&[&make_session("sess-kept")]);
@@ -484,11 +492,13 @@ fn a_reverted_multi_row_write_leaves_nothing_after_the_next_pass() {
     );
     assert_eq!(
         table_names(&hangar),
-        vec!["sess-a1", "sess-kept"],
-        "the first row reached the table before the refusal"
+        vec!["sess-kept"],
+        "the row written before the refusal was left in the table"
     );
 
-    assert_eq!(reconcile(&hangar, &homes), 1);
+    // And nothing puts it back later: a pass only adds what the mirror has,
+    // and the mirror was reverted too.
+    assert_eq!(reconcile(&hangar, &homes), 0, "a pass deleted a table row");
     assert_eq!(table_names(&hangar), vec!["sess-kept"]);
 }
 

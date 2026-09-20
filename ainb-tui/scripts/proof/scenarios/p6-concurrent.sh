@@ -26,18 +26,24 @@
 #     write lands after the lock goes with the file still valid JSON. A writer
 #     that took no lock would return at once and fail the wait.
 #   * the kill switch: `AINB_SESSION_SOURCE=file` puts one process on the file
-#     end to end, and what it wrote is in the table after a reconcile.
+#     end to end, and what it wrote is in the table after a reconcile. What it
+#     KILLED is not taken from the table by a pass: a pass adds and never takes
+#     away, so that row waits for a kill through a current surface.
 #
-# The capability is dark in a release build, so the binaries the harness builds
-# carry `test-support` and this scenario turns it on with
-# AINB_TEST_WORKSPACE_SESSIONS=1 (the daemon reads the same variable in
-# rpc/auth.rs).
+#   * the mirror: with `sessions.json` moved away, the rows ainb web serves
+#     are still the table's. While both agree, equality cannot tell a surface
+#     reading the table from one reading the file; with no file to read, it
+#     can.
+#
+# Since the flip (P6e-6) the capability comes from the binary's own catalogue,
+# so this scenario sets no switch: an ordinary build of these binaries is what
+# is under test.
 #
 # Combination names match scripts/surface-combo-smoke.sh, which is where the
 # four came from (P6e open question 5).
 
 # shellcheck disable=SC2034  # read by write_result in lib.sh
-EXPECT="with the sessions capability on, the CLI and every TUI resolve the daemon's sessions table and what ainb web serves is that table, and one daemon serves the TUI, ainb web and the CLI together in every combination ({tui} {web} {tui,web} {tui,tui}): a session created from the TUI reaches every surface that is up, a kill from the TUI leaves every surface, an ASK answered on the web folds on the TUIs, and the table and sessions.json agree across a reconcile; separately, a write while degraded is file-first and reaches the table after the switch, a write waits for the sessions.json flock, and AINB_SESSION_SOURCE=file works end to end"
+EXPECT="with the capability advertised by the build itself, the CLI and every TUI resolve the daemon's sessions table and what ainb web serves is that table, and one daemon serves the TUI, ainb web and the CLI together in every combination ({tui} {web} {tui,web} {tui,tui}): a session created from the TUI reaches every surface that is up, a kill from the TUI leaves every surface, an ASK answered on the web folds on the TUIs, and the table and sessions.json agree across a reconcile; separately, a write while degraded is file-first and reaches the table after the switch, a write waits for the sessions.json flock, the rows ainb web serves are still the table's when sessions.json is gone, and AINB_SESSION_SOURCE=file works end to end, its file-only kill leaving a row the table keeps until a kill through the daemon clears it"
 
 # How long a surface has to show a change another surface made.
 P6_REACH=90
@@ -46,20 +52,26 @@ P6_WEB_REACH=180
 # How long the sessions.json lock is held in front of a write.
 P6_LOCK_HOLD=5
 
-# The capability, on for every process this scenario starts: the binaries the
-# harness builds carry `test-support`, and a release build ignores it.
-p6_capability_on() {
-  export AINB_TEST_WORKSPACE_SESSIONS=1
+# The environment every process this scenario starts inherits. Since the flip
+# (P6e-6) the capability comes from the binary's own catalogue, so there is no
+# switch to set: an ordinary build of these binaries is what is under test.
+p6_env() {
   # Every surface says which source it resolved at info. A short command and
   # `ainb web` log to stderr at warn unless RUST_LOG raises them, and the
   # first clause keeps the rest of what a TUI logs where it was.
   export RUST_LOG="info,ainb=info,ainb_core=info,ainb_app=info"
 }
 
-# p6_binaries_ready: the CLI answers with the capability switch set.
+# p6_binaries_ready: the CLI runs, and the build under test advertises the
+# sessions capability. A build that does not is one the flip never reached,
+# and every check below would be proving the file path.
 p6_binaries_ready() {
   if ! "$AINB_BIN" list --format json >/dev/null 2>&1; then
-    check "the CLI runs with AINB_TEST_WORKSPACE_SESSIONS=1" false
+    check "the CLI runs" false
+    return 1
+  fi
+  if ! "$AINB_BIN" hangar daemon status >/dev/null 2>&1; then
+    check "the daemon verb answers" false
     return 1
   fi
   return 0
@@ -286,6 +298,31 @@ p6_web_has() {
 }
 p6_web_lacks() { p6_web_alive && ! p6_web_has "$1"; }
 
+# p6_without_the_mirror <name> <tmux name>: move `sessions.json` away, ask the
+# daemon to reconcile, and require the web to go on serving the table's rows.
+#
+# Post-flip a missing file is a lost mirror, not an empty store: the pass
+# deletes nothing and still commits. A surface that had been reading the file
+# would have nothing to serve here, so this is the check equality cannot make
+# while both stores agree. The file is put back before anything writes again.
+p6_without_the_mirror() {
+  local name="$1" tmux_name="$2" file="$HOME/.agents-in-a-box/sessions.json"
+  if [[ ! -s "$file" ]]; then
+    check "$name: there is a sessions.json to move away" false
+    return 1
+  fi
+  mv "$file" "$file.aside"
+  observe "$name: reconcile with no sessions.json said $(p6_reconcile)"
+  check "$name: the daemon keeps its rows with no sessions.json" \
+    wait_for 30 p6_table_has "$tmux_name"
+  check "$name: ainb web still serves the table's rows with no sessions.json" \
+    wait_for "$P6_WEB_REACH" p6_web_serves_the_table
+  check "$name: the session is still on the web with no sessions.json" \
+    p6_web_has "$tmux_name"
+  mv "$file.aside" "$file"
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Writing from a surface that is not the CLI
 # ---------------------------------------------------------------------------
@@ -471,6 +508,10 @@ p6_combination() {
     check "$name: the rows ainb web serves are the daemon's table" \
       wait_for "$P6_WEB_REACH" p6_web_serves_the_table
     observe "$name: ainb web serves: $(p6_web_rows | tr '\n' ' ')"
+    # While the two stores agree, equality says nothing about which one a
+    # surface read. With the mirror moved away, it does: post-flip the table
+    # keeps its rows, and a surface still serving them is reading the table.
+    p6_without_the_mirror "$name" "$tmux_name"
   fi
 
   # 2. An ASK answered on one surface folds on the others.
@@ -745,13 +786,22 @@ p6_kill_switch() {
     >"$PROOF_WORLD/p6-killswitch-kill.txt" 2>&1 \
     || observe "kill switch: ainb kill said $(tail -1 "$PROOF_WORLD/p6-killswitch-kill.txt")"
   check "kill switch: the row leaves sessions.json" wait_for 60 p6_file_lacks "$tmux_name"
+  # A pass adds and never takes away (P6e-6), so a kill made on the file alone
+  # does NOT end the session: the table keeps its row, which is the documented
+  # cost of a mirror a previous release could damage. That row waits for a kill
+  # through a current surface.
   observe "kill switch: reconcile said $(p6_reconcile)"
-  check "kill switch: the row leaves the table too" wait_for 60 p6_table_lacks "$tmux_name"
+  check "kill switch: the table keeps the row a file-only kill removed" \
+    p6_table_has "$tmux_name"
+  "$AINB_BIN" kill "$id" --force >"$PROOF_WORLD/p6-killswitch-kill-2.txt" 2>&1 \
+    || observe "kill switch: the second kill said $(tail -1 "$PROOF_WORLD/p6-killswitch-kill-2.txt")"
+  check "kill switch: a kill through the daemon clears that row" \
+    wait_for 60 p6_table_lacks "$tmux_name"
   return 0
 }
 
 scenario() {
-  p6_capability_on
+  p6_env
   p6_binaries_ready || return
 
   # Each combination brings up one daemon and every surface it names against

@@ -777,13 +777,16 @@ async fn a_rewrite_that_keeps_the_mtime_still_runs_a_pass() {
     assert_eq!(outcome.marker.imported, 1);
 }
 
-// ─── P6e: the file is the authority on which sessions exist (#1250) ────────
+// ─── P6e-6: the table decides which sessions exist; a pass only adds ──────
 
-/// A delete that reached the file but not the table (a client that removed
-/// the file row and then crashed, or whose table delete failed) is finished
-/// by the next pass: the table row goes too, and the pass says so.
+/// A delete that reached the file but not the table (a client that removed the
+/// file row and then crashed, or whose table delete failed) leaves its row in
+/// the table, and no pass takes it away: since the flip the mirror's word is
+/// not enough to end a session. The cost is a stale row until it is killed
+/// through a current surface; the alternative is a previous release's
+/// whole-file save deciding what the table holds.
 #[tokio::test]
-async fn a_delete_that_reached_only_the_file_is_finished_by_the_next_pass() {
+async fn a_delete_that_reached_only_the_file_leaves_its_row_for_a_real_kill() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_in(dir.path()).await.unwrap();
     let pool = store.pool();
@@ -802,16 +805,26 @@ async fn a_delete_that_reached_only_the_file_is_finished_by_the_next_pass() {
     // The file row went; the crash came before the table delete.
     sessions_file(&sessions_path, &[(kept, "ainb-kept", "ws")]);
     let outcome = reconcile_sessions(pool, &sessions_path).await.unwrap();
-    assert_eq!(outcome.deleted, vec![gone.to_string()]);
+    assert!(
+        outcome.deleted.is_empty(),
+        "a pass deleted on the mirror's word: {:?}",
+        outcome.deleted
+    );
+    assert_eq!(ids(&table(pool).await), vec![gone, kept]);
+
+    // It goes when the table's own path ends it, which is what `ainb kill`
+    // reaches through the resolver.
+    assert!(SessionsRepo::delete_by_id(pool, gone).await.unwrap());
     assert_eq!(ids(&table(pool).await), vec![kept]);
 }
 
-/// A `sessions.json` that goes missing while the table holds sessions is not
-/// read as "no sessions": the pass is refused, every row stays, and the
-/// marker is left as it was. The watcher's tick right after the file went
-/// away is the case that matters.
+/// P6e-6, the flip: a `sessions.json` that goes missing while the table holds
+/// sessions is a lost mirror, not an empty store. The pass keeps every row and
+/// still commits, so the first-pass gate opens and readers are served from the
+/// table rather than waiting for a file that may never come back. Before the
+/// flip this same pass was refused, because the file decided existence.
 #[tokio::test]
-async fn a_missing_file_never_empties_a_populated_table() {
+async fn a_missing_file_leaves_the_rows_and_still_opens_the_gate() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_in(dir.path()).await.unwrap();
     let pool = store.pool();
@@ -825,16 +838,31 @@ async fn a_missing_file_never_empties_a_populated_table() {
     let marker = SessionsRepo::import_marker(pool, &source).await.unwrap();
 
     fs::remove_file(&sessions_path).unwrap();
-    let err = watch.tick(pool).await.expect("a vanished file is a change").unwrap_err();
-    assert!(format!("{err:#}").contains("missing"), "{err:#}");
+    let outcome = watch
+        .tick(pool)
+        .await
+        .expect("a vanished file is a change")
+        .expect("the pass must not refuse a missing mirror");
+    assert!(
+        outcome.deleted.is_empty(),
+        "a lost mirror deleted rows: {:?}",
+        outcome.deleted
+    );
     assert_eq!(
         ids(&table(pool).await),
         vec![kept],
         "a missing file emptied the table"
     );
-    assert_eq!(
-        SessionsRepo::import_marker(pool, &source).await.unwrap(),
-        marker
+    let after = SessionsRepo::import_marker(pool, &source).await.unwrap();
+    assert!(
+        after != marker,
+        "the pass did not commit, so the gate would never open"
+    );
+    assert!(
+        SessionsRepo::import_complete_for(pool, &marker_key(&sessions_path))
+            .await
+            .unwrap(),
+        "readers are still not served from the table"
     );
 }
 
@@ -853,4 +881,130 @@ async fn a_fresh_home_with_no_file_still_completes_its_pass() {
     assert!(outcome.deleted.is_empty());
     let source = marker_key(&sessions_path);
     assert!(SessionsRepo::import_complete_for(pool, &source).await.unwrap());
+}
+
+/// P6e-6, the migration this release makes: a home that has been running the
+/// old stack has every session in `sessions.json` and none in the table. The
+/// first boot after the flip must keep all of them, whatever their age
+/// against the file's own last write, and open the gate.
+#[tokio::test]
+async fn the_first_boot_after_the_flip_keeps_a_populated_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    let one = "00000000-0000-0000-0000-0000000000e1";
+    let two = "00000000-0000-0000-0000-0000000000e2";
+    sessions_file(
+        &sessions_path,
+        &[(one, "ainb-one", "ws"), (two, "ainb-two", "ws")],
+    );
+
+    // The boot the flip ships: the P6d import, then the first pass.
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+    let mut watch = ReconcileWatch::new(&sessions_path);
+    let outcome = watch
+        .tick(pool)
+        .await
+        .expect("the first pass runs")
+        .expect("the first pass failed");
+
+    assert!(
+        outcome.deleted.is_empty(),
+        "the first pass after the flip dropped sessions: {:?}",
+        outcome.deleted
+    );
+    assert_eq!(
+        ids(&table(pool).await),
+        vec![one, two],
+        "a session in the file did not survive the first boot after the flip"
+    );
+    assert!(
+        SessionsRepo::import_complete_for(pool, &marker_key(&sessions_path))
+            .await
+            .unwrap(),
+        "the gate stayed shut, so no reader would be served from the table"
+    );
+}
+
+/// P6e-6, the first wipe window the code review named: delete `sessions.json`,
+/// then create one session. The writer saves the rows it touched, so the file
+/// comes back holding one; a pass that deleted what the mirror lacks would
+/// take every other row with it. The pass adds and takes nothing away.
+#[tokio::test]
+async fn a_recreated_mirror_with_one_row_takes_no_other_row_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    let (first, second) = (
+        "00000000-0000-0000-0000-0000000000c1",
+        "00000000-0000-0000-0000-0000000000c2",
+    );
+    sessions_file(
+        &sessions_path,
+        &[(first, "ainb-first", "ws"), (second, "ainb-second", "ws")],
+    );
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+    reconcile_sessions(pool, &sessions_path).await.unwrap();
+    assert_eq!(ids(&table(pool).await), vec![first, second]);
+
+    // The mirror is lost, and the next write recreates it with its own row.
+    fs::remove_file(&sessions_path).unwrap();
+    let third = "00000000-0000-0000-0000-0000000000c3";
+    sessions_file(&sessions_path, &[(third, "ainb-third", "ws")]);
+
+    let outcome = reconcile_sessions(pool, &sessions_path).await.unwrap();
+
+    assert!(
+        outcome.deleted.is_empty(),
+        "the recreated mirror emptied the table: {:?}",
+        outcome.deleted
+    );
+    assert_eq!(
+        ids(&table(pool).await),
+        vec![first, second, third],
+        "a session was lost to a mirror that had just been recreated"
+    );
+}
+
+/// P6e-6, the second wipe window: a torn `sessions.json` that the daemon's own
+/// registration is asked to write into. The writer refuses, so the file keeps
+/// its bytes and the table keeps its rows; nothing is lost either way.
+#[tokio::test]
+async fn a_torn_mirror_is_refused_and_no_row_is_lost() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let sessions_path = dir.path().join("sessions.json");
+    let (first, second) = (
+        "00000000-0000-0000-0000-0000000000d1",
+        "00000000-0000-0000-0000-0000000000d2",
+    );
+    sessions_file(
+        &sessions_path,
+        &[(first, "ainb-first", "ws"), (second, "ainb-second", "ws")],
+    );
+    import_sessions_if_needed(pool, &sessions_path).await.unwrap();
+    reconcile_sessions(pool, &sessions_path).await.unwrap();
+
+    // Torn in half, as an interrupted write leaves it.
+    let torn = r#"{"sessions":{"ainb-first":{"session_id":"000"#;
+    fs::write(&sessions_path, torn).unwrap();
+    let record = ainb_fleet_core::session_registry::AinbSessionRecord::new(
+        "ainb-third",
+        std::path::PathBuf::from("/work/third"),
+        "ws",
+    );
+    let refused = ainb_fleet_core::session_registry::register_session_at(&sessions_path, &record);
+
+    assert!(refused.is_err(), "the torn mirror was written over");
+    assert_eq!(
+        fs::read_to_string(&sessions_path).unwrap(),
+        torn,
+        "the bytes changed under a refused write"
+    );
+    // The pass reads the same torn file and refuses it too, leaving the rows.
+    assert!(reconcile_sessions(pool, &sessions_path).await.is_err());
+    assert_eq!(ids(&table(pool).await), vec![first, second]);
 }

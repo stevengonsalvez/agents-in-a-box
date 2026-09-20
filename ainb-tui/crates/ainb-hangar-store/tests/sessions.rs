@@ -504,11 +504,11 @@ async fn reconcile_marker_carries_the_latest_pass() {
     assert_eq!(import.completed_at, 1);
 }
 
-/// Until the flip the file is the authority on which sessions exist: a table
-/// row whose session the file does not have is deleted by the pass, and
-/// returned in `deleted`, while a row the file has keeps its table contents.
+/// Since the flip the table is the authority on which sessions exist: a table
+/// row whose session the mirror does not have stays, and a row the mirror also
+/// has keeps its table contents.
 #[tokio::test]
-async fn reconcile_deletes_table_rows_the_file_does_not_have() {
+async fn reconcile_keeps_table_rows_the_file_does_not_have() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_in(dir.path()).await.unwrap();
     let pool = store.pool();
@@ -534,16 +534,24 @@ async fn reconcile_deletes_table_rows_the_file_does_not_have() {
     let out = SessionsRepo::complete_reconcile(pool, source, &[from_file(&stale)], 0, 3)
         .await
         .unwrap();
-    assert_eq!(out.deleted, vec![gone.session_id.clone()]);
+    assert!(
+        out.deleted.is_empty(),
+        "a pass deleted on the file's word: {:?}",
+        out.deleted
+    );
     assert_eq!(out.marker.imported, 0);
+    let mut left = SessionsRepo::list(pool, None, 100).await.unwrap();
+    left.sort_by(|a, b| a.session_id.cmp(&b.session_id));
     assert_eq!(
-        SessionsRepo::list(pool, None, 100).await.unwrap(),
-        vec![kept]
+        left,
+        vec![kept, gone],
+        "the row the mirror no longer names was taken from the table"
     );
 }
 
-/// A tmux name the table binds to an id the file no longer has moves to the
-/// file's session: the stale row is deleted first, then the file's inserted.
+/// A tmux name the table binds to an id the file no longer has stays where it
+/// is: the pass deletes nothing, so the file's session is a name conflict and
+/// the table's row keeps the name.
 #[tokio::test]
 async fn reconcile_gives_a_tmux_name_to_the_files_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -568,11 +576,167 @@ async fn reconcile_gives_a_tmux_name_to_the_files_session() {
     let out = SessionsRepo::complete_reconcile(pool, source, &[from_file(&new)], 0, 4)
         .await
         .unwrap();
-    assert_eq!(out.deleted, vec![old.session_id.clone()]);
-    assert_eq!(out.marker.imported, 1);
-    assert!(out.conflicts.is_empty());
+    assert!(out.deleted.is_empty(), "{:?}", out.deleted);
+    assert_eq!(out.marker.imported, 0);
+    assert_eq!(
+        out.conflicts.len(),
+        1,
+        "the name is still bound, so the file's session is a conflict"
+    );
     assert_eq!(
         SessionsRepo::list(pool, None, 100).await.unwrap(),
-        vec![new]
+        vec![old],
+        "the table's row lost its name to the mirror"
+    );
+}
+
+/// P6e-6: with no file to read, the mirror was lost rather than emptied. The
+/// pass deletes nothing and still commits its marker, so readers are served
+/// from the table instead of waiting for a file that may never come back.
+#[tokio::test]
+async fn a_post_flip_pass_with_no_file_keeps_every_row_and_still_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/p/.agents-in-a-box/sessions.json";
+
+    let held = test_session(
+        "00000000-0000-0000-0000-0000000000cc",
+        "ainb-held",
+        "ws",
+        1_000,
+    );
+    SessionsRepo::upsert(pool, &held).await.unwrap();
+    // The P6d import ran on this home before the flip, as it does on a real
+    // one: what this test turns on is the reconcile that follows.
+    SessionsRepo::complete_import(pool, source, &[], 0, 1_000).await.unwrap();
+
+    let out = SessionsRepo::complete_reconcile(pool, source, &[], 0, 4_000).await.unwrap();
+
+    assert!(out.deleted.is_empty(), "{:?}", out.deleted);
+    assert_eq!(out.marker.imported, 0);
+    let left = SessionsRepo::list(pool, None, 10).await.unwrap();
+    assert_eq!(left.len(), 1, "the lost mirror emptied the table");
+    assert!(
+        SessionsRepo::import_complete_for(pool, source).await.unwrap(),
+        "the pass did not commit its marker, so readers would never be served"
+    );
+}
+
+/// P6e-6, migration safety: a home whose `sessions.json` holds sessions the
+/// table has never seen keeps every one of them on the first pass after the
+/// flip. The rows are inserted, nothing is dropped for being unknown.
+#[tokio::test]
+async fn the_first_post_flip_pass_keeps_the_files_own_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/p/.agents-in-a-box/sessions.json";
+
+    let older = test_session(
+        "00000000-0000-0000-0000-0000000000d1",
+        "ainb-older",
+        "ws",
+        1_000,
+    );
+    let newer = test_session(
+        "00000000-0000-0000-0000-0000000000d2",
+        "ainb-newer",
+        "ws",
+        8_000,
+    );
+
+    let out = SessionsRepo::complete_reconcile(
+        pool,
+        source,
+        &[from_file(&older), from_file(&newer)],
+        0,
+        10_000,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out.marker.imported, 2);
+    assert!(out.deleted.is_empty(), "{:?}", out.deleted);
+    let mut left: Vec<String> = SessionsRepo::list(pool, None, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.tmux_session_name)
+        .collect();
+    left.sort();
+    assert_eq!(left, vec!["ainb-newer", "ainb-older"]);
+}
+
+/// P6e-6: a record that failed validation says nothing about the sessions that
+/// did not. One malformed entry in the mirror must not cost a live row.
+#[tokio::test]
+async fn a_rejected_record_takes_no_row_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/p/.agents-in-a-box/sessions.json";
+
+    let live = test_session(
+        "00000000-0000-0000-0000-0000000000f1",
+        "ainb-live",
+        "ws",
+        1_000,
+    );
+    SessionsRepo::upsert(pool, &live).await.unwrap();
+
+    // The whole file parsed to one rejected record and nothing usable.
+    let out = SessionsRepo::complete_reconcile(pool, source, &[], 1, 2_000).await.unwrap();
+
+    assert!(out.deleted.is_empty(), "{:?}", out.deleted);
+    assert_eq!(out.marker.rejected, 1);
+    assert_eq!(
+        SessionsRepo::list(pool, None, 10).await.unwrap().len(),
+        1,
+        "a rejected record emptied the table"
+    );
+}
+
+/// P6e-6: a mirror restored from an old backup names sessions that were killed
+/// since. The pass adds what the table lacks and takes nothing away, so the
+/// rows that are still live stay live.
+#[tokio::test]
+async fn a_stale_restored_mirror_takes_nothing_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/p/.agents-in-a-box/sessions.json";
+
+    let live = test_session(
+        "00000000-0000-0000-0000-0000000000f2",
+        "ainb-live",
+        "ws",
+        5_000,
+    );
+    SessionsRepo::upsert(pool, &live).await.unwrap();
+    // The backup is from before that session existed and names another.
+    let old = test_session(
+        "00000000-0000-0000-0000-0000000000f3",
+        "ainb-old",
+        "ws",
+        1_000,
+    );
+
+    let out = SessionsRepo::complete_reconcile(pool, source, &[from_file(&old)], 0, 6_000)
+        .await
+        .unwrap();
+
+    assert!(out.deleted.is_empty(), "{:?}", out.deleted);
+    let mut names: Vec<String> = SessionsRepo::list(pool, None, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.tmux_session_name)
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["ainb-live", "ainb-old"],
+        "the live session did not survive a restored backup"
     );
 }

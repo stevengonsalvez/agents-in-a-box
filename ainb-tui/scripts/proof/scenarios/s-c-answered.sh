@@ -44,6 +44,21 @@ scenario() {
   observe "POST /api/answer (web): $reply"
   check "the web answer is delivered" jq -e '.outcome == "delivered"' <<<"$reply"
   check "the TUI card retires within 2 s" wait_screen tui '0 need you' 2
+  # What the board has left when the card goes: a retirement through the
+  # answered event carries the answerer, a board rebuilt from an empty
+  # snapshot carries nothing, and the session count tells the two apart.
+  observe "sessions after the web answer: $("$AINB_BIN" list --format json 2>/dev/null | jq 'length') listed, fixture pane $(ftmux has-session -t "=$FIXTURE_TMUX:" 2>/dev/null && echo alive || echo gone)"
+  observe "control centre header: $(pane_text tui | sed -e 's/[^[:print:]]//g' | grep -oE 'Control .*need you' | head -1)"
+  # The toast rides on the answered EVENT; a board rebuilt from a snapshot
+  # retires the card with nothing to say. This is what the TUI heard.
+  local tui_log
+  tui_log="$(find "$HOME/.agents-in-a-box/logs" -name 'agents-in-a-box-*.jsonl' 2>/dev/null | sort | tail -1)"
+  if [[ -n "$tui_log" ]]; then
+    grep -oE '"message":"[^"]{0,80}(nswer|ttention|plugin[^"]{0,40}(crash|restart|quarantine))[^"]{0,40}"' \
+      "$tui_log" 2>/dev/null | sort -u | tail -6 | redact_host >"$NODE_DIR/tui-answer-log.txt"
+    CAPTURES+=("tui-answer-log.txt")
+    observe "the TUI heard: $(tr '\n' ' ' <"$NODE_DIR/tui-answer-log.txt")"
+  fi
   check "the TUI title names the web as the answerer" wait_screen tui 'answered by web@' 2
   capture tui control-after-web-answer
 

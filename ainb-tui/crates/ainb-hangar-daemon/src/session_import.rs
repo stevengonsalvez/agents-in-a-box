@@ -256,20 +256,22 @@ async fn reconcile_pass(
     })
     .await
     .context("sessions.json read task")??;
+    // A pass is additive: it inserts what the mirror has and the table lacks
+    // and deletes nothing (P6e-6). A previous release cannot refuse an
+    // unparseable `sessions.json`, so anything deleting on the file's word
+    // would carry that release's wipe into the table; a wrong delete costs the
+    // operator their sessions, a late one costs a stale row.
+    //
+    // A missing file is therefore a lost mirror, not an empty store: nothing
+    // goes, the marker is still committed so readers are served from the table
+    // rather than waiting for a file that may never come back, and the next
+    // write through the daemon recreates it row by row.
     let (sessions, rejected) = match content {
-        // A missing file is "no sessions" only on a fresh home. With rows in
-        // the table it is far more likely a file that went away (deleted,
-        // moved, a home on a volume that is not mounted) than a user who
-        // killed every session, and the existence rule would turn it into an
-        // empty table. So the pass is refused, the marker left as it was, and
-        // the watcher tries again. A fresh home (no file, no rows) still
-        // commits, or the table could never become authoritative.
         None => {
             if !SessionsRepo::list(pool, None, 1).await?.is_empty() {
-                bail!(
-                    "{} is missing while the sessions table holds sessions; \
-                     refusing a pass that would delete them",
-                    sessions_path.display()
+                tracing::warn!(
+                    path = %sessions_path.display(),
+                    "sessions.json is missing; the table keeps its sessions and the next write recreates the mirror"
                 );
             }
             (Vec::new(), 0)
@@ -292,12 +294,6 @@ async fn reconcile_pass(
         gate.send_replace(true);
     }
 
-    for session_id in &outcome.deleted {
-        tracing::info!(
-            %session_id,
-            "sessions table row deleted: sessions.json no longer has this session"
-        );
-    }
     for conflict in &outcome.conflicts {
         tracing::warn!(
             session_id = %conflict.session_id,
@@ -471,12 +467,11 @@ impl ReconcileWatch {
 /// Log a finished pass: quiet when it changed nothing.
 pub fn log_reconcile(outcome: &ReconcileOutcome) {
     let m = &outcome.marker;
-    if m.imported > 0 || m.skipped > 0 || m.rejected > 0 || !outcome.deleted.is_empty() {
+    if m.imported > 0 || m.skipped > 0 || m.rejected > 0 {
         tracing::info!(
             imported = m.imported,
             skipped = m.skipped,
             rejected = m.rejected,
-            deleted = outcome.deleted.len(),
             "sessions.json reconciled into the sessions table"
         );
     }

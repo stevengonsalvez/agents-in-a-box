@@ -496,12 +496,27 @@ Everything ainb persists, for the current user. Never
 .IR ~/.ainb/ .
 .TP
 .I ~/.agents\-in\-a\-box/sessions.json
-The session store: one record per session (id, workspace name, tmux session
-name, worktree path, branch, provider). This is what
+The session mirror: one record per session (id, workspace name, tmux session
+name, worktree path, branch, provider). The hangar daemon's
+.I sessions
+table is what
 .B ainb list
 reads and what
 .BR "ainb attach" / "status" / "kill"
-resolve against.
+resolve against; this file is written beside it, row by row under its lock, so
+a previous release still sees current sessions.
+.IP
+A session written here by an older binary is added to the table on the daemon's
+next pass. A session REMOVED here, by an older binary's
+.B ainb kill
+or by hand, is not: a pass only adds, because a release that cannot refuse a
+damaged mirror would otherwise decide what the table holds. Such a row stays
+listed until it is killed through a current surface:
+.B ainb kill <id>
+ends it in both. Restoring an old copy of this file can likewise bring back
+rows for sessions that have since been killed;
+.B ainb kill
+clears them.
 .TP
 .I ~/.agents\-in\-a\-box/config/config.toml
 User configuration. Edit through
@@ -527,6 +542,19 @@ misbehaves.
 .I ./.ainb/config.toml
 Per\-repository overrides, read from the repository ainb is pointed at.
 .SH ENVIRONMENT
+.TP
+.B AINB_SESSION_SOURCE
+Set to
+.B file
+to make this one process read and write
+.I ~/.agents\-in\-a\-box/sessions.json
+instead of the daemon's sessions table, with no daemon call at all. It is read
+before anything is dialled, so it works whatever the daemon is doing, and it is
+the way back if the table is ever wrong: run the command with
+.B AINB_SESSION_SOURCE=file
+and the file decides. Any other value is ignored with one warning. A process
+forced onto the file still sees current sessions, because every write through
+the daemon keeps the file current.
 .TP
 .B AINB_HOME
 Relocates ainb's state so a test run or a throwaway fleet does not touch your

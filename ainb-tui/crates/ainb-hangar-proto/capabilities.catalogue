@@ -73,3 +73,4 @@ fleet.status.read
 hangar.connections.transient
 fleet.roster_status.read
 hangar.host_identity
+hangar.workspace.sessions

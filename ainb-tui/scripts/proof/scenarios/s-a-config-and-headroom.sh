@@ -28,6 +28,36 @@ config_edit() {
 
 config_value() { "$AINB_BIN" config get "$1" 2>/dev/null | tail -1; }
 
+# mark_headroom_enabled <sessions.json>: set headroom_enabled on every session
+# in the mirror and in the daemon's table.
+#
+# The table is the source a surface reads (P6e-6), and a reconcile pass never
+# overwrites a table row from its file row, so the mirror alone would leave the
+# watchdog reading `false` for ever.
+mark_headroom_enabled() {
+  local store="$1"
+  jq '.sessions |= map_values(.headroom_enabled = true)' "$store" >"$store.tmp" \
+    && mv "$store.tmp" "$store" || return 1
+  jq -e '[.sessions[] | .headroom_enabled] | length > 0 and all' "$store" >/dev/null || return 1
+  # The same row through the daemon, field for field as the wire carries it.
+  local entry
+  # `created_at` is RFC3339 in the file and epoch milliseconds on the wire.
+  entry="$(jq -c '.sessions | to_entries[0].value | {
+    session_id, tmux_session_name, worktree_path, workspace_name,
+    created_at: (.created_at | sub("\\.[0-9]+"; "") | fromdateiso8601 * 1000),
+    agent_type,
+    headroom_enabled: true,
+    rtk_enabled: (.rtk_enabled // false),
+    skip_permissions, model,
+    model_source: (.model_source // "LegacyTyped"),
+    codex_model, codex_thread_id
+  }' "$store")" || return 1
+  local reply
+  reply="$(rpc_call 1 1 workspace/session_upsert "{\"session\": $entry}" 2>/dev/null | tail -1)"
+  observe "headroom flag through the daemon: ${reply:-no reply}"
+  [[ "$reply" == *'"ok":true'* || "$reply" == *'"result"'* ]]
+}
+
 scenario() {
   local cfg="$HOME/.agents-in-a-box/$CONFIG_TOML"
 
@@ -68,14 +98,35 @@ scenario() {
     grep -q 'workspace_defaults.branch_prefix *: proofa/' "$NODE_DIR/restart-branch-prefix.txt"
 
   # ---- Step 5: one headroom proxy -----------------------------------------
+  # A daemon of this node's own, started before the TUIs of this step and not
+  # owned by any of them. The daemon a TUI autostarts in an ephemeral hangar
+  # home dies with that TUI, and since the flip a surface that resolved it
+  # reads sessions through it: every read then fails, and the watchdog this
+  # step is about skips on the read rather than starting its proxy.
+  "$AINB_BIN" hangar daemon start >"$PROOF_WORLD/headroom-daemon.txt" 2>&1 || true
+  check "a daemon is up for the headroom step" wait_for 45 daemon_running
   fixture_session || { check "the headroom fixture session starts" false; return; }
   local store="$HOME/.agents-in-a-box/sessions.json" pidfile="$HOME/.agents-in-a-box/headroom/proxy.pid"
+  # Headroom is a launch-time choice with no CLI verb, so the proof sets the
+  # flag itself. Since the flip the daemon's table is what a surface reads, so
+  # the flag goes there as well as into the mirror: an edit to sessions.json
+  # alone no longer reaches the watchdog, which is the point of the flip.
   check "the fixture session is marked headroom_enabled in the session store" \
-    bash -c "jq '.sessions |= map_values(.headroom_enabled = true)' '$store' >'$store.tmp' && mv '$store.tmp' '$store' \
-      && jq -e '[.sessions[] | .headroom_enabled] | length > 0 and all' '$store' >/dev/null"
+    mark_headroom_enabled "$store"
 
   start_tui a || { check "TUI A restarts for the headroom step" false; return; }
   check "TUI A's watchdog starts the proxy (pid file within 30 s)" wait_for 30 test -s "$pidfile"
+  # What the watchdog itself said, whichever way the check went: it skips on a
+  # store read it could not make, and that reason is the first thing to look
+  # at when no proxy appears.
+  local log_a
+  log_a="$(find "$HOME/.agents-in-a-box/logs" -name 'agents-in-a-box-*.jsonl' -newer "$store" 2>/dev/null | sort | tail -1)"
+  if [[ -n "$log_a" ]]; then
+    grep -oE '"message":"[^"]*(headroom|session source)[^"]*"' "$log_a" 2>/dev/null \
+      | sort -u | head -5 | redact_host >"$NODE_DIR/tui-a-headroom-log.txt"
+    CAPTURES+=("tui-a-headroom-log.txt")
+    observe "TUI A said: $(tr '\n' ' ' <"$NODE_DIR/tui-a-headroom-log.txt")"
+  fi
   local pid_a
   pid_a="$(cat "$pidfile" 2>/dev/null)"
   check "the proxy answers /health on its port" curl -fsS -o /dev/null "http://127.0.0.1:$PROOF_HEADROOM_PORT/health"

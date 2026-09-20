@@ -6,9 +6,10 @@
 //!              └─▶ anything else ────────────────▶ File   ──▶ sessions.json
 //! ```
 //!
-//! P6d lands dark: no production daemon advertises the capability, so the
-//! first two tests pin that every CLI process stays on the file. The rest
-//! switch the capability on through the daemon's test-only switch.
+//! Since the flip (P6e-6) this build advertises the capability, so the
+//! production resolver answers the daemon and a client reads the file only
+//! when it meets a daemon from before the flip, which the first two tests
+//! pin. The rest drive the daemon path, which needs no switch now.
 //!
 //! Every daemon test here drives the real RPC handlers through a real socket
 //! (`FleetHangar`), so deleting a handler fails them. The file is checked byte
@@ -144,21 +145,24 @@ fn rt() -> tokio::runtime::Runtime {
         .expect("client runtime")
 }
 
-/// Dark: a daemon with a completed import that does not advertise the
-/// capability (every production daemon in P6d) leaves the process on the file.
+/// Mixed versions: a daemon that does not advertise the capability is a
+/// previous release, and a client that meets one stays on the file for good,
+/// with no degraded wait and no retry. Since the flip this is the only way a
+/// new client reads the file without being told to.
 #[test]
-fn a_dark_daemon_leaves_the_cli_on_the_file() {
+fn a_daemon_that_does_not_advertise_leaves_the_client_on_the_file() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let homes = Homes::new();
     let meta = make_session("sess-file-1", "file-ws");
     homes.write_file_store(&[&meta]);
-    let hangar = homes.start_daemon();
-    complete_import(&hangar, &homes);
-    ainb_hangar_daemon::rpc::auth::advertise_workspace_sessions_for_tests(false);
-    let (socket, token) = homes.daemon_parts();
 
     let rt = rt();
-    let source = rt.block_on(SessionSource::resolve_at(socket, token));
+    // A hello with the catalogue minus the sessions capability, which is what
+    // a release built before the flip answers.
+    let socket = older_daemon(&rt, &homes.hangar);
+    // The older daemon answers hello whatever the token says; what decides
+    // here is the capability list it carries.
+    let source = rt.block_on(SessionSource::resolve_at(socket, "t".to_string()));
     assert!(matches!(source, SessionSource::File), "{source:?}");
     let run_meta = make_session("sess-run-1", "run-ws");
     rt.block_on(source.mutate(|s| s.upsert(run_meta.clone()))).expect("file write");
@@ -168,22 +172,25 @@ fn a_dark_daemon_leaves_the_cli_on_the_file() {
         "the run landed in the file"
     );
     assert_eq!(
-        table(&hangar).len(),
-        1,
-        "the table holds only the imported row"
+        OLDER_DAEMON_REQUESTS.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the write was sent to a daemon that does not serve the table"
     );
+    rt.shutdown_background();
 }
 
-/// Dark: the production resolver answers the file even with a live daemon on
-/// the hangar home, because this build does not advertise the capability.
+/// P6e-6, criterion 4, against a real daemon: this build advertises the
+/// capability from its catalogue, so the production resolver, with no test
+/// switch anywhere, answers the daemon's table.
 #[test]
-fn the_production_resolver_is_the_file_while_dark() {
+fn the_production_resolver_is_the_daemon_after_the_flip() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let homes = Homes::new();
-    let _hangar = homes.start_daemon();
+    let hangar = homes.start_daemon();
+    complete_import(&hangar, &homes);
     let _hangar_home = EnvGuard::set("AINB_HANGAR_HOME", &homes.hangar);
     let source = rt().block_on(SessionSource::resolve());
-    assert!(matches!(source, SessionSource::File), "{source:?}");
+    assert!(matches!(source, SessionSource::Daemon(_)), "{source:?}");
 }
 
 /// On the file path a mutation that changes nothing leaves `sessions.json`
@@ -376,6 +383,53 @@ fn daemon_death_mid_command_is_an_error_not_a_fallback() {
     assert!(err.to_string().contains("daemon"), "{err}");
     assert!(rt.block_on(source.load()).is_err(), "a read must fail too");
     assert_eq!(homes.file_bytes(), Some(file_before));
+}
+
+/// Requests the pre-flip fake daemon was sent past hello.
+static OLDER_DAEMON_REQUESTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// A daemon from before the flip: its hello carries the catalogue as that
+/// release knew it, without the sessions capability, and it answers nothing
+/// else. A client that meets one stays on the file for good.
+fn older_daemon(rt: &tokio::runtime::Runtime, dir: &Path) -> PathBuf {
+    OLDER_DAEMON_REQUESTS.store(0, std::sync::atomic::Ordering::SeqCst);
+    let socket = dir.join("older.sock");
+    let listener = rt.block_on(async { UnixListener::bind(&socket) }).expect("bind older");
+    rt.spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let (read_half, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let Some(hello) = read_frame(&mut reader).await else {
+                    return;
+                };
+                let older: Vec<String> = ainb_hangar_proto::protocol::catalogue_strings()
+                    .into_iter()
+                    .filter(|id| id != CAP_WORKSPACE_SESSIONS)
+                    .collect();
+                write_frame(
+                    &mut writer,
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": hello["id"],
+                        "result": { "capabilities": older },
+                    }),
+                )
+                .await;
+                // Anything past hello is a client that took this daemon for
+                // one that serves the table.
+                if read_frame(&mut reader).await.is_some() {
+                    OLDER_DAEMON_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                std::future::pending::<()>().await;
+            });
+        }
+    });
+    socket
 }
 
 /// A fake daemon: every connection gets a hello advertising the sessions
