@@ -495,10 +495,27 @@ pub struct ControlCenterState {
     /// set when a card is retired because another surface won the answer.
     /// Unlike `note` it is not keyed to a card: the card it was about is gone.
     answered_toast: Option<(String, i64)>,
+    /// The ids this board has shown, most recent last, bounded by
+    /// [`HELD_MEMORY`].
+    ///
+    /// The `AttentionAnswered` event and the `attention/list` snapshot race,
+    /// and with sessions read over RPC the snapshot usually wins: it drops the
+    /// answered row silently, so by the time the event arrives there is no
+    /// card to remove. The event is still the fact that another surface
+    /// answered, so this is what lets the toast be shown for a row that has
+    /// already left the board while still saying nothing for one this board
+    /// never showed.
+    held: std::collections::VecDeque<String>,
 }
 
 /// How long the "answered by <who>" toast stays on the title row.
 const ANSWERED_TOAST_MS: i64 = 3_000;
+
+/// How many ids the board remembers having shown. A person is answering one
+/// card at a time, and the event follows its snapshot within a tick, so this
+/// only has to outlive that race; it is bounded so a long session cannot grow
+/// it without limit.
+const HELD_MEMORY: usize = 256;
 
 impl ControlCenterState {
     /// Surface an answer verdict the daemon returned instead of a delivery,
@@ -541,6 +558,12 @@ impl ControlCenterState {
         let before = self.cards.len();
         self.cards.retain(|card| card.id != attention_id);
         let removed = self.cards.len() != before;
+        // The toast is the event's, not the card's: a snapshot may have
+        // dropped the row already, and with sessions read over RPC it usually
+        // has. It is still said only for a row this board showed.
+        if by.contains('@') && (removed || self.held.iter().any(|id| id == attention_id)) {
+            self.answered_toast = Some((format!("answered by {by}"), now_ms + ANSWERED_TOAST_MS));
+        }
         if !removed {
             return false;
         }
@@ -555,11 +578,19 @@ impl ControlCenterState {
         if self.note.as_ref().is_some_and(|(id, _)| id == attention_id) {
             self.note = None;
         }
-        if by.contains('@') {
-            self.answered_toast = Some((format!("answered by {by}"), now_ms + ANSWERED_TOAST_MS));
-        }
         self.clamp_option_cursor();
         true
+    }
+
+    /// Remember that this board has shown `id`, bounded by [`HELD_MEMORY`].
+    fn remember(&mut self, id: &str) {
+        if self.held.iter().any(|held| held == id) {
+            return;
+        }
+        if self.held.len() == HELD_MEMORY {
+            self.held.pop_front();
+        }
+        self.held.push_back(id.to_string());
     }
 
     /// The live "answered by <who>" toast at `now_ms`, or `None` once it has
@@ -598,6 +629,10 @@ impl ControlCenterState {
         // answered from another surface or its session is gone.
         if self.note.as_ref().is_some_and(|(id, _)| !cards.iter().any(|c| &c.id == id)) {
             self.note = None;
+        }
+        for card in &cards {
+            let id = card.id.clone();
+            self.remember(&id);
         }
         self.cards = cards;
         self.clamp_option_cursor();
@@ -1523,7 +1558,12 @@ mod tests {
             row("b", "ask_user_question", 200, &ask_payload("q2", &["z"])),
         ]);
         // The snapshot arrives first and the row is simply gone.
-        state.set_attention(&[row("a", "ask_user_question", 100, &ask_payload("q", &["y"]))]);
+        state.set_attention(&[row(
+            "a",
+            "ask_user_question",
+            100,
+            &ask_payload("q", &["y"]),
+        )]);
         assert!(state.cards().iter().all(|card| card.id != "b"));
 
         let removed = state.retire_answered("b", "web@box", 1_000);
@@ -1541,7 +1581,12 @@ mod tests {
     #[test]
     fn a_row_this_board_never_showed_says_nothing() {
         let mut state = ControlCenterState::default();
-        state.set_attention(&[row("a", "ask_user_question", 100, &ask_payload("q", &["y"]))]);
+        state.set_attention(&[row(
+            "a",
+            "ask_user_question",
+            100,
+            &ask_payload("q", &["y"]),
+        )]);
 
         assert!(!state.retire_answered("never-here", "web@box", 1_000));
         assert_eq!(state.answered_toast(1_000), None);
