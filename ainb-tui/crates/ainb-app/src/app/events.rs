@@ -3922,7 +3922,13 @@ impl EventHandler {
                     });
                 if let Some(at) = at {
                     if let Some(ref mut git_state) = state.git_view.git_view_state {
-                        git_state.selected_commit_index = at;
+                        // Through the same bound the wheel and the keys use
+                        // (#1252), so a click cannot put the cursor somewhere
+                        // they could not.
+                        let from = i64::try_from(git_state.selected_commit_index).unwrap_or(0);
+                        let to = i64::try_from(at).unwrap_or(0);
+                        let delta = i32::try_from(to - from).unwrap_or(0);
+                        git_state.move_commit_selection(delta);
                     }
                 }
             }

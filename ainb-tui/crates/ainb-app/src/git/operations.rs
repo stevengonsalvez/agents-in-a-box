@@ -336,6 +336,7 @@ pub fn get_branch_commits(worktree_path: &Path, limit: usize) -> Result<Vec<Comm
     revwalk.set_sorting(git2::Sort::TIME)?;
 
     let mut commits = Vec::new();
+    let mut hashes = Vec::new();
     for oid_result in revwalk.take(limit) {
         let oid = oid_result?;
 
@@ -347,15 +348,49 @@ pub fn get_branch_commits(worktree_path: &Path, limit: usize) -> Result<Vec<Comm
         }
 
         let commit = repo.find_commit(oid)?;
+        hashes.push(oid.to_string());
         commits.push(CommitInfo {
-            hash_short: format!("{:.7}", oid),
+            hash_short: String::new(),
             author: commit.author().name().unwrap_or("Unknown").to_string(),
             date: format_relative_time(commit.time().seconds()),
             message: commit.summary().unwrap_or("").to_string(),
         });
     }
+    // The short hash is the commit's id everywhere else: a click names it
+    // (`git_view.select_commit`) and the diff is opened by it, so two commits
+    // sharing one would select and open the wrong commit. It is made unique
+    // within the list here, where the full hashes are still in hand.
+    for (commit, short) in commits.iter_mut().zip(unique_short_hashes(&hashes)) {
+        commit.hash_short = short;
+    }
 
     Ok(commits)
+}
+
+/// The shortest prefixes of `hashes` that are still distinct, never under
+/// seven characters.
+///
+/// Git itself grows an abbreviation until it is unambiguous; this list is at
+/// most fifty commits, so one pass over the length is cheaper than being
+/// clever. Two identical hashes (which git cannot produce) keep their full
+/// length rather than looping.
+#[must_use]
+pub fn unique_short_hashes(hashes: &[String]) -> Vec<String> {
+    const SHORTEST: usize = 7;
+    let longest = hashes.iter().map(String::len).max().unwrap_or(SHORTEST);
+    let mut length = SHORTEST;
+    while length < longest {
+        let mut seen = std::collections::HashSet::with_capacity(hashes.len());
+        if hashes.iter().all(|hash| seen.insert(prefix(hash, length))) {
+            break;
+        }
+        length += 1;
+    }
+    hashes.iter().map(|hash| prefix(hash, length)).collect()
+}
+
+fn prefix(hash: &str, length: usize) -> String {
+    hash.chars().take(length).collect()
 }
 
 /// Find merge-base with main or master branch

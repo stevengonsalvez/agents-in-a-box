@@ -76,12 +76,44 @@ export function commitsCut(section: GitViewView_Serialize | undefined): string |
   const parts: string[] = [];
   if (view.commits_cut > 0) parts.push(`${view.commits_cut} commits not sent`);
   if (view.selected_commit_cut) {
-    parts.push("the commit the terminal is on was not sent; this is the nearest one that was");
+    parts.push("the commit the terminal is on was not sent, so this is the nearest one that was");
   }
   return parts.length === 0 ? undefined : parts.join("; ");
+}
+
+/**
+ * How many commits the branch has as far as the frame knows: the ones it
+ * carries plus the ones it says it left out.
+ *
+ * A reader told "row 3 of 12" when the branch has 200 commits is being told
+ * the diff is twelve commits long, so the count a row's place is given against
+ * is this one, not the length of the window or even of the framed list.
+ */
+export function commitCount(section: GitViewView_Serialize | undefined): number {
+  const view = gitView(section);
+  return view === undefined ? 0 : view.commits.length + view.commits_cut;
 }
 
 /** A click on the commit `sha`: the reducer decides, and the frame says so. */
 export function selectCommitIntent(sha: string): RendererIntent {
   return { Command: [SELECT_COMMIT, { sha }] };
+}
+
+/**
+ * Where to put the list's scroll so the selected row is in view, or
+ * `undefined` when it already is.
+ *
+ * The terminal moves this list only when the selection leaves the view
+ * (ratatui's own `ListState`), and the selection here is a cursor, not a
+ * scroll offset: pinning the selected row to the top of the box would jump
+ * the list under a person on every arrow key, which the terminal never does.
+ */
+export function scrollFor(
+  box: { scrollTop: number; clientHeight: number },
+  row: { top: number; height: number },
+): number | undefined {
+  if (row.top < box.scrollTop) return row.top;
+  const bottom = row.top + row.height;
+  if (bottom > box.scrollTop + box.clientHeight) return bottom - box.clientHeight;
+  return undefined;
 }

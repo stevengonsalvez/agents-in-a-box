@@ -124,6 +124,21 @@ test("the commits tab shows every fact the fixture's list names", async () => {
   assert.deepEqual(missing(html, "git_commits"), [], text(html));
 });
 
+// Two hundred commits with the hundredth selected: neither renderer draws the
+// whole list, and the facts are the commits around that selection, so a window
+// that drew from row zero, or a list pinned to the top of the branch, fails
+// them.
+test("the commits tab draws the page the selection is in", async () => {
+  const html = await drawCommits("git_commits_long");
+
+  assert.ok(facts("git_commits_long").length > 0, "the facts list has facts in it");
+  assert.deepEqual(missing(html, "git_commits_long"), [], text(html));
+  assert.ok(
+    !html.includes("commit number 0<"),
+    "the first commit of the branch is not drawn: this is a window, not the whole list",
+  );
+});
+
 test("a renderer given one commit fewer fails the facts", async () => {
   const whole = await drawCommits("git_commits");
   assert.deepEqual(missing(whole, "git_commits"), [], "the fixture as it stands shows every fact");
