@@ -50,6 +50,10 @@ P6_LOCK_HOLD=5
 # harness builds carry `test-support`, and a release build ignores it.
 p6_capability_on() {
   export AINB_TEST_WORKSPACE_SESSIONS=1
+  # Every surface says which source it resolved at info. A short command and
+  # `ainb web` log to stderr at warn unless RUST_LOG raises them, and the
+  # first clause keeps the rest of what a TUI logs where it was.
+  export RUST_LOG="info,ainb=info,ainb_core=info,ainb_app=info"
 }
 
 # p6_binaries_ready: the CLI answers with the capability switch set.
@@ -107,6 +111,14 @@ p6_pane_switched() {
   pid="$(p6_pane_pid "$1")"
   [[ -n "$pid" ]] || return 1
   p6_logged "$pid" 'session source switched' "$2"
+}
+
+# p6_web_source <source>: `ainb web` resolved that source. Its own log is the
+# pane's output, which `start_web` tees, and it logs to stderr rather than to
+# the JSONL a TUI writes, so the line is in the compact shape.
+p6_web_source() {
+  grep -q 'session source resolved' "$PROOF_WORLD/web.log" 2>/dev/null \
+    && grep -q "source=\"\?$1\"\?" "$PROOF_WORLD/web.log"
 }
 
 # p6_pane_said_degraded <pane>: the surface told the operator sessions are on
@@ -356,7 +368,7 @@ p6_combination() {
   done
   if [[ "$web" == "1" ]]; then
     check "$name: ainb web resolved the daemon's sessions table" \
-      wait_for 60 p6_pane_source web daemon
+      wait_for 60 p6_web_source daemon
   fi
 
   # 1. A session created from a surface that is NOT the CLI reaches the
@@ -401,6 +413,14 @@ p6_combination() {
 
   # 2. An ASK answered on one surface folds on the others.
   if [[ "$web" == "1" ]]; then
+    # The ASK is raised through a session's own pane, so it needs a fixture
+    # session of this combination's own: the one the TUI made is not the
+    # hook's, and a stale one from an earlier combination has no pane left.
+    if ! fixture_session; then
+      check "$name: a session to raise the ASK on" false
+      p6_surfaces_down "${panes[@]}"
+      return 1
+    fi
     raise_ask "Proof P6e: $name?" "p6-$name" >/dev/null
     if web_card_id "Proof P6e" "p6-card-$name" "$P6_WEB_REACH"; then
       web_answer "$WEB_CARD_ID" 1 >"$PROOF_WORLD/p6-answer-$name.json"
