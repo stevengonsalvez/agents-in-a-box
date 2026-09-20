@@ -1,11 +1,19 @@
-// The inbox journey (D3p-d): issues created by a separate CLI process land
-// in the local human's inbox as the daemon aggregates them, the window's
-// inbox page lists them by the daemon's own entry ids, the sweep from the
-// page reaches the daemon, and the daemon's record is what the page then
-// shows. The ids are asserted by value against `ainb hangar inbox list`, so a
-// page drawing rows from anywhere but section 16 cannot pass.
+// The inbox journey (D3p-d): issues created through the daemon's own RPC by
+// a process that is not the window land in the local human's inbox as the
+// daemon aggregates them, the window's inbox page lists them by the daemon's
+// own entry ids, the sweep from the page reaches the daemon, and the daemon's
+// record is what the page then shows. The ids are asserted by value against
+// `ainb hangar inbox list`, so a page drawing rows from anywhere but section
+// 16 cannot pass.
+//
+// The issues go through `hangar/issue_create` rather than the CLI: the CLI
+// writes the store directly and stamps its own creator, and the inbox is
+// aggregated from the events the daemon's broker carries, for the creator of
+// an unassigned issue, so only an issue the daemon created for `member:me`
+// is one the local human's inbox holds.
 
 import assert from "node:assert/strict";
+import { rpc } from "../rpc.js";
 import { click } from "../support.js";
 import { AINB_BIN, run } from "../world.js";
 
@@ -14,17 +22,16 @@ function inboxList() {
   return JSON.parse(run(AINB_BIN, ["hangar", "inbox", "list", "--format", "json", "--limit", "200"]));
 }
 
-/** Poll `read` until `ok(value)`, or fail with `what`. */
+/** Poll `read` until `ok(value)`, or fail with `what` and the last value. */
 async function until(read, ok, what, timeout = 60_000) {
   let last;
-  await browser.waitUntil(
-    () => {
-      last = read();
-      return ok(last);
-    },
-    { timeout, timeoutMsg: () => `${what}; last: ${JSON.stringify(last).slice(0, 400)}` },
-  );
-  return last;
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    last = read();
+    if (ok(last)) return last;
+    assert.ok(Date.now() < deadline, `${what}; last: ${JSON.stringify(last).slice(0, 600)}`);
+    await browser.pause(1000);
+  }
 }
 
 describe("the inbox from the window", () => {
@@ -35,16 +42,17 @@ describe("the inbox from the window", () => {
       timeoutMsg: async () => `the sidecar never connected: ${await $(".banner").getText()}`,
     });
 
-    // Two issues, created by a process that is not the window. An unassigned
-    // issue lands in its creator's own inbox, so these are the local human's.
+    // Two issues, created through the daemon by a process that is not the
+    // window, for the local human and unassigned, so they land in the
+    // creator's own inbox: `member:me`'s.
     const stamp = Date.now();
-    const issues = ["one", "two"].map((n) => {
+    const issues = [];
+    for (const n of ["one", "two"]) {
       const title = `e2e inbox ${stamp} ${n}`;
-      const out = run(AINB_BIN, ["hangar", "issue", "create", "--title", title]);
-      const id = /created issue (\S+)/.exec(out)?.[1];
-      assert.ok(id, `issue create printed no id:\n${out}`);
-      return { id, title };
-    });
+      const reply = await rpc("hangar/issue_create", { workspace_id: "default", title, creator: "member:me" });
+      assert.ok(reply.result?.id, `the daemon refused the issue: ${JSON.stringify(reply.error ?? reply)}`);
+      issues.push({ id: reply.result.id, title });
+    }
     const mine = (entries) => entries.filter((entry) => issues.some((issue) => issue.id === entry.subject_id));
 
     // The daemon's own record first: the entries exist, unread, with ids of
