@@ -80,6 +80,16 @@ impl<S: FrameSink> Shell<S> {
         }
     }
 
+    /// Drain the executor's queued session-store writes; see
+    /// [`DesktopExecutor::flush_session_store_writes`]. Answers with the
+    /// number still unwritten when the bound ran out.
+    ///
+    /// The window calls this on the paths that end the process, which is the
+    /// only place it can be called: this shell never unwinds.
+    pub fn flush_session_store_writes(&self, within: std::time::Duration) -> usize {
+        self.core().executor.flush_session_store_writes(within)
+    }
+
     /// Every command the palette may offer; see [`DesktopHost::palette`].
     #[must_use]
     pub fn palette(&self) -> Vec<crate::host::PaletteEntry> {

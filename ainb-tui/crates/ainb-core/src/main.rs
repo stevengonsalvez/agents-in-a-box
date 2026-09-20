@@ -486,16 +486,26 @@ async fn run_tui(
     // Ensure terminal cleanup happens even if there's an error
     let result = run_tui_loop(app, layout, &mut terminal, agent_status, inbox_host).await;
 
-    // P6e: a queued session-store write outlives the loop, so it is waited
-    // for before the process goes. Quitting mid-write would drop the
-    // operator's last change.
-    ainb::effect_host::finish_session_store_writes();
-
     // Always clean up terminal using unified cleanup
     if let Err(e) = cleanup_terminal_with_instance(&mut terminal) {
         tracing::error!("Failed to cleanup terminal: {}", e);
         // Fallback to basic cleanup
         cleanup_terminal();
+    }
+
+    // P6e: a queued session-store write outlives the loop, so it is waited for
+    // before the process goes. Quitting mid-write would drop the operator's
+    // last change. After the terminal is back, never before: a wait inside the
+    // alternate screen is a frozen screen to the operator. Bounded, and for
+    // the whole queue, because a write can be sitting on a daemon that stopped
+    // answering; what the bound leaves behind is said on the real stderr.
+    let dropped =
+        ainb::effect_host::finish_session_store_writes(ainb::cli::util::SESSION_STORE_FLUSH_BOUND);
+    if dropped > 0 {
+        tracing::warn!(dropped, "session-store writes were still queued at exit");
+        eprintln!(
+            "Warning: {dropped} session change(s) were not written: the session store did not answer in time."
+        );
     }
 
     // Perf trace summary (no-op unless AINB_PERF_TRACE is set). Emitted after

@@ -8,8 +8,10 @@
 //! back as report intents.
 
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use ainb_app::Intent;
 use ainb_app::app::reports::{
@@ -40,10 +42,22 @@ pub struct DesktopExecutor {
     terminals: Option<Terminals>,
     deferred_tx: mpsc::Sender<Intent>,
     deferred_rx: mpsc::Receiver<Intent>,
-    /// The one worker that writes the session store, with its handle for the
-    /// join on drop. One thread, not one per write: the writes are a queue,
-    /// and two at once would race for the same `sessions.json` lock.
-    session_store_writer: Option<(mpsc::Sender<ainb_app::app::Persist>, thread::JoinHandle<()>)>,
+    /// The one worker that writes the session store. One thread, not one per
+    /// write: the writes are a queue, and two at once would race for the same
+    /// `sessions.json` lock.
+    session_store_writer: Option<SessionStoreWriter>,
+}
+
+/// The session-store worker, as the executor holds it.
+struct SessionStoreWriter {
+    /// Where a queued write goes. Dropping it ends the worker's loop.
+    work: mpsc::Sender<ainb_app::app::Persist>,
+    /// The worker sends once here when its queue is empty and it is leaving,
+    /// which is what a flush waits on: a `JoinHandle` has no bounded wait.
+    done: mpsc::Receiver<()>,
+    handle: thread::JoinHandle<()>,
+    /// Writes queued and not yet written, for a timed-out flush to report.
+    queued: Arc<AtomicUsize>,
 }
 
 impl DesktopExecutor {
@@ -69,7 +83,10 @@ impl DesktopExecutor {
         let store_id = store.store_id();
         if self.session_store_writer.is_none() {
             let (work_tx, work_rx) = mpsc::channel::<ainb_app::app::Persist>();
+            let (done_tx, done_rx) = mpsc::channel::<()>();
             let reports_tx = self.deferred_tx.clone();
+            let queued = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&queued);
             match thread::Builder::new().name("ainb-desktop-session-store-write".into()).spawn(
                 move || {
                     // In order, one at a time, until the sender is dropped.
@@ -78,10 +95,21 @@ impl DesktopExecutor {
                             let _ =
                                 reports_tx.send(reports::persist_failed(store.store_id(), &error));
                         }
+                        counted.fetch_sub(1, Ordering::SeqCst);
                     }
+                    // The queue is empty and the worker is leaving: a flush
+                    // that is waiting can stop waiting.
+                    let _ = done_tx.send(());
                 },
             ) {
-                Ok(handle) => self.session_store_writer = Some((work_tx, handle)),
+                Ok(handle) => {
+                    self.session_store_writer = Some(SessionStoreWriter {
+                        work: work_tx,
+                        done: done_rx,
+                        handle,
+                        queued,
+                    });
+                }
                 Err(error) => {
                     return vec![reports::persist_failed(
                         store_id,
@@ -90,8 +118,12 @@ impl DesktopExecutor {
                 }
             }
         }
-        if let Some((work_tx, _)) = self.session_store_writer.as_ref() {
-            if let Err(error) = work_tx.send(store) {
+        if let Some(writer) = self.session_store_writer.as_ref() {
+            // Counted before the send, so the worker never sees a write it
+            // cannot subtract.
+            writer.queued.fetch_add(1, Ordering::SeqCst);
+            if let Err(error) = writer.work.send(store) {
+                writer.queued.fetch_sub(1, Ordering::SeqCst);
                 return vec![reports::persist_failed(
                     store_id,
                     &format!("the session store worker is gone: {error}"),
@@ -99,6 +131,36 @@ impl DesktopExecutor {
             }
         }
         Vec::new()
+    }
+
+    /// Wait for every queued session-store write to land, up to `within` for
+    /// all of them together, and answer with the number still unwritten.
+    ///
+    /// The desktop calls this on the paths that end the process: this shell
+    /// never unwinds, so nothing here can be left to a destructor. A later
+    /// write simply starts the worker again.
+    pub fn flush_session_store_writes(&mut self, within: Duration) -> usize {
+        let Some(writer) = self.session_store_writer.take() else {
+            return 0;
+        };
+        let SessionStoreWriter {
+            work,
+            done,
+            handle,
+            queued,
+        } = writer;
+        // The worker's loop ends when the last sender goes, and only then does
+        // it say it is done.
+        drop(work);
+        match done.recv_timeout(within) {
+            Ok(()) => {
+                let _ = handle.join();
+                0
+            }
+            // Past the bound the writes that are left are left: the worker is
+            // blocked on a lock or a daemon, and the exit does not wait on it.
+            Err(_) => queued.load(Ordering::SeqCst),
+        }
     }
 
     /// Open terminal tabs on `terminals` for the attaches they can hold.
@@ -122,13 +184,16 @@ impl DesktopExecutor {
 }
 
 impl Drop for DesktopExecutor {
-    /// Wait for every queued session-store write to land. The shell drops the
-    /// executor as it closes, and a write still in flight would otherwise go
-    /// with it, taking the operator's last change.
+    /// Drain the queue for an executor that is dropped rather than exited
+    /// from, which in the shipped app is no one: tao's run loop exits the
+    /// process, so [`Self::flush_session_store_writes`] is called by hand on
+    /// each path that ends it. This is the same drain for a host that is only
+    /// built and dropped, a test one among them.
     fn drop(&mut self) {
-        if let Some((work_tx, handle)) = self.session_store_writer.take() {
-            drop(work_tx);
-            let _ = handle.join();
+        let dropped =
+            self.flush_session_store_writes(ainb_app::cli::util::SESSION_STORE_FLUSH_BOUND);
+        if dropped > 0 {
+            tracing::warn!(dropped, "session-store writes were still queued at drop");
         }
     }
 }
