@@ -81,7 +81,19 @@ pub fn execute<'t>(
             queue_session_store_write(store);
             Work::Done(Vec::new())
         }
-        Effect::Persist(store) => Work::Done(match crate::config::persist::write(&store) {
+        // Named one by one, with no catch-all: every one of these is a local
+        // file write and belongs on the tick. A new variant that reaches the
+        // session store would otherwise land here in silence and put the
+        // daemon wait back on the tick; instead this stops compiling until
+        // someone says which side it is on.
+        Effect::Persist(
+            store @ (ainb_app::app::Persist::AppConfig { .. }
+            | ainb_app::app::Persist::ConfigExternalKeys(_)
+            | ainb_app::app::Persist::Favorites(_)
+            | ainb_app::app::Persist::SessionLabels(_)
+            | ainb_app::app::Persist::Onboarding(_)
+            | ainb_app::app::Persist::OnboardingGitDirectories(_)),
+        ) => Work::Done(match crate::config::persist::write(&store) {
             Ok(()) => Vec::new(),
             Err(error) => vec![reports::persist_failed(store.store_id(), &error)],
         }),
@@ -270,55 +282,102 @@ fn queue_session_store_write(store: ainb_app::app::Persist) {
     let tx = deferred().0.clone();
     let store_id = store.store_id();
     let mut writer = SESSION_STORE_WRITER.lock().unwrap_or_else(|p| p.into_inner());
-    if writer.is_none() {
-        let (work_tx, work_rx) = std::sync::mpsc::channel::<ainb_app::app::Persist>();
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-        let reports_tx = tx.clone();
-        let queued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counted = std::sync::Arc::clone(&queued);
-        match std::thread::Builder::new()
-            .name("ainb-session-store-write".into())
-            .spawn(move || {
-                // In order, one at a time, until the sender is dropped on exit.
-                for store in work_rx {
-                    if let Err(error) = crate::config::persist::write(&store) {
-                        let _ = reports_tx.send(reports::persist_failed(store.store_id(), &error));
-                    }
-                    counted.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                }
-                // The queue is empty and the worker is leaving: a quit that is
-                // waiting can stop waiting.
-                let _ = done_tx.send(());
-            }) {
-            Ok(handle) => {
-                *writer = Some(SessionStoreWriter {
-                    work: work_tx,
-                    done: done_rx,
-                    handle,
-                    queued,
-                });
-            }
-            Err(error) => {
-                let _ = tx.send(reports::persist_failed(
-                    store_id,
-                    &format!("the worker did not start: {error}"),
-                ));
-                return;
+    let mut store = store;
+    // Two turns at most: the first send can find a worker that is gone (a
+    // panic inside a write ends the thread and drops the queue), and a dead
+    // slot left in place would fail this write and every write after it. The
+    // second turn is against a worker started here.
+    for attempt in 0..2 {
+        if writer.is_none() {
+            match start_session_store_worker(&tx) {
+                Some(started) => *writer = Some(started),
+                None => return,
             }
         }
-    }
-    if let Some(writer) = writer.as_ref() {
+        let Some(live) = writer.as_ref() else { return };
         // Counted before the send, so the worker never sees a write it cannot
         // subtract.
-        writer.queued.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if let Err(error) = writer.work.send(store) {
-            writer.queued.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            let _ = tx.send(reports::persist_failed(
-                store_id,
-                &format!("the session store worker is gone: {error}"),
-            ));
+        live.queued.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match live.work.send(store) {
+            Ok(()) => return,
+            Err(error) => {
+                live.queued.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                // The worker is gone. Clear the slot so the next turn, and
+                // every later write, starts a new one.
+                *writer = None;
+                if attempt == 1 {
+                    let _ = tx.send(reports::persist_failed(
+                        store_id,
+                        &format!("the session store worker is gone: {error}"),
+                    ));
+                    return;
+                }
+                tracing::warn!("the session store worker was gone; starting another");
+                store = error.0;
+            }
         }
     }
+}
+
+/// Start the one session-store worker, or report why it did not start.
+fn start_session_store_worker(
+    reports: &std::sync::mpsc::Sender<Intent>,
+) -> Option<SessionStoreWriter> {
+    let (work_tx, work_rx) = std::sync::mpsc::channel::<ainb_app::app::Persist>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let reports_tx = reports.clone();
+    let queued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&queued);
+    match std::thread::Builder::new()
+        .name("ainb-session-store-write".into())
+        .spawn(move || {
+            // In order, one at a time, until the sender is dropped on exit.
+            for store in work_rx {
+                if let Err(error) = crate::config::persist::write(&store) {
+                    let _ = reports_tx.send(reports::persist_failed(store.store_id(), &error));
+                }
+                counted.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            // The queue is empty and the worker is leaving: a quit that is
+            // waiting can stop waiting.
+            let _ = done_tx.send(());
+        }) {
+        Ok(handle) => Some(SessionStoreWriter {
+            work: work_tx,
+            done: done_rx,
+            handle,
+            queued,
+        }),
+        Err(error) => {
+            let _ = reports.send(reports::persist_failed(
+                "session_store",
+                &format!("the worker did not start: {error}"),
+            ));
+            None
+        }
+    }
+}
+
+/// Leave the session-store worker's slot holding a sender nothing reads, as a
+/// worker that panicked inside a write leaves it. The next queued write has to
+/// notice and start another worker.
+///
+/// The live worker is drained and let go first, so the writes queued before
+/// this and the writes queued after it never run at the same time: the test
+/// reading the store afterwards is reading one order, not a race.
+#[cfg(feature = "test-support")]
+pub fn break_the_session_store_worker_for_tests() {
+    finish_session_store_writes(std::time::Duration::from_secs(5));
+    let (dead_work, unread) = std::sync::mpsc::channel();
+    drop(unread);
+    let (never, done) = std::sync::mpsc::channel();
+    drop(never);
+    *SESSION_STORE_WRITER.lock().unwrap_or_else(|p| p.into_inner()) = Some(SessionStoreWriter {
+        work: dead_work,
+        done,
+        handle: std::thread::spawn(|| {}),
+        queued: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    });
 }
 
 /// Wait for every queued session-store write to land, up to `within` for all
