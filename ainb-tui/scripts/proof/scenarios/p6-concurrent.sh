@@ -37,7 +37,7 @@
 # four came from (P6e open question 5).
 
 # shellcheck disable=SC2034  # read by write_result in lib.sh
-EXPECT="with the sessions capability on, every surface resolves the daemon's sessions table, and one daemon serves the TUI, ainb web and the CLI together in every combination ({tui} {web} {tui,web} {tui,tui}): a session created from the TUI reaches every surface that is up, a kill from the TUI leaves every surface, an ASK answered on the web folds on the TUIs, and the table and sessions.json agree across a reconcile; separately, a write while degraded is file-first and reaches the table after the switch, a write waits for the sessions.json flock, and AINB_SESSION_SOURCE=file works end to end"
+EXPECT="with the sessions capability on, the CLI and every TUI resolve the daemon's sessions table and what ainb web serves is that table, and one daemon serves the TUI, ainb web and the CLI together in every combination ({tui} {web} {tui,web} {tui,tui}): a session created from the TUI reaches every surface that is up, a kill from the TUI leaves every surface, an ASK answered on the web folds on the TUIs, and the table and sessions.json agree across a reconcile; separately, a write while degraded is file-first and reaches the table after the switch, a write waits for the sessions.json flock, and AINB_SESSION_SOURCE=file works end to end"
 
 # How long a surface has to show a change another surface made.
 P6_REACH=90
