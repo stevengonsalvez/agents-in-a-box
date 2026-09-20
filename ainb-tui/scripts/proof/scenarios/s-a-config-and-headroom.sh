@@ -109,6 +109,17 @@ scenario() {
 
   start_tui a || { check "TUI A restarts for the headroom step" false; return; }
   check "TUI A's watchdog starts the proxy (pid file within 30 s)" wait_for 30 test -s "$pidfile"
+  # What the watchdog itself said, whichever way the check went: it skips on a
+  # store read it could not make, and that reason is the first thing to look
+  # at when no proxy appears.
+  local log_a
+  log_a="$(find "$HOME/.agents-in-a-box/logs" -name 'agents-in-a-box-*.jsonl' -newer "$store" 2>/dev/null | sort | tail -1)"
+  if [[ -n "$log_a" ]]; then
+    grep -oE '"message":"[^"]*(headroom|session source)[^"]*"' "$log_a" 2>/dev/null \
+      | sort -u | head -5 | redact_host >"$NODE_DIR/tui-a-headroom-log.txt"
+    CAPTURES+=("tui-a-headroom-log.txt")
+    observe "TUI A said: $(tr '\n' ' ' <"$NODE_DIR/tui-a-headroom-log.txt")"
+  fi
   local pid_a
   pid_a="$(cat "$pidfile" 2>/dev/null)"
   check "the proxy answers /health on its port" curl -fsS -o /dev/null "http://127.0.0.1:$PROOF_HEADROOM_PORT/health"
