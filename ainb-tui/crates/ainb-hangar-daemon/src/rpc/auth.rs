@@ -392,12 +392,15 @@ async fn minted_host_id(pool: &SqlitePool) -> Option<String> {
     }
 }
 
-/// Test-only switch that adds the dark sessions capability to hello.
+/// Test-only switch that added the sessions capability to hello while it was
+/// dark.
 ///
-/// P6d ships the sessions table and its RPCs dark: `CAP_WORKSPACE_SESSIONS`
-/// is not in the catalogue, so a production daemon never advertises it and
-/// the CLI stays on `sessions.json`. Tests turn it on here to drive the
-/// daemon path against the real handlers. It does not exist outside
+/// P6d shipped the sessions table and its RPCs dark, and tests turned them on
+/// here to drive the daemon path against the real handlers. Since the flip
+/// (P6e-6) the capability is in the catalogue, so this switch adds nothing:
+/// the catalogue is checked first and the id is never listed twice. Kept so
+/// the tests written against it still read, and so a build that ever takes it
+/// back out of the catalogue has its seam. It does not exist outside
 /// `test`/`test-support` builds.
 #[cfg(any(test, feature = "test-support"))]
 static ADVERTISE_WORKSPACE_SESSIONS: std::sync::atomic::AtomicBool =
@@ -410,16 +413,17 @@ pub fn advertise_workspace_sessions_for_tests(on: bool) {
     ADVERTISE_WORKSPACE_SESSIONS.store(on, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// The capabilities a hello reply carries: the catalogue, plus the dark
-/// sessions capability when a test has switched it on, in process or, for a
-/// real daemon binary built with `test-support` (the P6e proof harness), by
-/// `AINB_TEST_WORKSPACE_SESSIONS=1` in its environment.
+/// The capabilities a hello reply carries: the catalogue, plus the sessions
+/// capability when a test has switched it on and the catalogue does not
+/// already carry it. Since the flip it always does, so the switch is a no-op
+/// and no id is ever listed twice.
 fn advertised_capabilities() -> Vec<String> {
     #[allow(unused_mut)]
     let mut capabilities = catalogue_strings();
     #[cfg(any(test, feature = "test-support"))]
-    if ADVERTISE_WORKSPACE_SESSIONS.load(std::sync::atomic::Ordering::SeqCst)
-        || std::env::var("AINB_TEST_WORKSPACE_SESSIONS").is_ok_and(|v| v == "1")
+    if !ainb_hangar_proto::protocol::advertises(ainb_hangar_proto::protocol::CAP_WORKSPACE_SESSIONS)
+        && (ADVERTISE_WORKSPACE_SESSIONS.load(std::sync::atomic::Ordering::SeqCst)
+            || std::env::var("AINB_TEST_WORKSPACE_SESSIONS").is_ok_and(|v| v == "1"))
     {
         capabilities.push(ainb_hangar_proto::protocol::CAP_WORKSPACE_SESSIONS.to_string());
     }
