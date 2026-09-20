@@ -1,6 +1,6 @@
 # shellcheck shell=bash
-# D3-prime inbox: an issue created by a separate CLI process is aggregated by
-# the daemon into the local human's inbox, the open desktop window carries it
+# D3-prime inbox: an issue created through the daemon by a separate process
+# is aggregated into the local human's inbox, the open desktop window carries it
 # in the inbox section it subscribes to from its first batch (read from the
 # renderer's own telemetry rather than its pixels), the TUI's inbox screen
 # draws the same row from the same section, and a mark-all-read sweep sent by
@@ -12,7 +12,7 @@
 # leaves answering to answer.e2e.js.
 
 # shellcheck disable=SC2034  # read by write_result in lib.sh
-EXPECT="an issue created by a separate CLI process lands in the local human's inbox as the daemon aggregates it, the open desktop window carries it in the inbox section it subscribes to and applies, the TUI's inbox screen draws the same row from the same section, and a mark-all-read sweep sent by a third process through the daemon's RPC is what both surfaces then show as read"
+EXPECT="an issue created through the daemon's RPC by a separate process lands in the local human's inbox as the daemon aggregates it, the open desktop window carries it in the inbox section it subscribes to and applies, the TUI's inbox screen draws the same row from the same section, and a mark-all-read sweep sent by a third process through the daemon's RPC is what both surfaces then show as read"
 
 TITLE="proof d3p inbox $(date +%s)"
 
@@ -58,15 +58,19 @@ scenario() {
   check "the window subscribes to the inbox section from its first batch" \
     grep -q '"inbox"' <<<"$(applied_sections)"
 
-  # Created by this process, not the window or the TUI. An unassigned issue
-  # lands in its creator's own inbox: the local human's.
-  local out id
-  out="$("$AINB_BIN" hangar issue create --title "$TITLE" 2>&1)"
-  printf '%s\n' "$out" >"$NODE_DIR/issue-create.txt"
-  CAPTURES+=("issue-create.txt")
-  id="$(sed -n 's/^created issue //p' <<<"$out" | head -1)"
-  observe "issue created by a separate process: ${id:-none}"
-  check "a separate CLI process created an issue" test -n "$id"
+  # Created through the daemon's own RPC by this process, not the window or
+  # the TUI, for the local human and unassigned, so it lands in its creator's
+  # own inbox: `member:me`'s. (The CLI's `issue create` writes the store
+  # directly under its own creator, which the daemon's aggregation never
+  # sees, so it is not the way an inbox row is raised.)
+  local id
+  rpc_call 1 1 hangar/issue_create \
+    "$(jq -nc --arg title "$TITLE" '{workspace_id: "default", title: $title, creator: "member:me"}')" \
+    | tail -1 >"$NODE_DIR/issue-create.json"
+  CAPTURES+=("issue-create.json")
+  id="$(jq -r '.result.id // empty' "$NODE_DIR/issue-create.json" 2>/dev/null)"
+  observe "issue created through the daemon by a separate process: ${id:-none} ($(jq -c '.error // .result.title' "$NODE_DIR/issue-create.json" 2>/dev/null))"
+  check "a separate process created an issue through the daemon" test -n "$id"
   [[ -n "$id" ]] || return
 
   check "the daemon aggregated the issue into the local human's inbox within 60 s" \
