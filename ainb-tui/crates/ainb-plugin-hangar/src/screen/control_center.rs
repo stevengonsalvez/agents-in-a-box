@@ -1543,6 +1543,37 @@ mod tests {
         );
     }
 
+    /// P6e-6: the answered event and the next `attention/list` snapshot race,
+    /// and on the daemon source the snapshot usually wins. The card is gone
+    /// either way; what must not go with it is the line telling the operator
+    /// that another surface answered.
+    #[test]
+    fn a_card_a_snapshot_already_dropped_still_names_who_answered_it() {
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[
+            row("a", "ask_user_question", 100, &ask_payload("q", &["y"])),
+            row("b", "ask_user_question", 200, &ask_payload("q", &["y"])),
+        ]);
+        // The snapshot lands first: `b` was answered elsewhere, so the open
+        // set no longer holds it.
+        state.set_attention(&[row(
+            "a",
+            "ask_user_question",
+            100,
+            &ask_payload("q", &["y"]),
+        )]);
+        assert_eq!(state.cards().len(), 1);
+
+        // The event arrives after it, with nothing left to remove.
+        state.retire_answered("b", "web@box", 1_000);
+
+        assert_eq!(
+            state.answered_toast(1_000),
+            Some("answered by web@box"),
+            "the operator was not told which surface answered"
+        );
+    }
+
     #[test]
     fn retiring_a_card_this_board_never_had_changes_nothing() {
         let mut state = ControlCenterState::default();
