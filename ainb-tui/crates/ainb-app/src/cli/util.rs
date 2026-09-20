@@ -204,6 +204,17 @@ async fn within_deadline<T, E: std::fmt::Display>(
 /// be reconciling. A test in `ainb-core` pins this above the daemon's sum.
 pub const SESSIONS_LOCK_WAIT: Duration = Duration::from_secs(10);
 
+/// How long a host waits, on its way out, for every queued session-store
+/// write together.
+///
+/// A host queues its session-store writes on one worker, and drains that queue
+/// as it exits so a quit does not drop the operator's last change. The wait is
+/// for the whole queue, not for each write: one write can sit on a daemon for
+/// [`SESSION_RPC_DEADLINE`], and a per-write wait would hold an exit for as
+/// many deadlines as there are writes. Past this bound the host says how many
+/// writes it is leaving behind and goes.
+pub const SESSION_STORE_FLUSH_BOUND: Duration = SESSION_RPC_DEADLINE;
+
 /// The bound on all of one `mutate`'s table writes together.
 ///
 /// On [`SessionSource::Daemon`] each RPC is also under
