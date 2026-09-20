@@ -133,7 +133,7 @@ test("both counters are said, because neither implies the other (#1268)", () => 
   );
   assert.equal(
     cut,
-    "3 commits not sent; the commit the terminal is on was not sent; this is the nearest one that was",
+    "3 commits not sent; the commit the terminal is on was not sent, so this is the nearest one that was",
   );
 });
 
