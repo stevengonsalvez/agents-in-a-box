@@ -4,7 +4,7 @@
 // rows, their bound and their scrub are the section's, and the one write is a
 // keymap row the reducer resolves.
 
-use ainb_app::app::sections::InboxSection;
+use ainb_app::app::sections::{INBOX_SUMMARY_CUT_MARKER, InboxSection};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -69,11 +69,13 @@ pub fn render(frame: &mut Frame, area: Rect, section: &InboxSection) {
     let room = usize::from(chunks[0].height).saturating_sub(notes.len());
     let scroll = section.scroll.min(section.entries.len().saturating_sub(1));
     let shown = section.entries.len().min(scroll.saturating_add(room));
+    // What is left of the line after the mark, the kind and the age.
+    let text_width = usize::from(chunks[0].width).saturating_sub(ROW_PREFIX_WIDTH);
     let mut lines = notes;
     lines.extend(
         section.entries[scroll..shown]
             .iter()
-            .map(|row| row_line(row, section.received_at_ms)),
+            .map(|row| row_line(row, section.received_at_ms, text_width)),
     );
     frame.render_widget(Paragraph::new(lines), chunks[0]);
     frame.render_widget(
@@ -101,12 +103,9 @@ fn note_lines(section: &InboxSection) -> Vec<Line<'static>> {
     }
     // What was cut comes before the rows: a screen too short for a hundred
     // rows still says what it does not show.
-    if section.rows_cut > 0 || section.summaries_cut > 0 {
+    if let Some(cut) = cut_line(section) {
         lines.push(Line::from(Span::styled(
-            format!(
-                "{} more rows not shown, {} summaries cut",
-                section.rows_cut, section.summaries_cut
-            ),
+            cut,
             Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         )));
     }
@@ -119,8 +118,54 @@ fn note_lines(section: &InboxSection) -> Vec<Line<'static>> {
     lines
 }
 
-/// One row: its read mark, kind, age and summary.
-fn row_line(row: &ainb_hangar_proto::events::InboxEntryRow, now_ms: i64) -> Line<'static> {
+/// What the fold cut, in the words the desktop's inbox uses for the same
+/// counters, so one facts list reads both renderers.
+fn cut_line(section: &InboxSection) -> Option<String> {
+    let plural =
+        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut lost = Vec::new();
+    if section.rows_cut > 0 {
+        lost.push(format!(
+            "{} not sent",
+            plural(section.rows_cut, "older entry", "older entries")
+        ));
+    }
+    if section.summaries_cut > 0 {
+        lost.push(format!(
+            "{} shortened",
+            plural(section.summaries_cut, "summary", "summaries")
+        ));
+    }
+    (!lost.is_empty()).then(|| lost.join(", "))
+}
+
+/// The columns before the summary: the read mark (2), the kind (8) and the
+/// age (5).
+const ROW_PREFIX_WIDTH: usize = 15;
+
+/// `summary` as one line of `width` cells. A summary the host cut ends in
+/// the cut marker, and the marker stays at the visible end when the line is
+/// too narrow for the whole summary, so what the host cut is said on screen
+/// however wide the screen is; `…` says the screen clipped the rest.
+fn fit(summary: &str, width: usize) -> String {
+    if summary.chars().count() <= width {
+        return summary.to_string();
+    }
+    let marker = INBOX_SUMMARY_CUT_MARKER;
+    if summary.ends_with(marker) && width > marker.chars().count() + 1 {
+        let head: String = summary.chars().take(width - marker.chars().count() - 1).collect();
+        return format!("{head}…{marker}");
+    }
+    let head: String = summary.chars().take(width.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+/// One row: its read mark, kind, age and summary, fitted to `text_width`.
+fn row_line(
+    row: &ainb_hangar_proto::events::InboxEntryRow,
+    now_ms: i64,
+    text_width: usize,
+) -> Line<'static> {
     let unread = row.read_at.is_none();
     let (marker, marker_style, text_style) = if unread {
         (
@@ -145,7 +190,7 @@ fn row_line(row: &ainb_hangar_proto::events::InboxEntryRow, now_ms: i64) -> Line
             format!("{:>4} ", age(row.created_at, now_ms)),
             Style::default().fg(MUTED_GRAY),
         ),
-        Span::styled(row.summary.clone(), text_style),
+        Span::styled(fit(&row.summary, text_width), text_style),
     ])
 }
 
@@ -294,12 +339,12 @@ mod tests {
             summaries_cut: 1,
             ..InboxSection::default()
         };
-        assert!(text(&section).contains("3 more rows not shown, 1 summaries cut"));
+        assert!(text(&section).contains("3 older entries not sent, 1 summary shortened"));
         let none = InboxSection {
             entries: vec![row(1, "x", false)],
             ..InboxSection::default()
         };
-        assert!(!text(&none).contains("not shown"));
+        assert!(!text(&none).contains("not sent"));
     }
 
     #[test]
@@ -353,6 +398,24 @@ mod tests {
             past.contains("Row 10"),
             "a scroll past the end draws the last row:\n{past}"
         );
+    }
+
+    #[test]
+    fn a_cut_summary_keeps_its_marker_at_the_visible_end_of_a_narrow_line() {
+        let long = format!("{}{INBOX_SUMMARY_CUT_MARKER}", "x".repeat(300));
+        let section = InboxSection {
+            entries: vec![row(1, &long, false)],
+            ..InboxSection::default()
+        };
+        let drawn = lines(&section, 60, 6);
+        let line = drawn.iter().find(|l| l.contains("xxx")).expect("the row");
+        assert!(line.contains("… [cut]"), "{line}");
+        assert!(
+            !drawn.join("\n").contains("[cut]x"),
+            "the marker is the end"
+        );
+        assert_eq!(fit("short", 10), "short");
+        assert_eq!(fit("a plain long summary", 8), "a plain…");
     }
 
     #[test]

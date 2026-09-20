@@ -44,6 +44,15 @@ export interface InboxPage {
 }
 
 /**
+ * The inbox section as the renderer's telemetry line reports it, for the
+ * proof harness: how many rows the frame holds and how many the daemon counts
+ * unread. Counts only, never a body; `[0, 0]` until the section is framed.
+ */
+export function inboxCounts(inbox: InboxView_Serialize | undefined): [number, number] {
+  return inbox === undefined ? [0, 0] : [inbox.entries.length, inbox.unread];
+}
+
+/**
  * The rows that put the reducer on its inbox screen, where the sweep is
  * active, the way the terminal opens it from home. Whether the page shows is
  * the reducer's: it shows while `shell.current_screen` is `inbox`.
