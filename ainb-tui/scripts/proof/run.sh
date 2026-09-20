@@ -55,6 +55,7 @@ if ((BUILD)); then
   echo "building ainb, ainb-hangar-daemon and plugins" >&2
   (cd "$AINB_TUI_DIR" \
     && CARGO_INCREMENTAL=0 cargo build -j 4 -p ainb -p ainb-hangar-daemon \
+      --features ainb/test-support,ainb-hangar-daemon/test-support \
     && bash scripts/build-plugins.sh) || { echo "build failed" >&2; exit 2; }
   # The desktop shell (d1-shell) is its own cargo workspace and needs the
   # platform webview. Built only where webkit2gtk-4.1 is present; elsewhere
@@ -89,7 +90,8 @@ ALL_NODES=(
   p1-app-extraction p2-effects p3-hangar-host p4-review-screens
   w0-wire t0-daemon issue-963-presence issue-962-fleet-panel
   t0-section issue-983-redaction issue-1094-own-session issue-1173-select-tab
-  d1-shell d2-board d3-review d3p-inbox
+  d1-shell d2-board d3-review
+  p6-concurrent
 )
 if ((${#ONLY[@]})); then NODES=("${ONLY[@]}"); else NODES=("${ALL_NODES[@]}"); fi
 for node in "${NODES[@]}"; do
