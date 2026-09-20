@@ -89,7 +89,8 @@ fn a_click_on_a_commit_row_reaches_the_reducer_and_comes_back_in_a_frame() {
 }
 
 /// The hash is read against the list as it stands: a click naming a commit the
-/// list no longer carries moves nothing, and sends no frame saying it did.
+/// list no longer carries moves nothing, and the selection the last live click
+/// made is still the one the window is told about.
 #[test]
 fn a_click_on_a_commit_that_is_gone_moves_nothing() {
     let frames = Frames::default();
@@ -98,11 +99,18 @@ fn a_click_on_a_commit_that_is_gone_moves_nothing() {
 
     frames.borrow_mut().clear();
     let _ = host.dispatch(click("c9999"));
+    // Asked for whatever the dispatch did or did not send, so the assertion is
+    // on the state the window would draw rather than on a silence.
+    host.reframe();
 
-    let moved = frames
+    let drawn = frames
         .borrow()
         .iter()
         .filter_map(|frame| frame["git_view_state"]["selected_commit_index"].as_u64())
-        .any(|at| at != 2);
-    assert!(!moved, "the selection stayed where the last live click put it");
+        .next_back();
+    assert_eq!(
+        drawn,
+        Some(2),
+        "the window is still on the commit the last live click named"
+    );
 }
