@@ -81,13 +81,44 @@ impl<S: FrameSink> Shell<S> {
     }
 
     /// Drain the executor's queued session-store writes; see
-    /// [`DesktopExecutor::flush_session_store_writes`]. Answers with the
-    /// number still unwritten when the bound ran out.
+    /// [`DesktopExecutor::flush_session_store_writes`]. `Some(n)` is the
+    /// number still unwritten when the bound ran out, `None` that the shell
+    /// itself was busy for the whole bound and the queue was never reached.
     ///
     /// The window calls this on the paths that end the process, which is the
-    /// only place it can be called: this shell never unwinds.
-    pub fn flush_session_store_writes(&self, within: std::time::Duration) -> usize {
-        self.core().executor.flush_session_store_writes(within)
+    /// only place it can be called: this shell never unwinds. `within` bounds
+    /// the whole call, the wait for the lock included: a tick that is stuck
+    /// holding the lock must not hold the exit with it, so this takes the lock
+    /// only if it can and gives the rest of the bound to the queue.
+    pub fn flush_session_store_writes(&self, within: std::time::Duration) -> Option<usize> {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            match self.core.try_lock() {
+                Ok(mut core) => {
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    return Some(core.executor.flush_session_store_writes(left));
+                }
+                // A panic under the lock left the state as it was: the queue
+                // is the executor's own and is still worth draining.
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    return Some(poisoned.into_inner().executor.flush_session_store_writes(left));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
+    /// Hold the lock the shell's own calls take, for a test that has to see
+    /// what a busy shell does.
+    #[doc(hidden)]
+    pub fn hold_for_tests(&self) -> impl Drop + '_ {
+        self.core()
     }
 
     /// Every command the palette may offer; see [`DesktopHost::palette`].
