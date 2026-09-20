@@ -134,21 +134,25 @@ p6_pane_logged_text() {
   grep -qF "$text" "$PROOF_WORLD/$pane.stderr" 2>/dev/null
 }
 
-# p6_web_pid: the `ainb web` process itself. Not the pane's pid: `start_web`
-# runs it in a pipeline, so the pane holds the shell.
-p6_web_pid() { pgrep -f "$AINB_BIN web --listen" | head -1; }
+# `ainb web` has no session reader of its own: it runs `ainb list --frame` as
+# a child and serves what that prints (`ainb-web/src/data.rs`, "Sessions come
+# from `ainb list --frame`"). So the web process never resolves a session
+# source, and asking its log for one would fail whatever the source was. What
+# the proof checks instead is the rows it serves: they are the daemon's table,
+# read through the same CLI path the source check above covers.
 
-# p6_web_source <source>: `ainb web` resolved that source. It is a long-lived
-# command, so its line is in the JSONL log beside the TUIs'; the pane's own
-# output, which `start_web` tees, is read as well for a build that logs there.
-p6_web_source() {
-  local pid
-  pid="$(p6_web_pid)"
-  if [[ -n "$pid" ]] && p6_logged "$pid" 'session source resolved' "$1"; then
-    return 0
-  fi
-  grep -q 'session source resolved' "$PROOF_WORLD/web.log" 2>/dev/null \
-    && grep -q "source=\"\?$1\"\?" "$PROOF_WORLD/web.log"
+# p6_web_rows: the tmux names `ainb web` serves, sorted.
+p6_web_rows() {
+  curl -sS "$WEB_URL/api/snapshot" 2>/dev/null \
+    | jq -r '.sessions[]? | (.tmux_session_name // .tmux_session // empty)' 2>/dev/null | sort
+}
+
+# p6_web_serves_the_table: what the web serves is what the table holds.
+p6_web_serves_the_table() {
+  local table web
+  table="$(p6_table_names)"
+  web="$(p6_web_rows)"
+  [[ -n "$table" && "$table" == "$web" ]]
 }
 
 # p6_pane_said_degraded <pane>: the surface told the operator sessions are on
@@ -423,10 +427,7 @@ p6_combination() {
     check "$name: the TUI in $i resolved the daemon's sessions table" \
       wait_for 60 p6_pane_source "$i" daemon
   done
-  if [[ "$web" == "1" ]]; then
-    check "$name: ainb web resolved the daemon's sessions table" \
-      wait_for 60 p6_web_source daemon
-  fi
+
 
   # 1. A session created from a surface that is NOT the CLI reaches the
   # others. `ainb web` has no create (its only writes are the answer and the
@@ -466,6 +467,10 @@ p6_combination() {
   if [[ "$web" == "1" ]]; then
     check "$name: the session $from created reached ainb web" \
       wait_for "$P6_WEB_REACH" p6_web_has "$tmux_name"
+    # And not merely reached it: what the web serves is the table, row for row.
+    check "$name: the rows ainb web serves are the daemon's table" \
+      wait_for "$P6_WEB_REACH" p6_web_serves_the_table
+    observe "$name: ainb web serves: $(p6_web_rows | tr '\n' ' ')"
   fi
 
   # 2. An ASK answered on one surface folds on the others.
