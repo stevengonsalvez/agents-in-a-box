@@ -41,9 +41,11 @@ mark_headroom_enabled() {
   jq -e '[.sessions[] | .headroom_enabled] | length > 0 and all' "$store" >/dev/null || return 1
   # The same row through the daemon, field for field as the wire carries it.
   local entry
+  # `created_at` is RFC3339 in the file and epoch milliseconds on the wire.
   entry="$(jq -c '.sessions | to_entries[0].value | {
     session_id, tmux_session_name, worktree_path, workspace_name,
-    created_at, agent_type,
+    created_at: (.created_at | sub("\\.[0-9]+"; "") | fromdateiso8601 * 1000),
+    agent_type,
     headroom_enabled: true,
     rtk_enabled: (.rtk_enabled // false),
     skip_permissions, model,
