@@ -8,7 +8,7 @@ import type {
   GitViewFrame_Serialize,
   GitViewView_Serialize,
 } from "../../../ainb-app/bindings/AppState";
-import { commitRows, commitsCut, commitWindow, selectCommitIntent } from "./commits.ts";
+import { commitRows, commitsCut, commitWindow, scrollFor, selectCommitIntent } from "./commits.ts";
 
 const commit = (n: number): CommitInfo => ({
   hash_short: `c${String(n).padStart(4, "0")}`,
@@ -138,4 +138,19 @@ test("a click names the commit by the hash the frame carries", () => {
   assert.deepEqual(selectCommitIntent("c0007"), {
     Command: ["git_view.select_commit", { sha: "c0007" }],
   });
+});
+
+test("a selected row already in view does not move the list", () => {
+  const box = { scrollTop: 100, clientHeight: 200 };
+  assert.equal(scrollFor(box, { top: 120, height: 20 }), undefined);
+  assert.equal(scrollFor(box, { top: 100, height: 20 }), undefined, "flush with the top is in view");
+  assert.equal(scrollFor(box, { top: 280, height: 20 }), undefined, "and flush with the bottom");
+});
+
+test("a selected row above the view scrolls up to it, and no further", () => {
+  assert.equal(scrollFor({ scrollTop: 100, clientHeight: 200 }, { top: 60, height: 20 }), 60);
+});
+
+test("a selected row below the view scrolls down by what it is short", () => {
+  assert.equal(scrollFor({ scrollTop: 100, clientHeight: 200 }, { top: 310, height: 20 }), 130);
 });
