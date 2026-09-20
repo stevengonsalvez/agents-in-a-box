@@ -46,8 +46,11 @@
 //! (`SessionsRepo::import_complete_for`).
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
+use ainb_hangar_proto::protocol::{CAP_WORKSPACE_SESSIONS, advertises};
 use ainb_hangar_proto::sessions::WorkspaceSessionEntry;
-use ainb_hangar_store::repo::sessions::{FileSession, ImportOutcome, SessionRow, SessionsRepo};
+use ainb_hangar_store::repo::sessions::{
+    Deletes, FileSession, ImportOutcome, SessionRow, SessionsRepo,
+};
 use anyhow::{Context, Result, bail};
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
@@ -256,31 +259,67 @@ async fn reconcile_pass(
     })
     .await
     .context("sessions.json read task")??;
-    let (sessions, rejected) = match content {
-        // A missing file is "no sessions" only on a fresh home. With rows in
-        // the table it is far more likely a file that went away (deleted,
-        // moved, a home on a volume that is not mounted) than a user who
-        // killed every session, and the existence rule would turn it into an
-        // empty table. So the pass is refused, the marker left as it was, and
-        // the watcher tries again. A fresh home (no file, no rows) still
-        // commits, or the table could never become authoritative.
+    // Which rule this pass works to is read from the daemon's own compiled
+    // catalogue, the same way a client decides whether it speaks the
+    // capability, so there is no runtime flag to get wrong.
+    let table_is_authoritative = advertises(CAP_WORKSPACE_SESSIONS);
+    let (sessions, rejected, deletes) = match content {
+        // A missing file is "no sessions" only on a fresh home.
+        //
+        // Before the flip, with rows in the table, it is far more likely a
+        // file that went away (deleted, moved, a home on a volume that is not
+        // mounted) than a user who killed every session, and the file decided
+        // existence, so the pass was refused and the watcher tried again.
+        //
+        // After the flip the table decides, so the same missing file is a lost
+        // mirror: nothing is deleted, the marker is still committed so readers
+        // are served from the table rather than waiting for a file that may
+        // never come back, and the next write through the daemon recreates the
+        // file row by row.
         None => {
-            if !SessionsRepo::list(pool, None, 1).await?.is_empty() {
-                bail!(
-                    "{} is missing while the sessions table holds sessions; \
-                     refusing a pass that would delete them",
-                    sessions_path.display()
-                );
+            if table_is_authoritative {
+                if !SessionsRepo::list(pool, None, 1).await?.is_empty() {
+                    tracing::warn!(
+                        path = %sessions_path.display(),
+                        "sessions.json is missing; the table keeps its sessions and the next write recreates the mirror"
+                    );
+                }
+                (Vec::new(), 0, Deletes::Nothing)
+            } else {
+                if !SessionsRepo::list(pool, None, 1).await?.is_empty() {
+                    bail!(
+                        "{} is missing while the sessions table holds sessions; \
+                         refusing a pass that would delete them",
+                        sessions_path.display()
+                    );
+                }
+                (Vec::new(), 0, Deletes::EveryRowTheFileLacks)
             }
-            (Vec::new(), 0)
         }
-        Some(content) => parse_records(&content)
-            .with_context(|| format!("could not parse {}", sessions_path.display()))?,
+        Some(content) => {
+            let (sessions, rejected) = parse_records(&content)
+                .with_context(|| format!("could not parse {}", sessions_path.display()))?;
+            let deletes = if table_is_authoritative {
+                // Only rows the file has had a chance to carry. A row a new
+                // writer created after the file's last write is not one the
+                // file dropped, it is one the mirror has not caught up with.
+                Deletes::RowsNoNewerThan(file_written_at(stamp.as_ref()))
+            } else {
+                Deletes::EveryRowTheFileLacks
+            };
+            (sessions, rejected, deletes)
+        }
     };
 
     let source = sessions_path.to_string_lossy().into_owned();
-    let write =
-        SessionsRepo::complete_reconcile(pool, &source, &sessions, rejected, SystemClock.now_ms());
+    let write = SessionsRepo::complete_reconcile(
+        pool,
+        &source,
+        &sessions,
+        rejected,
+        SystemClock.now_ms(),
+        deletes,
+    );
     let outcome = tokio::time::timeout(store_bound, write).await.map_err(|_| {
         anyhow::anyhow!(
             "sessions store write did not finish within {} ms",
@@ -366,6 +405,17 @@ struct FileStamp {
     mtime: Option<SystemTime>,
     len: u64,
     inode: u64,
+}
+
+/// When `sessions.json` was last written, in epoch milliseconds, for the
+/// post-flip delete scope. A stamp with no readable mtime is treated as
+/// written now, which deletes nothing that a clock could argue about.
+fn file_written_at(stamp: Option<&FileStamp>) -> i64 {
+    let written = stamp
+        .and_then(|stamp| stamp.mtime)
+        .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX));
+    written.unwrap_or_else(|| SystemClock.now_ms())
 }
 
 impl FileStamp {
