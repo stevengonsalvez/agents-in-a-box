@@ -40,3 +40,34 @@ fn every_registered_screen_has_a_row() {
         "screens the terminal registers with no row in screens.txt: {unlisted:?}"
     );
 }
+
+/// The screens the layout draws on its split-pane path, outside the
+/// registry: `LayoutComponent`'s own list.
+const SPLIT_PANE: [&str; 6] = [
+    "session_list",
+    "logs",
+    "new_session",
+    "claude_chat",
+    "search_workspace",
+    "non_git_notification",
+];
+
+/// Every screen a `both` row says the ratatui half draws is one the terminal
+/// opens: registered, or drawn by the layout's split-pane path.
+#[test]
+fn every_row_the_ratatui_half_draws_is_a_screen_the_terminal_opens() {
+    let layout = LayoutComponent::new();
+    let registered: BTreeSet<&str> = layout.screen_ids().iter().map(String::as_str).collect();
+    let unopenable: Vec<String> = rows()
+        .into_iter()
+        .filter(|(_, coverage)| coverage == "both")
+        .map(|(screen, _)| screen)
+        .filter(|screen| {
+            !registered.contains(screen.as_str()) && !SPLIT_PANE.contains(&screen.as_str())
+        })
+        .collect();
+    assert!(
+        unopenable.is_empty(),
+        "both rows naming screens the terminal neither registers nor draws: {unopenable:?}"
+    );
+}
