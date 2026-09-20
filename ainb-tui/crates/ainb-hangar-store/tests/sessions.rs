@@ -624,3 +624,138 @@ async fn reconcile_gives_a_tmux_name_to_the_files_session() {
         vec![new]
     );
 }
+
+/// P6e-6, the flip: with the table authoritative, a pass deletes only rows the
+/// file has had a chance to carry. A row an older binary killed (created long
+/// before the file's last write, and gone from it) is still reconciled; a row a
+/// new writer created after that write is not, because the mirror has simply
+/// not caught up with it.
+#[tokio::test]
+async fn a_post_flip_pass_deletes_only_rows_older_than_the_files_last_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/p/.agents-in-a-box/sessions.json";
+
+    let killed = test_session(
+        "00000000-0000-0000-0000-0000000000aa",
+        "ainb-killed",
+        "ws",
+        1_000,
+    );
+    let fresh = test_session(
+        "00000000-0000-0000-0000-0000000000bb",
+        "ainb-fresh",
+        "ws",
+        9_000,
+    );
+    SessionsRepo::upsert(pool, &killed).await.unwrap();
+    SessionsRepo::upsert(pool, &fresh).await.unwrap();
+
+    // The file was last written at 5_000: after the kill reached it, before
+    // the new writer created its row.
+    let out = SessionsRepo::complete_reconcile(
+        pool,
+        source,
+        &[],
+        0,
+        10_000,
+        Deletes::RowsNoNewerThan(5_000),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        out.deleted,
+        vec![killed.session_id.clone()],
+        "the older binary's kill was not reconciled, or the newer row was taken for one the file dropped"
+    );
+    let left: Vec<String> = SessionsRepo::list(pool, None, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.session_id)
+        .collect();
+    assert_eq!(left, vec![fresh.session_id]);
+}
+
+/// P6e-6: with no file to read, the mirror was lost rather than emptied. The
+/// pass deletes nothing and still commits its marker, so readers are served
+/// from the table instead of waiting for a file that may never come back.
+#[tokio::test]
+async fn a_post_flip_pass_with_no_file_keeps_every_row_and_still_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/p/.agents-in-a-box/sessions.json";
+
+    let held = test_session(
+        "00000000-0000-0000-0000-0000000000cc",
+        "ainb-held",
+        "ws",
+        1_000,
+    );
+    SessionsRepo::upsert(pool, &held).await.unwrap();
+    // The P6d import ran on this home before the flip, as it does on a real
+    // one: what this test turns on is the reconcile that follows.
+    SessionsRepo::complete_import(pool, source, &[], 0, 1_000).await.unwrap();
+
+    let out = SessionsRepo::complete_reconcile(pool, source, &[], 0, 4_000, Deletes::Nothing)
+        .await
+        .unwrap();
+
+    assert!(out.deleted.is_empty(), "{:?}", out.deleted);
+    assert_eq!(out.marker.imported, 0);
+    let left = SessionsRepo::list(pool, None, 10).await.unwrap();
+    assert_eq!(left.len(), 1, "the lost mirror emptied the table");
+    assert!(
+        SessionsRepo::import_complete_for(pool, source).await.unwrap(),
+        "the pass did not commit its marker, so readers would never be served"
+    );
+}
+
+/// P6e-6, migration safety: a home whose `sessions.json` holds sessions the
+/// table has never seen keeps every one of them on the first pass after the
+/// flip. The rows are inserted, nothing is dropped for being unknown.
+#[tokio::test]
+async fn the_first_post_flip_pass_keeps_the_files_own_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let source = "/home/p/.agents-in-a-box/sessions.json";
+
+    let older = test_session(
+        "00000000-0000-0000-0000-0000000000d1",
+        "ainb-older",
+        "ws",
+        1_000,
+    );
+    let newer = test_session(
+        "00000000-0000-0000-0000-0000000000d2",
+        "ainb-newer",
+        "ws",
+        8_000,
+    );
+
+    let out = SessionsRepo::complete_reconcile(
+        pool,
+        source,
+        &[from_file(&older), from_file(&newer)],
+        0,
+        10_000,
+        Deletes::RowsNoNewerThan(5_000),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out.marker.imported, 2);
+    assert!(out.deleted.is_empty(), "{:?}", out.deleted);
+    let mut left: Vec<String> = SessionsRepo::list(pool, None, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.tmux_session_name)
+        .collect();
+    left.sort();
+    assert_eq!(left, vec!["ainb-newer", "ainb-older"]);
+}
