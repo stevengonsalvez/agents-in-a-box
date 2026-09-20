@@ -6,10 +6,18 @@
 // no fixture, snapshot or facts list each fail. So a screen added without a
 // row is a failed test, not a criterion someone has to remember.
 
+#[path = "parity/support.rs"]
+mod support;
+
+#[path = "support/home.rs"]
+mod home;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use ainb_app::app::screens::ids;
+use home::ScopedHome;
+use support::ParityFixture;
 
 fn parity_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity")
@@ -83,8 +91,13 @@ fn every_screen_id_has_one_row_and_every_row_names_a_screen_id() {
     assert!(stale.is_empty(), "rows naming no screen id: {stale:?}");
 }
 
+/// A `both` row has its fixture, its snapshot and its frames; a `dom` row its
+/// fixture, frames and facts and no snapshot; an `excluded` row its reason.
+/// Facts for `both` rows are read wherever a list exists (`parity.rs`), and
+/// requiring one on every `both` row is the follow-up that writes the ten
+/// lists still missing.
 #[test]
-fn every_covered_row_has_its_fixture_snapshot_and_facts_and_every_excluded_row_its_reason() {
+fn every_covered_row_has_its_fixture_snapshot_and_frames_and_every_excluded_row_its_reason() {
     let dir = parity_dir();
     for row in rows() {
         match row.coverage.as_str() {
@@ -160,4 +173,27 @@ fn every_fixture_on_disk_is_named_by_a_row() {
         }
     }
     assert!(unclaimed.is_empty(), "fixtures no row names: {unclaimed:?}");
+}
+
+/// A row's fixture builds the row's screen: the state the fixture makes opens
+/// the screen the row names, so a fixture filed under the wrong screen fails
+/// here rather than passing on the file's existence.
+#[test]
+fn every_row_fixture_builds_the_row_s_screen() {
+    let _home = ScopedHome::new();
+    let dir = parity_dir();
+    for row in rows() {
+        if row.coverage != "both" && row.coverage != "dom" {
+            continue;
+        }
+        for fixture in row.detail.split_whitespace() {
+            let loaded = ParityFixture::load(&dir.join(format!("{fixture}.json")))
+                .unwrap_or_else(|error| panic!("{error}"));
+            let state = loaded.build();
+            assert_eq!(
+                state.shell.current_screen, row.screen,
+                "{fixture} builds a screen its row does not name"
+            );
+        }
+    }
 }
