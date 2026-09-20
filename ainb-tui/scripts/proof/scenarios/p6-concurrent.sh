@@ -7,19 +7,44 @@
 #         │       │          │
 #         └───────┴──────────┴──▶ one daemon, one $HOME, one sessions table
 #
-# What it proves, per combination: a session the CLI creates reaches every
-# surface that is up (for a TUI, on its next list reload, which is a key the
-# operator presses, not a restart); a session killed from the CLI leaves every surface; and
-# an ASK answered from one surface folds on the others. The capability is dark
-# in a release build, so the binaries the harness builds carry `test-support`
-# and this scenario turns it on with AINB_TEST_WORKSPACE_SESSIONS=1 (the
-# daemon reads the same variable in rpc/auth.rs).
+# Per combination, in order: every surface resolved the DAEMON (checked first,
+# so a harness built without `test-support` fails here instead of proving the
+# file path twice over); a session created from the TUI, which is not the CLI,
+# reaches every other surface; an ASK answered on the web folds on the TUIs; a
+# kill from the TUI, again not the CLI, leaves every surface; and after a
+# reconcile this scenario asks for by hand, the table and the file hold the
+# same sessions.
+#
+# Three things stand outside the combinations, each falsifying one rule:
+#
+#   * degraded and file-first: with no daemon up, a create still works and its
+#     row is in `sessions.json`; a TUI started there says degraded, shows the
+#     notice and switches once its daemon is up; and the session written while
+#     degraded is in the table after the switch. A writer that wrote the table
+#     first, or refused without one, fails the first half.
+#   * the flock: a held `sessions.json.lock` makes a write WAIT for it, and the
+#     write lands after the lock goes with the file still valid JSON. A writer
+#     that took no lock would return at once and fail the wait.
+#   * the kill switch: `AINB_SESSION_SOURCE=file` puts one process on the file
+#     end to end, and what it wrote is in the table after a reconcile.
+#
+# The capability is dark in a release build, so the binaries the harness builds
+# carry `test-support` and this scenario turns it on with
+# AINB_TEST_WORKSPACE_SESSIONS=1 (the daemon reads the same variable in
+# rpc/auth.rs).
 #
 # Combination names match scripts/surface-combo-smoke.sh, which is where the
 # four came from (P6e open question 5).
 
 # shellcheck disable=SC2034  # read by write_result in lib.sh
-EXPECT="with the sessions capability on, one daemon serves the TUI, ainb web and the CLI together in every combination ({tui} {web} {tui,web} {tui,tui}): a CLI-created session reaches every surface that is up, a CLI kill leaves every surface, and an ASK answered from one surface folds on the others"
+EXPECT="with the sessions capability on, every surface resolves the daemon's sessions table, and one daemon serves the TUI, ainb web and the CLI together in every combination ({tui} {web} {tui,web} {tui,tui}): a session created from the TUI reaches every surface that is up, a kill from the TUI leaves every surface, an ASK answered on the web folds on the TUIs, and the table and sessions.json agree across a reconcile; separately, a write while degraded is file-first and reaches the table after the switch, a write waits for the sessions.json flock, and AINB_SESSION_SOURCE=file works end to end"
+
+# How long a surface has to show a change another surface made.
+P6_REACH=90
+# How long the web has to show it: its snapshot is polled.
+P6_WEB_REACH=180
+# How long the sessions.json lock is held in front of a write.
+P6_LOCK_HOLD=5
 
 # The capability, on for every process this scenario starts: the binaries the
 # harness builds carry `test-support`, and a release build ignores it.
@@ -27,10 +52,7 @@ p6_capability_on() {
   export AINB_TEST_WORKSPACE_SESSIONS=1
 }
 
-# p6_binaries_ready: the CLI answers with the capability switch set. A harness
-# build without `test-support` ignores the switch and stays on the file, which
-# would prove the file path twice over rather than the table, so that is a
-# failure here, not a pass.
+# p6_binaries_ready: the CLI answers with the capability switch set.
 p6_binaries_ready() {
   if ! "$AINB_BIN" list --format json >/dev/null 2>&1; then
     check "the CLI runs with AINB_TEST_WORKSPACE_SESSIONS=1" false
@@ -39,48 +61,260 @@ p6_binaries_ready() {
   return 0
 }
 
+# p6_repo: the proof world's git repo, made once, which every create uses.
+p6_repo() {
+  local repo="$PROOF_WORLD/repo"
+  if [[ ! -d "$repo/.git" ]]; then
+    git init -q -b main "$repo"
+    git -C "$repo" -c user.email=proof@localhost -c user.name=proof \
+      commit -q --allow-empty -m init
+  fi
+  printf '%s' "$repo"
+}
+
+# ---------------------------------------------------------------------------
+# Which source a process resolved
+# ---------------------------------------------------------------------------
+#
+# A surface's source decides nothing visible on screen until the stores
+# disagree, so each process says which one it resolved, once, with its pid
+# (`session source resolved` in cli/util.rs, and `session source switched`
+# when a degraded one moves to the daemon). A long-lived surface writes that
+# to its JSONL log; a short CLI command writes it to stderr under RUST_LOG.
+
+# p6_logged <pid> <line> <source>: that pid's own log says it.
+p6_logged() {
+  grep -rlF "\"pid\":$1" "$HOME/.agents-in-a-box/logs" 2>/dev/null \
+    | xargs -r grep -hF "$2" 2>/dev/null \
+    | grep -F "\"pid\":$1" \
+    | grep -qF "\"source\":\"$3\""
+}
+
+# p6_pane_pid <pane>: the pid of the ainb process in a harness pane.
+p6_pane_pid() { ptmux display-message -p -t "=$1:" '#{pane_pid}' 2>/dev/null; }
+
+# p6_pane_source <pane> <source>: that surface resolved that source.
+p6_pane_source() {
+  local pid
+  pid="$(p6_pane_pid "$1")"
+  [[ -n "$pid" ]] || return 1
+  p6_logged "$pid" 'session source resolved' "$2"
+}
+
+# p6_pane_switched <pane> <source>: that surface moved to that source.
+p6_pane_switched() {
+  local pid
+  pid="$(p6_pane_pid "$1")"
+  [[ -n "$pid" ]] || return 1
+  p6_logged "$pid" 'session source switched' "$2"
+}
+
+# p6_pane_said_degraded <pane>: the surface told the operator sessions are on
+# the file for now. Long-lived surfaces put that notice in the log rather than
+# writing over the screen.
+p6_pane_said_degraded() {
+  local pid
+  pid="$(p6_pane_pid "$1")"
+  [[ -n "$pid" ]] || return 1
+  grep -rlF "\"pid\":$pid" "$HOME/.agents-in-a-box/logs" 2>/dev/null \
+    | xargs -r grep -qF 'sessions are on the local sessions.json' 2>/dev/null
+}
+
+# p6_cli_source <source> [env...]: one CLI read resolves that source. RUST_LOG
+# raises the sink a short command gets, so the line is on its stderr.
+p6_cli_source() {
+  local want="$1"; shift
+  local log="$PROOF_WORLD/p6-cli-source-$want.log"
+  env "$@" RUST_LOG=ainb_app=info "$AINB_BIN" list --format json >/dev/null 2>"$log"
+  grep -q 'session source resolved' "$log" && grep -q "source=\"\?$want\"\?" "$log"
+}
+
+# ---------------------------------------------------------------------------
+# The two stores, each read on its own terms
+# ---------------------------------------------------------------------------
+
 # p6_cli_sessions: the session ids `ainb list` reports, one per line.
 p6_cli_sessions() {
   "$AINB_BIN" list --format json 2>/dev/null | jq -r '.[].session_id'
 }
-
-# p6_cli_has <id>: the CLI lists that session.
 p6_cli_has() { p6_cli_sessions | grep -qF "$1"; }
-# p6_cli_lacks <id>: the CLI no longer lists it.
 p6_cli_lacks() { ! p6_cli_has "$1"; }
 
-# p6_table_rows: the session ids the daemon's table holds, through the CLI's
-# own daemon path (the capability is on, so this is a table read).
-p6_table_rows() { p6_cli_sessions | sort; }
+# p6_table_names: the tmux names the daemon's TABLE holds, asked of the daemon
+# over its own socket rather than through a surface, sorted.
+p6_table_names() {
+  rpc_call 1 1 workspace/session_list '{"limit":500}' 2>/dev/null \
+    | tail -1 | jq -r '.result.sessions[]?.tmux_session_name' 2>/dev/null | sort
+}
+p6_table_has() { p6_table_names | grep -qxF "$1"; }
+p6_table_lacks() { ! p6_table_has "$1"; }
+
+# p6_file_names: the tmux names `sessions.json` holds, sorted.
+p6_file_names() {
+  jq -r '.sessions | keys[]?' "$HOME/.agents-in-a-box/sessions.json" 2>/dev/null | sort
+}
+p6_file_has() { p6_file_names | grep -qxF "$1"; }
+p6_file_lacks() { ! p6_file_has "$1"; }
+p6_file_parses() { jq -e . "$HOME/.agents-in-a-box/sessions.json" >/dev/null 2>&1; }
+
+# p6_gone_from_both <tmux name>: neither store holds it.
+p6_gone_from_both() { p6_table_lacks "$1" && p6_file_lacks "$1"; }
+
+# p6_reconcile: ask the daemon for a reconcile pass; prints its reply.
+p6_reconcile() {
+  rpc_call 1 1 workspace/session_reconcile '{}' 2>/dev/null | tail -1
+}
+
+# p6_stores_agree: the table and the file hold the same tmux names.
+p6_stores_agree() { [[ "$(p6_table_names)" == "$(p6_file_names)" ]]; }
+
+# ---------------------------------------------------------------------------
+# What a surface shows
+# ---------------------------------------------------------------------------
 
 # p6_row_needle <tmux name>: what the TUI's session list actually shows for a
 # session: not the tmux name, but the 8-hex suffix its branch carries
 # (`tmux_repo-7d755792` runs on `agents/7d755792`).
 p6_row_needle() { printf '%s' "${1##*-}"; }
 
-# p6_tui_reload <session>: leave the session list and open it again, which is
+# p6_tui_reload <pane>: leave the session list and open it again, which is
 # where the TUI reloads its workspaces. Same process, no restart: the reload
 # is the operator's own key, and what it reads is the process's session source.
 p6_tui_reload() {
   keys "$1" Escape
   sleep 0.5
-  open_session_list "$1"
+  keys "$1" s
+  wait_screen "$1" 'Sessions|Workspaces|agent tick' 20
 }
 
-# p6_tui_has <session> <needle>: the TUI's session list shows it.
-p6_tui_has() { pane_text "$1" | grep -qF -- "$2"; }
-p6_tui_lacks() { ! p6_tui_has "$1" "$2"; }
+# p6_tui_live <pane>: the TUI is still drawing its own screen. Every negative
+# check is anchored on this: a pane whose app died shows no row either, and
+# would otherwise read as the row having gone.
+p6_tui_live() { pane_text "$1" | grep -qE 'Sessions|Workspaces|Stats +\[i\]'; }
 
-# p6_web_has <needle>: the web snapshot names it.
+# p6_tui_has <pane> <needle> / p6_tui_lacks <pane> <needle>: the list shows it,
+# or the surface is alive and does not. Each attempt reloads the list first, so
+# these go straight to wait_for with the reload inside the retry loop.
+p6_tui_has() {
+  p6_tui_reload "$1" >/dev/null 2>&1
+  p6_tui_live "$1" && pane_text "$1" | grep -qF -- "$2"
+}
+p6_tui_lacks() {
+  p6_tui_reload "$1" >/dev/null 2>&1
+  p6_tui_live "$1" && ! pane_text "$1" | grep -qF -- "$2"
+}
+
+# The web, the same way: alive first, then the row.
+p6_web_alive() { curl -sS "$WEB_URL/api/snapshot" >/dev/null 2>&1; }
 p6_web_has() {
   curl -sS "$WEB_URL/api/snapshot" 2>/dev/null | jq -e --arg n "$1" \
     '[.sessions[]? | tostring | select(test($n))] | length > 0' >/dev/null
 }
-p6_web_lacks() { ! p6_web_has "$1"; }
+p6_web_lacks() { p6_web_alive && ! p6_web_has "$1"; }
+
+# ---------------------------------------------------------------------------
+# Writing from a surface that is not the CLI
+# ---------------------------------------------------------------------------
+
+# p6_tui_create <pane>: create a session through the TUI's own New Session
+# flow. `n`, the repo typed as a path (the flow smart-parses it, so this does
+# not depend on what the local scan found), then Launch on the Configure form.
+# Sets P6_TUI_ID and P6_TUI_TMUX from the store once the session is there.
+p6_tui_create() {
+  local pane="$1" repo before after new
+  repo="$(p6_repo)"
+  before="$(p6_cli_sessions | sort)"
+  keys "$pane" Escape
+  sleep 0.5
+  keys "$pane" n
+  if ! wait_screen "$pane" 'Enter=Select|New Session' 20; then
+    observe "the TUI's New Session flow did not open in $pane"
+    return 1
+  fi
+  type_text "$pane" "$repo"
+  sleep 0.5
+  keys "$pane" Enter
+  if ! wait_screen "$pane" 'Branch:' 30; then
+    observe "the TUI's Configure form did not open in $pane"
+    return 1
+  fi
+  # Launch is the last row, so one shift+tab from the opening focus is on it.
+  keys "$pane" BTab
+  if ! wait_screen "$pane" '\[ Launch \]' 10; then
+    observe "the Configure form in $pane has no Launch row"
+    return 1
+  fi
+  keys "$pane" Enter
+  wait_screen "$pane" 'Creating Session|Creating Git worktree' 30 \
+    || observe "the TUI did not say it was creating a session in $pane"
+  # The store is where the new session lands, whichever source it is on.
+  if ! wait_for "$P6_REACH" p6_new_session_landed "$before"; then
+    observe "no new session reached the store after the TUI's New Session flow"
+    return 1
+  fi
+  after="$(p6_cli_sessions | sort)"
+  new="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -1)"
+  [[ -n "$new" ]] || return 1
+  P6_TUI_ID="$new"
+  P6_TUI_TMUX="$("$AINB_BIN" list --format json 2>/dev/null \
+    | jq -r --arg id "$new" '.[] | select(.session_id == $id) | .tmux_session_name')"
+  [[ -n "$P6_TUI_TMUX" ]]
+}
+
+# p6_new_session_landed <ids before>: the store holds a session it did not.
+p6_new_session_landed() {
+  local after
+  after="$(p6_cli_sessions | sort)"
+  [[ -n "$(comm -13 <(printf '%s\n' "$1") <(printf '%s\n' "$after"))" ]]
+}
+
+# p6_tui_kill <pane> <needle>: kill the selected session from the TUI's own
+# list. `d` on a Claude row opens `[ Stop ] [ Delete ] [ Cancel ]` with Stop
+# selected, so one `right` moves to Delete and enter takes it.
+p6_tui_kill() {
+  local pane="$1" needle="$2" row
+  p6_tui_reload "$pane"
+  row="$(row_of "$pane" "$needle")"
+  if [[ -z "$row" ]]; then
+    observe "no row for $needle in $pane to kill"
+    return 1
+  fi
+  click "$pane" 4 "$row"
+  keys "$pane" d
+  if ! wait_screen "$pane" 'Stop or Delete Session|Delete Session|Kill tmux Session' 20; then
+    observe "the TUI in $pane did not ask before deleting"
+    return 1
+  fi
+  if pane_text "$pane" | grep -qF 'Stop or Delete Session'; then
+    keys "$pane" Right
+  fi
+  keys "$pane" Enter
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# One combination
+# ---------------------------------------------------------------------------
+
+# p6_surfaces_down [panes...]: close what a combination started, its web and
+# its daemon. Called on every way out of a combination, the early ones too, so
+# the next combination starts from the same place.
+p6_surfaces_down() {
+  local pane
+  for pane in "$@"; do
+    quit_tui "$pane" 2>/dev/null || ptmux kill-session -t "=$pane:" 2>/dev/null || true
+  done
+  ptmux kill-session -t "=web:" 2>/dev/null || true
+  "$AINB_BIN" hangar daemon stop >/dev/null 2>&1 || true
+}
+
+# p6_daemon_down: the world's daemon is not answering.
+p6_daemon_down() { ! daemon_running; }
 
 # p6_combination <name> <tui count> <web:0|1>: one combination, end to end.
 p6_combination() {
   local name="$1" tuis="$2" web="$3" i
+  local panes=()
   say "combination $name"
   observe "=== $name ==="
 
@@ -90,89 +324,268 @@ p6_combination() {
   if ! wait_for 45 daemon_running; then
     observe "$name: daemon start said $(tail -2 "$PROOF_WORLD/p6-daemon-$name.txt" | tr '\n' ' ')"
     check "$name: one daemon is up for every surface" false
+    p6_surfaces_down
     return 1
   fi
   check "$name: one daemon is up for every surface" true
 
-  local sessions=()
   for ((i = 1; i <= tuis; i++)); do
     if ! start_tui "tui$i"; then
       check "$name: the TUI in tui$i reaches the home screen" false
+      p6_surfaces_down "${panes[@]}"
       return 1
     fi
-    sessions+=("tui$i")
+    panes+=("tui$i")
     open_session_list "tui$i"
   done
-  if [[ "$web" == "1" ]]; then
-    start_web || { check "$name: ainb web answers" false; return 1; }
+  if [[ "$web" == "1" ]] && ! start_web; then
+    check "$name: ainb web answers" false
+    p6_surfaces_down "${panes[@]}"
+    return 1
   fi
 
-  # 1. The CLI creates a session; every surface that is up sees it.
-  fixture_session || { check "$name: the CLI created a session" false; return 1; }
-  local created="$FIXTURE_ID" tmux_name="$FIXTURE_TMUX" row
-  row="$(p6_row_needle "$FIXTURE_TMUX")"
-  observe "$name: the CLI created $tmux_name ($created), listed as $row"
-  check "$name: the CLI lists the session it created" p6_cli_has "$created"
-  for i in "${sessions[@]}"; do
-    p6_tui_reload "$i"
-    check "$name: the session the CLI created reached $i" \
-      wait_for 60 p6_tui_has "$i" "$row"
-    pane_text "$i" >"$NODE_DIR/$name-$i-list.txt" 2>/dev/null || true
-    CAPTURES+=("$name-$i-list.txt")
-    observe "$name: $i shows: $(pane_text "$i" | sed -E 's/[^[:print:]]//g' | grep -oE '(agents/[0-9a-f]{8}|repo|No sessions|Sessions)' | sort -u | tr '\n' ' ')"
+  # 0. Every surface is on the daemon's table, checked before anything is
+  # created: a harness built without `test-support` stays on the file, and
+  # this is where that has to fail rather than pass on the file path.
+  check "$name: the CLI resolved the daemon's sessions table" \
+    wait_for 30 p6_cli_source daemon
+  for i in "${panes[@]}"; do
+    check "$name: the TUI in $i resolved the daemon's sessions table" \
+      wait_for 60 p6_pane_source "$i" daemon
   done
   if [[ "$web" == "1" ]]; then
-    check "$name: the session the CLI created reached ainb web" \
-      wait_for 180 p6_web_has "$tmux_name"
+    check "$name: ainb web resolved the daemon's sessions table" \
+      wait_for 60 p6_pane_source web daemon
+  fi
+
+  # 1. A session created from a surface that is NOT the CLI reaches the
+  # others. `ainb web` has no create (its only writes are the answer and the
+  # attached pane), so with no TUI up the CLI creates it instead.
+  local created tmux_name row from
+  if ((tuis > 0)); then
+    if ! p6_tui_create "${panes[0]}"; then
+      check "$name: a session was created from the TUI" false
+      p6_surfaces_down "${panes[@]}"
+      return 1
+    fi
+    created="$P6_TUI_ID"
+    tmux_name="$P6_TUI_TMUX"
+    from="the TUI in ${panes[0]}"
+    check "$name: a session was created from the TUI, not the CLI" true
+  else
+    if ! fixture_session; then
+      check "$name: a session was created" false
+      p6_surfaces_down "${panes[@]}"
+      return 1
+    fi
+    created="$FIXTURE_ID"
+    tmux_name="$FIXTURE_TMUX"
+    from="the CLI"
+  fi
+  row="$(p6_row_needle "$tmux_name")"
+  observe "$name: $from created $tmux_name ($created), listed as $row"
+  check "$name: the CLI lists the session $from created" wait_for 30 p6_cli_has "$created"
+  check "$name: the session $from created is in the daemon's table" \
+    wait_for 30 p6_table_has "$tmux_name"
+  for i in "${panes[@]}"; do
+    check "$name: the session $from created reached $i" \
+      wait_for "$P6_REACH" p6_tui_has "$i" "$row"
+    pane_text "$i" >"$NODE_DIR/$name-$i-list.txt" 2>/dev/null || true
+    CAPTURES+=("$name-$i-list.txt")
+  done
+  if [[ "$web" == "1" ]]; then
+    check "$name: the session $from created reached ainb web" \
+      wait_for "$P6_WEB_REACH" p6_web_has "$tmux_name"
   fi
 
   # 2. An ASK answered on one surface folds on the others.
   if [[ "$web" == "1" ]]; then
     raise_ask "Proof P6e: $name?" "p6-$name" >/dev/null
-    if web_card_id "Proof P6e" "p6-card-$name" 180; then
+    if web_card_id "Proof P6e" "p6-card-$name" "$P6_WEB_REACH"; then
       web_answer "$WEB_CARD_ID" 1 >"$PROOF_WORLD/p6-answer-$name.json"
       observe "$name: web answered $(tr -d '\n' <"$PROOF_WORLD/p6-answer-$name.json")"
       check "$name: the web answer was delivered" \
         grep -q '"outcome": *"delivered"' "$PROOF_WORLD/p6-answer-$name.json"
-      for i in "${sessions[@]}"; do
-        check "$name: the answered card folded on $i" \
-          wait_for 90 p6_tui_lacks "$i" "Proof P6e: $name?"
+      for i in "${panes[@]}"; do
+        check "$name: the answered card folded on $i, which is still up" \
+          wait_for "$P6_REACH" p6_tui_lacks "$i" "Proof P6e: $name?"
       done
     else
-      check "$name: the web lists the card within 180 s" false
+      check "$name: the web lists the card within ${P6_WEB_REACH} s" false
     fi
   fi
 
-  # 3. The CLI kills the session; every surface drops it.
-  "$AINB_BIN" kill "$created" --force >"$PROOF_WORLD/p6-kill-$name.txt" 2>&1 \
-    || observe "$name: ainb kill said $(tail -1 "$PROOF_WORLD/p6-kill-$name.txt")"
-  check "$name: the CLI no longer lists the killed session" wait_for 30 p6_cli_lacks "$created"
-  for i in "${sessions[@]}"; do
-    p6_tui_reload "$i"
-    check "$name: the killed session left $i" wait_for 90 p6_tui_lacks "$i" "$row"
+  # 3. The kill, from the TUI where there is one: again a write from a surface
+  # that is not the CLI. Every surface drops the row, and so do both stores.
+  if ((tuis > 0)); then
+    check "$name: the session was killed from the TUI, not the CLI" \
+      p6_tui_kill "${panes[0]}" "$row"
+  else
+    "$AINB_BIN" kill "$created" --force >"$PROOF_WORLD/p6-kill-$name.txt" 2>&1 \
+      || observe "$name: ainb kill said $(tail -1 "$PROOF_WORLD/p6-kill-$name.txt")"
+  fi
+  check "$name: the CLI no longer lists the killed session" \
+    wait_for "$P6_REACH" p6_cli_lacks "$created"
+  check "$name: the killed session left the daemon's table" \
+    wait_for "$P6_REACH" p6_table_lacks "$tmux_name"
+  for i in "${panes[@]}"; do
+    check "$name: the killed session left $i, which is still up" \
+      wait_for "$P6_REACH" p6_tui_lacks "$i" "$row"
   done
   if [[ "$web" == "1" ]]; then
-    check "$name: the killed session left ainb web" wait_for 180 p6_web_lacks "$tmux_name"
+    check "$name: the killed session left ainb web, which is still answering" \
+      wait_for "$P6_WEB_REACH" p6_web_lacks "$tmux_name"
   fi
 
-  # 4. Nothing the surfaces did left the stores disagreeing.
-  local table file
-  table="$(p6_table_rows | tr '\n' ' ')"
-  file="$(jq -r '.sessions | keys[]?' "$HOME/.agents-in-a-box/sessions.json" 2>/dev/null | sort | tr '\n' ' ')"
-  observe "$name: sessions the daemon serves: ${table:-none}"
-  observe "$name: sessions.json keys: ${file:-none}"
-  check "$name: the killed session is in neither store" \
-    bash -c "! grep -qF '$tmux_name' <<<'$file'"
+  # 4. A reconcile asked for by hand, then the two stores hold the same
+  # sessions: nothing the surfaces did left them disagreeing.
+  observe "$name: reconcile said $(p6_reconcile)"
+  check "$name: the table and sessions.json hold the same sessions" \
+    wait_for 30 p6_stores_agree
+  observe "$name: table: $(p6_table_names | tr '\n' ' ')"
+  observe "$name: sessions.json: $(p6_file_names | tr '\n' ' ')"
+  check "$name: the killed session is in neither store" p6_gone_from_both "$tmux_name"
 
-  # Close the surfaces this combination started, and its daemon, so the next
-  # combination starts from the same place.
-  for i in "${sessions[@]}"; do
-    quit_tui "$i" 2>/dev/null || ptmux kill-session -t "=$i:" 2>/dev/null || true
-  done
-  if [[ "$web" == "1" ]]; then
-    ptmux kill-session -t "=web:" 2>/dev/null || true
-  fi
+  p6_surfaces_down "${panes[@]}"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# The three rules that stand on their own
+# ---------------------------------------------------------------------------
+
+# p6_degraded_and_file_first: no daemon, then one. A create with nothing to
+# write a table row to still works and is in the file; a TUI started there
+# says degraded, shows the notice and switches; and the session written while
+# degraded is in the table after the switch.
+p6_degraded_and_file_first() {
+  say "degraded, and the file first"
+  observe "=== degraded ==="
   "$AINB_BIN" hangar daemon stop >/dev/null 2>&1 || true
+  if ! wait_for 30 p6_daemon_down; then
+    check "degraded: the daemon is down before the surfaces start" false
+    p6_surfaces_down
+    return 1
+  fi
+  check "degraded: the daemon is down before the surfaces start" true
+  check "degraded: the CLI says it is degraded with no daemon up" \
+    wait_for 30 p6_cli_source degraded
+
+  # The create: no table to write to, so this proves the row goes to the file
+  # first and the session is live either way.
+  if ! fixture_session; then
+    check "degraded: a session is created with no daemon up" false
+    p6_surfaces_down
+    return 1
+  fi
+  local degraded_tmux="$FIXTURE_TMUX" degraded_id="$FIXTURE_ID"
+  check "degraded: a session is created with no daemon up" true
+  check "degraded: its row is in sessions.json, written before any table row" \
+    p6_file_has "$degraded_tmux"
+
+  # The TUI started with no daemon up: degraded, the notice, then the switch
+  # once the daemon it autostarts is ready.
+  if ! start_tui tuid; then
+    check "degraded: the TUI reaches the home screen with no daemon up" false
+    p6_surfaces_down tuid
+    return 1
+  fi
+  check "degraded: the TUI resolved the file while the daemon was down" \
+    wait_for 60 p6_pane_source tuid degraded
+  check "degraded: the TUI said sessions are on the local file for now" \
+    wait_for 60 p6_pane_said_degraded tuid
+  check "degraded: the daemon came up behind it" wait_for 60 daemon_running
+  check "degraded: the TUI switched to the daemon's table" \
+    wait_for 90 p6_pane_switched tuid daemon
+
+  observe "degraded: reconcile said $(p6_reconcile)"
+  check "degraded: the session written while degraded is in the table" \
+    wait_for 60 p6_table_has "$degraded_tmux"
+  open_session_list tuid
+  check "degraded: the TUI lists it after the switch" \
+    wait_for "$P6_REACH" p6_tui_has tuid "$(p6_row_needle "$degraded_tmux")"
+
+  P6_DEGRADED_ID="$degraded_id"
+  P6_DEGRADED_TMUX="$degraded_tmux"
+  quit_tui tuid 2>/dev/null || ptmux kill-session -t "=tuid:" 2>/dev/null || true
+  return 0
+}
+
+# p6_lock_holder <seconds>: hold the sessions.json lock in another process,
+# the way the daemon's reconcile pass holds it.
+p6_lock_holder() {
+  python3 - "$HOME/.agents-in-a-box/sessions.json.lock" "$1" >/dev/null 2>&1 &
+  P6_LOCK_PID=$!
+  sleep 1
+}
+
+# p6_flock_is_taken: a write waits for the lock rather than walking over it.
+# The session killed here is the one the degraded leg created.
+p6_flock_is_taken() {
+  say "the sessions.json flock"
+  observe "=== flock ==="
+  local id="${P6_DEGRADED_ID:-}" tmux_name="${P6_DEGRADED_TMUX:-}" started waited
+  if [[ -z "$id" ]]; then
+    check "flock: there is a session to write to" false
+    return 1
+  fi
+  python3 -c "
+import fcntl, sys, time
+path = sys.argv[1]
+with open(path, 'a+') as handle:
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    time.sleep(float(sys.argv[2]))
+" "$HOME/.agents-in-a-box/sessions.json.lock" "$P6_LOCK_HOLD" &
+  local holder=$!
+  sleep 1
+  started=$SECONDS
+  "$AINB_BIN" kill "$id" --force >"$PROOF_WORLD/p6-flock-kill.txt" 2>&1 \
+    || observe "flock: ainb kill said $(tail -1 "$PROOF_WORLD/p6-flock-kill.txt")"
+  waited=$((SECONDS - started))
+  wait "$holder" 2>/dev/null || true
+  observe "flock: the write took ${waited}s against a lock held for ${P6_LOCK_HOLD}s"
+  check "flock: the write waited for the lock instead of walking over it" \
+    test "$waited" -ge $((P6_LOCK_HOLD - 2))
+  check "flock: the write landed once the lock went" \
+    wait_for 60 p6_cli_lacks "$id"
+  check "flock: sessions.json is still valid JSON" p6_file_parses
+  check "flock: the killed session is in neither store" \
+    wait_for 60 p6_gone_from_both "$tmux_name"
+  return 0
+}
+
+# p6_kill_switch: AINB_SESSION_SOURCE=file, once, end to end. The process
+# writes the file and nothing else; the daemon picks the row up on the next
+# reconcile, which is what makes the switch safe to reach for.
+p6_kill_switch() {
+  say "the kill switch"
+  observe "=== kill switch ==="
+  check "kill switch: a process with AINB_SESSION_SOURCE=file says so" \
+    p6_cli_source file AINB_SESSION_SOURCE=file
+
+  local repo out id tmux_name
+  repo="$(p6_repo)"
+  out="$(cd "$repo" && env AINB_SESSION_SOURCE=file "$AINB_BIN" run --repo "$repo" \
+    --worktree --format json </dev/null 2>&1)"
+  id="$(printf '%s\n' "$out" | sed -n 's/^ *Session ID: *//p' | head -1)"
+  tmux_name="$(printf '%s\n' "$out" | sed -n 's/^ *Tmux Session: *//p' | head -1)"
+  if [[ -z "$tmux_name" ]]; then
+    observe "kill switch: ainb run said $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+    check "kill switch: a session is created with the file forced" false
+    return 1
+  fi
+  check "kill switch: a session is created with the file forced" true
+  check "kill switch: its row is in sessions.json" p6_file_has "$tmux_name"
+  observe "kill switch: reconcile said $(p6_reconcile)"
+  check "kill switch: the daemon's table has it after a reconcile" \
+    wait_for 60 p6_table_has "$tmux_name"
+
+  env AINB_SESSION_SOURCE=file "$AINB_BIN" kill "$id" --force \
+    >"$PROOF_WORLD/p6-killswitch-kill.txt" 2>&1 \
+    || observe "kill switch: ainb kill said $(tail -1 "$PROOF_WORLD/p6-killswitch-kill.txt")"
+  check "kill switch: the row leaves sessions.json" wait_for 60 p6_file_lacks "$tmux_name"
+  observe "kill switch: reconcile said $(p6_reconcile)"
+  check "kill switch: the row leaves the table too" wait_for 60 p6_table_lacks "$tmux_name"
   return 0
 }
 
@@ -186,6 +599,13 @@ scenario() {
   p6_combination web 0 1 || return
   p6_combination tui-web 1 1 || return
   p6_combination tui-tui 2 0 || return
+
+  # The three rules, on a daemon of their own. The degraded leg starts with
+  # none up, so it must run before the two that need one.
+  p6_degraded_and_file_first || { p6_surfaces_down; return; }
+  p6_flock_is_taken || true
+  p6_kill_switch || true
+  p6_surfaces_down
 
   if [[ -s "$HOME/.agents-in-a-box/sessions.json" ]]; then
     redact_host <"$HOME/.agents-in-a-box/sessions.json" >"$NODE_DIR/sessions-json.txt"
