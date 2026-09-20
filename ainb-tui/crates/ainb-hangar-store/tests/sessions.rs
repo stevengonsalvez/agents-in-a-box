@@ -2,7 +2,7 @@
 
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::sessions::{
-    FileSession, ImportMarker, ImportOutcome, NameConflict, SessionRow, SessionsRepo,
+    Deletes, FileSession, ImportMarker, ImportOutcome, NameConflict, SessionRow, SessionsRepo,
     UpsertOutcome, reconcile_key,
 };
 
@@ -313,13 +313,17 @@ async fn import_complete_needs_the_import_and_a_reconcile_of_one_file() {
         "the import row alone must not report the table authoritative"
     );
 
-    SessionsRepo::complete_reconcile(pool, other, &[], 0, 2).await.unwrap();
+    SessionsRepo::complete_reconcile(pool, other, &[], 0, 2, Deletes::EveryRowTheFileLacks)
+        .await
+        .unwrap();
     assert!(
         !SessionsRepo::import_complete_for(pool, source).await.unwrap(),
         "another file's reconcile row must not complete this file"
     );
 
-    SessionsRepo::complete_reconcile(pool, source, &[], 0, 3).await.unwrap();
+    SessionsRepo::complete_reconcile(pool, source, &[], 0, 3, Deletes::EveryRowTheFileLacks)
+        .await
+        .unwrap();
     assert!(SessionsRepo::import_complete_for(pool, source).await.unwrap());
 }
 
@@ -356,6 +360,7 @@ async fn reconcile_inserts_missing_rows_and_the_table_wins_on_an_id() {
         &[from_file(&stale), from_file(&missing)],
         0,
         7,
+        Deletes::EveryRowTheFileLacks,
     )
     .await
     .unwrap();
@@ -400,6 +405,7 @@ async fn reconcile_skips_and_counts_a_tmux_name_conflict() {
         &[from_file(&holder_in_file), from_file(&rival)],
         2,
         7,
+        Deletes::EveryRowTheFileLacks,
     )
     .await
     .unwrap();
@@ -447,9 +453,16 @@ async fn reconcile_matches_a_minted_id_by_tmux_name() {
         row: row.clone(),
         id_minted: true,
     };
-    let out = SessionsRepo::complete_reconcile(pool, source, &[minted(&first)], 0, 1)
-        .await
-        .unwrap();
+    let out = SessionsRepo::complete_reconcile(
+        pool,
+        source,
+        &[minted(&first)],
+        0,
+        1,
+        Deletes::EveryRowTheFileLacks,
+    )
+    .await
+    .unwrap();
     assert_eq!(out.marker.imported, 1);
 
     let reminted = test_session(
@@ -458,9 +471,16 @@ async fn reconcile_matches_a_minted_id_by_tmux_name() {
         "ws",
         1000,
     );
-    let out = SessionsRepo::complete_reconcile(pool, source, &[minted(&reminted)], 0, 2)
-        .await
-        .unwrap();
+    let out = SessionsRepo::complete_reconcile(
+        pool,
+        source,
+        &[minted(&reminted)],
+        0,
+        2,
+        Deletes::EveryRowTheFileLacks,
+    )
+    .await
+    .unwrap();
     assert_eq!(out.marker.imported, 0);
     assert!(out.conflicts.is_empty(), "{:?}", out.conflicts);
     assert_eq!(
@@ -485,12 +505,26 @@ async fn reconcile_marker_carries_the_latest_pass() {
         "ws",
         1000,
     );
-    SessionsRepo::complete_reconcile(pool, source, &[from_file(&a)], 0, 5)
-        .await
-        .unwrap();
-    SessionsRepo::complete_reconcile(pool, source, &[from_file(&a)], 1, 9)
-        .await
-        .unwrap();
+    SessionsRepo::complete_reconcile(
+        pool,
+        source,
+        &[from_file(&a)],
+        0,
+        5,
+        Deletes::EveryRowTheFileLacks,
+    )
+    .await
+    .unwrap();
+    SessionsRepo::complete_reconcile(
+        pool,
+        source,
+        &[from_file(&a)],
+        1,
+        9,
+        Deletes::EveryRowTheFileLacks,
+    )
+    .await
+    .unwrap();
 
     let marker = SessionsRepo::import_marker(pool, &reconcile_key(source))
         .await
@@ -531,9 +565,16 @@ async fn reconcile_deletes_table_rows_the_file_does_not_have() {
     let mut stale = kept.clone();
     stale.workspace_name = "file-ws".to_string();
 
-    let out = SessionsRepo::complete_reconcile(pool, source, &[from_file(&stale)], 0, 3)
-        .await
-        .unwrap();
+    let out = SessionsRepo::complete_reconcile(
+        pool,
+        source,
+        &[from_file(&stale)],
+        0,
+        3,
+        Deletes::EveryRowTheFileLacks,
+    )
+    .await
+    .unwrap();
     assert_eq!(out.deleted, vec![gone.session_id.clone()]);
     assert_eq!(out.marker.imported, 0);
     assert_eq!(
@@ -565,9 +606,16 @@ async fn reconcile_gives_a_tmux_name_to_the_files_session() {
         1500,
     );
 
-    let out = SessionsRepo::complete_reconcile(pool, source, &[from_file(&new)], 0, 4)
-        .await
-        .unwrap();
+    let out = SessionsRepo::complete_reconcile(
+        pool,
+        source,
+        &[from_file(&new)],
+        0,
+        4,
+        Deletes::EveryRowTheFileLacks,
+    )
+    .await
+    .unwrap();
     assert_eq!(out.deleted, vec![old.session_id.clone()]);
     assert_eq!(out.marker.imported, 1);
     assert!(out.conflicts.is_empty());
