@@ -28,6 +28,34 @@ config_edit() {
 
 config_value() { "$AINB_BIN" config get "$1" 2>/dev/null | tail -1; }
 
+# mark_headroom_enabled <sessions.json>: set headroom_enabled on every session
+# in the mirror and in the daemon's table.
+#
+# The table is the source a surface reads (P6e-6), and a reconcile pass never
+# overwrites a table row from its file row, so the mirror alone would leave the
+# watchdog reading `false` for ever.
+mark_headroom_enabled() {
+  local store="$1"
+  jq '.sessions |= map_values(.headroom_enabled = true)' "$store" >"$store.tmp" \
+    && mv "$store.tmp" "$store" || return 1
+  jq -e '[.sessions[] | .headroom_enabled] | length > 0 and all' "$store" >/dev/null || return 1
+  # The same row through the daemon, field for field as the wire carries it.
+  local entry
+  entry="$(jq -c '.sessions | to_entries[0].value | {
+    session_id, tmux_session_name, worktree_path, workspace_name,
+    created_at, agent_type,
+    headroom_enabled: true,
+    rtk_enabled: (.rtk_enabled // false),
+    skip_permissions, model,
+    model_source: (.model_source // "LegacyTyped"),
+    codex_model, codex_thread_id
+  }' "$store")" || return 1
+  local reply
+  reply="$(rpc_call 1 1 workspace/session_upsert "{\"session\": $entry}" 2>/dev/null | tail -1)"
+  observe "headroom flag through the daemon: ${reply:-no reply}"
+  [[ "$reply" == *'"ok":true'* || "$reply" == *'"result"'* ]]
+}
+
 scenario() {
   local cfg="$HOME/.agents-in-a-box/$CONFIG_TOML"
 
@@ -70,9 +98,12 @@ scenario() {
   # ---- Step 5: one headroom proxy -----------------------------------------
   fixture_session || { check "the headroom fixture session starts" false; return; }
   local store="$HOME/.agents-in-a-box/sessions.json" pidfile="$HOME/.agents-in-a-box/headroom/proxy.pid"
+  # Headroom is a launch-time choice with no CLI verb, so the proof sets the
+  # flag itself. Since the flip the daemon's table is what a surface reads, so
+  # the flag goes there as well as into the mirror: an edit to sessions.json
+  # alone no longer reaches the watchdog, which is the point of the flip.
   check "the fixture session is marked headroom_enabled in the session store" \
-    bash -c "jq '.sessions |= map_values(.headroom_enabled = true)' '$store' >'$store.tmp' && mv '$store.tmp' '$store' \
-      && jq -e '[.sessions[] | .headroom_enabled] | length > 0 and all' '$store' >/dev/null"
+    mark_headroom_enabled "$store"
 
   start_tui a || { check "TUI A restarts for the headroom step" false; return; }
   check "TUI A's watchdog starts the proxy (pid file within 30 s)" wait_for 30 test -s "$pidfile"
