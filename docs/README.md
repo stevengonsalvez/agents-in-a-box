@@ -33,12 +33,12 @@ Canonical source of truth for the monorepo. Everything published to the website 
   - [burndown](/plugins/burndown): cost and spend tracking
   - [session-reader](/plugins/session-reader): JSONL event streaming
   - [witr](/plugins/witr): process causality tree
-  - [learnings](/plugins/learnings): knowledge graph
+  - [learnings](/plugins/learnings): knowledge graph (guide moved to the [reflect docs site](https://stevengonsalvez.github.io/ainb-reflect-memory/guides/tui-learnings-plugin/))
   - [abtop](/plugins/abtop): fleet process monitor
 - [Skill manager guide](/skill-manager/guide): discovery, sync, drift check, and promotion
 - [Toolkit overview](/toolkit/overview): portable skills and agents across 9 tools
 - [Reflect memory overview](/knowledge/overview): GraphRAG and QMD knowledge capture
-- [Memory browser](/knowledge/reflect-memory/serve): `reflect serve` web interface
+- [Memory browser](/knowledge/reflect-memory/serve): `reflect serve` web interface (moved to the [reflect docs site](https://stevengonsalvez.github.io/ainb-reflect-memory/guides/memory-browser/))
 
 ## 4. Reference
 
@@ -52,7 +52,7 @@ Canonical source of truth for the monorepo. Everything published to the website 
 - [TUI architecture](/tui/architecture): ratatui host and event loop
 - [Repositories map](/reference/repositories): monorepo crate map
 - [Hangar control plane](/hangar/architecture): task boards and autopilots
-- [Reflect memory internals](/knowledge/reflect-memory/problem-and-fit):
+- [Reflect memory internals](/knowledge/reflect-memory/problem-and-fit) (these pages moved to the [reflect docs site](https://stevengonsalvez.github.io/ainb-reflect-memory/)):
   - [The construct](/knowledge/reflect-memory/construct)
   - [Recall reference: 57 ports](/knowledge/reflect-memory/recall)
   - [Comparison](/knowledge/reflect-memory/comparison)

@@ -287,7 +287,7 @@ Postgres so every machine queries the same memory. The markdown notes stay the s
 all LLM/embedding work stays client-side either way: no extra API key.
 
 ➡️ Full treatment (topology, the two modes, threat model) lives on the reflect-memory
-**[Construct](/knowledge/reflect-memory/construct#backend-local-or-shared-postgres)** page.
+**[Construct](/knowledge/reflect-memory/construct)** page.
 
 ---
 
