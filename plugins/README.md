@@ -46,10 +46,10 @@ source path was placed; ignore it when reasoning about harness plugins.
 
 | Plugin           | Kind   | What it does                                                          | Marketplace install                          |
 |------------------|--------|----------------------------------------------------------------------|----------------------------------------------|
-| `ainb-fleet`     | skills | Teaches agents the `ainb fleet …` multi-session orchestration verbs   | `ainb-fleet@agents-in-a-box`                 |
+| `ainb-fleet`     | skills | Teaches agents the `ainb fleet ...` multi-session orchestration verbs | `ainb-fleet@agents-in-a-box`                 |
 | `ainb-hooks`     | hooks  | Captures documented Claude and Codex events into Hangar; routes only attention to inbox | `ainb-hooks@agents-in-a-box`                 |
-| `caveman-stats`  | hooks  | Caveman token-savings statusline + compaction-survival re-inject      | `caveman-stats@agents-in-a-box`              |
-| `illustration`   | skills | Popa-mascot brand-illustration workflow (sketchnote generation)       | `illustration@agents-in-a-box`               |
+| `caveman-stats`  | hooks  | Caveman token-savings statusline + compaction-survival (moved to `ainb-toolkit`) | `caveman-stats@ainb-toolkit` (or `@agents-in-a-box`) |
+| `illustration`   | skills | Popa mascot brand-illustration workflow (moved to `ainb-toolkit`) | `illustration@ainb-toolkit` (or `@agents-in-a-box`) |
 
 Two more harness plugins ship in this marketplace but are **sourced
 externally** (not files in this folder):

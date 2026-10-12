@@ -1,8 +1,13 @@
 # illustration
 
-Hand-drawn **sketchnote** illustrations starring **Popa** — a pink blob with a green sprout and a notepad — for Claude Code.
+> [!NOTE]
+> **Canonical location moved:** This plugin has moved to [`ainb-toolkit`](https://github.com/stevengonsalvez/ainb-toolkit/tree/main/plugins/illustration).
+> Preferred install: `claude plugin install illustration@ainb-toolkit`
+> Kept here for backward compatibility with `illustration@agents-in-a-box`.
 
-Digest → shot list → per-image generation → QA → deliver. Popa turns an article, README, system, or idea into an intricate hand-drawn sketchnote: a banner, many linked boxes and notes, arrows and spot icons — busy but legible.
+Hand-drawn **sketchnote** illustrations starring **Popa** (a pink blob with a green sprout and a notepad) for Claude Code.
+
+Digest -> shot list -> per-image generation -> QA -> deliver. Popa turns an article, README, system, or idea into an intricate hand-drawn sketchnote: a banner, many linked boxes and notes, arrows and spot icons: busy but legible.
 
 ## Featured series — agents-in-a-box in 22 frames
 
