@@ -65,8 +65,12 @@
     },
     {
       "name": "caveman-stats",
-      "source": "./plugins/caveman-stats",
-      "description": "Caveman mode lifecycle hooks. PostToolUse watermark-tracks output tokens per session and writes .caveman-statusline-suffix so the statusline badge updates live. PreCompact re-injects the full caveman ruleset into the compaction summary so mode survives context compaction. Pair with caveman@caveman for full caveman setup.",
+      "source": {
+        "source": "github",
+        "repo": "stevengonsalvez/ainb-toolkit",
+        "path": "plugins/caveman-stats"
+      },
+      "description": "Caveman mode lifecycle hooks. PostToolUse watermark-tracks output tokens per session and writes .caveman-statusline-suffix so the statusline badge updates live. PreCompact re-injects the full caveman ruleset into the compaction summary so mode survives context compaction. Pair with caveman@caveman for full caveman setup. Sourced from ainb-toolkit.",
       "strict": false,
       "keywords": [
         "caveman",
@@ -79,8 +83,12 @@
     },
     {
       "name": "illustration",
-      "source": "./plugins/illustration",
-      "description": "Explanatory & brand illustration skill starring Popa — a pink blob with a notepad — drawn as intricate hand-drawn sketchnotes. Digest → shot list → per-image generation → QA → deliver. Invoke `illustration` or `illustration:popa`.",
+      "source": {
+        "source": "github",
+        "repo": "stevengonsalvez/ainb-toolkit",
+        "path": "plugins/illustration"
+      },
+      "description": "Explanatory and brand illustration skill starring Popa (a pink blob with a notepad) drawn as intricate hand-drawn sketchnotes. Digest -> shot list -> per-image generation -> QA -> deliver. Invoke illustration or illustration:popa. Sourced from ainb-toolkit.",
       "strict": false,
       "keywords": [
         "illustration",
