@@ -1,0 +1,41 @@
+# Historical gitleaks hits present when this gate was added (2026-10-12).
+# Reviewed as test fixtures and placeholders. A new leak is not in this list and fails CI.
+# Remove a line once its value is rotated or the file is gone. Do not add a line to hide a new leak.
+0ba92730f54182c6f97250d4298daf4860ff5a58:plugins/reflect/tests/test_hooks_silent_fail.py:generic-api-key:235
+0ba92730f54182c6f97250d4298daf4860ff5a58:plugins/reflect/tests/test_hooks_silent_fail.py:generic-api-key:328
+0ba92730f54182c6f97250d4298daf4860ff5a58:plugins/reflect/tests/test_hooks_silent_fail.py:github-pat:248
+0ba92730f54182c6f97250d4298daf4860ff5a58:plugins/reflect/tests/test_hooks_silent_fail.py:github-pat:252
+0e80544a8a60368a7d82d5f2f9ff48fd12f1f3a1:ainb-tui/docker/agents-dev/scripts/tests/test/oauth-finish.test.js:generic-api-key:17
+0e80544a8a60368a7d82d5f2f9ff48fd12f1f3a1:ainb-tui/docker/agents-dev/scripts/tests/test/oauth-start.test.js:generic-api-key:16
+118ebba6db4e30895582891a450fb4b03e8106b3:reflect-kb/tests/test_issues_sanitize.py:private-key:55
+1e2ed4e67afa5cb7002d6c1d96d4c993121e93d9:ainb-tui/crates/ainb-core/src/fleet/bridge/redact.rs:slack-app-token:86
+1e2ed4e67afa5cb7002d6c1d96d4c993121e93d9:ainb-tui/crates/ainb-core/src/fleet/bridge/redact.rs:slack-app-token:92
+257d49a039357d745a8a445976b05898e86f6d48:ainb-tui/crates/ainb-web/frontend/xterm.js:generic-api-key:1
+2f6276698aa1fa507df860b394d4e85d4b189bc9:ainb-tui/crates/ainb-web/tests/session_source.rs:github-pat:14
+3009203414d0b29c346ed19c87facb57d400bb9f:reflect-kb/tests/test_issues_sanitize.py:generic-api-key:113
+3a3a1f32b1718eaca918b91db0e0fdf0a698086b:postman-security.mdc:generic-api-key:76
+3a3a1f32b1718eaca918b91db0e0fdf0a698086b:postman-security.mdc:generic-api-key:79
+3a3a1f32b1718eaca918b91db0e0fdf0a698086b:postman-security.mdc:generic-api-key:82
+3a3a1f32b1718eaca918b91db0e0fdf0a698086b:postman-security.mdc:generic-api-key:86
+46acb259af84034bf5a60767e4070464a7835ab2:ainb-tui/crates/ainb-app/src/wire/web.rs:github-pat:74
+53de6c10da70e1e16da5496138056e9d600db6c9:postman-security.mdc:generic-api-key:76
+53de6c10da70e1e16da5496138056e9d600db6c9:postman-security.mdc:generic-api-key:79
+53de6c10da70e1e16da5496138056e9d600db6c9:postman-security.mdc:generic-api-key:82
+53de6c10da70e1e16da5496138056e9d600db6c9:postman-security.mdc:generic-api-key:86
+7485cff338da64f8a4e25fe22e6a5ed368fc5f98:ainb-tui/crates/ainb-hangar-daemon/src/fleet_usage.rs:curl-auth-header:1336
+7485cff338da64f8a4e25fe22e6a5ed368fc5f98:ainb-tui/crates/ainb-hangar-daemon/src/fleet_usage.rs:generic-api-key:1302
+7ebff84f84e0909e62b2b8d5c6eafd651f1b9cbd:apps/ainb-fleet-macos/Sources/FleetRoster/FleetRosterPresentation.swift:generic-api-key:59
+9b6875dda4f416306137764926760a1d04dd61f7:ainb-tui/crates/ainb-web/tests/depth.rs:generic-api-key:82
+9ecd4b7c93e2be5302463bbbaf65f4e6e4801e03:ainb-tui/scripts/proof/scenarios/issue-983-redaction.sh:generic-api-key:9
+9ecd4b7c93e2be5302463bbbaf65f4e6e4801e03:ainb-tui/scripts/proof/scenarios/issue-983-redaction.sh:github-pat:9
+a995531712c9368edbecb3ce143fb2744092e92a:ainb-tui/crates/ainb-app/src/fleet/bridge/redact.rs:private-key:405
+b31a2b016b0f8568ec07910f17a4f2b4c1000b9b:ainb-tui/crates/ainb-app/src/fleet/bridge/redact.rs:private-key:289
+c16bc83fd6bd6e5b984dbcb5d5a4d9586acc69b5:ainb-tui/crates/ainb-app/tests/git_view_bound.rs:private-key:666
+c51f4335a1ac942b3f4287acec6bcc2cf9b8b2d4:ainb-tui/crates/ainb-core/src/cli/list.rs:github-pat:232
+c7102efa3a77f3c6334fcb17025760a119f8e622:apps/ainb-fleet-macos/Sources/Notifications/FleetNotificationCenter.swift:generic-api-key:6
+ca3f9ae344f5028b89b9067bac5e87454d59f817:ainb-tui/crates/ainb-hangar-core/src/redact.rs:private-key:431
+ef38a5b90326cda66c189f826d461b1e9455ed00:ainb-tui/crates/ainb-hangar-core/src/redact.rs:private-key:405
+ef38a5b90326cda66c189f826d461b1e9455ed00:ainb-tui/crates/ainb-hangar-core/src/redact.rs:private-key:488
+ef38a5b90326cda66c189f826d461b1e9455ed00:ainb-tui/crates/ainb-hangar-core/src/redact.rs:slack-app-token:315
+ef38a5b90326cda66c189f826d461b1e9455ed00:ainb-tui/crates/ainb-hangar-core/src/redact.rs:slack-app-token:321
+f78a449a1f16e67463a17584eff2d635d9e29aab:apps/ainb-fleet-macos/Sources/FleetRoster/FleetRosterPresentation.swift:generic-api-key:30

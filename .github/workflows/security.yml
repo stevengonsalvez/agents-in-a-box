@@ -1,0 +1,45 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history scan
+      - name: gitleaks (full-history scan)
+        env:
+          GITLEAKS_VERSION: "8.24.3"
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz gitleaks
+          ./gitleaks detect --source . --redact --verbose --exit-code 1
+
+  gitguardian:
+    name: gitguardian ggshield scan
+    runs-on: ubuntu-latest
+    env:
+      GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # ggshield needs history for CI range scan
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ggshield secret scan
+        run: |
+          if [ -z "$GITGUARDIAN_API_KEY" ]; then
+            echo "::warning::GITGUARDIAN_API_KEY not set — add it via 'gh secret set GITGUARDIAN_API_KEY' to enable ggshield."
+            exit 0
+          fi
+          pip install --quiet ggshield
+          ggshield secret scan ci
