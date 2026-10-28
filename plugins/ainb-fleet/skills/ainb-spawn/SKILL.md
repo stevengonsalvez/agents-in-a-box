@@ -3,10 +3,12 @@ name: ainb-fleet:ainb-spawn
 description: |
   Spawn a coding-agent session correctly with `ainb run`: always into a git
   worktree, never bare into a plain checkout. Use whenever you are about to
-  start a Claude/Codex/Gemini/Copilot session in a terminal. Guards the
-  invocations that silently produce a `(broken)` workspace row, two agents
-  sharing one working tree, a `--parent` flag that never fires, or a teardown
-  that cancels itself and leaks the session.
+  start a Claude/Codex/Gemini/Copilot session in a terminal. Prefer
+  `--remote-repo owner/repo`, which clones and fetches for you, over
+  hand-cloning a repo and passing the copy as `--repo`. Guards the invocations
+  that silently produce a `(broken)` workspace row, two agents sharing one
+  working tree, a `--parent` flag that never fires, or a teardown that cancels
+  itself and leaks the session.
 version: "0.1.0"
 user-invocable: true
 triggers:
@@ -21,12 +23,25 @@ allowed-tools:
 
 # ainb spawn, start a session correctly
 
-One command, two legal shapes for `--repo`. Getting that choice wrong is what
-shares a working tree between two agents or nests a worktree inside a worktree.
+One command, one decision: where the repo comes from. Getting it wrong shares a
+working tree between two agents, nests a worktree inside a worktree, or leaves a
+hand-made clone nobody cleans up.
 
-## The two legal shapes
+## The three legal shapes
 
-Fresh session off a repo root (the common case):
+Remote repo (prefer this, no local checkout needed):
+
+```bash
+ainb run \
+  --remote-repo shotclubhouse/shotclubhouse \
+  --worktree --create-branch fix/issue-101 \
+  --tool claude \
+  --dangerously-skip-permissions \
+  -p "$(cat /tmp/task-101.md)"
+```
+
+Fresh session off a local repo root (a checkout you must reuse: uncommitted work,
+or a branch that only exists on this box):
 
 ```bash
 ainb run \
@@ -43,18 +58,57 @@ Existing task worktree (isolation already done, do not nest another):
 ainb run --repo /absolute/path/to/existing/worktree --tool claude -p "$(cat task.md)"
 ```
 
-Which shape? One command decides it (`.git` is a *file* in a real worktree, a
-*directory* in a normal clone):
+Which local shape? One command decides it (`.git` is a *file* in a real worktree,
+a *directory* in a normal clone):
 
 ```bash
 test -f "$P/.git" && echo "worktree: pass bare" || echo "repo root: add --worktree --create-branch"
 ```
 
+## `--remote-repo`, and why it beats cloning yourself
+
+`owner/repo` becomes `https://github.com/owner/repo.git`; an `https://` or
+`git@host:owner/repo` URL is taken as given. ainb keeps ONE shared clone per repo
+at `~/.agents-in-a-box/repos/<host>/<owner>/<repo>`, the same root the TUI
+clones into, and adds a real git worktree off it per session:
+
+```
+--remote-repo shotclubhouse/shotclubhouse
+        │
+        ▼
+┌────────────────────────────────────────┐  exists  ┌─────────────┐
+│ ~/.agents-in-a-box/repos/              │─────────▶│ fetch       │
+│   github.com/shotclubhouse/            │          └─────────────┘
+│   shotclubhouse                        │  missing ┌─────────────┐
+└────────────────────────────────────────┘─────────▶│ clone       │
+        │                                           └─────────────┘
+        ▼  git worktree add
+~/.agents-in-a-box/worktrees/by-name/<workspace>--<branch>--<shortid>
+```
+
+So the transfer happens once and every later run is a fetch. `git clone` into
+`/tmp` and passing that as `--repo` gives the same repo a second on-disk root
+that ainb does not manage, nothing prunes it, and the workspace list keys its
+groups on the source repo path, so it renders as two identically-named rows.
+
+Three traps:
+
+- **`--repo` wins.** Pass both and `--remote-repo` is ignored silently, no
+  warning. Pass one.
+- **A local path is refused, by design:** `--remote-repo needs a remote:
+  owner/repo, an https:// URL, or git@host:owner/repo. Use --repo for a local
+  checkout.` Path-traversal values are refused too.
+- **Owner case forks the clone root.** The path is owner-scoped, so `a/tools` and
+  `b/tools` no longer collide, but `Owner/repo` and `owner/repo` clone twice into
+  two roots that then render as two workspace rows. Match the case in
+  `ainb favorites list`.
+
 ## Flags, and why
 
 | Flag | Why |
 |---|---|
-| `--repo <abs-path>` | Repo root, or an existing task worktree. Absolute, always. |
+| `--remote-repo <owner/repo>` | Preferred source. Clones once into `~/.agents-in-a-box/repos/<host>/<owner>/<repo>`, fetches after. Takes `owner/repo` or a URL, never a path. |
+| `--repo <abs-path>` | A local checkout you must reuse: repo root, or an existing task worktree. Absolute, always. |
 | `--create-branch <branch>` | Implies `--worktree` and names the branch. Prefer over bare `--worktree`, which invents `ainb/session-<shortid>`. |
 | `--worktree` | Isolation. Lands at `~/.agents-in-a-box/worktrees/by-name/<repo>--<branch>--<shortid>`. |
 | `--tool claude\|codex\|gemini\|copilot` | Which CLI to launch (default `claude`). |
